@@ -312,7 +312,7 @@ fn settle(lua: &Lua) {
     crate::script::UiScript::resolve_layout(&mut model);
 }
 
-pub(super) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
+pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     let s = model
         .arena
         .frame(h)

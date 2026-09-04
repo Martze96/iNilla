@@ -46,7 +46,7 @@ const FILES: &[&str] = &[
     // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow
     // BEFORE `TalentFrame_Update()`, so the whole window comes up empty (decision 1833). Our
     // retired file's OnShow called neither, which is why this was never a dependency before.
-    "MicroMenu.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     // Five files behind one line: the `.xml` sources its own `.lua` and `<Include>`s the
     // templates file that declares TalentButton/Branch/Arrow/TabTemplate.
     "Interface\\AddOns\\Blizzard_TalentUI\\Blizzard_TalentUI.xml",

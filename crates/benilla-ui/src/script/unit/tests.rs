@@ -1262,6 +1262,7 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
     //    comparison against our group's leader could ever express.
     s.set_party(PartyState {
         leader_guid: 0x9999,
+        own_guid: 0,
         ..Default::default()
     });
     s.set_unit(
@@ -1285,6 +1286,7 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
     //    out-of-range member — the client holds no object, so leg 1 has nothing to read.
     s.set_party(PartyState {
         leader_guid: THEM,
+        own_guid: 0,
         ..Default::default()
     });
     s.set_unit(

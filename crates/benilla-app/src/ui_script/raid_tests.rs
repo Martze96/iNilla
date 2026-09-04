@@ -80,6 +80,7 @@ fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
         members,
         leader_index: 0,
         leader_guid: 0, // the player leads; their guid is unset in this fixture
+        own_guid: 0,
         raid,
         loot_method: "group".into(),
         master_looter: None,

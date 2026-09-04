@@ -1480,8 +1480,8 @@
         --
         -- **benilla's own drag code does NOT use them**, and that is deliberate rather than an
         -- oversight: our UI space is 1:1 logical px and `GetCursorPosition` already reports in
-        -- the same space `SetPoint` offsets are read in (the same identity `MouseIsOver`'s
-        -- comment below records for `GetEffectiveScale`). Multiplying here would place a dragged
+        -- the same space `SetPoint` offsets are read in at the UI root's scale of 1 (a frame
+        -- under a `SetScale` reads its own units — `MouseIsOver` below divides for that). Multiplying here would place a dragged
         -- frame at 1.5x the cursor on a 1600-wide window. Kept for the addons, unused by us.
         function GetScreenHeightScale()
             return GetScreenHeight() / 768
@@ -1512,13 +1512,18 @@
         -- hand back for it, and the reference's own comment on that guard ("a symptom not the real
         -- issue") is about where the unresolved frame came from, not about the guard.
         --
-        -- ONE DIVERGENCE, and it is a no-op: the reference divides the cursor by
-        -- `frame:GetEffectiveScale()` because 1.12 hands Lua screen pixels. benilla's UI space is
-        -- 1:1 logical px and `GetEffectiveScale` is the constant 1 (`script/pointer.rs`,
-        -- `object.rs` l.271), so the division is written out rather than left in to divide by one
-        -- forever. If a real UI scale ever lands, this is one of the sites that needs it back.
+        -- The cursor is divided by `frame:GetEffectiveScale()` exactly as the reference does
+        -- (UIParent.lua l.1389-1390): `GetLeft`/`GetRight`/`GetTop`/`GetBottom` answer in the
+        -- frame's OWN units (screen ÷ effective scale, `object/layout_methods.rs`), and a frame
+        -- CAN be scaled — the stock world map is (`SetupFullscreenScale`, 1981), and with the
+        -- division written out its player blip answered "not over" under the very cursor that
+        -- had just entered it, so the hover tooltip came up empty (decision 1985). An earlier
+        -- note here called the scale "the constant 1"; that was true of the UI root and of
+        -- nothing a `SetScale` has touched.
         function MouseIsOver(frame, topOffset, bottomOffset, leftOffset, rightOffset)
             local x, y = GetCursorPosition()
+            x = x / frame:GetEffectiveScale()
+            y = y / frame:GetEffectiveScale()
             local left, right = frame:GetLeft(), frame:GetRight()
             local top, bottom = frame:GetTop(), frame:GetBottom()
             if not left then

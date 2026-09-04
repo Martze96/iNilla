@@ -68,7 +68,17 @@ impl Plugin for UiStablePlugin {
                         .after(UiInput)
                         // Nothing samples the booth while no stable is open, and the feed's
                         // first line is a name scan over the whole frame arena (1979's floor).
-                        .run_if(|open: Res<StableOpen>| open.npc.is_some()),
+                        .run_if(
+                            |open: Res<StableOpen>, booth: Res<crate::portrait::StableBooth>| {
+                                // …and one more run after the close: the feed is also what
+                                // EMPTIES the booth (unit/display_id → None), and a gate that
+                                // shut on the close frame left the pet standing in a closed
+                                // window's pane for good (review of 2026-09-04).
+                                open.npc.is_some()
+                                    || booth.unit.is_some()
+                                    || booth.display_id.is_some()
+                            },
+                        ),
                 ),
             );
     }

@@ -368,35 +368,15 @@ pub enum ZTarget {
     Region(RegionHandle),
 }
 
-/// Produce the render list in the client's exact `render_traverse_order 0x765650` order.
-///
-/// Only **effective-visible** frames contribute: because `effective_visible` is maintained across
-/// the whole subtree by the arena's propagation (`set_shown`/`set_parent`), filtering on the flag is
-/// equivalent to the client's "recurse to child frames, a hidden mid-tree frame blocks its subtree"
-/// (`propagation.md`) — a child of a hidden frame already carries `effective_visible == false` and is
-/// skipped here. Each visible frame emits its own [`ZTarget::Frame`] entry followed by one
-/// [`ZTarget::Region`] per owned region; the returned vec is sorted ascending by [`ZKey`], which *is*
-/// the total draw order (strata → frame level → **draw layer** → texture<fontstring → frame
-/// link-stamp → is-region → sub-level → decl; the layer outranks the frame — see the `ZKey`
-/// bit-layout note and decision 0884). Ties are impossible: distinct frames differ in link-stamp, a frame and its
-/// regions differ in the is-region bit, and a frame's regions differ in the remaining fields.
-///
-/// Ordering only: this emits an entry for *every* region of a visible frame. Region-level
-/// `Show`/`Hide` (the VisibleRegion bit, `region+0xc4`) is applied one layer up, where paint lives —
-/// [`UiScript::extract`](crate::script::UiScript::extract) drops hidden regions before they become
-/// quads. (The 1.12 region-draw cluster that would pin the *draw-time* skip is still flagged unread
-/// in wow-re's findings; the flag itself and its setter `0x77fcb0` are recorded.)
-/// The sorted draw list, cached against a fingerprint of its inputs (decision 1979): the list
-/// is a pure function of every visible frame's `(strata, level, insertion)` and every attached
-/// region's layer/sub-level/kind/decl — a walk over ~2 k frames and ~6 k regions, then a sort,
-/// and it was rebuilt on every frame for the extract, the pointer and the edit box alike. The
-/// walk stays (it is the fingerprint); the sort and the allocation happen only when the walk
-/// hashes differently from the last one, which on a still frame it never does.
 /// The sorted draw list itself — shared, so a frame that changed nothing hands out the same one.
 pub type DrawList = std::sync::Arc<[(ZTarget, ZKey)]>;
 
-#[derive(Default, Debug, Clone)]
-pub struct OrderCache(std::cell::RefCell<Option<(u64, DrawList)>>);
+/// [`traversal`]'s memo: the last walk (arena order) and the sorted list built from it.
+#[derive(Default, Debug)]
+pub struct OrderCache(std::cell::RefCell<Option<OrderMemo>>);
+
+/// The last walk, in arena order, and the sorted list built from it.
+type OrderMemo = (Vec<(ZTarget, ZKey)>, DrawList);
 
 /// Every `(target, key)` of the draw list, in ARENA order — the one walk both the fingerprint
 /// and the rebuild are made of, so they cannot disagree.
@@ -430,27 +410,58 @@ fn walk(arena: &WidgetArena, mut f: impl FnMut(ZTarget, ZKey)) {
     }
 }
 
+/// Produce the render list in the client's exact `render_traverse_order 0x765650` order.
+///
+/// Only **effective-visible** frames contribute: because `effective_visible` is maintained across
+/// the whole subtree by the arena's propagation (`set_shown`/`set_parent`), filtering on the flag is
+/// equivalent to the client's "recurse to child frames, a hidden mid-tree frame blocks its subtree"
+/// (`propagation.md`) — a child of a hidden frame already carries `effective_visible == false` and is
+/// skipped here. Each visible frame emits its own [`ZTarget::Frame`] entry followed by one
+/// [`ZTarget::Region`] per owned region; the returned vec is sorted ascending by [`ZKey`], which *is*
+/// the total draw order (strata → frame level → **draw layer** → texture<fontstring → frame
+/// link-stamp → is-region → sub-level → decl; the layer outranks the frame — see the `ZKey`
+/// bit-layout note and decision 0884). Ties are impossible: distinct frames differ in link-stamp, a frame and its
+/// regions differ in the is-region bit, and a frame's regions differ in the remaining fields.
+///
+/// Ordering only: this emits an entry for *every* region of a visible frame. Region-level
+/// `Show`/`Hide` (the VisibleRegion bit, `region+0xc4`) is applied one layer up, where paint lives —
+/// [`UiScript::extract`](crate::script::UiScript::extract) drops hidden regions before they become
+/// quads. (The 1.12 region-draw cluster that would pin the *draw-time* skip is still flagged unread
+/// in wow-re's findings; the flag itself and its setter `0x77fcb0` are recorded.)
+///
+/// Cached against its own inputs (decision 1979): the list
+/// is a pure function of every visible frame's `(strata, level, insertion)` and every attached
+/// region's layer/sub-level/kind/decl — a walk over ~2 k frames and ~6 k regions, then a sort,
+/// and it was rebuilt on every frame for the extract, the pointer and the edit box alike. The
+/// walk stays (it is the fingerprint); the sort and the allocation happen only when the walk
+/// hashes differently from the last one, which on a still frame it never does.
 pub fn traversal(arena: &WidgetArena) -> DrawList {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut n = 0usize;
-    walk(arena, |t, k| {
-        t.hash(&mut hasher);
-        k.hash(&mut hasher);
-        n += 1;
-    });
-    n.hash(&mut hasher);
-    let fingerprint = hasher.finish();
-    if let Some((cached, list)) = arena.order_cache.0.borrow().as_ref() {
-        if *cached == fingerprint {
-            return list.clone();
+    let mut cache = arena.order_cache.0.borrow_mut();
+    // One walk into a scratch (the previous walk's buffer, reused), then an EXACT compare
+    // against the last walk: equal inputs hand out the same list; a hash would have made a
+    // wrong draw order a possibility, however remote, and cost a second walk on every miss.
+    let (mut walked, last) = match cache.take() {
+        Some((prev, list)) => {
+            let mut scratch = Vec::with_capacity(prev.len());
+            walk(arena, |t, k| scratch.push((t, k)));
+            if scratch == prev {
+                *cache = Some((prev, list.clone()));
+                return list;
+            }
+            (scratch, Some(prev))
         }
-    }
-    let mut out: Vec<(ZTarget, ZKey)> = Vec::with_capacity(n);
-    walk(arena, |t, k| out.push((t, k)));
+        None => {
+            let mut scratch = Vec::new();
+            walk(arena, |t, k| scratch.push((t, k)));
+            (scratch, None)
+        }
+    };
+    drop(last);
+    let mut out = walked.clone();
     out.sort_by_key(|&(_, k)| k);
     let list: DrawList = out.into();
-    *arena.order_cache.0.borrow_mut() = Some((fingerprint, list.clone()));
+    walked.shrink_to_fit();
+    *cache = Some((walked, list.clone()));
     list
 }
 

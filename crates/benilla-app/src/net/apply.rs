@@ -1234,12 +1234,13 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::RaidTargetSet { icon, guid } => group.apply_raid_target(icon, guid),
             SessionEvent::RaidTargetList { entries } => group.apply_raid_target_list(&entries),
-            // The ready check came back with the Raid tab (decision 1549): the open form bumps
-            // the ticket the feed turns into a `READY_CHECK` edge. The ANSWER form is still
-            // ignored — the reference has no per-member answer surface in 1.12 (the raid pane
-            // shows no ready column; only later clients do), so there is nothing to show and
-            // storing it would be state with no reader.
-            SessionEvent::ReadyCheckRequest => group.apply_ready_check(),
+            // The ready check (decision 1549, completed by 1989): the open form takes the
+            // leader arm or the popup arm by our guid; the ANSWER form — forwarded to the leader
+            // alone — is logged for the engine's flags, which the timeout tick sums up after 30 s
+            // (1.12 has no per-member answer surface, only the AFK summary line).
+            SessionEvent::ReadyCheckRequest => {
+                group::ready_check_request(&mut group, &mut chat_log, &self_guid)
+            }
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
             // A group member pinged (decision 1596). The wire carries raw world floats and the
             // relay is stateless in the reference too — we seat them as the pin and the minimap
@@ -1249,7 +1250,9 @@ pub(super) fn apply_net_updates(
             SessionEvent::MinimapPing { guid, x, y } => {
                 ping.seat((x, y), guid);
             }
-            SessionEvent::ReadyCheckAnswer { .. } => {}
+            SessionEvent::ReadyCheckAnswer { guid, ready } => {
+                group.apply_ready_check_answer(guid, ready != 0)
+            }
             // ── The duel family (decision 0633): the session mirror + the two DisplayError
             // lines the handlers emit inline; the Era events fire off the mirror's edges in
             // `ui_duel::feed_duel`, and the countdown ticks in its own system ──

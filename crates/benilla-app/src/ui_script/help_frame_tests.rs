@@ -38,7 +38,7 @@ fn setup() -> UiScript {
         "Interface\\FrameXML\\StaticPopup.xml",
         // The stock file's `HelpFrame_OnShow` calls `UpdateMicroButtons()` before
         // `GetGMStatus()`, so without the micro row the OnShow raises and the status ask never
-        // happens. Ours never called it. MicroMenu needs the bar's button kit under it.
+        // happens. Ours never called it. The row needs the bar's button kit under it.
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -47,7 +47,7 @@ fn setup() -> UiScript {
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         // `TicketStatusFrame_OnEvent` re-anchors TemporaryEnchantFrame before it arms the repoll
         // timer, so without BuffFrame the handler raises and `refreshTime` is never set. This is
         // the one ordering requirement benilla.toc already calls out for this window.

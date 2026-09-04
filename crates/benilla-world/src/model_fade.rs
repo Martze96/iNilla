@@ -329,9 +329,13 @@ pub(crate) fn publish_model_alpha(
     >,
     // A declaration that went away is a change the `Ref` cannot see: those units are due.
     mut undeclared: RemovedComponents<ModelFade>,
+    // The appear ramp's RETIREMENT is a removal too — the frame it goes, the alpha must land
+    // on its final value, not hold the ramp's last sample (review 2026-09-04).
+    mut ramp_done: RemovedComponents<UnitAppearFade>,
 ) {
     let now = time.elapsed_secs();
-    let undeclared: bevy::platform::collections::HashSet<Entity> = undeclared.read().collect();
+    let mut undeclared: bevy::platform::collections::HashSet<Entity> = undeclared.read().collect();
+    undeclared.extend(ramp_done.read());
     for (entity, appear, despawn, is_self, declared, current) in &mut units {
         // With no ramp in flight and not the self body, the alpha is the declared fade alone —
         // a published value that cannot have moved unless the declaration did. Every resident

@@ -71,7 +71,7 @@ fn trainer_script_base() -> UiScript {
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         "Interface\\FrameXML\\ClassTrainerFrameTemplates.xml",
     ] {

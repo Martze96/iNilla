@@ -404,7 +404,7 @@
         -- The reference keeps `CloseMenus` in `UIParent.lua:984`, not in its dropdown file, and
         -- this file is already where our slice of UIParent.lua lives (`IsOptionFrameOpen` below,
         -- `CloseAllWindows`, `ToggleGameMenu`). It sits at manifest line 144, ahead of all five
-        -- consumers — the stock dropdown at 155, MicroMenu, GameMenuFrame and two test kits.
+        -- consumers — the stock dropdown at 155, the stock micro row, GameMenuFrame and two test kits.
         --
         -- The BOUND is inlined rather than read from `UIDROPDOWNMENU_MAXLEVELS`, which lives in the
         -- dropdown file: a kit that loads this file and not that one would otherwise fail on

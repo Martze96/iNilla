@@ -537,3 +537,54 @@ fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
     assert_eq!(visible(&s, "BlackoutWorld"), 0, "with the blackout down");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **Hovering the player arrow on a scaled map names the player** (director report: an empty
+/// tooltip). On a window narrower than 4:3 the stock `SetupFullscreenScale` scales the map
+/// under 1 (0.802 here); `WorldMapUnit_OnEnter` then asks `MouseIsOver(WorldMapPlayer)` for the
+/// text, which read the cursor against the blip's own-unit edges without the reference's scale
+/// division and answered nil — a tooltip with no lines (decision 1985).
+#[test]
+fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(821.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<f64>("return WorldMapFrame:GetScale()").unwrap() < 0.99,
+        "the narrow window scales the map under 1"
+    );
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    update(&mut s);
+    s.resolve();
+    let (px, py, eff) = s
+        .eval::<(f64, f64, f64)>(
+            "local x, y = WorldMapPlayer:GetCenter() return x, y, WorldMapPlayer:GetEffectiveScale()",
+        )
+        .unwrap();
+    s.mouse_move((px * eff) as f32, (py * eff) as f32);
+    assert_eq!(
+        s.hit_test_name((px * eff) as f32, (py * eff) as f32)
+            .as_deref(),
+        Some("WorldMapPlayer")
+    );
+    assert!(s.eval::<bool>("return WorldMapTooltip:IsShown()").unwrap());
+    assert_eq!(
+        s.eval::<String>("return WorldMapTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Probefour"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

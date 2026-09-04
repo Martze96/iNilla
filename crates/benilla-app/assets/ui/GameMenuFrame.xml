@@ -2,7 +2,7 @@
     <!--
         The GAME MENU — the frame ESC opens (decision 0674). The last hole in the game shell's
         outermost layer: until now ESC's chain ran out of things to close and did nothing, and the
-        Main Menu micro button was drawn but dead (MicroMenu.xml's SCOPE note).
+        Main Menu micro button was drawn but dead (our since-retired MicroMenu.xml's SCOPE note).
 
         PROVENANCE (0985 — the three-source split, stated the same way in every era-shaped
         window; OptionsFrame.xml carries the sibling block):
@@ -45,7 +45,7 @@
           278 LOGOUT_CANCEL), fired by `crate::ui_logout` off `SMSG_LOGOUT_RESPONSE`.
 
         NAMES are the reference's, unprefixed (`GameMenuFrame`, `GameMenuButton*`) — the same call
-        MicroMenu.xml made for its straight transcriptions, and required here besides: `ToggleGameMenu`
+        our retired MicroMenu.xml made for its straight transcriptions, and required here besides: `ToggleGameMenu`
         and `GameMenuFrame` are Era API surface an addon addresses by name.
 
         SCOPE / divergences (noted, not bugs):
@@ -101,7 +101,7 @@
     -->
     <Script><![CDATA[
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
-        -- verbatim. `X = X or "..."` so a later real strings table wins, the MicroMenu.xml idiom.
+        -- verbatim. `X = X or "..."` so a later real strings table wins, the retired MicroMenu.xml's idiom.
         MAIN_MENU = MAIN_MENU or "Main Menu"
         HUD_EDIT_MODE_MENU = HUD_EDIT_MODE_MENU or "Edit Mode"
         GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"

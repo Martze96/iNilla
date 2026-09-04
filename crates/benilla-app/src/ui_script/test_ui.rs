@@ -70,6 +70,14 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         "{entry}: loader errors: {:?}",
         report.errors
     );
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|leaf| leaf.eq_ignore_ascii_case("MainMenuBarMicroButtons.xml"))
+    {
+        s.run(MICRO_BUTTON_STAND_INS)
+            .expect("the micro-button stand-ins");
+    }
     if no_warnings {
         assert!(
             report.warnings.is_empty(),
@@ -91,6 +99,39 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     }
     report.frames
 }
+
+/// **What a kit owes the stock micro-button row.** `UpdateMicroButtons`
+/// (`MainMenuBarMicroButtons.lua:20-84`) reads ten panels, `KeyRingButton` and `IsBagOpen`
+/// UNGUARDED — the reference's own contract, because in the client every one of them is up
+/// before anything can be shown. A kit is a prefix of the manifest and stops wherever its window
+/// does, so [`load_entry`] wraps the function the moment the row loads: on its FIRST call — a
+/// panel's OnShow, by which time the kit is complete — the wrapper seats a hidden, unnamed
+/// stand-in under each name the kit never declared (a hidden frame is what a closed panel
+/// answers), then runs the reference's own body. First use rather than load time, and unnamed,
+/// because both registries keep the first writer: the arena's name map
+/// (`named_registry_is_non_overwriting`) and `_G` itself — a named frame is published
+/// non-overwriting (RF-0023: a `lua_gettable` nil check on GLOBALSINDEX, which is why a
+/// metatable fallback would block the real publish just the same). A stand-in seated before the
+/// real declaration shadows the real frame for good; the first cut did exactly that, 126
+/// failures, every tabbed panel's `numTabs` read off the stand-in. `fire_chat_login`'s
+/// `UIOptionsFrame` stand-in is the same move for the chat files. Seated here rather than at the
+/// kits' seventy-odd consumers because the dependency is the row's, not any one window's — and
+/// the shipped manifest never needs it. `tests/common/mod.rs` carries the same chunk for the
+/// integration tests, which cannot reach this module (decision 1987).
+pub(super) const MICRO_BUTTON_STAND_INS: &str = r#"
+    local real = UpdateMicroButtons
+    function UpdateMicroButtons()
+        for _, name in ipairs({ "CharacterFrame", "SpellBookFrame", "QuestLogFrame", "GameMenuFrame",
+            "OptionsFrame", "SoundOptionsFrame", "UIOptionsFrame", "FriendsFrame", "WorldMapFrame",
+            "HelpFrame" }) do
+            if not getglobal(name) then local f = CreateFrame("Frame") f:Hide() setglobal(name, f) end
+        end
+        if not KeyRingButton then KeyRingButton = CreateFrame("Button") KeyRingButton:Hide() end
+        if not KEYRING_CONTAINER then KEYRING_CONTAINER = -2 end
+        if not IsBagOpen then function IsBagOpen() return nil end end
+        return real()
+    end
+"#;
 
 /// One file's bytes, from whichever store its path names — the chain for a path, this crate's
 /// `assets/ui` for a bare name. Also the `<Include>` / `<Script file=>` provider, which is why it
@@ -222,9 +263,12 @@ pub(super) const LOOT_UI: &[&str] = &[
 ///   `HonorLevelText` and `HonorGuildText` "while we're at it" (`PaperDollFrame.lua:100`/`:120`).
 ///   Nothing touches them at load, so leaving this out loads clean and then raises the first time
 ///   the window is SHOWN. It sits below the character block in the manifest for the same reason.
-/// * **`MicroMenu.xml`** — `UpdateMicroButtons` (called by both `CharacterFrame_OnShow` and
-///   `_OnHide`) and `MicroButtonTooltipText` (all five tab hovers). A tab hover is the only thing
-///   that reaches the second one, so its absence is invisible until a test hovers a tab.
+/// * **`MainMenuBarMicroButtons.xml`** — `UpdateMicroButtons` (called by both
+///   `CharacterFrame_OnShow` and `_OnHide`) and `MicroButtonTooltipText` (all five tab hovers).
+///   A tab hover is the only thing that reaches the second one, so its absence is invisible
+///   until a test hovers a tab. The reference's own file since 1987; the panels its
+///   `UpdateMicroButtons` reads unguarded and this kit stops short of are
+///   [`MICRO_BUTTON_STAND_INS`]'s.
 ///
 /// Needs client data, like its three siblings: open with `benilla_formats::wow_data_or_skip!()`.
 pub(super) const CHARACTER_UI: &[&str] = &[
@@ -272,7 +316,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Interface\\FrameXML\\MainMenuBar.xml",
     "Interface\\FrameXML\\ActionBarFrame.xml",
     "Interface\\FrameXML\\BonusActionBarFrame.xml",
-    "MicroMenu.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     // The two page files these three need before the window can be OPENED, which is not the same
     // as before it can load: `CHARACTERFRAME_SUBFRAMES` lists all five pages by name and
     // `CharacterFrame_ShowSubFrame` calls `getglobal(value):Hide()` on each one it is not showing
@@ -331,7 +375,7 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "KeyBindingsPage.xml",
     "OptionsFrame.xml",
     "Interface\\FrameXML\\MultiActionBars.xml",
-    "MicroMenu.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\UIMenu.xml",
     "Interface\\FrameXML\\ChatFrame.xml",
@@ -393,7 +437,7 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\BonusActionBarFrame.xml",
     // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
     // l.137), because in the reference the keyring's existence moves the micro-button row.
-    "MicroMenu.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     // The dialog engine, after the UIPanelCloseButton it inherits (1960).

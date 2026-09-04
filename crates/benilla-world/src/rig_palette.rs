@@ -296,6 +296,21 @@ impl RigPalettes {
         } else {
             self.free_ranges[i] = (base + bones, len - bones);
         }
+        // A fresh range starts at zero rows: the spare-buffer reuse (`rows_make_mut`) means the
+        // CPU mirror above the watermark is a previous occupant's pose, and three readers
+        // (`write_rig`'s torn-joint keep, `write_rider`'s unchanged compare, the computed-rig
+        // readbacks) assume an unallocated row is zero (review 2026-09-04).
+        let (r0, r1) = (3 * base as usize, 3 * (base + bones) as usize);
+        let wm = self.bone_watermark();
+        let rows = rows_make_mut(
+            &mut self.rows,
+            &mut self.spare,
+            wm,
+            &mut self.cost_copies,
+            &mut self.cost_copy_us,
+        );
+        let r1 = r1.min(rows.len());
+        rows[r0..r1].fill([0.0; 4]);
         Arc::make_mut(&mut self.table)[slot as usize] = base;
         self.slot_len[slot as usize] = bones;
         self.mirrored[slot as usize] = false;

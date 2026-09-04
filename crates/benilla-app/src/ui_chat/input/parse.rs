@@ -39,7 +39,8 @@ fn social_body(key: &str, args: &str) -> ParsedChat {
 /// resource or a network channel.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::ui_chat) enum ParsedChat {
-    /// `/r [text]` — reply to the last received tell ([`crate::ui_chat::edit::ChatEditState::last_tell`]).
+    /// `/r [text]` — reply to the last received tell (the tell ring is the stock `ChatEdit_*`
+    /// Lua's since 1948 — see [`crate::ui_chat::edit`]).
     Reply { text: String },
     /// `/join <name> [password]` (aliases /channel /chan — SLASH_JOIN).
     Join { name: String, password: String },

@@ -796,7 +796,7 @@ fn interface_harness() -> UiScript {
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\ItemButtonTemplate.xml",
             "Interface\\FrameXML\\QuestFrame.xml",
-            "MicroMenu.xml",
+            r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
             "Interface\\FrameXML\\QuestLogFrame.xml",
         ],
     );

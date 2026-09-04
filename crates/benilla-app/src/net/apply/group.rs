@@ -26,6 +26,18 @@ fn push_group_lines(chat_log: &mut ChatLog, lines: Vec<String>) {
     }
 }
 
+/// `MSG_RAID_READY_CHECK`, the open form (decision 1989): our own echo as leader takes the
+/// response-collection arm and prints nothing; as anyone else we print the leader's line and take
+/// the popup ticket. The leader test is the reference's guid compare (`0x4ba3a0`).
+pub(super) fn ready_check_request(
+    group: &mut GroupState,
+    chat_log: &mut ChatLog,
+    self_guid: &SelfGuid,
+) {
+    let we_lead = self_guid.0 == Some(group.leader);
+    push_group_lines(chat_log, group.apply_ready_check_request(we_lead));
+}
+
 /// `SMSG_GROUP_INVITE` — someone asked us into their group.
 pub(super) fn invited(group: &mut GroupState, chat_log: &mut ChatLog, inviter: &str) {
     push_group_lines(chat_log, group.apply_invited(inviter));

@@ -1116,12 +1116,13 @@ mod tests {
     /// do not ship under its own name usually has a counterpart of ours under a different one, and
     /// both would declare the same frames.
     ///
-    /// That half doubles as the map nothing else holds: `FloatingChatFrame.xml` is our `ChatFrame.xml`,
-    /// `MainMenuBarMicroButtons.xml` is our `MicroMenu.xml`, `StaticPopup.xml` is our
-    /// `UiPanels.xml`. (The row this map used to lead with — `PlayerFrame.xml`/`TargetFrame.xml`/
-    /// `PetFrame.xml` all being our one `UnitFrames.xml` — is retired: those four are the
-    /// reference's own files now, 1751.) `chain_gap_report` calls several of those unblocked, and they are —
-    /// individually. They just cannot load beside the file of ours already holding their names.
+    /// That half used to double as the map nothing else held — `FloatingChatFrame.xml` was our
+    /// `ChatFrame.xml`, `MainMenuBarMicroButtons.xml` our `MicroMenu.xml`, `StaticPopup.xml` our
+    /// `UiPanels.xml`'s dialog half, `PlayerFrame.xml`/`TargetFrame.xml`/`PetFrame.xml` our one
+    /// `UnitFrames.xml`. Every one of those is the reference's own file now (1751; the micro row
+    /// last, 1987), so the frame half names nothing today. It stays because a stock window
+    /// declaring a frame one of ours still holds is the first thing a swap has to rule out —
+    /// such a pair can load individually and cannot load side by side.
     ///
     /// Run it before attempting a swap. It predicts which ones will fail without attempting them.
     #[test]
@@ -1419,8 +1420,8 @@ mod tests {
     /// FrameXML function is invisible to both, because loading a file never runs the body that
     /// calls it: `LootFrame.xml` shipped load-clean and raised at `LootFrame.lua:85` the first
     /// time it met real data, and stock `CharacterFrame.xml` would have raised on the first tab
-    /// HOVER, because `MicroButtonTooltipText` did not exist here (it does now — `MicroMenu.xml`,
-    /// our `MainMenuBarMicroButtons.xml` counterpart, is where the reference declares it).
+    /// HOVER, because `MicroButtonTooltipText` did not exist here (it does now — the stock
+    /// `MainMenuBarMicroButtons.xml` declares it, off the chain since 1987).
     ///
     /// So: for every chain `.xml` in the manifest, census the bare `Name(` call sites across it
     /// and its `.lua`, subtract what those two define themselves, keep the names the reference's

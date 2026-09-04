@@ -243,7 +243,7 @@ pub(crate) struct SceneGates<'w, 's> {
     portals: Query<'w, 's, &'static crate::wmo_portal::WmoPortalInstance>,
     /// Streamed-in buildings this frame: a room admit can only change with the camera, a
     /// window, a claim, a surface, or a new portal set — the last is this.
-    new_portals: Query<'w, 's, (), Added<crate::wmo_portal::WmoPortalInstance>>,
+    new_portals: Query<'w, 's, (), Changed<crate::wmo_portal::WmoPortalInstance>>,
 }
 
 impl SceneGates<'_, '_> {
@@ -452,7 +452,7 @@ pub(super) fn simulate_particles(
             Ref<GlobalTransform>,
             &Frustum,
             &Camera,
-            &Projection,
+            Ref<Projection>,
             Option<Ref<Transform>>,
         ),
         With<WorldCamera>,
@@ -529,6 +529,7 @@ pub(super) fn simulate_particles(
     // still too, and a gated emitter can skip its sphere/window/room tests outright — 2.4 k
     // resident emitters against 11 active in a parked city (decision 1979's floor).
     let gate_inputs_still = !cam_tf.is_changed()
+        && !projection.is_changed()
         && !cam_local.as_ref().is_some_and(|l| l.is_changed())
         && !gates.changed()
         && !interleave.surfaces_changed();
@@ -544,7 +545,7 @@ pub(super) fn simulate_particles(
     // The far-clip wall, the exterior gate and the camera's own room — built once for the whole
     // emitter walk, the same values the model visibility authority and `exterior_cull` ask
     // (0784/0786: one spelling of the window test).
-    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((&*cam_tf, projection)));
+    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((&*cam_tf, &*projection)));
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = dumps.depth_frame(time.elapsed_secs());
     // `$WOW_EMIT_DUMP`: is this a dump tick? Decided once per frame, for the whole walk.
@@ -778,17 +779,6 @@ pub(super) fn simulate_particles(
         // The instance's gseq cursor (0856/0858): the spawn age IS `sceneNow − attach` — the
         // emitter spawns with its instance, and every lane's instance is fresh per play.
         let gseq_now = f64::from(*age);
-        // Dormant (decision 1979): nothing alive, nothing draining, and the timing tracks say
-        // the emitter is not emitting at this clock — every placement, ride and water step
-        // below would compute state for zero particles. The clock derivation above already
-        // ran (it is what `emitting` reads, and `seq` must keep following the host).
-        if particles.is_empty()
-            && !*draining
-            && children.iter().all(|c| c.particles.is_empty())
-            && !def.timing.emitting(clock_seq, elapsed_s, gseq_now)
-        {
-            continue;
-        }
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
         // owner needs nothing beyond refreshing `placement` — the cloud rides the anchor for free
         // (the reference's per-frame `translate(−emitterPos)` draw-matrix rebuild).
@@ -846,6 +836,20 @@ pub(super) fn simulate_particles(
                 }
             }
             commands.entity(entity).despawn();
+            continue;
+        }
+        // Dormant (decision 1979) — judged AFTER the owner-loss and drain-complete blocks above,
+        // which are the emitter's lifetime and must run every frame (review of 2026-09-04: a
+        // one-shot whose owner despawned never drained and lived for the session). Nothing
+        // alive, nothing draining, and the timing tracks say
+        // the emitter is not emitting at this clock — every placement, ride and water step
+        // below would compute state for zero particles. The clock derivation above already
+        // ran (it is what `emitting` reads, and `seq` must keep following the host).
+        if particles.is_empty()
+            && !*draining
+            && children.iter().all(|c| c.particles.is_empty())
+            && !def.timing.emitting(clock_seq, elapsed_s, gseq_now)
+        {
             continue;
         }
         // The MODEL's render alpha for this frame (decision 0827 — the reference's per-frame
@@ -1290,7 +1294,7 @@ pub(super) fn simulate_particles(
                     &cam,
                     &cam_tf,
                     camera,
-                    projection,
+                    &projection,
                     images.contains(&*texture),
                     &quads.verts[start as usize..],
                 );

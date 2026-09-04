@@ -574,10 +574,10 @@ fn the_shipped_frames_carry_the_references_flags() {
         // frames are the reference's own now), which took the paired count from the low 400s to
         // the high 150s; 1966 (TradeFrame), 1968 (GameTooltip), 1969 (DressUpFrame) and 1970
         // (MailFrame) to the high 80s, and 1980 (WorldMapFrame, whose 50-odd blip frames were
-        // most of what was left) to the high teens. The floor guards the pairing, not the
-        // census — it comes down with every window that migrates, and reaches zero with the
-        // last file of ours that declares a reference-named frame.
-        compared > 10,
+        // most of what was left) to the high teens, and 1987 (the micro row) to nine. The floor
+        // guards the pairing, not the census — it comes down with every window that migrates,
+        // and reaches zero with the last file of ours that declares a reference-named frame.
+        compared > 5,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

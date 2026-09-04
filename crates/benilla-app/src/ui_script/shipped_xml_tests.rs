@@ -625,10 +625,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980; the floor
-    // follows the census down as windows migrate).
+    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980, 4 after 1987;
+    // the floor follows the census down as windows migrate).
     assert!(
-        paths.len() >= 5,
+        paths.len() >= 4,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
@@ -1375,9 +1375,10 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     let before = names.iter().filter(|n| visible(&s, n)).count();
     assert!(
         // 50 until 1938 took the three bar files stock, 20 until 1974 took the minimap cluster
-        // (its 22 named frames were most of what this sweep counted); the floor follows the
-        // census of OUR files down, and 12 is what is left — the glue and dev frames.
-        before > 10,
+        // (its 22 named frames were most of what this sweep counted), 12 until 1987 took the
+        // micro row; the floor follows the census of OUR files down, and 2 is what is left —
+        // the glue and dev frames.
+        before >= 2,
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );
@@ -1448,8 +1449,9 @@ fn every_declared_parent_really_attaches() {
     let declared = shipped_frame_parents();
     assert!(
         // A sanity floor for the scan, not a census — the declarations retire with the files
-        // that carry them (1751); 67 before 1938, 30 after 1956, 14 after 1970.
-        declared.len() >= 10,
+        // that carry them (1751); 67 before 1938, 30 after 1956, 14 after 1970, 2 after 1987
+        // (the micro row's eight were most of what was left).
+        declared.len() >= 2,
         "only {} parent declarations found — the scan broke",
         declared.len()
     );

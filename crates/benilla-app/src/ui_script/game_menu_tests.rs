@@ -577,7 +577,7 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         r"Interface\FrameXML\WorldMapFrame.xml",
     ]);
 
@@ -638,7 +638,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         r"Interface\FrameXML\WorldMapFrame.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what

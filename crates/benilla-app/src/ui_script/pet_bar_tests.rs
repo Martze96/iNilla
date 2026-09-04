@@ -692,7 +692,7 @@ fn tooltip_line1(s: &UiScript) -> String {
 ///
 /// The exact string is pinned, colour codes and all, because the ref's concatenation puts the
 /// colour BEFORE the space (`Attack|cffffd200 (CTRL-1)|r`, not `Attack |cffffd200(CTRL-1)|r` —
-/// which is what MicroMenu.xml's different-shaped version of the same idea produces).
+/// which is what the stock `MicroButtonTooltipText` — the same idea, the other shape — produces).
 #[test]
 fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
     let mut s = hovered_pet_bar();

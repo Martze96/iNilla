@@ -108,7 +108,7 @@ fn harness_with(player: &str) -> UiScript {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // `ClassTrainerListScrollFrameTemplate` — the icon chooser's scroll frame inherits it.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
-        "MicroMenu.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
     ] {
         super::test_ui::load_ui(&s, file);
     }

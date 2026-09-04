@@ -30,11 +30,23 @@ use benilla_assets::materials::WowModelMaterial;
 pub(super) fn apply_model_visibility(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
-    cam: Query<(Ref<GlobalTransform>, &Projection, Option<Ref<Transform>>), With<WorldCamera>>,
+    cam: Query<
+        (
+            Ref<GlobalTransform>,
+            Ref<Projection>,
+            Option<Ref<Transform>>,
+        ),
+        With<WorldCamera>,
+    >,
     // The two edges the per-part skip below cannot read off its own row: a building streaming
     // in (its portal set is new), and any owner's inherited verdict flipping (a card follows it).
-    new_portals: Query<(), Added<WmoPortalInstance>>,
+    // `Changed`, not `Added`: the PVS writer sets the tick only on a real change of the
+    // visible set, and that set moves when a building's asset lands frames after its spawn.
+    new_portals: Query<(), Changed<WmoPortalInstance>>,
     owner_flips: Query<(), Changed<InheritedVisibility>>,
+    // A part whose far-side mark was REMOVED reads as never marked; the classifier's full walk
+    // can strip it under a still camera (review 2026-09-04), and the strip must un-skip it.
+    mut unmarked: RemovedComponents<super::FarSideOfWater>,
     // The per-frame WMO portal PVS (computed by `crate::wmo_portal`), read here so the cull composes
     // with the toggles + far-clip in this single Visibility authority rather than fighting it.
     instances: Query<&WmoPortalInstance>,
@@ -60,6 +72,7 @@ pub(super) fn apply_model_visibility(
     // late to survive (decision 1409).
     card_owners: Query<&InheritedVisibility>,
     mut q: Query<(
+        Entity,
         &ModelPart,
         Ref<GlobalTransform>,
         &mut Visibility,
@@ -101,10 +114,9 @@ pub(super) fn apply_model_visibility(
     // floor: ~8.7 k resident parts re-verdicted on every still frame at the Stormwind pin).
     // Both the propagated frame and the seat's own write: this system runs before propagation,
     // so a teleport frame's move is only visible on the local `Transform` (see doodad_anim).
-    let scene_still = cam_view
-        .as_ref()
-        .is_some_and(|(t, _, l)| !t.is_changed() && !l.as_ref().is_some_and(|l| l.is_changed()))
-        && !debug.is_changed()
+    let scene_still = cam_view.as_ref().is_some_and(|(t, p, l)| {
+        !t.is_changed() && !p.is_changed() && !l.as_ref().is_some_and(|l| l.is_changed())
+    }) && !debug.is_changed()
         && !view.is_changed()
         && !windows.is_changed()
         && !claim.is_changed()
@@ -117,15 +129,18 @@ pub(super) fn apply_model_visibility(
     // asked per submesh below — the same value `crate::exterior_cull` asks for the objects it owns.
     let gate = crate::exterior_cull::ExteriorGate::build(
         &windows,
-        cam_view.as_ref().map(|(t, p, _)| (&**t, *p)),
+        cam_view.as_ref().map(|(t, p, _)| (&**t, &**p)),
     );
     // The placement the camera is standing in, exempt from its own window gate (see the param).
     let own_instance = claim.0.map(|c| c.room.instance);
     // Parallel: this walks EVERY model submesh in residency — ~100k in a city — and at that N a
     // serial walk alone blew half the 16.7 ms budget (the Stormwind fps hunt). Every write below
     // is change-gated, so the steady state is a pure read fan-out.
+    let unmarked: bevy::platform::collections::HashSet<Entity> = unmarked.read().collect();
+    let unmarked = &unmarked;
     q.par_iter_mut().for_each(
         |(
+            entity,
             part,
             xf,
             mut vis,
@@ -140,6 +155,7 @@ pub(super) fn apply_model_visibility(
             card,
         )| {
             if scene_still
+                && !unmarked.contains(&entity)
                 && !xf.is_changed()
                 && !group_vis.as_ref().is_some_and(|g| g.is_changed())
                 && !mat_anim.as_ref().is_some_and(|a| a.is_changed())

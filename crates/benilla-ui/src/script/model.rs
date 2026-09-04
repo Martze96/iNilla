@@ -490,6 +490,8 @@ pub(crate) struct Model {
     /// Party/loot intents (`AcceptGroup`/`InviteToParty`/`SetLootMethod`/…) queued since the
     /// app's last [`super::UiScript::take_party_requests`] drain — the outbound seam ([`party`]).
     pub(crate) party_requests: Vec<party::PartyRequest>,
+    /// The ready-check deadline and the unanswered flags the timeout tick reads (decision 1989).
+    pub(crate) ready_check: party::ReadyCheckState,
     /// The saved raid lockouts the Raid tab's info panel reads (decision 1549), pushed by the app
     /// from `SMSG_RAID_INSTANCE_INFO`. Its own field rather than a [`party::PartyState`] member
     /// because it arrives on its own packet and survives every roster change.
@@ -1776,6 +1778,7 @@ impl Model {
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
             party_requests: Vec::new(),
+            ready_check: party::ReadyCheckState::default(),
             saved_instances: Vec::new(),
             raid_selection: 0,
             instance_type: None,

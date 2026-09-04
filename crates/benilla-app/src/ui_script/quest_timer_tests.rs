@@ -44,7 +44,7 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
-    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestTimerFrame.xml");
     s

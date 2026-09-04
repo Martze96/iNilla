@@ -52,4 +52,31 @@ pub fn load_ui(script: &UiScript, entry: &str) {
         "{entry}: loader errors: {:#?}",
         report.errors
     );
+    if entry
+        .rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|leaf| leaf.eq_ignore_ascii_case("MainMenuBarMicroButtons.xml"))
+    {
+        script
+            .run(MICRO_BUTTON_STAND_INS)
+            .expect("the micro-button stand-ins");
+    }
 }
+
+/// The stock micro-button row's unguarded reads, stood in for on the row's first call — one copy
+/// per store, like the loader itself. `ui_script::test_ui::MICRO_BUTTON_STAND_INS` is the
+/// original and carries the why (decision 1987).
+const MICRO_BUTTON_STAND_INS: &str = r#"
+    local real = UpdateMicroButtons
+    function UpdateMicroButtons()
+        for _, name in ipairs({ "CharacterFrame", "SpellBookFrame", "QuestLogFrame", "GameMenuFrame",
+            "OptionsFrame", "SoundOptionsFrame", "UIOptionsFrame", "FriendsFrame", "WorldMapFrame",
+            "HelpFrame" }) do
+            if not getglobal(name) then local f = CreateFrame("Frame") f:Hide() setglobal(name, f) end
+        end
+        if not KeyRingButton then KeyRingButton = CreateFrame("Button") KeyRingButton:Hide() end
+        if not KEYRING_CONTAINER then KEYRING_CONTAINER = -2 end
+        if not IsBagOpen then function IsBagOpen() return nil end end
+        return real()
+    end
+"#;

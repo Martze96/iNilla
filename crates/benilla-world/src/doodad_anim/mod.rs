@@ -476,7 +476,7 @@ fn gate_doodad_anim(
         (
             Ref<GlobalTransform>,
             &bevy::camera::primitives::Frustum,
-            &bevy::camera::Projection,
+            Ref<bevy::camera::Projection>,
             // The seat's own write, visible THIS frame: `GlobalTransform` only changes after
             // propagation, which runs after this system — so on a teleport frame the global
             // reads still while the camera has already moved. Reading the local too is what
@@ -516,17 +516,21 @@ fn gate_doodad_anim(
     let world_cam = cam.single().ok();
     let exterior_gate = crate::exterior_cull::ExteriorGate::build(
         &exterior_windows,
-        world_cam.as_ref().map(|(tf, _, proj, _)| (&**tf, *proj)),
+        world_cam.as_ref().map(|(tf, _, proj, _)| (&**tf, &**proj)),
     );
     let camera_instance = camera_claim.0.map(|c| c.room.instance);
-    let verdicts_still = world_cam.as_ref().is_some_and(|(tf, _, _, local)| {
-        !tf.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
+    let verdicts_still = world_cam.as_ref().is_some_and(|(tf, _, proj, local)| {
+        !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
     }) && !exterior_windows.is_changed()
         && !camera_claim.is_changed()
         && !view.is_changed()
         && changed_vis.is_empty();
     for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
-        let drawn = if verdicts_still {
+        // A host born this frame has no verdict to reuse (`active` starts false): a meshless one
+        // spawned under a parked camera stayed parked until the camera moved (review
+        // 2026-09-04). Read off the host's own tick — a second query on the component would
+        // conflict with this one's `&mut`.
+        let drawn = if verdicts_still && !host.is_added() {
             host.active
         } else if host.meshes.is_empty() {
             // Meshless (particles-only) host: the emitters' own draw-set law (see the `fade`

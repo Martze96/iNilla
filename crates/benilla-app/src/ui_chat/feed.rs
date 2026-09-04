@@ -633,7 +633,8 @@ fn notice_event(
 /// **YOU_JOINED lands before, YOU_LEFT lands after.** The notice's arg4/arg7/arg8/arg9 are read off
 /// the client's channel record ([`ChannelState::stamp_channel`] is our leg of that), so a record
 /// torn down before the line is composed costs it the slot number — and, since the color resolves
-/// through `ChatTypeInfo["CHANNEL"..arg8]` ([`super::event::resolved_color`]), its color with it.
+/// through `ChatTypeInfo["CHANNEL"..arg8]` — the stock window's own Lua since 1948 — its color
+/// with it.
 /// The reference's YOU_LEFT arm only *flags* the teardown (`0x49c115 mov dword [ebp-0xc],1`); the
 /// event fires first (`0x49c5b0 call 0x49a870`) and only then does `0x49c5b5 test` /
 /// `0x49c5c2 call 0x49bbd0` destroy the record — VERIFIED by disassembly at those addresses (1275).

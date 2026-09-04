@@ -131,7 +131,7 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
-    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     // A left-slot panel open, and the toast raised after it — the order that must not decide.

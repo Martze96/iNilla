@@ -112,6 +112,15 @@ pub struct GroupState {
     /// fires `READY_CHECK` on a counter edge and a second check while the first popup is still up
     /// re-arms it. A boolean could not tell the two apart.
     pub ready_check: u32,
+    /// The request GENERATION — bumped by BOTH arms of the open form (decision 1989), unlike the
+    /// ticket above, which only the non-leader arm bumps: the leader never gets the popup, because
+    /// `0x4ba360`'s leader arm never reaches the `READY_CHECK` fire. The feed turns an edge here
+    /// into the engine's `ready_check_request` and resets its answer cursor.
+    pub ready_check_requests: u32,
+    /// The answers forwarded to us as leader since the last request — `{guid, ready}` in wire
+    /// order. A log the feed replays into the engine from its own cursor, append-only within one
+    /// check so the feed never has to mutate this state; the next request clears it.
+    pub ready_check_answers: Vec<(u64, bool)>,
 }
 
 // The GlobalStrings templates, quoted verbatim from the reference client's own patch chain
@@ -129,6 +138,7 @@ const NEW_LEADER_YOU: &str = "You are now the group leader."; // ERR_NEW_LEADER_
 const RAID_MEMBER_ADDED: &str = "%s has joined the raid group"; // ERR_RAID_MEMBER_ADDED_S (GlobalStrings:1824)
 const RAID_MEMBER_REMOVED: &str = "%s has left the raid group"; // ERR_RAID_MEMBER_REMOVED_S (GlobalStrings:1825)
 const RAID_YOU_JOINED: &str = "You have joined a raid group"; // ERR_RAID_YOU_JOINED (GlobalStrings:1826)
+const READY_CHECK_START_S: &str = "%s has initiated a ready check"; // ERR_RAID_LEADER_READY_CHECK_START_S (GlobalStrings:1823)
 
 /// `format!`-free "%s" substitution — the templates are quoted verbatim from GlobalStrings, so
 /// they carry printf placeholders, not Rust ones.
@@ -389,10 +399,34 @@ impl GroupState {
         self.saved_instances_answers = self.saved_instances_answers.wrapping_add(1);
     }
 
-    /// `MSG_RAID_READY_CHECK` (open form) — the leader started one. Bumps the ticket the feed
-    /// turns into a `READY_CHECK` event edge.
-    pub fn apply_ready_check(&mut self) {
+    /// `MSG_RAID_READY_CHECK` (open form) — the leader started one, and the server echoes the
+    /// request to every member including the leader. The handler `0x4ba360` splits on the leader
+    /// guid (decision 1989): the **leader** takes the response-collection arm and neither prints
+    /// nor pops; everyone **else** prints `ERR_RAID_LEADER_READY_CHECK_START_S` with the leader's
+    /// name and gets the popup — the ticket the feed turns into a `READY_CHECK` event edge. Both
+    /// arms bump the request generation and start a fresh answer log.
+    pub fn apply_ready_check_request(&mut self, we_lead: bool) -> Vec<String> {
+        self.ready_check_requests = self.ready_check_requests.wrapping_add(1);
+        self.ready_check_answers.clear();
+        if we_lead {
+            return Vec::new();
+        }
         self.ready_check = self.ready_check.wrapping_add(1);
+        // The reference resolves the leader's name from its cache and prints whatever it holds;
+        // ours is the roster's name for the leader's guid, which is the same cache's content.
+        let leader = self
+            .members
+            .iter()
+            .find(|m| m.guid == self.leader)
+            .map(|m| m.name.as_str())
+            .unwrap_or("");
+        vec![fmt_s(READY_CHECK_START_S, leader)]
+    }
+
+    /// `MSG_RAID_READY_CHECK` (answer form) — one member's answer, which the server forwards to
+    /// the leader alone. Logged for the feed to replay into the engine's flags (decision 1989).
+    pub fn apply_ready_check_answer(&mut self, guid: u64, ready: bool) {
+        self.ready_check_answers.push((guid, ready));
     }
 }
 
@@ -446,6 +480,42 @@ mod tests {
 
     /// The ungated diff (0440 byte law): a FIRST roster prints joins for everyone already
     /// there; later rosters diff both ways.
+    /// The open form's two arms (decision 1989): the leader's own echo neither prints nor pops;
+    /// a member prints the leader's line and takes the popup ticket. Both bump the request
+    /// generation and restart the answer log.
+    #[test]
+    fn the_open_form_pops_for_a_member_and_stays_quiet_for_the_leader() {
+        let mut g = GroupState {
+            leader: 0xA11CE,
+            members: vec![member("Alice", 0xA11CE), member("Bob", 0xB0B)],
+            ..Default::default()
+        };
+        g.apply_ready_check_answer(0xB0B, true);
+
+        assert_eq!(
+            g.apply_ready_check_request(false),
+            vec!["Alice has initiated a ready check".to_string()]
+        );
+        assert_eq!((g.ready_check, g.ready_check_requests), (1, 1));
+        assert!(
+            g.ready_check_answers.is_empty(),
+            "a request starts a fresh log"
+        );
+
+        assert!(
+            g.apply_ready_check_request(true).is_empty(),
+            "the leader's echo"
+        );
+        assert_eq!(
+            (g.ready_check, g.ready_check_requests),
+            (1, 2),
+            "no popup for the leader"
+        );
+
+        g.apply_ready_check_answer(0xB0B, false);
+        assert_eq!(g.ready_check_answers, vec![(0xB0B, false)]);
+    }
+
     #[test]
     fn join_lines_come_from_roster_diffs() {
         let mut g = GroupState::default();

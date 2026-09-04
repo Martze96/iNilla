@@ -6,7 +6,8 @@
 //! or monster lines), the `[Language]` header, the `[N. Name]` channel prefix with its " - Zone"
 //! tail stripped (the SPEECH branch only — a notice prints arg4 whole, 1275), and the
 //! `CHAT_<X>_NOTICE` channel-notice strings. Formats are QUOTED from the extracted GlobalStrings
-//! (0288's pin, §2/§4); colors come from [`super::event::resolved_color`].
+//! (0288's pin, §2/§4); colors come from the stock window's `ChatTypeInfo` table (1948), whose
+//! shipped defaults are transcribed in [`super::event::default_color`].
 
 use bevy::prelude::*;
 

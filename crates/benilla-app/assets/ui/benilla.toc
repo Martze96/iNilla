@@ -443,13 +443,17 @@ PetActionBarAdapters.xml
 # reference's toc seats it right after PetActionBarFrame (l.73-74): the bonus buttons'
 # Up/Down call PetActionButtonUp/Down, which PetActionBar.xml above defines.
 Interface\FrameXML\BonusActionBarFrame.xml
-# The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
-# loads MainMenuBarMicroButtons right after MainMenuBar). After MainMenuBar.xml: it anchors
-# into MainMenuBarArtFrame by name and seats itself above the art plate with its own
-# BenillaActionBarArt_SeatAbove (moved here from ActionBar.xml with 1938). It must come BEFORE the panels it toggles, because each of
-# their OnShow/OnHide calls the `UpdateMicroButtons` this file defines (the panel frames
-# themselves are read back through getglobal, so the reverse dependency is call-time).
-MicroMenu.xml
+# The micro-button row in the bar's right-hand recess — the reference's own file (1751;
+# decision 1987), which its toc seats right after MainMenuBar (l.34-35). After MainMenuBar.xml:
+# the eight buttons carry parent="MainMenuBarArtFrame", resolved by name at load (1734), and a
+# child is born one level above its parent (order.rs; SetParent 0x76ab65) — the seat our retired
+# MicroMenu.xml set by hand. BEFORE the panels it toggles: each of their OnShow/OnHide calls the
+# UpdateMicroButtons this file defines, and that function reads CharacterFrame, SpellBookFrame,
+# QuestLogFrame, GameMenuFrame, OptionsFrame, SoundOptionsFrame, UIOptionsFrame, FriendsFrame,
+# WorldMapFrame, HelpFrame and KeyRingButton UNGUARDED at call time, so every one of them is up
+# before anything can be shown (SoundOptionsFrame and UIOptionsFrame are OptionsFrame.xml's two
+# aliases — our one options window answers for the reference's three).
+Interface\FrameXML\MainMenuBarMicroButtons.xml
 # ══ THE BATTLEGROUND LIST + THE MINIMAP CLUSTER — the reference's own, off the player's chain
 # (1751; decision 1974) ══
 # BattlefieldFrame.xml + BattlefieldFrame.lua: the battlemaster's instance list (the "First
@@ -688,7 +692,7 @@ Interface\FrameXML\ContainerFrame.xml
 # LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
 # `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /
 # `PlayerFrameManaBar`, named in that same OnLoad), MainMenuBar.xml (`MainMenuExpBar`, likewise),
-# MicroMenu.xml (`MicroButtonTooltipText`, the five tab hovers) and UIParent.xml
+# MainMenuBarMicroButtons.xml (`MicroButtonTooltipText`, the five tab hovers) and UIParent.xml
 # (`Model_OnLoad`/`_RotateLeft`/`_RotateRight`/`_OnUpdate` — the model pane's turntable, the
 # reference's own code living in our UIParent.lua counterpart).
 #
@@ -817,7 +821,7 @@ Interface\FrameXML\DressUpFrame.xml
 # the Spell/Pet toggle tabs. Its whole engine surface was already ours (1924's UpdateSpells, 1931's
 # GetSpellTabInfo tuple); what stopped it in 1926 — MultiActionBar_ShowAllGrids/HideAllGrids on
 # show/hide — has been the reference's MultiActionBars.lua since 1938. Loaded here, after the
-# action-bar files it calls into and after MicroMenu (UpdateMicroButtons on show). The 'P' binding
+# action-bar files it calls into and after MainMenuBarMicroButtons (UpdateMicroButtons on show). The 'P' binding
 # calls its own ToggleSpellBook(BOOKTYPE_SPELL). 0216's transcription is gone.
 Interface\FrameXML\SpellBookFrame.xml
 # The one adapter the reference's file needs from this engine: its pet-page autocast shine is a
@@ -1029,7 +1033,7 @@ Interface\FrameXML\PetitionFrame.xml
 # Stock QuestLogFrame.xml sources QuestLogFrame.lua; the 'L' binding calls its ToggleQuestLog(),
 # and its reward hovers are GameTooltip:SetQuestLogItem / SetQuestLogRewardSpell (engine, 1944).
 # After QuestFrame.xml (QuestItemTemplate, QuestMoneyFrame_OnLoad, QuestFrameItems_Update),
-# MicroMenu.xml (QuestLog_OnShow calls UpdateMicroButtons unguarded) and the same kit as the
+# MainMenuBarMicroButtons.xml (QuestLog_OnShow calls UpdateMicroButtons unguarded) and the same kit as the
 # giver; the reference's toc has the pair at l.53-54.
 Interface\FrameXML\QuestLogFrame.xml
 # The timed-quest countdown window under the minimap (decision 1150): the reference's own
@@ -1093,7 +1097,7 @@ ScriptLogFrame.xml
 # UIPanelTemplates (UIPanelCloseButton, UIPanelButtonTemplate2, GameMenuButtonTemplate and the
 # real UIPanelScrollFrameTemplate the ticket editor is built on), ScrollTemplates (the faux kit
 # behind the GM category list, its shared trough, and the ScrollingEdit pair), GameTooltip (the
-# toast wears the tooltip backdrop colours at OnLoad) and MicroMenu (whose Help button calls this
+# toast wears the tooltip backdrop colours at OnLoad) and MainMenuBarMicroButtons (whose Help button calls this
 # file's ToggleHelpFrame, and whose UpdateMicroButtons this file calls back on show/hide — both
 # resolved at call time, so that pair could sit either way round). The one seat that is a REAL
 # requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
@@ -1130,7 +1134,7 @@ Interface\FrameXML\TabardFrame.xml
 Interface\FrameXML\TutorialFrame.xml
 # The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
 # layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
-# + panel manager, MicroMenu's UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing
+# + panel manager, MainMenuBarMicroButtons' UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing
 # depends on it: the ESC chain and the micro button both reach it by name at call time.
 #
 # NOT yet on the chain, and the reason is not in the gap report: the stock file's buttons reach

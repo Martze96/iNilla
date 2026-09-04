@@ -4055,11 +4055,17 @@
             </OnHide>
         </Scripts>
     </Frame>
-    <!-- The reference names its options window UIOptionsFrame, and its FloatingChatFrame.lua reads
-         `UIOptionsFrame:IsShown()` every frame (FCF_OnUpdate's hover gate). Ours is OptionsFrame
-         until the options window migrates (1751); this alias is the adapter, and it retires with
-         the file. BENILLA_ALLOW_OWN_UI=1 -->
+    <!-- The reference has three options windows — OptionsFrame (video), SoundOptionsFrame and
+         UIOptionsFrame (interface) — and ours is the one window for all three (0985), kept ours by
+         the director's call. The stock files address the three by name: FloatingChatFrame.lua reads
+         `UIOptionsFrame:IsShown()` every frame (FCF_OnUpdate's hover gate), and the stock micro
+         row's UpdateMicroButtons reads all three UNGUARDED to decide whether the Main Menu button
+         is down (MainMenuBarMicroButtons.lua l.47-52; decision 1987). These two aliases are the
+         adapter: a stock read of either sibling is answered by this window, which is the honest
+         answer — while ours is up, the reference's question "is an options window open" is yes.
+         BENILLA_ALLOW_OWN_UI=1 -->
     <Script><![CDATA[
         UIOptionsFrame = OptionsFrame
+        SoundOptionsFrame = OptionsFrame
     ]]></Script>
 </Ui>

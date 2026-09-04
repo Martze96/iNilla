@@ -114,7 +114,7 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         "Interface\\FrameXML\\SpellBookFrame.xml",
         "SpellBookAdapters.xml",
     ] {
@@ -703,7 +703,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The icon chooser's scroll frame inherits `ClassTrainerListScrollFrameTemplate`.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
-        "MicroMenu.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

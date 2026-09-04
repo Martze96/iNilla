@@ -29,6 +29,7 @@ use crate::widget::{FrameHandle, FrameKind};
 mod events_regions;
 mod frame_state;
 mod layout_methods;
+pub(crate) use layout_methods::eff_scale;
 pub(crate) mod movable;
 pub(crate) mod toplevel;
 pub(crate) use layout_methods::{anchor_bits_eq, anchor_retarget_is_structural};
@@ -358,9 +359,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetCursorPosition() → x, y — the last cursor position the host fed (`mouse_move`/
-    // `mouse_button`), UI units y-up like every other coordinate read. The real client scales by
-    // the UI scale; ours is the constant 1 (`GetEffectiveScale`), so the ref's `/scale` dance is
-    // an identity. The world map polls this every OnUpdate for hover/click math.
+    // `mouse_button`), UI units y-up like every other coordinate read — the SCREEN's units, which
+    // is what the reference hands Lua too; a caller inside a scaled frame divides by its
+    // `GetEffectiveScale()` (the reference's own `MouseIsOver` does, and the stock world map at
+    // a scale under 1 is the case that made the division load-bearing here — decision 1985). The
+    // world map polls this every OnUpdate for hover/click math.
     lua.globals().set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {

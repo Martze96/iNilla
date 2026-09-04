@@ -670,6 +670,19 @@ type WireBody = (
     Option<&'static benilla_world::world_unit::WorldUnit>,
 );
 
+/// One viewer-reconcile row: the entity, whether it is the embodied self, whether it is marked.
+type ViewerRow = (
+    Entity,
+    Has<crate::net::Embodied>,
+    Has<benilla_world::world_unit::ViewerUnit>,
+);
+
+/// Only entities that can be a viewer at all — one of the two markers present.
+type ViewerCandidate = Or<(
+    With<crate::net::Embodied>,
+    With<benilla_world::world_unit::ViewerUnit>,
+)>;
+
 /// The edges on which a body's [`WorldUnit`](benilla_world::world_unit::WorldUnit) restatement can
 /// move — [`publish_world_units`]' query filter (the anchor's removal is read separately).
 type WireBodyMoved = Or<(
@@ -696,11 +709,9 @@ fn publish_world_units(
     bodies: Query<WireBody, WireBodyMoved>,
     all_bodies: Query<WireBody>,
     mut unanchored: RemovedComponents<crate::transport::TransportAnchor>,
-    viewers: Query<(
-        Entity,
-        Has<crate::net::Embodied>,
-        Has<benilla_world::world_unit::ViewerUnit>,
-    )>,
+    // Only entities that can be a viewer at all: the reconcile below needs one of the two
+    // present, and an unfiltered query walked every entity in the world each frame.
+    viewers: Query<ViewerRow, ViewerCandidate>,
 ) {
     let freed: Vec<Entity> = unanchored.read().collect();
     let due = bodies

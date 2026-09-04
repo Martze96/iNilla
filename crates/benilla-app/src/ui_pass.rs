@@ -854,6 +854,10 @@ struct BatchPools {
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
     /// Per slot: the solo-run material (key + tint it was built with), `None` while pooled.
     solo: Vec<Option<SoloMaterial>>,
+    /// Solo materials a slot let go of, by key — taken before a fresh one is built, so a run
+    /// shifting slots (a tooltip opening above it) re-points at a material that exists
+    /// instead of adding one and dropping one per shifted slot per frame (review 2026-09-04).
+    solo_free: std::collections::HashMap<MatKey, Vec<SoloMaterial>>,
     /// Per slot: the material the batch entity currently carries.
     bound: Vec<Option<AssetId<UiQuadMaterial>>>,
 }
@@ -1059,6 +1063,7 @@ fn rebuild_ui_mesh(
                 *slot = None;
             }
         }
+        pools.solo_free.retain(|k, _| !retired.contains(&k.0));
     }
     let (hidden, mesh_cost, cost_wanted) =
         (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
@@ -1282,6 +1287,7 @@ fn rebuild_ui_mesh(
     // on their next miss.
     if pools.materials.len() > 256 {
         pools.materials.clear();
+        pools.solo_free.clear();
     }
     let mut used = 0usize;
     let mut n_rewrites = 0usize;
@@ -1370,7 +1376,10 @@ fn rebuild_ui_mesh(
                         tint: Vec4::from_array(tint),
                     })
                 };
-                match &mut pools.solo[used] {
+                let BatchPools {
+                    solo, solo_free, ..
+                } = &mut *pools;
+                match &mut solo[used] {
                     Some((handle, k, t)) if *k == key => {
                         if *t != tint {
                             if let Some(m) = materials.get_mut(&*handle) {
@@ -1381,14 +1390,32 @@ fn rebuild_ui_mesh(
                         handle.clone()
                     }
                     slot => {
-                        let handle = fresh(materials);
-                        *slot = Some((handle.clone(), key, tint));
+                        if let Some(old) = slot.take() {
+                            solo_free.entry(old.1).or_default().push(old);
+                        }
+                        let reused =
+                            solo_free
+                                .get_mut(&key)
+                                .and_then(Vec::pop)
+                                .map(|(handle, k, t)| {
+                                    if t != tint {
+                                        if let Some(m) = materials.get_mut(&handle) {
+                                            m.tint = Vec4::from_array(tint);
+                                        }
+                                    }
+                                    (handle, k, tint)
+                                });
+                        let (handle, k, t) =
+                            reused.unwrap_or_else(|| (fresh(materials), key, tint));
+                        *slot = Some((handle.clone(), k, t));
                         handle
                     }
                 }
             }
             None => {
-                pools.solo[used] = None;
+                if let Some(old) = pools.solo[used].take() {
+                    pools.solo_free.entry(old.1).or_default().push(old);
+                }
                 pools
                     .materials
                     .entry(key)
