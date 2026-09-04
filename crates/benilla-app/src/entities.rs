@@ -761,6 +761,7 @@ impl Plugin for EntitiesPlugin {
                 .before(benilla_world::schedule::WorldStage::Input),
         )
         .init_resource::<SkinComposites>()
+        .init_resource::<attach::MergedFormsCache>()
         // The 16 bone-pile body models (decision 1706), keyed (race, sex) rather than by a
         // display id — a skeleton has no CreatureDisplayInfo row.
         .init_resource::<corpse::BonesModels>()

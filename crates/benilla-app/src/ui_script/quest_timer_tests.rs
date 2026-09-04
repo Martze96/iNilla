@@ -37,6 +37,7 @@ fn harness() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "QuestFrame.xml");
     load_xml(&s, "QuestLogFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestTimerFrame.xml");
     s

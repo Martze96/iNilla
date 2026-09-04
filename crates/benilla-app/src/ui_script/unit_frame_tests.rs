@@ -25,6 +25,7 @@ fn load_unit_frames(s: &UiScript) {
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(s, "MoneyFrame.xml");
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(s, "UnitPopup.xml");
@@ -649,6 +650,8 @@ fn shipped_target_frame_runs_the_level_law() {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "QuestFrame.xml");
     load_xml(&s, "QuestLogFrame.xml");
     // The player at level 3, both feeds (the snapshot UnitLevel("player") reads; the req state
     // the −1 gate and GetQuestGreenRange read) — the app keeps the two in step.

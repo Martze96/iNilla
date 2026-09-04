@@ -191,10 +191,11 @@ mod wmo_area;
 pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;
 pub use spells::{
-    load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_dispel_types,
-    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, FormRefusal, OpenLock,
-    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
+    cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
+    load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
+    load_spell_ranges, substitute, CcExemption, FormRefusal, OpenLock, ShapeshiftForm,
+    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
+    SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
     SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,

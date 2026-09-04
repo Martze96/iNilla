@@ -65,6 +65,46 @@ fn spell_catalog_resolves_known_spells() {
          distinguishable from 165 at all"
     );
 
+    // **The crowd-control exemption's three columns** (decision 1946): `School` 1, `Mechanic` 5,
+    // `EffectMechanic[0..2]` 79–81. Pinned against spells whose values are common knowledge, and
+    // the per-effect pair is the convincing half — Frostbolt carries its SNARE on effect 0 and
+    // Frost Nova its ROOT on effect 1, which no neighbouring column would reproduce.
+    assert_eq!(catalog.get(133).expect("Fireball").school, 2, "fire");
+    assert_eq!(catalog.get(116).expect("Frostbolt").school, 4, "frost");
+    assert_eq!(catalog.get(585).expect("Smite").school, 1, "holy");
+    assert_eq!(
+        catalog.get(78).expect("Heroic Strike").school,
+        0,
+        "physical"
+    );
+
+    assert_eq!(
+        catalog.get(118).expect("Polymorph").mechanic,
+        17,
+        "MECHANIC_POLYMORPH"
+    );
+    assert_eq!(
+        catalog.get(5782).expect("Fear").mechanic,
+        5,
+        "MECHANIC_FEAR"
+    );
+    assert_eq!(
+        catalog.get(133).expect("Fireball").mechanic,
+        0,
+        "a plain nuke carries no mechanic"
+    );
+
+    assert_eq!(
+        catalog.get(116).expect("Frostbolt").effect_mechanic[0],
+        11,
+        "Frostbolt's slow is MECHANIC_SNARE, on effect 0"
+    );
+    assert_eq!(
+        catalog.get(122).expect("Frost Nova").effect_mechanic[1],
+        7,
+        "Frost Nova's root is MECHANIC_ROOT, on effect 1 — not effect 0"
+    );
+
     let fireball = catalog.get(133).expect("Fireball");
     assert_eq!(fireball.visual, 67, "Fireball's SpellVisual id");
     assert_eq!(fireball.speed, 24.0, "Fireball's projectile speed");

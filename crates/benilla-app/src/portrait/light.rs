@@ -130,6 +130,9 @@ pub(super) fn material_variant(
     if let Some(twin) = variants.get(&world.id()) {
         return Some(twin.clone());
     }
+    // A blend/zfill twin is cloned before the world ever binds it — realize the parked value
+    // first (`model_render::lazy`); a no-op for a material already in the store.
+    benilla_world::model_render::lazy::realize(materials, world.id());
     let mat = materials.get(world)?;
     let mut twin = mat.clone();
     twin.extension.light_buf = buffer.clone();

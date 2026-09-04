@@ -44,6 +44,7 @@ fn harness() -> UiScript {
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
+        "MoneyFrame.xml",
         "GameTooltip.xml",
     ] {
         load_xml(&s, f);

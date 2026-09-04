@@ -375,9 +375,12 @@ const UI_CAMERA_ORDER: isize = 1;
 struct PlayerUiCamera;
 
 /// Marker on each rebuilt batch mesh entity, so [`rebuild_ui_mesh`] can despawn last frame's batches
-/// before spawning the new ones.
+/// before spawning the new ones. `pub(crate)` for one reader: `FPS_PROBE`'s `ui_batches=`, the
+/// live count of texture-identity runs — each is a `Mesh2d` draw in the 2D pass, and that pass
+/// node priced at ~0.5 ms a frame on the crowd rig's *alone* leg, ~1.2 with a raid's party
+/// frames (1929's trace), so the number a UI change moves is this one, not `quads=`.
 #[derive(Component)]
-struct UiQuadBatch;
+pub(crate) struct UiQuadBatch;
 
 /// The shared 1×1 opaque-white texture flat-shaded/texture-less quads sample (see the module doc).
 #[derive(Resource)]

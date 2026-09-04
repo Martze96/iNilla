@@ -125,6 +125,9 @@ pub struct CensusReport {
     /// Resident asset counts — the leak meter. A tour probe reading the same counts as a fresh
     /// control is what "torn down" means, machine-checked.
     pub mats: usize,
+    /// Built materials parked by `model_render::lazy`, not yet assets — the variants nothing
+    /// visible has bound. `mats` counts realized ones only.
+    pub mats_parked: usize,
     pub meshes: usize,
     pub images: usize,
     pub uv_anims: usize,
@@ -292,6 +295,7 @@ impl WorldCensus<'_, '_> {
                 liquid_hidden: v.liquid_hidden,
             }),
             mats: self.mats.len(),
+            mats_parked: crate::model_render::lazy::pending_len(),
             meshes: self.meshes.len(),
             images: self.images.len(),
             uv_anims: self.uv_reg.0.len(),

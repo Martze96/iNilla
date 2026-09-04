@@ -22,6 +22,7 @@ fn harness(extra: &[&str]) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     for f in extra {
         load_xml(&s, f);

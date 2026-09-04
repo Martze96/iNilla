@@ -12,7 +12,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
-const FILES: [&str; 9] = [
+const FILES: [&str; 10] = [
     "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
@@ -23,6 +23,7 @@ const FILES: [&str; 9] = [
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "MailFrame.xml",
 ];
 
@@ -518,7 +519,7 @@ fn money_button_hover_shows_the_amount_tooltip() {
         "the money tooltip shows on hover"
     );
     assert!(
-        s.eval::<bool>("return GameTooltipMoneyCoin1:IsShown()")
+        s.eval::<bool>("return GameTooltipMoneyFrame:IsShown()")
             .unwrap(),
         "the coin row rendered (SetTooltipMoney path)"
     );

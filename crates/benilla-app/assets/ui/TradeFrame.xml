@@ -113,7 +113,9 @@
             end
             -- Our gold is the editable input, reflected via PLAYER_TRADE_MONEY (not repainted here, so
             -- the repaint never clobbers mid-typing); only the partner's read-only gold repaints.
-            BenillaMoney_Set("TradeRecipientMoneyFrame", GetTargetTradeMoney())
+            -- The recipient's money frame is type TARGET_TRADE and repaints itself on
+            -- TRADE_MONEY_CHANGED (MoneyFrame_OnEvent); the reference issues no explicit update
+            -- here and neither do we (1937).
             -- A repaint puts both glows down. TRADE_ACCEPT_UPDATE is the only thing that raises
             -- them, so whatever is standing comes straight back on the next one.
             setTradeGlow(TradeHighlightPlayer, TradeHighlightPlayerEnchant, false)
@@ -492,26 +494,12 @@
                 </Scripts>
             </Frame>
             <!-- The partner's gold (read-only — GetTargetTradeMoney; ref TradeRecipientMoneyFrame l.574). -->
-            <Frame name="TradeRecipientMoneyFrame">
-                <Size><AbsDimension x="13" y="13"/></Size>
+            <!-- ref TradeFrame.xml:574-588: a SmallMoneyFrameTemplate of type TARGET_TRADE, which repaints
+                 itself on TRADE_MONEY_CHANGED through MoneyFrame_OnEvent — no explicit update anywhere in
+                 the reference's Lua, and none here now. Same TOPRIGHT (-40,-80) seat as before (1937). -->
+            <Frame name="TradeRecipientMoneyFrame" inherits="SmallMoneyFrameTemplate">
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-40" y="-80"/></Offset></Anchor></Anchors>
-                <Frames>
-                    <Frame name="$parentCoin1">
-                        <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                    </Frame>
-                    <Frame name="$parentCoin2">
-                        <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                    </Frame>
-                    <Frame name="$parentCoin3">
-                        <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                    </Frame>
-                </Frames>
+                <Scripts><OnLoad>SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("TARGET_TRADE");</OnLoad></Scripts>
             </Frame>
         </Frames>
         <Scripts>

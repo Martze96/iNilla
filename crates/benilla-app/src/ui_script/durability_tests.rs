@@ -397,6 +397,8 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
         "MinimapCluster.xml",
         "ScrollTemplates.xml",
         "Interface\\FrameXML\\DurabilityFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "QuestFrame.xml",
         "QuestLogFrame.xml",
     ] {
         load_xml(&s, f);

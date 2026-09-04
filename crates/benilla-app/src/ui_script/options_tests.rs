@@ -761,6 +761,7 @@ fn interface_harness() -> UiScript {
             r"Interface\FrameXML\ReputationFrame.xml",
             "ScrollTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
             "QuestFrame.xml",
             "QuestLogFrame.xml",
         ],

@@ -211,8 +211,7 @@
             end)(),
             ["QuestProgressScrollFrame"] = (function()
                 local t = { "QuestProgressText", "QuestProgressRequiredItemsText",
-                            "QuestProgressRequiredMoneyText", "QuestProgressMoneyCoin1",
-                            "QuestProgressMoneyCoin2", "QuestProgressMoneyCoin3" }
+                            "QuestProgressRequiredMoneyText", "QuestProgressRequiredMoneyFrame" }
                 for i = 1, MAX_REQUIRED_ITEMS do table.insert(t, "QuestProgressItem" .. i) end
                 return t
             end)(),
@@ -570,21 +569,35 @@
             local reqText = getglobal("QuestProgressRequiredItemsText")
             local moneyText = getglobal("QuestProgressRequiredMoneyText")
             local item1 = getglobal("QuestProgressItem1")
+            -- ref QuestFrame.lua:168-190, ported in full (1937): the money frame paints from
+            -- GetQuestMoneyToGet(); BOTH colours branch on whether the purse covers it — the frame
+            -- red/white and the LABEL black/dark-grey; the label and frame are Shown/Hidden rather
+            -- than blanked (the label's text is the XML's REQUIRED_MONEY); and the first required
+            -- item re-anchors to whichever text is showing.
+            local moneyFrame = getglobal("QuestProgressRequiredMoneyFrame")
             if numItems > 0 or (money and money > 0) then
-                reqText:SetText("Items Needed:")
+                reqText:Show()
                 if money and money > 0 then
-                    moneyText:SetText("Required Money:")
-                    BenillaMoney_Set("QuestProgressMoney", money, true)
+                    MoneyFrame_Update("QuestProgressRequiredMoneyFrame", money)
+                    if money > GetMoney() then
+                        moneyText:SetTextColor(0, 0, 0)
+                        SetMoneyFrameColor("QuestProgressRequiredMoneyFrame", 1.0, 0.1, 0.1)
+                    else
+                        moneyText:SetTextColor(0.2, 0.2, 0.2)
+                        SetMoneyFrameColor("QuestProgressRequiredMoneyFrame", 1.0, 1.0, 1.0)
+                    end
+                    moneyText:Show()
+                    moneyFrame:Show()
                     item1:SetPoint("TOPLEFT", moneyText, "BOTTOMLEFT", 0, -10)
                 else
-                    moneyText:SetText("")
-                    BenillaMoney_Clear("QuestProgressMoney")
+                    moneyText:Hide()
+                    moneyFrame:Hide()
                     item1:SetPoint("TOPLEFT", reqText, "BOTTOMLEFT", -3, -5)
                 end
             else
-                reqText:SetText("")
-                moneyText:SetText("")
-                BenillaMoney_Clear("QuestProgressMoney")
+                reqText:Hide()
+                moneyText:Hide()
+                moneyFrame:Hide()
             end
             for i = 1, MAX_REQUIRED_ITEMS do
                 if i <= numItems then
@@ -909,16 +922,6 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <!-- One money coin slot (shared money display; BenillaMoney_Set fills three, high-denom first,
-         shrinking each to its number + 13px coin — the XML width is just the pre-fill state). -->
-    <Frame name="BenillaQuestMoneyCoinTemplate" virtual="true">
-        <Size><AbsDimension x="13" y="13"/></Size>
-        <Layers><Layer level="OVERLAY">
-            <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
-            <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
-        </Layer></Layers>
-    </Frame>
-
     <!-- The shared sub-panel chrome (ref `QuestFramePanelTemplate`, QuestFrameTemplates.xml l.3-84):
          the four corner parchment quadrants every one of the four panels draws independently (the
          ref's own choice — each real sub-panel repeats this art rather than the window compositing it
@@ -1219,15 +1222,19 @@
                                             <Size><AbsDimension x="295" y="0"/></Size>
                                             <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="QuestProgressRequiredMoneyText" inherits="QuestFontNormalSmall" justifyH="LEFT">
+                                        <FontString name="QuestProgressRequiredMoneyText" inherits="QuestFontNormalSmall" text="REQUIRED_MONEY" justifyH="LEFT">
                                             <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressRequiredItemsText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Frame name="QuestProgressMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequiredMoneyText" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestProgressMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestProgressMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <!-- ref QuestFrame.xml:392-406: the REQUIRED-money frame — money the player hands over, a
+                                         different flow from the two reward seats 1928 converted, with its own colour and anchor
+                                         rules in QuestFrameProgressItems_Update. Same LEFT->text RIGHT (10,0) seat (1937). -->
+                                    <Frame name="QuestProgressRequiredMoneyFrame" inherits="MoneyFrameTemplate">
+                                        <Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequiredMoneyText" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                                        <Scripts><OnLoad>SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("STATIC");</OnLoad></Scripts>
+                                    </Frame>
 
                                     <!-- The 2-col×3-row grid (ref l.407-460): item1 is Lua-repositioned
                                          (money-line vs header-line); items 2-6 are a STATIC chain off

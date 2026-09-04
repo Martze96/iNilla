@@ -20,6 +20,7 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the dropdown kit's MenuBackdrop)
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the unit popups' kit (TargetFrameDropDown's template)
     load_xml(&s, "Cooldown.xml");

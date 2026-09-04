@@ -283,6 +283,19 @@ impl ObjectFields {
     pub fn unit_auras(&self) -> impl Iterator<Item = UnitAuraSlot> + '_ {
         (0..UNIT_AURA_SLOTS).filter_map(|slot| self.unit_aura(slot))
     }
+    /// Every `UNIT_FIELD_AURA` slot's **raw** spell id, unfiltered — no `AURAFLAGS` nibble test,
+    /// no zero-skip, in ascending slot order.
+    ///
+    /// This is deliberately NOT [`Self::unit_auras`], and the difference is the reference's, not
+    /// ours: the cast validator's crowd-control exemption scan (`0x6e9ca0`) reads these slots
+    /// straight and **does not consult `UNIT_FIELD_AURAFLAGS`** — it skips no "inactive" slot and
+    /// reads no duration, stack or caster state. Any non-zero, in-range id counts, husk or not.
+    /// The buff bar wants the filtered view; that scan wants this one (decision 1946).
+    pub fn unit_aura_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..UNIT_AURA_SLOTS)
+            .map(|slot| self.get_u32(FIELD_UNIT_AURA + u16::from(slot)).unwrap_or(0))
+    }
+
     /// The unit's active power type (`UNIT_FIELD_BYTES_0` byte 3): `0` mana, `1` rage, `2` focus,
     /// `3` energy, `4` happiness. Absent (no bytes_0 on the wire yet) reads as mana, the descriptor's
     /// zero-initialized default.

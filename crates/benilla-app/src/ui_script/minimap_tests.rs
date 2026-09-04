@@ -24,6 +24,7 @@ fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // The shipped load order provides GameTooltip before the cluster; Minimap_Update's tooltip
     // half (the PVP tint slice, decision 0287) touches it from OnLoad on.
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
@@ -87,6 +88,7 @@ fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
         .unwrap();
     s.run("function PlaySound() end").unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
@@ -135,6 +137,7 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT()`, which the reference's own tooltip and label formatting passes every string through.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTime.xml");
@@ -246,6 +249,7 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
         .unwrap();
     s.run("function PlaySound() end").unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
     s.resolve();
@@ -290,6 +294,7 @@ fn get_ping_position_is_nil_until_there_is_a_ping() {
         .unwrap();
     s.run("function PlaySound() end").unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 

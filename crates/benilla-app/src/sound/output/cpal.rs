@@ -206,14 +206,32 @@ impl Stream {
         let observed_frames = Arc::new(AtomicU32::new(buffer_frames));
 
         let errors = Arc::clone(notices);
+        // Only two of cpal's four `StreamError`s are fatal to a stream, and getting that wrong is
+        // expensive in exactly one direction. `BufferUnderrun` is a routine ALSA xrun — the
+        // device starved below us — and `BackendSpecific` is a grab-bag; treating either as a
+        // dead device means a full teardown and rebuild of the stream on every glitch, which is
+        // the loudest possible response to the quietest problem (decision 1939). **Measured, not
+        // reasoned:** with both mapped to `device_died`, one second of the Linux live test
+        // carried a `Lost` and a re-`Opened`; with this split, three runs carry neither. kira
+        // draws the same line (`stream_manager.rs`: `DeviceNotAvailable | StreamInvalidated`
+        // restart, the other two are dropped).
+        let reported = std::sync::atomic::AtomicBool::new(false);
         let on_error = move |e: cpal::StreamError| {
-            // Both variants mean the same thing here: this stream will not produce audio again.
-            // `service` tears it down and reopens on whatever the default is by then. This is
-            // the one log on the audio thread, taken knowingly: the stream is already dead, it
-            // fires once, and the host's own text is the only place the reason exists — the
-            // notice above can only say "the device went away".
-            bevy::log::warn!("audio: output stream error ({e})");
-            errors.device_died.store(true, Ordering::Release);
+            match e {
+                cpal::StreamError::DeviceNotAvailable | cpal::StreamError::StreamInvalidated => {
+                    errors.device_died.store(true, Ordering::Release);
+                }
+                // Not fatal, so the stream stays. Said once per stream and no more: this runs on
+                // the audio thread, and an xrun storm must not become a logging storm. The
+                // audible cost of a starved device is already counted upstairs as an underrun.
+                _ => {
+                    if !reported.swap(true, Ordering::Relaxed) {
+                        bevy::log::warn!("audio: output stream reported {e} (stream kept)");
+                    }
+                    return;
+                }
+            }
+            bevy::log::warn!("audio: output stream lost ({e})");
         };
 
         let ctx = Callback {

@@ -503,6 +503,25 @@ fn send_spell_cast(
             .and_then(|f| f.unit_charmed_by())
             .is_some_and(|charmer| Some(charmer) != ctx.self_guid),
         def,
+        // The per-arm exemption scan (decision 1946): the caster's RAW aura slot ids — the
+        // reference reads them unfiltered — joined to the spell catalog.
+        &mut |aura_types: &[u32]| {
+            let Some((d, fields)) = def.zip(self_fields) else {
+                return benilla_formats::CcExemption::default();
+            };
+            let catalog = spells.as_ref().map(|s| &s.catalog);
+            aura_types
+                .iter()
+                .map(|&ty| {
+                    benilla_formats::cc_exemption(d, fields.unit_aura_ids(), ty, |id| {
+                        catalog.and_then(|c| c.get(id))
+                    })
+                })
+                // The arms scan several types; the reference's loop takes the FIRST rejection it
+                // meets and stops, and reports exempt only if a match was found and accepted.
+                .reduce(|a, b| if a.mechanic != 0 || a.exempt { a } else { b })
+                .unwrap_or_default()
+        },
     ) {
         debug!("ui_action: cast {spell_id} refused locally — crowd control ({reason:#x})");
         cast_errors.push_local(spell_id, reason);

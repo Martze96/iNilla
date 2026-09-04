@@ -43,6 +43,40 @@ pub(crate) fn enabled() -> bool {
 #[derive(Resource, Clone)]
 pub(crate) struct GpuMsShared(pub Arc<AtomicU64>);
 
+/// **The wgpu resource census** — live buffers, textures and bind groups, off wgpu-core's own
+/// registry report, refreshed once a frame by the render app and read by `FPS_PROBE` under the
+/// same env (`wgpu_bufs=… wgpu_texs=… wgpu_bgs=…`). It is on the GPU meter because it prices
+/// the GPU *lane's* CPU: every render pass wgpu encodes allocates and clears usage trackers
+/// sized to the device's live buffer and texture counts (`wgpu_core::track::UsageScope`), so a
+/// scene's pass-encode CPU carries a term that scales with residency, not with what is drawn —
+/// a sampled profile of the crowd rig (1929's follow-on) put that term at roughly half of
+/// `encode_render_pass`. The count is the number that lever moves.
+#[derive(Resource, Clone)]
+pub(crate) struct WgpuCensusShared(pub Arc<WgpuCensus>);
+
+#[derive(Default)]
+pub(crate) struct WgpuCensus {
+    pub buffers: AtomicU64,
+    pub textures: AtomicU64,
+    pub bind_groups: AtomicU64,
+}
+
+/// Render world, `Cleanup`: refresh the census. wgpu-core's report takes each registry's read
+/// lock and counts live ids — microseconds, and only under the meter's env.
+fn census(instance: Res<bevy::render::renderer::RenderInstance>, shared: Res<WgpuCensusShared>) {
+    let Some(report) = instance.generate_report() else {
+        return;
+    };
+    let hub = &report.hub;
+    let c = &shared.0;
+    c.buffers
+        .store(hub.buffers.num_allocated as u64, Ordering::Relaxed);
+    c.textures
+        .store(hub.textures.num_allocated as u64, Ordering::Relaxed);
+    c.bind_groups
+        .store(hub.bind_groups.num_allocated as u64, Ordering::Relaxed);
+}
+
 const RING: usize = 4;
 
 /// Ring-slot states: a copy may only target a FREE slot — submitting into a mapped (or
@@ -231,14 +265,17 @@ pub(crate) fn plugin(app: &mut App) {
         return;
     }
     let shared = Arc::new(AtomicU64::new(0));
+    let counts = Arc::new(WgpuCensus::default());
     app.insert_resource(GpuMsShared(shared.clone()));
+    app.insert_resource(WgpuCensusShared(counts.clone()));
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
     render_app.insert_resource(GpuMsShared(shared));
+    render_app.insert_resource(WgpuCensusShared(counts));
     render_app.add_systems(
         Render,
-        (init_stamp, readback)
+        (init_stamp, readback, census)
             .chain()
             .in_set(RenderSystems::Cleanup),
     );

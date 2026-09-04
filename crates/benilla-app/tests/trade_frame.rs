@@ -120,7 +120,7 @@ fn trade_frame_loads_and_key_regions_exist() {
         "TradeFrameTradeButton",
         "TradeFrameCancelButton",
         "TradePlayerInputMoneyGold", // our gold is now the editable input (P2)
-        "TradeRecipientMoneyFrameCoin1",
+        "TradeRecipientMoneyFrameCopperButton",
         "TradeHighlightPlayer",
         "TradeHighlightRecipientEnchant",
     ] {
@@ -191,10 +191,16 @@ fn trade_show_opens_and_both_columns_populate() {
         "Thrall"
     );
 
-    // The partner's read-only gold rendered a coin (5s → 1 coin); our own gold is the editable input,
-    // exercised in `player_money_input_reflects_then_offers`.
+    // The partner's read-only money rendered exactly one coin for 5s: TARGET_TRADE is a COLLAPSING
+    // type (MoneyTypeInfo.collapse), so gold and copper hide and silver alone stands — the
+    // reference's own rule, and the one this fixture was written to show. Our own gold is the
+    // editable input, exercised in `player_money_input_reflects_then_offers`.
     assert!(s
-        .eval::<bool>("return TradeRecipientMoneyFrameCoin1:IsShown()")
+        .eval::<bool>(
+            "return TradeRecipientMoneyFrameSilverButton:IsShown() \
+             and not TradeRecipientMoneyFrameGoldButton:IsShown() \
+             and not TradeRecipientMoneyFrameCopperButton:IsShown()"
+        )
         .unwrap());
 
     assert!(s.take_errors().is_empty(), "clean repaint");

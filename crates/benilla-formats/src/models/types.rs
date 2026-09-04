@@ -43,7 +43,7 @@ pub enum ModelBlend {
 ///   `TextureName[1]` keyed by skinColor (`…Skin00_NN_Extra.blp`), loaded plain (never composited —
 ///   the client's dedicated extra-texture loader is a bare TextureCreate). Only fur races author it:
 ///   the tauren body binds its head/leg fur batches to this slot instead of the body atlas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CharSkinSlot {
     Body,
     Hair,

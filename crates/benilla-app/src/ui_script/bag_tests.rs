@@ -675,8 +675,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>(
-            "return GameTooltipMoneyCoin1:IsShown() \
-             and GameTooltipMoneyCoin1Num:GetText() == '52'",
+            "return GameTooltipMoneyFrame:IsShown() \
+             and GameTooltipMoneyFrameCopperButton:GetText() == '52'",
         )
         .unwrap());
     assert_eq!(
@@ -689,7 +689,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     unhover(&mut s);
     assert_eq!(s.ui_cursor(), None, "ResetCursor on leave");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
 
     // The unsellable item: the ITEM_UNSELLABLE line, no coins.
@@ -704,7 +704,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
         .unwrap();
     assert!(has_line, "SellPrice 0 shows the ITEM_UNSELLABLE line");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

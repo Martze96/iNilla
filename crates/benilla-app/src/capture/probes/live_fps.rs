@@ -114,6 +114,14 @@ type ScreenParams<'w, 's> = (
     Query<'w, 's, &'static bevy::window::Monitor>,
     Option<Res<'w, crate::perf::GpuMsShared>>,
     Local<'s, Vec<f32>>,
+    Option<Res<'w, crate::perf::WgpuCensusShared>>,
+    // Every camera, for `views=`: the number of ACTIVE views the render app walked this frame —
+    // each is its own pass set (a portrait booth awake, a body pane open), and a lane that
+    // scales with views (cluster assignment, the view bind groups, every per-pass tracker) is
+    // not a scene cost until this number is known.
+    Query<'w, 's, &'static Camera>,
+    // The UI's live texture-identity runs (`ui_batches=`): one `Mesh2d` draw each in the 2D pass.
+    Query<'w, 's, (), With<crate::ui_pass::UiQuadBatch>>,
 );
 
 #[derive(SystemParam)]
@@ -157,7 +165,14 @@ fn drive_live_fps(
     // the leg line carries gpu percentiles beside the cpu ones (absent when the meter is off).
     mut screen: ScreenParams,
 ) {
-    let (monitors, gpu, gpu_samples) = (&screen.0, &screen.1, &mut screen.2);
+    let (monitors, gpu, gpu_samples, wgpu_census, cameras, ui_batches) = (
+        &screen.0,
+        &screen.1,
+        &mut screen.2,
+        &screen.3,
+        &screen.4,
+        &screen.5,
+    );
     // Drain every frame so the state is current whichever phase we're in — the window can be
     // occluded before sampling ever starts (a detached launch spawns behind whatever is open).
     for o in occlusions.read() {
@@ -301,8 +316,24 @@ fn drive_live_fps(
                 let mut g = std::mem::take(&mut **gpu_samples);
                 g.sort_by(f32::total_cmp);
                 let gat = |q: f32| g[(((g.len() - 1) as f32) * q).round() as usize];
+                // …and the wgpu resource census beside it (`perf::gpu::WgpuCensus`): the
+                // residency term of the pass-encode CPU, sampled at the window's end.
+                let census = wgpu_census
+                    .as_ref()
+                    .map(|c| {
+                        let ld = |a: &std::sync::atomic::AtomicU64| {
+                            a.load(std::sync::atomic::Ordering::Relaxed)
+                        };
+                        format!(
+                            " wgpu_bufs={} wgpu_texs={} wgpu_bgs={}",
+                            ld(&c.0.buffers),
+                            ld(&c.0.textures),
+                            ld(&c.0.bind_groups)
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    " gpu_p50={:.2} gpu_p99={:.2} gpu_max={:.2}",
+                    " gpu_p50={:.2} gpu_p99={:.2} gpu_max={:.2}{census}",
                     gat(0.50),
                     gat(0.99),
                     g[g.len() - 1]
@@ -400,8 +431,15 @@ fn drive_live_fps(
                 })
                 .unwrap_or_default();
             let residency_line = format!(
-                " mats={} meshes={} images={} uv={} tint={}",
-                seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
+                " mats={} mats_parked={} meshes={} images={} uv={} tint={} views={} ui_batches={}",
+                seen.mats,
+                seen.mats_parked,
+                seen.meshes,
+                seen.images,
+                seen.uv_anims,
+                seen.tint_anims,
+                cameras.iter().filter(|c| c.is_active).count(),
+                ui_batches.iter().count(),
             );
             println!(
                 "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}",

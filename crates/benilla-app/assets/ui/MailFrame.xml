@@ -580,13 +580,13 @@
                 SendMailCODButtonText:SetTextColor(0.5, 0.5, 0.5)
             end
             getglobal("SendMailPackageButtonCount"):SetText(stackCount)
-            BenillaMoney_Set("SendMailMoneyFrame", GetMoney())
-            -- The 30c postage (ref l.542-547); red when it exceeds the purse.
-            BenillaMoney_Set("SendMailCost", GetSendMailPrice())
+            -- ref MailFrame.lua:542-547, verbatim. The purse (type PLAYER) and the postage (painted
+            -- in its own OnLoad) need no update here; only the postage COLOUR is decided per
+            -- refresh, and with the reference's own named colours rather than literals (1937).
             if GetSendMailPrice() > GetMoney() then
-                BenillaMoney_SetColor("SendMailCost", 1.0, 0.1, 0.1)
+                SetMoneyFrameColor("SendMailCostMoneyFrame", RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
             else
-                BenillaMoney_SetColor("SendMailCost", 1.0, 1.0, 1.0)
+                SetMoneyFrameColor("SendMailCostMoneyFrame", HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
             end
             SendMailFrame_CanSend()
         end
@@ -1030,33 +1030,21 @@
                     <!-- ref SendMailCostMoneyFrame l.739-767 (SmallMoneyFrameTemplate at TOPRIGHT
                          -46,-48; inlined as BenillaMoney coin slots, copper-first right-to-left, with
                          the SEND_MAIL_COST label). -->
-                    <Frame name="SendMailCost">
-                        <Size><AbsDimension x="13" y="13"/></Size>
+                    <!-- ref MailFrame.xml:739-766, and the reference's own NAME — ours was "SendMailCost". A
+                         SmallMoneyFrameTemplate of type STATIC, painted once from GetSendMailPrice() in its OnLoad
+                         exactly as the reference does, with the SEND_MAIL_COST ("Postage:") label at RIGHT->LEFT
+                         (-3,0) — ours had a literal "Cost:" at -56. Same TOPRIGHT (-46,-48) seat (1937). -->
+                    <Frame name="SendMailCostMoneyFrame" inherits="SmallMoneyFrameTemplate">
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-46" y="-48"/></Offset></Anchor></Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <FontString inherits="GameFontNormal" text="Cost:">
-                                    <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="-56" y="0"/></Offset></Anchor></Anchors>
-                                </FontString>
-                            </Layer>
-                        </Layers>
-                        <Frames>
-                            <Frame name="$parentCoin1">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                            <Frame name="$parentCoin2">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                            <Frame name="$parentCoin3">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                        </Frames>
+                        <Layers><Layer level="BACKGROUND">
+                            <FontString inherits="GameFontNormal" text="SEND_MAIL_COST">
+                                <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor></Anchors>
+                            </FontString>
+                        </Layer></Layers>
+                        <Scripts><OnLoad>
+                            SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("STATIC");
+                            MoneyFrame_Update("SendMailCostMoneyFrame", GetSendMailPrice());
+                        </OnLoad></Scripts>
                     </Frame>
                     <!-- ref SendMailSubjectEditBox l.768-842: 237×20 below the name box, 64 letters. -->
                     <EditBox name="SendMailSubjectEditBox" letters="64" historyLines="0" autoFocus="false">
@@ -1165,26 +1153,11 @@
                          UI-ClassTrainer-BotLeft left of the Send button (without it the recess reads
                          as a broken empty input box). Inlined as the BenillaMoney coin trio; fed
                          GetMoney() by SendMailFrame_Update + the PLAYER_MONEY event. -->
-                    <Frame name="SendMailMoneyFrame">
-                        <Size><AbsDimension x="13" y="13"/></Size>
+                    <!-- ref MailFrame.xml:993-1001: the purse, a SmallMoneyFrameTemplate with NO OnLoad of its
+                         own — the template's SmallMoneyFrame_OnLoad sets type PLAYER, which repaints on
+                         PLAYER_MONEY. Same BOTTOMRIGHT->BOTTOMLEFT (183,84) seat (1937). -->
+                    <Frame name="SendMailMoneyFrame" inherits="SmallMoneyFrameTemplate">
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="183" y="84"/></Offset></Anchor></Anchors>
-                        <Frames>
-                            <Frame name="$parentCoin1">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                            <Frame name="$parentCoin2">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                            <Frame name="$parentCoin3">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
-                            </Frame>
-                        </Frames>
                     </Frame>
                     <!-- ref SendMailCancelButton l.1002-1018 / SendMailMailButton l.1019-1035
                          (UIPanelButtonTemplate 80×22 at the ref offsets; inlined UI-Panel-Button art). -->

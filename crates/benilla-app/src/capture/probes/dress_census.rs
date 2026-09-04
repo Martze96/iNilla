@@ -72,6 +72,7 @@ struct DressCensus {
 /// What the census reads per entity: identity, kind, pose, the resolved worn set, and the attach
 /// roots actually standing.
 type DressQuery = (
+    Entity,
     &'static Guid,
     &'static NetEntity,
     &'static Transform,
@@ -87,6 +88,13 @@ fn fire_dress_census(
     names: Res<NameCache>,
     body: Query<&Transform, With<SelfPlayer>>,
     entities: Query<DressQuery>,
+    // The body's draw population (`parts=`/`mats=`): every mesh part hanging under the unit —
+    // body batches, each attach model's batches, cards — and how many DISTINCT materials
+    // they bind. The gap between the two is the ceiling on merging a body's batches by
+    // material (1929's first proposal): what a merge could collapse, read off a dressed body
+    // instead of guessed from a model's batch table.
+    children: Query<&Children>,
+    parts: Query<&MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>,
 ) {
     let now = time.elapsed_secs();
     if probe.next <= 0.0 || now < probe.next {
@@ -109,7 +117,7 @@ fn fire_dress_census(
     // `(is_contradiction, sort key, line)`. A contradiction sorts to the top: it is the finding.
     let mut rows: Vec<(bool, i64, String)> = Vec::new();
     let (mut hiding_helm, mut hiding_cloak, mut bad) = (0u32, 0u32, 0u32);
-    for (guid, net, t, store, equipment, attached) in &entities {
+    for (unit, guid, net, t, store, equipment, attached) in &entities {
         if net.kind != EntityKind::Player
             || t.translation.distance_squared(body.translation) > radius * radius
         {
@@ -140,12 +148,13 @@ fn fire_dress_census(
             (false, false) => "-",
         };
         let dist = t.translation.distance(body.translation);
+        let (n_parts, n_mats) = draw_population(unit, &children, &parts);
         rows.push((
             contradiction,
             (dist * 100.0) as i64,
             format!(
                 "DRESS {:#018x} d={dist:6.1} flags={flags:#010x} hide={hide:<10} \
-                 helm={:<6} cloak={:<6} settled={} spawned=[{}] {}{}",
+                 helm={:<6} cloak={:<6} settled={} spawned=[{}] parts={n_parts} mats={n_mats} {}{}",
                 guid.0,
                 eq.helm,
                 eq.cloak,
@@ -169,4 +178,21 @@ fn fire_dress_census(
     for (_, _, line) in &rows {
         println!("{line}");
     }
+}
+
+/// Mesh parts under `unit` (every depth) and the distinct materials they bind.
+fn draw_population(
+    unit: Entity,
+    children: &Query<&Children>,
+    parts: &Query<&MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>,
+) -> (usize, usize) {
+    let mut n = 0usize;
+    let mut mats = std::collections::HashSet::new();
+    for e in children.iter_descendants(unit) {
+        if let Ok(m) = parts.get(e) {
+            n += 1;
+            mats.insert(m.0.id());
+        }
+    }
+    (n, mats.len())
 }

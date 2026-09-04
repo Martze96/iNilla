@@ -874,6 +874,8 @@ fn upload_rig_palettes(
     // Coalesce the per-rig dirty ranges before touching the queue: rigs allocate contiguously,
     // so a steady frame's ~750 one-rig ranges merge into a handful of runs — the 0724 ledger
     // measured the per-range `write_buffer` loop at 2.7 ms/frame, almost all call overhead.
+    // Small gaps (a parked body between two live ones) are bridged for the same reason
+    // (`COALESCE_GAP_BONES`).
     let all = coalesce_ranges(data.dirty.iter().map(|&(b, l, _)| (b, l)).collect());
     let mirrored_only = coalesce_ranges(
         data.dirty
@@ -932,13 +934,30 @@ fn upload_rig_palettes(
     }
 }
 
-/// Sort + merge overlapping/adjacent `(base, len)` bone ranges into maximal runs.
-fn coalesce_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+/// The gap (in bones) two dirty runs may leave between them and still upload as ONE
+/// `write_buffer`. A `queue.write_buffer` is not a memcpy: wgpu allocates a staging buffer per
+/// call, registers it, records the copy and releases it — a few microseconds of fixed cost
+/// against ~10 GB/s of copying, so re-sending up to this many *unchanged* rows (they are the
+/// live rows, straight out of `rows`; nothing stale can be written) is cheaper than a second
+/// call. Sized so the whole tolerance costs about what one call does. The case that needed it:
+/// a 40-man raid at the Stormwind auction house uploaded ~310 KB of rows in ~93 calls a frame
+/// (1929's `[rig-upload]` census), because parked bodies and idle props sit between the live
+/// rigs in the slab and a strictly-adjacent merge stops at every one of them.
+const COALESCE_GAP_BONES: u32 = 256;
+
+/// Sort + merge overlapping, adjacent, and *nearly* adjacent (gap ≤ [`COALESCE_GAP_BONES`])
+/// `(base, len)` bone ranges into maximal runs. Rows inside a bridged gap are written with their
+/// current contents.
+fn coalesce_ranges(ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    coalesce_ranges_with_gap(ranges, COALESCE_GAP_BONES)
+}
+
+fn coalesce_ranges_with_gap(mut ranges: Vec<(u32, u32)>, gap: u32) -> Vec<(u32, u32)> {
     ranges.sort_unstable_by_key(|r| r.0);
     let mut out: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
     for (base, len) in ranges {
         if let Some(last) = out.last_mut() {
-            if base <= last.0 + last.1 {
+            if base <= last.0 + last.1 + gap {
                 last.1 = (base + len).max(last.0 + last.1) - last.0;
                 continue;
             }
@@ -1326,10 +1345,30 @@ mod tests {
     fn dirty_ranges_coalesce_into_runs() {
         // Adjacent + overlapping merge; a hole splits. Order-independent (upload sorts).
         assert_eq!(
-            coalesce_ranges(vec![(70, 5), (0, 10), (10, 20), (25, 10), (40, 5)]),
+            coalesce_ranges_with_gap(vec![(70, 5), (0, 10), (10, 20), (25, 10), (40, 5)], 0),
             vec![(0, 35), (40, 5), (70, 5)]
         );
         assert_eq!(coalesce_ranges(Vec::new()), Vec::new());
+    }
+
+    #[test]
+    fn dirty_ranges_bridge_small_gaps_but_not_large_ones() {
+        // A parked rig's rows between two live ones (the raid's ~93-call frame): bridged, so
+        // the run is one call. A gap wider than the tolerance still splits.
+        assert_eq!(
+            coalesce_ranges_with_gap(vec![(0, 10), (14, 6), (30, 5)], 4),
+            vec![(0, 20), (30, 5)]
+        );
+        // The shipped tolerance bridges a gap of exactly its size and no more.
+        let g = COALESCE_GAP_BONES;
+        assert_eq!(
+            coalesce_ranges(vec![(0, 10), (10 + g, 5)]),
+            vec![(0, 15 + g)]
+        );
+        assert_eq!(
+            coalesce_ranges(vec![(0, 10), (11 + g, 5)]),
+            vec![(0, 10), (11 + g, 5)]
+        );
     }
 
     #[test]

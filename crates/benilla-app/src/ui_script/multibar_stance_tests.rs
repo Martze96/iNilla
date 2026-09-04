@@ -20,6 +20,7 @@ fn load_action_bar(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
+        "MoneyFrame.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -435,6 +436,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
+        "MoneyFrame.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",

@@ -345,7 +345,18 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// a ceiling — and it is the ratchet's own instruction: a count that cannot see the whole file
 /// cannot report a widening either, which is the one thing this test exists to do. The six are
 /// **not** hereby blessed as PUBLISH: they are un-sorted 1164 work, now visible enough to sort.
-const CEILING: usize = 172;
+/// And 172 → 173: `model_render::lazy::realize`, a PUBLISH. A built `WowModelMaterial` is no
+/// longer an asset the moment a spawner builds it — the engine parks the value behind a
+/// reserved handle and inserts the asset the first frame something visible is bound to it
+/// (decision 1940: 9.9k materials, 20.7k buffers and 10.2k bind groups were alive at the
+/// Stormwind auction house for 36 drawn entity batches, the variant set every spawner is handed
+/// and never switches to). A game lane that CLONES a material before anything binds it — the
+/// portrait booth relighting a part's twins onto its own light buffer, a spell kit deriving its
+/// per-instance tinted copy from the shared steady — asks the engine to realize it first. That
+/// is the whole of the crossing: one function, "make this handle's asset exist now", the
+/// doorway's own rule about when a material is real. The alternative — eager materials for
+/// the two lanes that read early — would put the store's law in the caller's hands.
+const CEILING: usize = 173;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

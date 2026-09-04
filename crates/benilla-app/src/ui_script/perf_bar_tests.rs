@@ -220,7 +220,7 @@ fn get_net_stats_reports_the_pushed_latency() {
 /// tooltip that is quietly one line short.
 #[test]
 fn hovering_the_meter_shows_the_live_latency() {
-    let mut s = harness(&["UIParent.xml", "GameTooltip.xml"]);
+    let mut s = harness(&["MoneyFrame.xml", "UIParent.xml", "GameTooltip.xml"]);
     s.set_latency_ms(Some(42));
     s.resolve();
 

@@ -32,7 +32,9 @@ use super::{
 mod char_skin;
 use char_skin::{build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip};
 mod dress;
-use dress::{spawn_part, PartDress};
+mod merge;
+use dress::{spawn_group, PartDress};
+pub(super) use merge::MergedFormsCache;
 mod preview;
 pub(crate) use preview::equip_slot;
 pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
@@ -299,6 +301,9 @@ pub(super) fn attach_entity_visuals(
         ResMut<SkinComposites>,
         Res<AssetServer>,
         benilla_world::model_render::M2BatchMaterials,
+        // The merged-group forms (`merge`): built on a body's first silhouette, shared after.
+        ResMut<Assets<Mesh>>,
+        ResMut<merge::MergedFormsCache>,
     ),
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
@@ -307,8 +312,16 @@ pub(super) fn attach_entity_visuals(
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
-    let (sections, world_assets, mut images, mut skin_composites, asset_server, mut mats) =
-        skin_build;
+    let (
+        sections,
+        world_assets,
+        mut images,
+        mut skin_composites,
+        asset_server,
+        mut mats,
+        mut meshes,
+        mut merged,
+    ) = skin_build;
     // Arm each entity's appear-fade at the moment its visual attaches (≈ its first-visible moment).
     let now = time.elapsed_secs();
     for (entity, net, equipment, reattached, mount_child, mount_body, anchored) in &pending {
@@ -792,18 +805,21 @@ pub(super) fn attach_entity_visuals(
                     JoinedFade::Pending { since: now }
                 },
             };
-            for (i, part) in parts.iter().enumerate() {
-                // Skip a geoset this character doesn't show (an unselected hair/facial/body
-                // variant, or a body region its worn gear replaces). The equipment half of that
-                // selection is re-run in place on a gear change (`attach::redress`); this is the
-                // same predicate, evaluated once at build.
-                if visible_geosets
+            // A geoset this character doesn't show (an unselected hair/facial/body variant, or a
+            // body region its worn gear replaces) is skipped. The equipment half of that
+            // selection is re-run in place on a gear change (`attach::redress`); this is the
+            // same predicate, evaluated once at build. The shown batches spawn as material
+            // GROUPS (`merge`): one entity per set of batches nothing downstream can tell apart.
+            let shows = |part: &super::EntityPart| {
+                visible_geosets
                     .as_ref()
-                    .is_some_and(|vis| !vis.contains(&part.geoset_id))
-                {
-                    continue;
-                }
-                unit_will_fade |= spawn_part(&mut commands, part, i, &dress);
+                    .is_none_or(|vis| vis.contains(&part.geoset_id))
+            };
+            let groups = merge::guard_groups(merge::group_parts(parts, shows), parts, &char_mats);
+            for group in &groups {
+                let forms = merged.forms(parts, group, &mut meshes);
+                let part = merge::group_part(parts, group, forms);
+                unit_will_fade |= spawn_group(&mut commands, &part, group, &dress);
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item
             // / helm / shoulder attaching later reads this to join the same ramp

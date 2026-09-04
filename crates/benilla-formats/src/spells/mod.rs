@@ -125,6 +125,8 @@ pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
 pub use display::{FormRefusal, OpenLock, SpellDisplay};
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
+mod immunity;
+pub use immunity::{cc_exemption, grants_immunity, CcExemption};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
 pub use ranges::{load_spell_ranges, SpellRange, SpellRangeCatalog};
 pub use tokens::{substitute, TokenContext};
@@ -246,6 +248,12 @@ const COL_REQUIRES_SPELL_FOCUS: usize = 15;
 /// `Dispel` — the `SpellDispelType.dbc` id (`SpellRec+0x10`; the byte offset chain-locks it to
 /// `COL_CAST_UI` at `+0xc` and `COL_ATTRIBUTES` at `+0x18`). Decision 0257.
 const COL_DISPEL: usize = 4;
+/// `School` (`SpellRec+0x4`, `0x4/4 == 1`) — see [`SpellDisplay::school`].
+const COL_SCHOOL: usize = 1;
+/// `Mechanic` (`SpellRec+0x14`, `0x14/4 == 5`) — see [`SpellDisplay::mechanic`].
+const COL_MECHANIC: usize = 5;
+/// `EffectMechanic[0]` (`SpellRec+0x13c`, `0x13c/4 == 79`) — see [`SpellDisplay::effect_mechanic`].
+const COL_EFFECT_MECHANIC_1: usize = 79;
 const COL_ATTRIBUTES: usize = 6;
 /// `AttributesEx` (`SpellRec+0x1c` — chain-locked between `COL_ATTRIBUTES` at `+0x18` and
 /// `COL_ATTRIBUTES_EX2` at `+0x20`).
@@ -754,6 +762,11 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 attributes_ex: u32_at(r, COL_ATTRIBUTES_EX).unwrap_or(0),
                 attributes_ex2: u32_at(r, COL_ATTRIBUTES_EX2).unwrap_or(0),
                 attributes_ex3: u32_at(r, COL_ATTRIBUTES_EX3).unwrap_or(0),
+                school: u32_at(r, COL_SCHOOL).unwrap_or(0),
+                mechanic: u32_at(r, COL_MECHANIC).unwrap_or(0),
+                effect_mechanic: std::array::from_fn(|i| {
+                    u32_at(r, COL_EFFECT_MECHANIC_1 + i).unwrap_or(0)
+                }),
                 prevention_type: u32_at(r, COL_PREVENTION_TYPE).unwrap_or(0),
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),

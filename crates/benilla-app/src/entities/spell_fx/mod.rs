@@ -134,6 +134,9 @@ fn fx_part_material(
     let Some(anim) = &part.rgb_anim else {
         return part.material.clone();
     };
+    // The shared steady may still be parked (`model_render::lazy`): this copy is made before
+    // anything binds it.
+    benilla_world::model_render::lazy::realize(wow_materials, part.material.id());
     let Some(mut mat) = wow_materials.get(part.material.id()).cloned() else {
         return part.material.clone(); // shared material not built yet — parts were checked ready
     };
@@ -378,6 +381,7 @@ pub(crate) fn attach_effect_visuals(
         };
         // The material's packed fog byte, handed over raw — the lane owns what it maps to.
         // `7` (Scene) is the no-material fallback the packer's own default agrees with.
+        benilla_world::model_render::lazy::realize(wow_materials, part.material.id());
         let (texture, fog_bits) = match wow_materials.get(part.material.id()) {
             Some(mat) => (
                 mat.base.base_color_texture.clone(),

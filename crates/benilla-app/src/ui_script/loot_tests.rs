@@ -478,6 +478,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 

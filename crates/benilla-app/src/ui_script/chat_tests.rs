@@ -19,6 +19,7 @@ fn chat_frame() -> UiScript {
     // `benilla.toc` already orders both ahead of ChatFrame.xml (l.60/64 vs l.399); the harness
     // says so too, rather than a guard that would hide a real ordering fault. (The tooltip file is
     // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from

@@ -114,7 +114,7 @@
         --
         -- Signature note: the ref reads the firing frame from the `this` global; the corpus
         -- convention is to keep the ref NAME and take that frame as a leading parameter
-        -- (GameTooltip_OnHide(self), GameTooltip_ClearMoney(frame) — same shift). Reference code
+        -- (GameTooltip_OnHide(self) — same shift; GameTooltip_ClearMoney went back to the reference's no-argument form in 1937). Reference code
         -- pasted in verbatim must therefore have the owner threaded in as arg 1.
         -- **The reference's exact signature, because a signature IS api (1199).** Ours used to take
         -- the owner as arg 1; the reference takes none and reads `this`. Outfitter calls it the
@@ -181,30 +181,28 @@
         -- engine fires OnTooltipAddMoney with the computed price (wow-re ui/scratch/tooltip-money.md
         -- 0x52b650@0x52e376: the engine computes, FrameXML renders) and this is its handler; Lua
         -- call sites (repair cost) call it directly, exactly like the ref's ContainerFrame does.
+        -- ref GameTooltip.lua:84-92, verbatim, on the reference's own widget (1937). The money row
+        -- is the $parentMoneyFrame SmallMoneyFrameTemplate instance below, not a coin trio.
         function SetTooltipMoney(frame, money)
             frame:AddLine(" ", 1.0, 1.0, 1.0)
             local numLines = frame:NumLines()
-            local line = getglobal(frame:GetName() .. "TextLeft" .. numLines)
-            local coin1 = getglobal(frame:GetName() .. "MoneyCoin1")
-            coin1:ClearAllPoints()
-            coin1:SetPoint("LEFT", line, "LEFT", 4, 0)
-            BenillaMoney_Set(frame:GetName() .. "Money", money, true)
-            local width = 4
-            for i = 1, 3 do
-                local c = getglobal(frame:GetName() .. "MoneyCoin" .. i)
-                if c:IsShown() then width = width + c:GetWidth() + 4 end
-            end
-            frame:SetMinimumWidth(width)
+            local moneyFrame = getglobal(frame:GetName() .. "MoneyFrame")
+            moneyFrame:SetPoint("LEFT", frame:GetName() .. "TextLeft" .. numLines, "LEFT", 4, 0)
+            moneyFrame:Show()
+            MoneyFrame_Update(moneyFrame:GetName(), money)
+            frame:SetMinimumWidth(moneyFrame:GetWidth())
         end
 
         -- The money row clears whenever the content does (the ref wires GameTooltip_ClearMoney to
         -- OnTooltipCleared; the engine fires it on ClearLines/SetOwner/Hide). BenillaMoney_Clear
         -- ships in MerchantFrame.xml (the money kit's home) — guard for engine tests that load
         -- this file alone; in the app every file is loaded.
-        function GameTooltip_ClearMoney(frame)
-            frame = frame or this
-            if BenillaMoney_Clear then
-                BenillaMoney_Clear(frame:GetName() .. "Money")
+        -- ref GameTooltip.lua:94-99, verbatim: reads `this`, takes no argument. The one XML
+        -- caller (OnTooltipCleared) is a handler, so `this` IS the tooltip.
+        function GameTooltip_ClearMoney()
+            local moneyFrame = getglobal(this:GetName() .. "MoneyFrame")
+            if moneyFrame then
+                moneyFrame:Hide()
             end
         end
 
@@ -312,12 +310,12 @@
         $parentStatusBar, and the OnLoad/OnHide pair (ref l.611-616).
 
         What is deliberately NOT here, and stays on the GameTooltip instance:
-        - The money coin trio and the OnTooltipAddMoney/OnTooltipCleared pair. The reference's
-          template carries a $parentMoneyFrame (l.598-608, a SmallMoneyFrameTemplate), so its
-          handler is safe on every instance; ours is a bespoke three-coin row that only
-          GameTooltip declares, so a templated OnTooltipAddMoney would index a MoneyCoin1 that
-          does not exist. Moving the row up would give ItemRefTooltip and every addon tooltip a
-          coin line they render today without — a visible change, so it waits for the director.
+        - The money row and the OnTooltipAddMoney/OnTooltipCleared pair. Since 1937 the row IS the
+          reference's widget (a $parentMoneyFrame SmallMoneyFrameTemplate), but it still lives on
+          the GameTooltip INSTANCE, where the reference's template carries it (l.598-608) so that
+          ItemRefTooltip and every addon tooltip get the coin line too. That hoist is the remaining
+          divergence here. It used to wait for the director; the 2026-09-03 ruling (faithful wins)
+          resolves it, and it is its own unit because 27 corpus addons inherit this template.
         - OnTooltipSetDefaultAnchor (ref l.617-619). The engine fires it by name on `GameTooltip`
           alone (script/tooltip_unit.rs looks the frame up), so on any other instance it is dead
           weight.
@@ -471,64 +469,11 @@
              screen center when the default-anchor script wasn't wired. -->
         <Size><AbsDimension x="120" y="32"/></Size>
         <Frames>
-            <!-- The money row's coin trio (the real $parentMoneyFrame — GameTooltipTemplate.xml,
-                 patch.MPQ — as our shared coin-slot shape; MerchantFrame.xml's BenillaMoney_Set
-                 fills them, left-to-right gold-first). Coin1 is re-anchored by SetTooltipMoney to
-                 the money line's LEFT +4 (ref SetTooltipMoney's seat). -->
-            <Frame name="$parentMoneyCoin1" hidden="true">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-            </Frame>
-            <Frame name="$parentMoneyCoin2" hidden="true">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors>
-                    <Anchor point="LEFT" relativeTo="$parentMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-            </Frame>
-            <Frame name="$parentMoneyCoin3" hidden="true">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors>
-                    <Anchor point="LEFT" relativeTo="$parentMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
+            <!-- The reference's own money row (GameTooltipTemplate.xml:598-607): ONE SmallMoneyFrameTemplate
+                 instance, hidden until SetTooltipMoney seats and shows it. Replaces our three hand-built
+                 $parentMoneyCoin1..3 — the System B shape 1937 retires from this window. -->
+            <Frame name="$parentMoneyFrame" inherits="SmallMoneyFrameTemplate" hidden="true">
+                <Scripts><OnLoad>SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("STATIC");</OnLoad></Scripts>
             </Frame>
         </Frames>
         <Scripts>
@@ -559,7 +504,7 @@
                  computes a price and fires OnTooltipAddMoney(arg1 = copper); OnTooltipCleared fires
                  whenever the content clears (ClearLines/SetOwner/Hide) and drops the coin row. -->
             <OnTooltipAddMoney>SetTooltipMoney(this, arg1)</OnTooltipAddMoney>
-            <OnTooltipCleared>GameTooltip_ClearMoney(this)</OnTooltipCleared>
+            <OnTooltipCleared>GameTooltip_ClearMoney()</OnTooltipCleared>
         </Scripts>
     </GameTooltip>
 

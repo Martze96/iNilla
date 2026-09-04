@@ -24,6 +24,7 @@ fn setup() -> UiScript {
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "ScrollTemplates.xml",
+        "MoneyFrame.xml",
         "GameTooltip.xml",
         // Before UiPanels.xml: the shared StaticPopup carries a `SmallMoneyFrameTemplate` coin
         // row, whose OnLoad calls `SmallMoneyFrame_OnLoad` — the TOC's own order (1580's

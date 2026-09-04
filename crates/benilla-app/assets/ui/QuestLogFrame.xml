@@ -596,7 +596,7 @@
             for i = 1, MAX_NUM_ITEMS do
                 getglobal("QuestLogItem" .. i):Hide()
             end
-            BenillaMoney_Clear("QuestLogMoney")
+            getglobal("QuestLogMoneyFrame"):Hide()
             -- Nothing selected: the header-only span (BenillaQuestLogRewards_Update's own
             -- haveAnyReward==false case, 18px) is the right resize input here too.
             BenillaQuestLogDetail_ResizeChild(0, 18)
@@ -754,10 +754,13 @@
             -- Money: a STATIC XML anchor (LEFT of ItemReceiveText's RIGHT, +15,0 — ref
             -- QuestLogFrame.xml:896-903) tracks receiveText's runtime SetPoint above via the resolver's
             -- fixpoint re-propagation; only the coin fill/clear is Lua's job here.
+            -- ref QuestFrame.lua:350-356's tail, on the reference's own widget (1937).
+            local moneyFrame = getglobal("QuestLogMoneyFrame")
             if money and money > 0 then
-                BenillaMoney_Set("QuestLogMoney", money, true)
+                moneyFrame:Show()
+                MoneyFrame_Update("QuestLogMoneyFrame", money)
             else
-                BenillaMoney_Clear("QuestLogMoney")
+                moneyFrame:Hide()
             end
 
             -- The section's total height, mirroring the branches above term-for-term (a money-only
@@ -1792,29 +1795,13 @@
 
                             <!-- Reward money (pin §3, GetQuestLogRewardMoney) — ref QuestLogMoneyFrame anchors LEFT
                                  to QuestLogItemReceiveText's RIGHT, offset (15,0) (QuestLogFrame.xml:896-903). -->
-                            <Frame name="QuestLogMoneyCoin1">
-                                <Size><AbsDimension x="13" y="13"/></Size>
+                            <!-- ref QuestLogFrame.xml:896-906, and the reference's own NAME: one MoneyFrameTemplate at the
+                                 same LEFT->QuestLogItemReceiveText RIGHT (15,0) seat our Coin1 used. Its OnLoad is the
+                                 reference's QuestMoneyFrame_OnLoad (QuestFrame.lua:306, in our QuestFrame.xml — manifest 960,
+                                 above this file at 987). Retires QuestLogMoneyCoin1..3 (1937). -->
+                            <Frame name="QuestLogMoneyFrame" inherits="MoneyFrameTemplate">
                                 <Anchors><Anchor point="LEFT" relativeTo="QuestLogItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY">
-                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
-                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
-                                </Layer></Layers>
-                            </Frame>
-                            <Frame name="QuestLogMoneyCoin2">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="LEFT" relativeTo="QuestLogMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY">
-                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
-                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
-                                </Layer></Layers>
-                            </Frame>
-                            <Frame name="QuestLogMoneyCoin3">
-                                <Size><AbsDimension x="13" y="13"/></Size>
-                                <Anchors><Anchor point="LEFT" relativeTo="QuestLogMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
-                                <Layers><Layer level="OVERLAY">
-                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
-                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
-                                </Layer></Layers>
+                                <Scripts><OnLoad>QuestMoneyFrame_OnLoad()</OnLoad></Scripts>
                             </Frame>
                         </Frames>
                     </Frame>
