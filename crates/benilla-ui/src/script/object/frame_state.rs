@@ -119,6 +119,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     fn type_chain(kind: FrameKind) -> &'static [&'static str] {
         match kind {
             FrameKind::Frame => &["Frame", "Region"],
+            FrameKind::WorldFrame => &["Frame", "Region"],
             FrameKind::Button => &["Button", "Frame", "Region"],
             FrameKind::CheckButton => &["CheckButton", "Button", "Frame", "Region"],
             // `CLootButton::IsObjectType 0x495af0` prepends its own name to the base's three

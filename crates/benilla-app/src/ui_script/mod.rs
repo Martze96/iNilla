@@ -1100,6 +1100,9 @@ mod quiver_tests;
 #[cfg(test)]
 mod world_entry_tests;
 
+/// The guild tabard designer — the stock `TabardFrame.xml` off the chain (decision 1977).
+#[cfg(test)]
+mod tabard_tests;
 /// The world map's POI pool — the guard's directions marker today, the AreaPOI landmarks later.
 #[cfg(test)]
 mod world_map_tests;

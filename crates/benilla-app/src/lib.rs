@@ -172,6 +172,7 @@ mod ui_social;
 mod ui_spellbook;
 mod ui_stable;
 mod ui_summon;
+mod ui_tabard;
 mod ui_talent;
 mod ui_talent_wipe;
 mod ui_taxi;
@@ -256,6 +257,7 @@ use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_stable::UiStablePlugin;
 use ui_summon::UiSummonPlugin;
+use ui_tabard::TabardUiPlugin;
 use ui_talent::UiTalentPlugin;
 use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -796,6 +798,7 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(UiSavedPlugin)
     .add_plugins(NamePersistPlugin)
     .add_plugins(UiStablePlugin)
+    .add_plugins(TabardUiPlugin)
     .add_plugins(UiTrainerPlugin)
     // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the
     // NPC-session range guard, and the TaxiFrame.xml window feed/drain (catalogs, node

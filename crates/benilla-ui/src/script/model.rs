@@ -22,6 +22,38 @@ pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
 /// The host's texture **texel-size** oracle — see [`Model::texture_size_probe`].
 pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
 
+/// A map from a minted object id to its handle, indexed directly: ids are dense (`next_id`
+/// counts from 1), and every scripted method call on a frame or region starts with this lookup
+/// — a few hundred a frame from the stock `OnUpdate` sweep alone (decision 1979's UI tick), so
+/// the hash a `HashMap` paid per call was the wrong price for a one-word index.
+#[derive(Debug, Clone)]
+pub(crate) struct IdMap<T>(Vec<Option<T>>);
+
+impl<T> Default for IdMap<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T: Copy> IdMap<T> {
+    pub(crate) fn get(&self, id: &u32) -> Option<&T> {
+        self.0.get(*id as usize).and_then(Option::as_ref)
+    }
+    pub(crate) fn contains_key(&self, id: &u32) -> bool {
+        self.get(id).is_some()
+    }
+    pub(crate) fn insert(&mut self, id: u32, v: T) -> Option<T> {
+        let i = id as usize;
+        if self.0.len() <= i {
+            self.0.resize(i + 1, None);
+        }
+        self.0[i].replace(v)
+    }
+    pub(crate) fn remove(&mut self, id: &u32) -> Option<T> {
+        self.0.get_mut(*id as usize).and_then(Option::take)
+    }
+}
+
 /// The Rust-side model behind the Lua VM — the arena, the layout inputs + resolved rects, the
 /// id↔handle bijection, region visuals, and the event/script registrations. Held in `lua.app_data`
 /// (interior-mutable) so callbacks reach it; contains **no** mlua handles (the MAXCSTACK discipline).
@@ -265,9 +297,9 @@ pub(crate) struct Model {
 
     /// Monotonic id source (starts at 1; `0` is [`SCREEN`]).
     pub(crate) next_id: u32,
-    pub(crate) id_to_frame: HashMap<u32, FrameHandle>,
+    pub(crate) id_to_frame: IdMap<FrameHandle>,
     pub(crate) frame_to_id: HashMap<FrameHandle, u32>,
-    pub(crate) id_to_region: HashMap<u32, RegionHandle>,
+    pub(crate) id_to_region: IdMap<RegionHandle>,
     pub(crate) region_to_id: HashMap<RegionHandle, u32>,
     /// Region name → layout id — the region twin of the arena's frame-name publish (same
     /// non-overwriting first-wins rule). `SetPoint`'s string `relativeTo` resolves through frames
@@ -1466,6 +1498,14 @@ pub(crate) struct Model {
     /// why order matters). The pane's yaw is its own `ModelState` facing, like every migrated
     /// window's (`UiScript::model_pane_facing`, 1751/1969).
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
+    /// The tabard designer (1977): each `TabardModel`'s five values, the last seeded/cycled five
+    /// (the app's body preview), the host facts, and the queued intents.
+    pub(crate) tabard_designs: HashMap<crate::widget::FrameHandle, [i32; 5]>,
+    pub(crate) tabard_preview: Option<[i32; 5]>,
+    pub(crate) tabard_host: super::tabard::TabardHost,
+    pub(crate) tabard_intents: Vec<super::tabard::TabardIntent>,
+    /// The WorldFrame type's one-shot registry record (1984): `true` once the first is made.
+    pub(crate) world_frame_made: bool,
     /// Unit token (lowercase) → what the app resolved about it this frame, for **every** token
     /// that named a **live unit object**, creature as readily as player — the input to both
     /// verified range predicates (`CanInspect`, `CheckInteractDistance`). An absent token is one
@@ -1699,9 +1739,9 @@ impl Model {
             font_objects_by_lower: HashMap::new(),
             region_resolved: HashMap::new(),
             next_id: 1,
-            id_to_frame: HashMap::new(),
+            id_to_frame: IdMap::default(),
             frame_to_id: HashMap::new(),
-            id_to_region: HashMap::new(),
+            id_to_region: IdMap::default(),
             region_to_id: HashMap::new(),
             region_names: HashMap::new(),
             scripts: HashMap::new(),
@@ -2051,6 +2091,11 @@ impl Model {
             inspect_notifies: Vec::new(),
             inspect_clear: false,
             dressup_intents: Vec::new(),
+            tabard_designs: HashMap::new(),
+            tabard_preview: None,
+            tabard_host: Default::default(),
+            tabard_intents: Vec::new(),
+            world_frame_made: false,
             unit_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),

@@ -67,7 +67,7 @@ pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, Spawn
 use queries::update_current_area;
 pub use queries::{
     area_id_under, doodad_ground_shade, ground_effect_under, terrain_height_under,
-    AreaAuthoritySet, CurrentArea, ShadeResolve,
+    terrain_height_under_cached, AreaAuthoritySet, CurrentArea, ShadeResolve,
 };
 
 /// Wall-clock spent per frame spawning streamed-in geometry (terrain tiles in [`stream_terrain`],
@@ -110,6 +110,11 @@ pub struct TerrainStreamer {
     /// neighbourhood's every placement every frame for the rest of the run — the settled-work scan
     /// the latch exists to stop.
     was_paced: bool,
+    /// The last frame found nothing to request, drop or spawn and every resident tile stood
+    /// furnished — so a frame with the same window, the same pacing and a complete load has
+    /// nothing to do and skips the window walk (three window-sized allocations and a scan of
+    /// every resident tile, on every still frame — decision 1979's floor).
+    settled: bool,
 }
 
 /// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
@@ -731,6 +736,29 @@ fn stream_terrain(
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
+    let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
+    // Never while a load is in flight: `paced` is false from a snap until the body settles, and
+    // the tail this skip bypasses is where the load is RELEASED — the retained pass's undrawn
+    // count that `presentable()` reads, the burst-over `flush_now`, and the settle hold. A
+    // skip that engaged the frame `complete` flipped, with the pass still baking the new
+    // cells, froze that count above zero and held the loading screen up for good — the
+    // .tele hang of 2026-09-04, the day after this skip landed (1982). So the skip needs a
+    // paced, presentable, complete world, and even then keeps the undrawn count fresh so a
+    // later rebake un-skips it.
+    if same_window
+        && state.settled
+        && focus.paced
+        && state.was_paced == focus.paced
+        && (wdt_index.is_some() || state.wdt_ungated)
+        && load_progress
+            .as_ref()
+            .is_none_or(|p| p.complete && p.presentable())
+    {
+        if let (Some(p), Some(gx)) = (load_progress.as_mut(), staticgx.as_deref()) {
+            p.gx_pending = crate::static_gx::StaticGx::undrawn_regions(gx);
+        }
+        return;
+    }
     state.focus = (cx, cy);
     // One line per change of reach — the slider moved, or the first frame — so a run log says
     // what the residency window was when a tile count or a frame cost was read off it.
@@ -793,6 +821,7 @@ fn stream_terrain(
             .filter(|&tile| !window.keeps(tile))
             .collect()
     };
+    let stale_empty = stale.is_empty();
     if unload_budget > 0 && stale.len() > unload_budget {
         stale.sort_by_key(|&(tx, ty)| std::cmp::Reverse((tx - cx).abs().max((ty - cy).abs())));
         stale.truncate(unload_budget);
@@ -831,6 +860,7 @@ fn stream_terrain(
     // the only cost of the window edge (~2 tiles out, in fog) filling over a few frames. World
     // entry and teleports stay unstaggered: the loading screen exists to absorb that burst, and
     // the settle release waits on exactly these tiles.
+    let mut fresh_empty = true;
     if wdt_index.is_some() || state.wdt_ungated {
         let live = focus.paced;
         let mut fresh: Vec<(i32, i32)> = desired
@@ -838,6 +868,7 @@ fn stream_terrain(
             .copied()
             .filter(|c| !state.tiles.contains_key(c))
             .collect();
+        fresh_empty = fresh.is_empty();
         if live && fresh.len() > 1 {
             fresh.sort_by_key(|&(tx, ty)| (tx - cx).abs().max((ty - cy).abs()));
             fresh.truncate(1);
@@ -992,6 +1023,12 @@ fn stream_terrain(
     // focus tile that doesn't exist (map edge) counts as resident so we never get stuck waiting
     // for ground that isn't there.
     // The pacing edge, read and advanced once per frame (see [`TerrainStreamer::was_paced`]).
+    state.settled = stale_empty
+        && fresh_empty
+        && state
+            .tiles
+            .values()
+            .all(|t| t.entity.is_some() && t.furnished);
     let was_paced = std::mem::replace(&mut state.was_paced, focus.paced);
     if let Some(p) = load_progress.as_mut() {
         p.focus_tile = Some((cx, cy));

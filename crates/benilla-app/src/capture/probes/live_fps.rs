@@ -59,6 +59,7 @@ impl Plugin for LiveFpsPlugin {
             paced_samples: Vec::new(),
             threads_at_start: None,
             faults_at_start: None,
+            still_at_start: [0; 5],
             cpu_at_start: None,
             sys_at_start: None,
             occluded_now: false,
@@ -81,6 +82,12 @@ enum LiveFpsPhase {
 }
 
 /// [`LiveFpsPlugin`] state.
+/// The still-frame input counters (`benilla_world::dev_state::STILL_INPUTS_CHANGED`), now.
+fn still_inputs_now() -> [u32; 5] {
+    let c = &benilla_world::dev_state::STILL_INPUTS_CHANGED;
+    std::array::from_fn(|i| c[i].load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[derive(Resource)]
 struct LiveFps {
     frames: usize,
@@ -115,6 +122,8 @@ struct LiveFps {
     threads_at_start: Option<Vec<(usize, String, f64, f64)>>,
     /// The page-fault counters at the window's first frame (`perf::process_faults`).
     faults_at_start: Option<(u64, u64)>,
+    /// `dev_state::STILL_INPUTS_CHANGED` at the window's first frame — `noisy=` is the delta.
+    still_at_start: [u32; 5],
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
@@ -306,6 +315,7 @@ fn drive_live_fps(
                 probe.cpu_at_start = crate::perf::process_cpu_secs();
                 probe.threads_at_start = crate::perf::thread_cpu_table();
                 probe.faults_at_start = crate::perf::process_faults();
+                probe.still_at_start = still_inputs_now();
                 main_split.restart();
                 probe.sys_at_start = crate::perf::system_cpu_ticks();
                 // The churn census restarts with the window — warmup noise (streaming, shader
@@ -516,15 +526,26 @@ fn drive_live_fps(
                                 .inside_ms()
                                 .map(|m| format!(" main_in={m:.2}"))
                                 .unwrap_or_default();
+                            let now_still = still_inputs_now();
+                            let noisy: Vec<u32> = now_still
+                                .iter()
+                                .zip(probe.still_at_start)
+                                .map(|(n, s)| n.wrapping_sub(s))
+                                .collect();
                             // Page faults per frame beside the split: `sys` time with no
                             // syscall under it is the kernel zero-filling pages the allocator
                             // gave back and asked for again.
                             let faults =
                                 match (probe.faults_at_start, crate::perf::process_faults()) {
                                     (Some((mi0, ma0)), Some((mi1, ma1))) => format!(
-                                        " faults={:.0}/{:.1}",
+                                        " faults={:.0}/{:.1} noisy=[cam:{},dbg:{},view:{},win:{},claim:{}]",
                                         (mi1 - mi0) as f64 / v_len as f64,
-                                        (ma1 - ma0) as f64 / v_len as f64
+                                        (ma1 - ma0) as f64 / v_len as f64,
+                                        noisy[0],
+                                        noisy[1],
+                                        noisy[2],
+                                        noisy[3],
+                                        noisy[4],
                                     ),
                                     _ => String::new(),
                                 };

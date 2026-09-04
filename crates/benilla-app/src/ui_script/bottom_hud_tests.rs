@@ -158,11 +158,6 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
         "the base itself — the bar everything else measures its clearance FROM, so it has no \
          clearance of its own to compute",
     ),
-    (
-        "WorldFrame",
-        "a full-screen named handle, not a HUD frame (UIParent.xml) — setAllPoints, renders \
-         nothing",
-    ),
     ("UIParent", "the full-screen root itself"),
     (
         "ZoneTextFrame",

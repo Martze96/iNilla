@@ -14,9 +14,9 @@ use super::{
     action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
-    progression, pvp, quest, social, spellbook, spells, stable, summon, taxi, trade, trainer,
-    tutorial, update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode,
-    ServerPacket, SpeedKind, SplineMode,
+    progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
+    trainer, tutorial, update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo,
+    MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -412,6 +412,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::MSG_BATTLEGROUND_PLAYER_POSITIONS => {
             ServerPacket::BattlefieldPositions(battlefield::read_battlefield_positions(&mut r)?)
+        }
+        opcode::MSG_TABARDVENDOR_ACTIVATE => {
+            ServerPacket::TabardVendorActivate(tabard::read_tabard_vendor_activate(&mut r)?)
+        }
+        opcode::MSG_SAVE_GUILD_EMBLEM => {
+            ServerPacket::SaveGuildEmblemResult(tabard::read_save_guild_emblem_result(&mut r)?)
         }
         opcode::SMSG_GROUP_JOINED_BATTLEGROUND => ServerPacket::GroupJoinedBattleground {
             result: crate::wire::read_u32_le(&mut r)?,

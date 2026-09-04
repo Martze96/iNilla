@@ -115,6 +115,15 @@ Interface\FrameXML\BasicControls.xml
 # (UIPARENT_MANAGED_FRAME_POSITIONS + UIParent_ManageFramePositions, decision 0272, the ref
 # mechanism that re-anchors the cast bar / chat over the bottom bars) are called later, applied by
 # the loader's post-load bootstrap (ui_script/manifest.rs).
+# ══ THE WORLD FRAME — the reference's own, off the player's chain (1751; decision 1983) ══
+# WorldFrame.xml + WorldFrame.lua: the <WorldFrame> singleton (the engine's own kind, mouse-enabled
+# by construction, its hits the world's), the framerate readout ToggleFramerate/TOGGLEFPS drives
+# off GetFramerate, the OnUpdate that ticks StaticPopup and MirrorTimer frames while the UI is
+# hidden, and the ScreenshotStatus child ("Screen Captured" over SCREENSHOT_SUCCEEDED/FAILED,
+# the 1.5 s GetTime fade, TakeScreenshot for the SCREENSHOT binding). Right above UIParent.xml as
+# the reference's toc has it (l.7-8). Needs Fonts.xml's SystemFont above; everything else it
+# names is call-time.
+Interface\FrameXML\WorldFrame.xml
 UIParent.xml
 # ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
 # `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
@@ -475,11 +484,6 @@ Interface\FrameXML\Minimap.xml
 # sourced at the top of this manifest and `UIParent_OnEvent`'s VARIABLES_LOADED arm calls it. The
 # value is the PLAYER's locale rather than our assumption about it.
 Interface\FrameXML\GameTime.xml
-# Print screen's UI half (decision 1487): the centred "Screen Captured"/"Screen Capture Failed"
-# line, and the `TakeScreenshot()` the SCREENSHOT binding runs. Needs Fonts.xml (SystemFont) and
-# UIParent.xml (its seat) — both far above — and nothing else; seated beside ZoneText.xml, whose
-# AutoFollowStatus is the same full-screen-frame-with-a-centred-line shape.
-ScreenshotStatus.xml
 # ══ THE ZONE SPLASH — the reference's own, off the player's chain (1751, window 8) ══
 # Two files, in the reference's own order and for its own reason.
 #
@@ -1115,6 +1119,14 @@ Interface\FrameXML\CinematicFrame.xml
 # engine — the two flag banks, the fire-once trigger, the four verbs — is `crate::tutorial`.
 # Needs UIPanelTemplates (UICheckButtonTemplate), BasicControls (the dialog button textures),
 # GameTooltip, and UiPanels' SetButtonPulse, all far above.
+# ══ THE TABARD DESIGNER — the reference's own, off the player's chain (1751; decision 1977) ══
+# TabardFrame.xml + TabardFrame.lua: the <TabardModel> pane (its ten methods are the engine's,
+# `script/tabard.rs`), the five customization rows over CycleVariation, the emblem cells the two
+# texture setters paint, Save/CanSaveTabardNow and CloseTabardCreation; opened only by the wire
+# (`crate::ui_tabard`). Right before TutorialFrame.xml as the reference's toc has it (l.79-80).
+# Needs UIPanelTemplates (UIPanelButtonTemplate, UIPanelCloseButton), MoneyFrame
+# (SmallMoneyFrameTemplate), GameTooltip and UiPanels, all far above.
+Interface\FrameXML\TabardFrame.xml
 Interface\FrameXML\TutorialFrame.xml
 # The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
 # layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine

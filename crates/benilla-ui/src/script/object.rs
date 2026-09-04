@@ -153,9 +153,11 @@ fn enum_token(s: &str) -> String {
     s.trim().to_ascii_uppercase()
 }
 
+/// The reference's strata NAME table (`0x8119f8`) has eight rows, `BACKGROUND`..`TOOLTIP`; stratum
+/// 0 (`WORLD`) has no name and no XML or Lua can put a frame there — the WorldFrame's constructor
+/// is its only writer (decision 1984, wow-re `worldframe-widget.md` §4).
 fn strata_from_str(s: &str) -> Option<Strata> {
     Some(match enum_token(s).as_str() {
-        "WORLD" => Strata::World,
         "BACKGROUND" => Strata::Background,
         "LOW" => Strata::Low,
         "MEDIUM" => Strata::Medium,
@@ -203,6 +205,9 @@ pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
+        // The world frame's own registered type (decision 1983; `0x495948` in the registration
+        // batch, the one row passing `1` as its third argument).
+        "WORLDFRAME" => FrameKind::WorldFrame,
         // `TaxiRouteFrame` — a registered `CreateFrame` type that is a `CSimpleFrame` and NOTHING
         // else, so it maps to `Frame` rather than earning a kind (decision 1828; wow-re
         // `ui/scratch/taxiroute-widget-type.md`). Factory `0x495ba0` allocates `0x314`, the same
@@ -478,6 +483,20 @@ pub(super) fn create_frame(
 ) -> mlua::Result<Table> {
     let frame_kind = frame_kind_from_str(&kind)
         .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
+    // The WorldFrame's registry record is a ONE-SHOT: the reference unlinks and releases it the
+    // moment the first `<WorldFrame>` is instantiated (`0x6ee439`), so a second one — from any
+    // XML, or `CreateFrame("WorldFrame")` — takes the lookup's miss leg, `Unknown frame type`
+    // (decision 1984). The loader reaches this through the same global, so it covers both.
+    if frame_kind == FrameKind::WorldFrame
+        && lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .world_frame_made
+    {
+        return Err(mlua::Error::runtime(format!(
+            "CreateFrame: unknown frame type '{kind}'"
+        )));
+    }
     // **`name` and `inherits` are `lua_tostring` positions, and a NUMBER is a string to it.**
     // `0x7060b0` reads both through `0x6f3690` with no type guard at all, so `CreateFrame("Frame",
     // 5)` names the frame `"5"` — a `Value::String`-only match drops it (wow-re
@@ -569,6 +588,9 @@ pub(super) fn create_frame(
     let id = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let h = model.arena.create(frame_kind, name, parent_handle);
+        if frame_kind == FrameKind::WorldFrame {
+            model.world_frame_made = true;
+        }
         // The client's CreateFrame inheritance (the ctor doc's "loader/CreateFrame concern" —
         // widget/mod.rs `create`): a child enters its PARENT's stratum at the parent's level + 1.
         // The ctor's bare MEDIUM/0 left a DIALOG-strata popup drawing its own translucent

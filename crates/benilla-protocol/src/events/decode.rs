@@ -787,6 +787,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::PvpLogData(data) => vec![SessionEvent::PvpLogData(data)],
         ServerPacket::BattlefieldList(list) => vec![SessionEvent::BattlefieldList(list)],
         ServerPacket::BattlefieldPositions(p) => vec![SessionEvent::BattlefieldPositions(p)],
+        ServerPacket::TabardVendorActivate(g) => vec![SessionEvent::TabardVendorActivate(g)],
+        ServerPacket::SaveGuildEmblemResult(r) => vec![SessionEvent::SaveGuildEmblemResult(r)],
         ServerPacket::GroupJoinedBattleground { result } => {
             vec![SessionEvent::GroupJoinedBattleground { result }]
         }

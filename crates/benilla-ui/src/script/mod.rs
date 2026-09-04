@@ -206,6 +206,10 @@ pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
+pub use tabard::{
+    emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
+    TABARD_CREATION_COST,
+};
 pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
 
 pub use inspect::{InspectView, UnitReach};
@@ -1434,6 +1438,8 @@ impl UiScript {
         if let Some(h) = model.arena.lookup(name) {
             return model.arena.frame(h).map(|f| match f.kind {
                 crate::widget::FrameKind::Frame => "Frame",
+                // A `Frame` to Lua (1984): the registered name never becomes a class identity.
+                crate::widget::FrameKind::WorldFrame => "Frame",
                 crate::widget::FrameKind::Button => "Button",
                 crate::widget::FrameKind::CheckButton => "CheckButton",
                 // `GetObjectType 0x495b60` is two instructions and returns `"LootButton"`

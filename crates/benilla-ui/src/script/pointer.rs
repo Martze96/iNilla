@@ -150,6 +150,20 @@ impl UiScript {
     /// can be checked against is a handle set snapshotted earlier ([`Self::live_targets`]'s). The
     /// addon harness's use probe asks exactly that — a pointer event is only an addon's to be
     /// judged by when the frame under the cursor is one the addon itself created.
+    /// Whether a frame id names a [`FrameKind::WorldFrame`] — the reference's world frame, whose
+    /// mouse hits belong to the 3D world (decisions 1983/1984). The hit test still answers it (it
+    /// is mouse-enabled by construction, so an addon's `OnEnter`/`OnMouseDown` on it fire — the
+    /// reference runs those, then the click's `BUTTON1`/`BUTTON2` binding, which IS the world
+    /// click), but the app's pointer arbiter does not count it as being over the UI.
+    pub fn is_world_frame(&self, id: u32) -> bool {
+        let model = self.model_ref();
+        model
+            .id_to_frame
+            .get(&id)
+            .and_then(|h| model.arena.frame(*h))
+            .is_some_and(|f| f.kind == crate::widget::FrameKind::WorldFrame)
+    }
+
     pub fn hit_test_frame(&self, x: f32, y: f32) -> Option<FrameHandle> {
         let model = self.model_ref();
         let sorted = order::traversal(&model.arena);

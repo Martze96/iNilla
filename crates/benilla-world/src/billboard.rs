@@ -548,8 +548,8 @@ pub struct BillboardPlace;
 pub(crate) fn face_billboards(
     mut commands: Commands,
     time: Res<Time>,
-    cam: Query<&GlobalTransform, With<WorldCamera>>,
-    owners: Query<&GlobalTransform, (Without<WorldCamera>, Without<BillboardCard>)>,
+    cam: Query<(Ref<GlobalTransform>, Option<Ref<Transform>>), With<WorldCamera>>,
+    owners: Query<Ref<GlobalTransform>, (Without<WorldCamera>, Without<BillboardCard>)>,
     mut cards: Query<
         (
             Entity,
@@ -562,17 +562,29 @@ pub(crate) fn face_billboards(
         Without<WorldCamera>,
     >,
 ) {
-    let Ok(cam_tf) = cam.single() else {
+    let Ok((cam_tf, cam_local)) = cam.single() else {
         return;
     };
     // The camera basis — the VIEW-MATRIX axes the byte law substitutes (one shared orientation
     // for every billboard; never a per-pivot aim).
+    // The propagated frame OR the seat's own write: a teleport frame moves the local before
+    // propagation runs (see doodad_anim's gate), and the old read carried a pre-snap placement
+    // across the snap.
+    let cam_moved = cam_tf.is_changed() || cam_local.as_ref().is_some_and(|l| l.is_changed());
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
     for (entity, mut card, mut tf, mut global, tag) in &mut cards {
+        // A card with no track is a pure function of the camera basis and its owner's frame:
+        // when neither moved this frame, the placement below would come out bit-identical
+        // (the write guards at the end already knew that; the recompute did not — 1979's
+        // floor, every resident card re-placed on a still frame).
+        let tracked = card.scale_anim.is_some() || card.seq_translation.is_some();
         if let Some(owner) = card.follow {
             match owners.get(owner) {
                 Ok(gt) => {
+                    if !tracked && !cam_moved && !gt.is_changed() {
+                        continue;
+                    }
                     let pivot = card.local_pivot;
                     card.re_place(gt.compute_transform(), pivot);
                     // The card-provenance trace (`WOW_MOVE_TRACE`, ~2 Hz): where each following
@@ -602,6 +614,8 @@ pub(crate) fn face_billboards(
                     continue;
                 }
             }
+        } else if !tracked && !cam_moved {
+            continue;
         }
         // The gseq attach anchor: stamped on the card's first placement pass — the reference's
         // once-per-instance scene-clock snapshot (decision 0856).

@@ -1086,6 +1086,11 @@ fn writer_loop(
                     ClientCommand::RequestBattlefieldPositions => {
                         w.request_battlefield_positions()
                     }
+                    ClientCommand::TabardVendorActivate { npc } => w.tabard_vendor_activate(npc),
+                    ClientCommand::SaveGuildEmblem { vendor, design } => {
+                        w.save_guild_emblem(vendor, design)
+                    }
+                    ClientCommand::BattlemasterHello { npc } => w.battlemaster_hello(npc),
                     ClientCommand::BattlemasterJoin {
                         battlemaster,
                         map_id,

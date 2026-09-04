@@ -241,9 +241,20 @@ pub(crate) struct SceneGates<'w, 's> {
     exterior_windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
     portals: Query<'w, 's, &'static crate::wmo_portal::WmoPortalInstance>,
+    /// Streamed-in buildings this frame: a room admit can only change with the camera, a
+    /// window, a claim, a surface, or a new portal set — the last is this.
+    new_portals: Query<'w, 's, (), Added<crate::wmo_portal::WmoPortalInstance>>,
 }
 
 impl SceneGates<'_, '_> {
+    /// Any of the three resources a draw-set verdict reads moved this frame.
+    pub(crate) fn changed(&self) -> bool {
+        self.view.is_changed()
+            || self.exterior_windows.is_changed()
+            || self.camera_claim.is_changed()
+            || !self.new_portals.is_empty()
+    }
+
     /// The three per-frame values every draw-set caller needs before it can ask
     /// [`EmitterFade::in_draw_set`]: the far-clip wall, the built exterior gate, and the placement
     /// the camera is standing in. Built ONCE per walk (the gate is a handful of 6-plane frusta).
@@ -435,7 +446,17 @@ pub(super) fn simulate_particles(
     // The water-plane interleave inputs — see [`WaterInterleave`] and [`far_side_of_water`].
     interleave: WaterInterleave,
     mut commands: Commands,
-    cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
+    cam: Query<
+        (
+            Entity,
+            Ref<GlobalTransform>,
+            &Frustum,
+            &Camera,
+            &Projection,
+            Option<Ref<Transform>>,
+        ),
+        With<WorldCamera>,
+    >,
     owners: Owners,
     // MODEL-particle instance entities ([`super::model`]): the draw-set gate hides them with
     // their frozen emitter.
@@ -462,7 +483,7 @@ pub(super) fn simulate_particles(
             &mut ParticleEmitter,
             &mut Transform,
             &mut GlobalTransform,
-            Option<&EmitterFade>,
+            Option<Ref<EmitterFade>>,
             Option<&RenderLayers>,
             Option<&EffectLightOverride>,
             Option<&crate::interior::EmitterLitBy>,
@@ -496,7 +517,7 @@ pub(super) fn simulate_particles(
     // `$WOW_PARTICLE_DEPTHDUMP` and `$WOW_EMIT_DUMP`. Both inert without their env.
     mut dumps: super::dumps::Dumps,
 ) {
-    let Ok((world_cam, cam_tf, frustum, camera, projection)) = cam.single() else {
+    let Ok((world_cam, cam_tf, frustum, camera, projection, cam_local)) = cam.single() else {
         return;
     };
     // Clamp dt so a load hitch doesn't fling every particle out of existence in one step.
@@ -504,6 +525,13 @@ pub(super) fn simulate_particles(
     if dt <= 0.0 {
         return;
     }
+    // Every input of an emitter's draw-set verdict, still since last frame: the verdict is then
+    // still too, and a gated emitter can skip its sphere/window/room tests outright — 2.4 k
+    // resident emitters against 11 active in a parked city (decision 1979's floor).
+    let gate_inputs_still = !cam_tf.is_changed()
+        && !cam_local.as_ref().is_some_and(|l| l.is_changed())
+        && !gates.changed()
+        && !interleave.surfaces_changed();
     let cam_pos = cam_tf.translation();
     let density = tuning.density.clamp(0.25, 1.0);
     let snap_filter = crate::collision::WorldCollision::body_filter();
@@ -516,7 +544,7 @@ pub(super) fn simulate_particles(
     // The far-clip wall, the exterior gate and the camera's own room — built once for the whole
     // emitter walk, the same values the model visibility authority and `exterior_cull` ask
     // (0784/0786: one spelling of the window test).
-    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((cam_tf, projection)));
+    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((&*cam_tf, projection)));
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = dumps.depth_frame(time.elapsed_secs());
     // `$WOW_EMIT_DUMP`: is this a dump tick? Decided once per frame, for the whole walk.
@@ -584,7 +612,10 @@ pub(super) fn simulate_particles(
         // "all effects render at unlimited distance", and it is why the terrain under them was
         // already gone. `within_farclip` is the same rule the owner mesh uses in
         // `debug_panel::visibility` — shared, so the two can no longer drift apart.
-        if let Some(f) = fade {
+        if let Some(f) = fade.as_ref() {
+            if emitter.gated && gate_inputs_still && !f.is_changed() {
+                continue;
+            }
             let in_set = f.in_draw_set(
                 cam_pos,
                 cam_fwd,
@@ -725,6 +756,39 @@ pub(super) fn simulate_particles(
         let water_gt = (*anchor).and_then(|e| owners.transforms.get(e).ok().copied());
         let water_bound = *water_bound;
         *age += dt;
+        let (clock_seq, elapsed_s) = match *host {
+            Some(h) => match hosts
+                .get(h)
+                .ok()
+                .and_then(|(p, a)| crate::doodad_anim::playing_seq(p, a))
+            {
+                Some((s, t)) => {
+                    *seq = Some(s);
+                    (Some(s), t)
+                }
+                None => (*seq, 0.0),
+            },
+            None => (*seq, *age),
+        };
+        // This frame's emitter PARAMETERS — the nine per-frame-sampled channels, on the same
+        // clock as the rate track (the reference's `m2_animate` emitter phase samples all ten;
+        // wow-re `part-emission-rate-animated.md` §1). Frost Nova rides its emission radius
+        // 0.19 → 13.2 yd out with the ring; Arcane Explosion 0 → 7.2 yd with the dome — births
+        // MUST read the frame's values, not `value[0]` (decision 0844).
+        // The instance's gseq cursor (0856/0858): the spawn age IS `sceneNow − attach` — the
+        // emitter spawns with its instance, and every lane's instance is fresh per play.
+        let gseq_now = f64::from(*age);
+        // Dormant (decision 1979): nothing alive, nothing draining, and the timing tracks say
+        // the emitter is not emitting at this clock — every placement, ride and water step
+        // below would compute state for zero particles. The clock derivation above already
+        // ran (it is what `emitting` reads, and `seq` must keep following the host).
+        if particles.is_empty()
+            && !*draining
+            && children.iter().all(|c| c.particles.is_empty())
+            && !def.timing.emitting(clock_seq, elapsed_s, gseq_now)
+        {
+            continue;
+        }
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
         // owner needs nothing beyond refreshing `placement` — the cloud rides the anchor for free
         // (the reference's per-frame `translate(−emitterPos)` draw-matrix rebuild).
@@ -792,7 +856,7 @@ pub(super) fn simulate_particles(
         // placed doodad's takes its own distance fade, whose cutoff the draw-set gate above
         // already applies as a hard stop.
         *alpha = alpha_src.map_or(1.0, |e| owner_mul.alpha(e))
-            * fade.map_or(1.0, |f| f.distance_alpha(cam_pos));
+            * fade.as_ref().map_or(1.0, |f| f.distance_alpha(cam_pos));
         // The cloud anchor (see the field doc): the model's live translation, or the last-known
         // one while the pool drains. A whole-model owner keeps anchor == owner — identical math.
         match *anchor {
@@ -928,28 +992,6 @@ pub(super) fn simulate_particles(
         // (bug B27). A host with no live player yet keeps its last slot at that slot's opening
         // pose. Pinned lanes (doodads, effect rigs, booths) run their slot on the spawn-age
         // clock; the baked loops wrap a looping band and end-hold a clamped one.
-        let (clock_seq, elapsed_s) = match *host {
-            Some(h) => match hosts
-                .get(h)
-                .ok()
-                .and_then(|(p, a)| crate::doodad_anim::playing_seq(p, a))
-            {
-                Some((s, t)) => {
-                    *seq = Some(s);
-                    (Some(s), t)
-                }
-                None => (*seq, 0.0),
-            },
-            None => (*seq, *age),
-        };
-        // This frame's emitter PARAMETERS — the nine per-frame-sampled channels, on the same
-        // clock as the rate track (the reference's `m2_animate` emitter phase samples all ten;
-        // wow-re `part-emission-rate-animated.md` §1). Frost Nova rides its emission radius
-        // 0.19 → 13.2 yd out with the ring; Arcane Explosion 0 → 7.2 yd with the dome — births
-        // MUST read the frame's values, not `value[0]` (decision 0844).
-        // The instance's gseq cursor (0856/0858): the spawn age IS `sceneNow − attach` — the
-        // emitter spawns with its instance, and every lane's instance is fresh per play.
-        let gseq_now = f64::from(*age);
         let now = def.params.sample(clock_seq, elapsed_s, gseq_now);
 
         // 1. Age + integrate the live pool. The verified vanilla integrator (`particle_integrate`
@@ -1246,7 +1288,7 @@ pub(super) fn simulate_particles(
                     // sim's own `emitter_world` is the STORE's origin — 1591).
                     ride.to_world(emitter_world),
                     &cam,
-                    cam_tf,
+                    &cam_tf,
                     camera,
                     projection,
                     images.contains(&*texture),

@@ -187,6 +187,8 @@ pub(crate) fn feed_interact_npc(
     // client's own `0x5f05bc` path), so there is no gossip session behind it at all. The registrar
     // arm above is the same shape for the same reason.
     stable: Option<Res<crate::ui_stable::StableOpen>>,
+    // The tabard designer's vendor (decision 1977) — its portrait and name banner, the same way.
+    tabard: Option<Res<crate::ui_tabard::TabardOpen>>,
     index: Option<Res<GuidIndex>>,
     mut out: ResMut<InteractNpc>,
 ) {
@@ -200,7 +202,8 @@ pub(crate) fn feed_interact_npc(
         .or_else(|| bank.and_then(|s| s.npc()))
         .or_else(|| auction.and_then(|s| s.npc()))
         .or_else(|| registrar.and_then(|s| s.npc()))
-        .or_else(|| stable.and_then(|s| s.npc()));
+        .or_else(|| stable.and_then(|s| s.npc()))
+        .or_else(|| tabard.and_then(|s| s.npc()));
     // Field 0 is the entity the portrait booth bakes and the facing chain steers by; field 1 is
     // the same NPC's **guid**, which `crate::ui_unit`'s feed needs to resolve the `"npc"` unit
     // token's name (a name lives in the `NameCache`, keyed by guid — there is no way back to one

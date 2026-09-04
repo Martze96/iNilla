@@ -420,6 +420,8 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
+    /// The draw list's fingerprint cache ([`crate::order::traversal`]).
+    pub(crate) order_cache: crate::order::OrderCache,
     /// Monotonic count of Minimap-kind frames ever created — an O(1) "a new Minimap widget
     /// exists" signal, so the per-frame state feed (`set_minimap_inside`'s caller) re-pushes
     /// exactly when one appears instead of walking every frame to find out.
@@ -484,6 +486,9 @@ pub fn mouse_enabled_by_ctor(kind: FrameKind) -> bool {
         FrameKind::Button
             | FrameKind::CheckButton
             | FrameKind::EditBox
+            // `CGWorldFrame`'s ctor enables key + mouse + wheel (`0x481b09`/`0x481b14`/`0x481b1f`,
+            // wow-re `mouse-enable-law.md`); the hit is the world's, not the UI's (decision 1983).
+            | FrameKind::WorldFrame
             // A Slider's thumb must be draggable: every scrollbar is a UIPanelScrollBarTemplate
             // Slider that declares no `enableMouse` yet is draggable in-game (decision 0250).
             | FrameKind::Slider
@@ -503,6 +508,7 @@ impl WidgetArena {
             names: HashMap::new(),
             next_insertion: 0,
             minimap_created: 0,
+            order_cache: Default::default(),
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
@@ -643,7 +649,13 @@ impl WidgetArena {
             children: Vec::new(),
             regions: Vec::new(),
             title_region: None,
-            strata: Strata::default(),
+            // The WorldFrame's constructor is the one writer of stratum 0 (`WORLD`, below
+            // `BACKGROUND`); every other kind starts at the base ctor's MEDIUM (1984).
+            strata: if kind == FrameKind::WorldFrame {
+                Strata::World
+            } else {
+                Strata::default()
+            },
             level: 0,
             alpha,
             effective_alpha,
@@ -656,7 +668,7 @@ impl WidgetArena {
             // with no attribute, and nothing else is.
             mouse_wheel_enabled: matches!(
                 kind,
-                FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame
+                FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame | FrameKind::WorldFrame
             ),
             // Nothing is keyboard-enabled by construction: `0x76af00` is only ever reached from the
             // XML attribute or an explicit call, never a ctor (`scripts-auto-enable.md` §1-2).

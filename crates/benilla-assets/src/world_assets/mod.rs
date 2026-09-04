@@ -500,6 +500,33 @@ impl WorldAssets {
         loaded
     }
 
+    /// The tabard designer's emblem cell (decision 1977): the emblem BLP decoded and rewritten to
+    /// **white carrying its own alpha** — `(a << 24) | 0x00FFFFFF` per texel, the reference's
+    /// `0x503431` loop — as an ordinary clamped sprite the caller tints. Cached per path like a
+    /// sprite; a file that fails to open yields `None` (the reference installs its static array's
+    /// stale contents instead; nothing here has a previous emblem to show).
+    pub fn emblem_mask_texture(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = format!("emblem-mask:{}", sprite_key(path));
+        if let Some(cached) = self.sprites.get(&key) {
+            return cached.clone();
+        }
+        let loaded =
+            decode_sprite(&self.chain, self.loose_root.as_deref(), path).map(|(w, h, mut rgba)| {
+                for px in rgba.chunks_exact_mut(4) {
+                    px[0] = 0xFF;
+                    px[1] = 0xFF;
+                    px[2] = 0xFF;
+                }
+                images.add(sprite_image(w, h, rgba))
+            });
+        self.sprites.insert(key, loaded.clone());
+        loaded
+    }
+
     /// A coverage **mask** ([`mask_image`] — linear/clamp, the texel bytes handed to the shader
     /// 1:1): the minimap's `MinimapMask.blp` circle (decision 0203, [`crate::ui_pass::UiQuadMask`]).
     /// Same extensionless→`.blp` resolve as [`Self::sprite_texture`]; its own cache, hits AND misses.

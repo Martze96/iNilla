@@ -116,7 +116,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
     // the guild tabard's three layers come through the same list, because they land in the same
     // rows and the question ("what repainted this cell?") is the same one.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
-    for step in equip_blits(&equipment, look.emblem) {
+    for step in equip_blits(&equipment, look.emblem, false) {
         let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
         let candidates = step.candidates(look.sex);
         let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
@@ -184,6 +184,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_color,
             [None; 8],
             None,
+            false,
         )?
         .context("no base skin row for this appearance")?;
     let dressed = sections
@@ -198,6 +199,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_color,
             equipment,
             look.emblem,
+            false,
         )?
         .context("no base skin row for this appearance")?;
 

@@ -94,6 +94,7 @@ mod social;
 mod spells;
 mod stable;
 mod summon;
+mod tabard;
 mod taxi;
 mod trade;
 mod trainer;

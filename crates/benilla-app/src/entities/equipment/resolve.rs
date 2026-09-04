@@ -189,6 +189,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&ResolveKey>,
         Option<&DressKey>,
         Option<&DisarmFreeze>,
+        Has<crate::net::SelfPlayer>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
     mut templates: ResMut<Items>,
@@ -211,6 +212,8 @@ pub(in crate::entities) fn resolve_equipment(
     // what sends the `CMSG_GUILD_QUERY` whose answer paints the tabard. `Option` for the same
     // reason `creatures` is: a harness without the UI plugins still resolves equipment.
     mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
+    // The tabard designer's five under preview (decision 1977) — a change re-dresses our body.
+    tabard_design: Option<Res<crate::ui_tabard::TabardDesign>>,
 ) {
     let Some(mut held) = held else {
         return;
@@ -225,7 +228,8 @@ pub(in crate::entities) fn resolve_equipment(
     );
     let caches_moved = last_epochs.replace(epochs) != Some(epochs)
         || creatures.as_ref().is_some_and(|c| c.is_changed())
-        || enchants.as_ref().is_some_and(|e| e.is_changed());
+        || enchants.as_ref().is_some_and(|e| e.is_changed())
+        || tabard_design.as_ref().is_some_and(|d| d.is_changed());
     let mut glows = glows;
     let enchant_rows = enchants.as_deref().map(|e| &e.0);
     for (
@@ -242,6 +246,7 @@ pub(in crate::entities) fn resolve_equipment(
         current_key,
         current_dress,
         freeze,
+        is_self,
     ) in &units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
@@ -333,6 +338,16 @@ pub(in crate::entities) fn resolve_equipment(
             eq.emblem = guilds
                 .as_deref_mut()
                 .and_then(|g| crate::ui_guild::unit_guild_emblem(s, g, &net));
+            // The tabard designer's preview (decision 1977): while it is open on OUR body the
+            // five under design replace the guild's emblem and the tabard geoset is forced on
+            // over the empty slot — the reference's `[cc+0xc]` flag and its `0x47a610` install,
+            // both on the local player's character component and nobody else's.
+            if is_self {
+                if let Some(design) = tabard_design.as_deref().and_then(|d| d.preview()) {
+                    eq.emblem = Some(design);
+                    eq.tabard_preview = true;
+                }
+            }
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
             }

@@ -153,7 +153,13 @@ pub(in crate::entities) fn redress_player_looks(
         // The dressing inputs, re-resolved exactly as the first build resolved them.
         let worn = resolve_worn_equip(net, Some(live), Some(dm));
         let look = resolve_char_look(net, Some(dm), entity, &stores);
-        let eg = equip_geosets(displays.as_deref(), &worn.bodyslots, worn.cloak, worn.helm);
+        let eg = equip_geosets(
+            displays.as_deref(),
+            &worn.bodyslots,
+            worn.cloak,
+            worn.helm,
+            worn.tabard_preview,
+        );
         let visible: Option<Vec<u16>> = look.as_ref().and_then(|l| {
             let cg = characters.as_deref()?;
             Some(cg.0.visible_geosets(l.race, l.sex, l.hair_style, l.facial_hair, &eg))
@@ -166,6 +172,7 @@ pub(in crate::entities) fn redress_player_looks(
                 worn.bodyslots,
                 worn.cloak,
                 worn.emblem,
+                worn.tabard_preview,
                 displays.as_deref(),
                 sections.as_deref(),
                 world_assets.as_deref(),

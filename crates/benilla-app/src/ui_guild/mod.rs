@@ -278,6 +278,36 @@ impl GuildState {
         self.identity_generation
     }
 
+    /// The tabard designer's view of our guild record (decision 1977): `Some(five)` once the
+    /// record is cached — `-1`s for an undesigned tabard, as the wire carries them — and `None`
+    /// while it has not arrived or the player has no guild. A miss sends the query, the lazy-cache
+    /// idiom every other read of this cache uses.
+    pub(crate) fn own_emblem_record(
+        &mut self,
+        guild_id: u32,
+        commands: &NetCommands,
+    ) -> Option<[i32; 5]> {
+        let e = self.resolve_identity(guild_id, commands)?.emblem;
+        Some([
+            e.emblem_style,
+            e.emblem_color,
+            e.border_style,
+            e.border_color,
+            e.background_color,
+        ])
+    }
+
+    /// A saved emblem's eviction (`0x5e715f`, decision 1977): our guild's cached record is
+    /// dropped so the next query anywhere re-fetches it — the tabards of every member in sight
+    /// re-dress off the arrival, as the reference's guild-appearance refresh does.
+    pub(crate) fn evict_own_identity(&mut self) {
+        if self.identities.remove(&self.guild_id).is_some() {
+            self.queried.remove(&self.guild_id);
+            self.identity_generation = self.identity_generation.wrapping_add(1);
+            self.dirty = true;
+        }
+    }
+
     /// `SMSG_GUILD_QUERY_RESPONSE` — fill (or negatively fill) the identity cache.
     fn apply_query_response(&mut self, response: GuildQueryResponse) {
         self.queried.remove(&response.guild_id);

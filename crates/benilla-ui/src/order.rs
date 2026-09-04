@@ -386,14 +386,27 @@ pub enum ZTarget {
 /// [`UiScript::extract`](crate::script::UiScript::extract) drops hidden regions before they become
 /// quads. (The 1.12 region-draw cluster that would pin the *draw-time* skip is still flagged unread
 /// in wow-re's findings; the flag itself and its setter `0x77fcb0` are recorded.)
-pub fn traversal(arena: &WidgetArena) -> Vec<(ZTarget, ZKey)> {
-    let mut out: Vec<(ZTarget, ZKey)> = Vec::new();
+/// The sorted draw list, cached against a fingerprint of its inputs (decision 1979): the list
+/// is a pure function of every visible frame's `(strata, level, insertion)` and every attached
+/// region's layer/sub-level/kind/decl — a walk over ~2 k frames and ~6 k regions, then a sort,
+/// and it was rebuilt on every frame for the extract, the pointer and the edit box alike. The
+/// walk stays (it is the fingerprint); the sort and the allocation happen only when the walk
+/// hashes differently from the last one, which on a still frame it never does.
+/// The sorted draw list itself — shared, so a frame that changed nothing hands out the same one.
+pub type DrawList = std::sync::Arc<[(ZTarget, ZKey)]>;
+
+#[derive(Default, Debug, Clone)]
+pub struct OrderCache(std::cell::RefCell<Option<(u64, DrawList)>>);
+
+/// Every `(target, key)` of the draw list, in ARENA order — the one walk both the fingerprint
+/// and the rebuild are made of, so they cannot disagree.
+fn walk(arena: &WidgetArena, mut f: impl FnMut(ZTarget, ZKey)) {
     for (fh, frame) in arena.iter_frames() {
         if !frame.effective_visible {
             continue;
         }
         let (strata, level, insertion) = (frame.strata, frame.level, frame.insertion_seq);
-        out.push((ZTarget::Frame(fh), ZKey::frame(strata, level, insertion)));
+        f(ZTarget::Frame(fh), ZKey::frame(strata, level, insertion));
         for &rh in &frame.regions {
             let Some(region) = arena.region(rh) else {
                 continue;
@@ -412,11 +425,33 @@ pub fn traversal(arena: &WidgetArena) -> Vec<(ZTarget, ZKey)> {
                 matches!(region.kind, RegionKind::FontString),
                 region.decl_seq as u16,
             );
-            out.push((ZTarget::Region(rh), key));
+            f(ZTarget::Region(rh), key);
         }
     }
+}
+
+pub fn traversal(arena: &WidgetArena) -> DrawList {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut n = 0usize;
+    walk(arena, |t, k| {
+        t.hash(&mut hasher);
+        k.hash(&mut hasher);
+        n += 1;
+    });
+    n.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    if let Some((cached, list)) = arena.order_cache.0.borrow().as_ref() {
+        if *cached == fingerprint {
+            return list.clone();
+        }
+    }
+    let mut out: Vec<(ZTarget, ZKey)> = Vec::with_capacity(n);
+    walk(arena, |t, k| out.push((t, k)));
     out.sort_by_key(|&(_, k)| k);
-    out
+    let list: DrawList = out.into();
+    *arena.order_cache.0.borrow_mut() = Some((fingerprint, list.clone()));
+    list
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -617,7 +652,7 @@ mod tests {
             .unwrap();
         a.set_shown(hidden, false);
 
-        let list: Vec<ZTarget> = traversal(&a).into_iter().map(|(t, _)| t).collect();
+        let list: Vec<ZTarget> = traversal(&a).iter().map(|&(t, _)| t).collect();
 
         // Expected painter order: MEDIUM frame + its region first (lower strata), then the DIALOG
         // frame followed by its two regions (Background texture before Artwork fontstring). The
@@ -647,9 +682,8 @@ mod tests {
         let tracking = a.create(FrameKind::Frame, Some("Tracking".into()), None);
         let backdrop = a.create(FrameKind::Frame, Some("Backdrop".into()), None);
 
-        let order = |a: &WidgetArena| -> Vec<ZTarget> {
-            traversal(a).into_iter().map(|(t, _)| t).collect()
-        };
+        let order =
+            |a: &WidgetArena| -> Vec<ZTarget> { traversal(a).iter().map(|&(t, _)| t).collect() };
         // Declaration order while both start shown: tracking before backdrop.
         assert_eq!(
             order(&a),

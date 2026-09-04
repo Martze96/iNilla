@@ -62,6 +62,7 @@ mod spellbook;
 mod spells;
 mod stable;
 mod summon;
+mod tabard;
 mod taxi;
 mod trade;
 mod trainer;
@@ -238,6 +239,9 @@ pub use stable::{
     StabledPet,
 };
 pub use summon::{summon_response, SummonRequest};
+pub use tabard::{
+    battlemaster_hello, save_guild_emblem, tabard_vendor_activate, GUILD_EMBLEM_RESULT_MESSAGES,
+};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,

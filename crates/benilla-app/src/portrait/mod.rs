@@ -170,8 +170,11 @@ const STABLE_SLOT: &str = "stable";
 /// take the name from. It is not packed — the `.pub` is only what the loose
 /// `Interface\AddOns\Blizzard_InspectUI\` folder holds, while the real `.xml` and `.lua` sit
 /// inside `patch.MPQ`, which the chain mounts. 1832 migrated the window and the prefix went with it.
-const MODEL_PANE_BOOTHS: [(&str, &str); 6] = [
+const MODEL_PANE_BOOTHS: [(&str, &str); 7] = [
     ("CharacterModelFrame", PAPERDOLL_SLOT),
+    // The tabard designer's pane (1977): a PlayerModel of the player — the paper doll's own
+    // bake, whose body wears the design under preview while the window is up.
+    ("TabardModel", PAPERDOLL_SLOT),
     ("PetModelFrame", PETDOLL_SLOT),
     ("InspectModelFrame", INSPECT_SLOT),
     ("PetStableModel", STABLE_SLOT),

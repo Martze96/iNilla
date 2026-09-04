@@ -154,6 +154,7 @@ pub(super) struct WornEquip {
     /// no guild column, and a display-driven body never joins one, so this stays `None` there and a
     /// tabard in an NPC's bodyslot-9 column keeps its own art.
     pub(super) emblem: Option<benilla_formats::GuildEmblem>,
+    pub(super) tabard_preview: bool,
 }
 
 pub(super) fn resolve_worn_equip(
@@ -172,6 +173,7 @@ pub(super) fn resolve_worn_equip(
                 cloak: e.cloak,
                 helm: e.helm,
                 emblem: e.emblem,
+                tabard_preview: e.tabard_preview,
             })
             .unwrap_or_default(),
         // A character-model NPC's worn gear ships in its display's CreatureDisplayInfoExtra columns
@@ -184,6 +186,7 @@ pub(super) fn resolve_worn_equip(
                 cloak: 0,
                 helm: npc.equipment[0],
                 emblem: None,
+                tabard_preview: false,
             })
             .unwrap_or_default(),
         _ => WornEquip::default(),
@@ -196,16 +199,20 @@ pub(super) fn resolve_worn_equip(
 /// composite plan the atlas blits. One helper for the world attach path and the glue-preview
 /// builder — the selection law can't fork (decision 0465).
 ///
-/// [`EquipGeosets::tabard_preview`](benilla_formats::EquipGeosets::tabard_preview) (B6) is left
-/// `false` here: its only setter in the reference is the guild registrar's tabard designer, a
-/// window benilla has not migrated yet (decision 1864).
+/// [`EquipGeosets::tabard_preview`](benilla_formats::EquipGeosets::tabard_preview) (B6) is the
+/// tabard designer's flag, up on the local player's body while that window is open (decision
+/// 1977) — its only setter in the reference too.
 pub(in crate::entities) fn equip_geosets(
     displays: Option<&super::super::ItemDisplays>,
     bodyslots: &[u32; 8],
     cloak: u32,
     helm: u32,
+    tabard_preview: bool,
 ) -> benilla_formats::EquipGeosets {
-    let mut eg = benilla_formats::EquipGeosets::default();
+    let mut eg = benilla_formats::EquipGeosets {
+        tabard_preview,
+        ..Default::default()
+    };
     if let Some(d) = displays {
         let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
         for (i, id) in bodyslots.iter().enumerate() {
@@ -287,6 +294,7 @@ pub(super) fn build_char_skin_materials(
     // display asks for it. `None` = no guild, or its identity has not arrived; both leave the
     // tabard garment showing its own art.
     emblem: Option<benilla_formats::GuildEmblem>,
+    tabard_preview: bool,
     displays: Option<&super::super::ItemDisplays>,
     sections: Option<&SkinSections>,
     world_assets: Option<&WorldAssets>,
@@ -329,6 +337,7 @@ pub(super) fn build_char_skin_materials(
                 hair_color: look.hair_color,
                 equip,
                 emblem,
+                tabard_preview,
             };
             // `WOW_PROBE_SHARED_SKIN=1` — a PRICING lever, never a look: every body composites
             // the same key, so every body part of one mesh shares one material and bevy's
@@ -345,6 +354,7 @@ pub(super) fn build_char_skin_materials(
                     hair_color: 0,
                     equip: [0; 8],
                     emblem: None,
+                    tabard_preview: false,
                 };
             }
             match skin_cache.fetch(&key) {
@@ -375,6 +385,7 @@ pub(super) fn build_char_skin_materials(
                             key.hair_color,
                             worn,
                             key.emblem,
+                            key.tabard_preview,
                         )
                         .ok()??;
                     // Through the upload gate like every other texture: a composite is

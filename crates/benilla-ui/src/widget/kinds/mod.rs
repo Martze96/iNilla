@@ -20,6 +20,18 @@ pub use messageframe::*;
 pub enum FrameKind {
     /// Plain `CSimpleFrame` — the base container.
     Frame,
+    /// The reference's `CGWorldFrame` (decisions 1983/1984; wow-re `worldframe-widget.md`): the
+    /// singleton the 3D world renders behind. Registered as its own frame type (`"WorldFrame"`
+    /// @`0x843450`, factory `0x4959d0`) whose registry record is **destroyed on the first
+    /// instantiation** — a second `<WorldFrame>` or `CreateFrame("WorldFrame")` is an unknown type;
+    /// **a `Frame` to Lua** (`GetObjectType()` answers `"Frame"`, `IsObjectType("WorldFrame")` is
+    /// nil — its vtable inherits the base's type slots, the TaxiRouteFrame precedent); born with
+    /// key, mouse and wheel enabled (`0xE`) in **stratum 0, `WORLD`, below `BACKGROUND`**, which
+    /// no XML or Lua can name. benilla draws the world through Bevy, so the kind is a full-screen
+    /// frame whose hits are the WORLD's: the app's pointer arbiter treats a hovered WorldFrame as
+    /// not-over-UI while its own scripts still fire, as the reference's do before the click's
+    /// binding runs.
+    WorldFrame,
     Button,
     /// `CLootButton` (`Ui\\LootFrame.h:21`, factory `0x495a30`, size `0x4e0`) — a
     /// **registered `CreateFrame` type**, one of the eight the client registers through

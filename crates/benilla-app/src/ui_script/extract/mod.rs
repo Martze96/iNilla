@@ -1565,7 +1565,13 @@ fn convert_entry(
                 .any(|c| !(-0.001..=1.001).contains(c));
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
-                    let resolved = if circular {
+                    // The tabard designer's emblem cells (1977): the reference installs a
+                    // generated 128×64 / 128×32 image — white RGB carrying the emblem BLP's own
+                    // alpha — into the Texture the setter was handed; the region carries that as
+                    // a token path and the resolver builds exactly that image.
+                    let resolved = if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
+                        a.emblem_mask_texture(blp, images)
+                    } else if circular {
                         a.portrait_texture(p, images)
                     } else if tiled {
                         a.sprite_texture_tiled(p, images)

@@ -322,14 +322,30 @@ pub(crate) fn publish_model_alpha(
             Option<&UnitAppearFade>,
             Option<&DespawnFade>,
             Has<crate::world_unit::ViewerUnit>,
-            Option<&ModelFade>,
+            Option<Ref<ModelFade>>,
             Option<&mut ModelAlpha>,
         ),
         With<crate::world_unit::WorldUnit>,
     >,
+    // A declaration that went away is a change the `Ref` cannot see: those units are due.
+    mut undeclared: RemovedComponents<ModelFade>,
 ) {
     let now = time.elapsed_secs();
+    let undeclared: bevy::platform::collections::HashSet<Entity> = undeclared.read().collect();
     for (entity, appear, despawn, is_self, declared, current) in &mut units {
+        // With no ramp in flight and not the self body, the alpha is the declared fade alone —
+        // a published value that cannot have moved unless the declaration did. Every resident
+        // unit was recomputed and compared each frame (decision 1979's floor).
+        if appear.is_none()
+            && despawn.is_none()
+            && !is_self
+            && current.is_some()
+            && !declared.as_ref().is_some_and(|d| d.is_changed())
+            && !undeclared.contains(&entity)
+        {
+            continue;
+        }
+        let declared = declared.as_deref();
         let alpha = model_render_alpha(
             now,
             appear.copied(),

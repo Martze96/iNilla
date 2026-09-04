@@ -1328,12 +1328,13 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 /// name-for-name comparison against the reference could not see it. **Sweeping what is actually
 /// visible can**, which is why this is written against the observable and not against a list.
 ///
-/// The three survivors are each required to survive:
+/// The two survivors are each required to survive (a third, `WorldFrame`, was one while our
+/// `UIParent.xml` declared it; since decision 1983 it is the reference's own file off the chain,
+/// which this sweep over the SHIPPED tree does not walk — it stays up through a fly-by exactly as
+/// before, top-level and never hidden):
 ///
 /// - `CinematicFrame` — the frame being *shown*. The reference declares it with no parent for
 ///   exactly this reason, and `SetFullScreenFrame` shows it in the same breath as hiding UIParent.
-/// - `WorldFrame` — the 3D scene's frame. Ours renders nothing (Bevy draws the world), but it is
-///   the reference's own bottom-of-strata frame and a cinematic is a thing you watch *in* it.
 /// - `BenillaFadeDriver` — a 1x1 frame with no textures and no layers, whose only content is an
 ///   `OnUpdate` running `UIFrameFadeUpdate`. It draws nothing, and it must not be hidden: a hidden
 ///   frame's `OnUpdate` does not run, so parenting it would freeze every in-flight `UIFrameFade`
@@ -1393,9 +1394,9 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     after.sort_unstable();
     assert_eq!(
         after,
-        ["BenillaFadeDriver", "CinematicFrame", "WorldFrame"],
+        ["BenillaFadeDriver", "CinematicFrame"],
         "something is drawing over the fly-by (see this test's header for why exactly these \
-         three are allowed to survive)"
+         two are allowed to survive)"
     );
 
     // …and the player gets it all back.

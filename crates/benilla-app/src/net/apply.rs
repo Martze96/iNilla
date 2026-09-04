@@ -262,6 +262,7 @@ pub(super) fn apply_net_updates(
                         ResMut<crate::ui_battlefield::Battlefield>,
                         ResMut<crate::tutorial::Tutorials>,
                         ResMut<crate::ui_battlefield_positions::BattlefieldPositions>,
+                        ResMut<crate::ui_tabard::TabardOpen>,
                     ),
                 ),
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
@@ -489,6 +490,7 @@ pub(super) fn apply_net_updates(
                         mut battlefield,
                         mut tutorials,
                         mut battlefield_positions,
+                        mut tabard,
                     ),
                 ),
                 mut poi_marker,
@@ -981,6 +983,14 @@ pub(super) fn apply_net_updates(
             SessionEvent::MeetingStoneNotice(notice) => meeting_stone.apply_notice(notice),
             SessionEvent::TutorialFlags(bytes) => tutorials.apply_flags(&bytes),
             SessionEvent::BattlefieldPositions(packet) => battlefield_positions.apply(packet),
+            SessionEvent::TabardVendorActivate(vendor) => tabard.open(vendor),
+            // A saved emblem evicts our guild's cached record (`0x5e715f`): the next query
+            // anywhere re-fetches it — no event, no packet.
+            SessionEvent::SaveGuildEmblemResult(result) => {
+                if tabard.apply_result(result) {
+                    guild.evict_own_identity();
+                }
+            }
             SessionEvent::PlayerBound { binder: npc, area } => {
                 debug!("net: bound to area {area} by {npc:#x}");
                 crate::ui_binder::apply::bound(

@@ -361,7 +361,11 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// the number the `FPS_PROBE` line prints as `fx=`. It is the reading that refuted the
 /// additive-window regroup on the crowd rig (decision 1955): a lane whose merge walk is the
 /// only place the count exists has to publish it or stay unmeasurable.
-const CEILING: usize = 174;
+/// And 174 → 175: `dev_state::STILL_INPUTS_CHANGED`, an instrument PUBLISH — how many frames
+/// each whole-scene input of the still-frame skips (1979) read as changed. Counted in the
+/// world crate so the probe names ONE static instead of the four resources the skips read; the
+/// reading is what says whether a gate ever engages.
+const CEILING: usize = 175;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

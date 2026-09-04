@@ -251,6 +251,10 @@ pub const SMSG_AI_REACTION: u16 = 0x013C; // 316
 pub const SMSG_SPELL_START: u16 = 0x0131; // 305
 pub const SMSG_SPELL_GO: u16 = 0x0132; // 306
 pub const SMSG_PLAY_SPELL_VISUAL: u16 = 0x01F3; // 499
+/// The guild tabard designer's two-way pair (decision 1977; bodies in [`super::tabard`]): the
+/// vendor activation that opens the frame, and the save whose reply is a six-row result.
+pub const MSG_SAVE_GUILD_EMBLEM: u16 = 0x01F1; // 497
+pub const MSG_TABARDVENDOR_ACTIVATE: u16 = 0x01F2; // 498
 pub const SMSG_CANCEL_AUTO_REPEAT: u16 = 0x029C; // 668
 pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 
@@ -606,6 +610,9 @@ pub const CMSG_INSPECT: u16 = 0x0114; // 276
 /// Same three silent refusals as [`CMSG_INSPECT`] (`MiscHandler.cpp:962-972`), but *unlike* it
 /// this handler does not set our selection. Decision 1512.
 pub const MSG_INSPECT_HONOR_STATS: u16 = 0x02D6; // 726
+/// The NPC-click ladder's BATTLEMASTER arm (`0x5e01a0`): a `u64` NPC guid, no gate; the server
+/// answers with `SMSG_BATTLEFIELD_LIST` (decision 1977 retires 1861's greeting stand-in).
+pub const CMSG_BATTLEMASTER_HELLO: u16 = 0x02D7; // 727
 pub const CMSG_SET_SELECTION: u16 = 0x013D; // 317
 pub const CMSG_ATTACKSWING: u16 = 0x0141; // 321
 pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322

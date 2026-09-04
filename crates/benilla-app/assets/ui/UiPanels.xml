@@ -37,6 +37,7 @@
         -- 1673, and Petition + GuildRegistrar with 1672 — all of them are rows below.
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["TabardFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
         -- The item-text reader (decision 0572, ItemTextFrame.xml): the ref's own l.20 verbatim
         -- (`UIPanelWindows["ItemTextFrame"] = { area = "left", pushable = 0 }`). The missing row

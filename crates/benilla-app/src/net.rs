@@ -1308,6 +1308,20 @@ pub(crate) enum ClientCommand {
     /// `RequestBattlefieldPositions()` — `MSG_BATTLEGROUND_PLAYER_POSITIONS` outbound (empty;
     /// decision 1980), throttled app-side to the reference's 5000 ms.
     RequestBattlefieldPositions,
+    // ── The tabard designer (decision 1977) ──
+    /// The NPC-click ladder's TABARDDESIGNER arm — `MSG_TABARDVENDOR_ACTIVATE` out.
+    TabardVendorActivate {
+        npc: u64,
+    },
+    /// `TabardModel:Save()` past its pre-flight checks — `MSG_SAVE_GUILD_EMBLEM` out.
+    SaveGuildEmblem {
+        vendor: u64,
+        design: [u32; 5],
+    },
+    /// The ladder's BATTLEMASTER arm — `CMSG_BATTLEMASTER_HELLO`; the list window answers.
+    BattlemasterHello {
+        npc: u64,
+    },
     /// `JoinBattlefield` when the list arrived without one — `CMSG_BATTLEFIELD_JOIN`.
     BattlefieldJoin {
         map_id: u32,

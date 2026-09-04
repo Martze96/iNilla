@@ -689,6 +689,9 @@ pub fn spawn_emitter(
             model_instances: Vec::new(),
         },
     ));
+    if emitter.recursion.is_some() {
+        spawned.insert(PendingChildren);
+    }
     if let Some(node) = lit_node {
         spawned.insert(crate::interior::EmitterLitBy(node));
     }
@@ -737,14 +740,23 @@ pub(crate) fn owner_last_bias(reach: f32) -> f32 {
 /// parent's anchor and rung). The reference wires at the child model's async-load completion
 /// (`0x7b5dd0`); this system is that completion hook. A child never self-emits ambiently — its
 /// only particle source is the per-parent-particle drive in the sim.
+/// An emitter whose child-emitter model (`ParticleEmitter::recursion`) has not been resolved
+/// yet — the only emitters [`wire_child_emitters`] visits. Without it the wiring walked every
+/// resident emitter every frame to find the handful still waiting on a model (decision 1979).
+#[derive(Component)]
+pub(crate) struct PendingChildren;
+
 pub(crate) fn wire_child_emitters(
     mut commands: Commands,
     models: Res<Assets<benilla_assets::M2Model>>,
-    mut emitters: Query<(
-        Entity,
-        &mut ParticleEmitter,
-        Has<crate::interior::EmitterLitBy>,
-    )>,
+    mut emitters: Query<
+        (
+            Entity,
+            &mut ParticleEmitter,
+            Has<crate::interior::EmitterLitBy>,
+        ),
+        With<PendingChildren>,
+    >,
 ) {
     for (entity, mut emitter, registered) in &mut emitters {
         let Some(model) = emitter.recursion.as_ref().and_then(|h| models.get(h)) else {
@@ -775,6 +787,7 @@ pub(crate) fn wire_child_emitters(
             .collect();
         emitter.recursion = None;
         emitter.children = children;
+        commands.entity(entity).remove::<PendingChildren>();
         // A child emitter is a whole emitter record of the recursion model with its own flag word,
         // so it takes its own lighting verdict (the same rule its texture/blend/fog identity
         // follows). A LIT child under an UNLIT parent is therefore a light-node consumer whose

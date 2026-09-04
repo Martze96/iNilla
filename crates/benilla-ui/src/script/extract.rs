@@ -100,7 +100,7 @@ impl UiScript {
         // [`effective_clip`] walks a quad's owner up through this to find every ancestor ScrollFrame
         // it is clipped by (nested ScrollFrames intersect).
         let scroll_sources = scroll_clip_sources(&model);
-        for (target, zkey) in list {
+        for &(target, zkey) in list.iter() {
             let (rect, alpha, content, clip, scale) = match target {
                 ZTarget::Frame(fh) => {
                     let frame = model.arena.frame(fh);

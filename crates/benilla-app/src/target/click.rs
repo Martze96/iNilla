@@ -1316,12 +1316,12 @@ pub(crate) enum ServiceAction {
 /// carrying no gossip bit gets nothing at all — no packet, no event, no error. That is not an
 /// omission here, it is the reference's own answer.
 ///
-/// **Two arms deviate deliberately, and here is the whole of it**: `TabardDesigner` should send
-/// `MSG_TABARDVENDOR_ACTIVATE` and `Battlemaster` `CMSG_BATTLEMASTER_HELLO`, and benilla has
-/// neither window to open with the reply. They keep the universal gossip greeting, which against
-/// vmangos still puts a usable menu on screen; sending the faithful opcode into a reply we drop
-/// would trade a working affordance for a wire detail nobody can see. Each retires the moment its
-/// window exists — that is the condition, written down (decision 1861).
+/// The `TabardDesigner` and `Battlemaster` arms send their own opcodes (`0x5f051a`'s
+/// `MSG_TABARDVENDOR_ACTIVATE`, `0x5f0551`'s `CMSG_BATTLEMASTER_HELLO`) since decision 1977 —
+/// 1861 had them on the universal gossip greeting while neither window existed; the battleground
+/// list (1974) and the tabard designer (1977) answer the replies now. The tabard arm's one gate
+/// — the shapeshift refusal `ERR_EMBLEMERROR_NOTABARDGEOSET` when the player's displayed model is
+/// not the native one, and the same-vendor no-op — is named, not built (1977's record).
 pub(crate) fn service_action(
     arm: ServiceArm,
     guid: u64,
@@ -1364,9 +1364,11 @@ pub(crate) fn service_action(
         ServiceArm::Petitioner => {
             ServiceAction::Send(ClientCommand::PetitionShowList { npc: guid })
         }
-        // The two documented deviations — see this function's doc.
-        ServiceArm::TabardDesigner | ServiceArm::Battlemaster => {
-            ServiceAction::Send(ClientCommand::GossipHello { guid })
+        ServiceArm::TabardDesigner => {
+            ServiceAction::Send(ClientCommand::TabardVendorActivate { npc: guid })
+        }
+        ServiceArm::Battlemaster => {
+            ServiceAction::Send(ClientCommand::BattlemasterHello { npc: guid })
         }
         ServiceArm::Auctioneer => {
             ServiceAction::Send(ClientCommand::AuctionHello { auctioneer: guid })
@@ -1864,13 +1866,15 @@ mod tests {
         assert_eq!(sent(ServiceArm::SpiritHealer, false), "silent");
         assert_eq!(sent(ServiceArm::SpiritGuide, false), "silent");
         assert_eq!(sent(ServiceArm::SpiritHealer, true), "ask-spirit-healer");
-        // The two documented deviations keep the greeting until their windows exist.
-        for arm in [ServiceArm::TabardDesigner, ServiceArm::Battlemaster] {
-            assert!(matches!(
-                service_action(arm, 0x42, false, None),
-                ServiceAction::Send(ClientCommand::GossipHello { guid: 0x42 })
-            ));
-        }
+        // The two arms 1861 had on the greeting send their own opcodes since 1977.
+        assert!(matches!(
+            service_action(ServiceArm::TabardDesigner, 0x42, false, None),
+            ServiceAction::Send(ClientCommand::TabardVendorActivate { npc: 0x42 })
+        ));
+        assert!(matches!(
+            service_action(ServiceArm::Battlemaster, 0x42, false, None),
+            ServiceAction::Send(ClientCommand::BattlemasterHello { npc: 0x42 })
+        ));
     }
 
     /// **The vendor arm is a fork, and only the vendor arm** — decision 1914.

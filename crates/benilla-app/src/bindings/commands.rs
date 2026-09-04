@@ -1156,6 +1156,16 @@ const TABLE: &[Spec] = &[
     //
     // On a Mac keyboard the token arrives as F13, which is the reference's own Mac mapping rather
     // than an accommodation (`KEY_PRINTSCREEN_MAC = "F13"`); `super::chord` does the translation.
+    // The stock WorldFrame.lua's framerate readout (decision 1983): `FramerateLabel`/`FramerateText`
+    // toggled by `ToggleFramerate()`, refreshed off `GetFramerate()` every quarter second by
+    // `WorldFrame_OnUpdate`. CTRL-R is the install's own DefaultBindings.wtf chord (1804).
+    spec!(
+        "TOGGLEFPS",
+        MISC,
+        Kind::Edge("ToggleFramerate();"),
+        Some("CTRL-R"),
+        None
+    ),
     spec!(
         "SCREENSHOT",
         MISC,
@@ -1848,14 +1858,6 @@ pub(crate) static ABSENT: &[Absent] = &[
     // ── Action bar ──────────────────────────────────────────────────────────────────────
     // ── Interface ───────────────────────────────────────────────────────────────────────
     // ── Misc ────────────────────────────────────────────────────────────────────────────
-    absent!(
-        "TOGGLEFPS",
-        ["ToggleFramerate"],
-        "the only framerate readout here is the dev HUD's cost pill, which is behind \
-         `#[cfg(feature = \"dev\")]` and is an instrument, not a player display (perf/hud.rs) — \
-         there is no player-facing framerate to toggle. (0997 recorded this as \"the perf pill is \
-         always-on by design\"; the pill is not the thing TOGGLEFPS toggles.)"
-    ),
     // The nine `hidden="true" debug="true"` rows. Every one of them names an instrument benilla
     // really has (the tri counter, the collision display, the portal draw, the perf pill) — they
     // are absent because those instruments answer to the dev plane's chords (0702/1043), not to a

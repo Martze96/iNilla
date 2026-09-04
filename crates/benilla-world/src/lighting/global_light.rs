@@ -55,7 +55,7 @@ use crate::view::WorldCamera;
 /// allows. Keeping the probes out of this struct keeps it stack-cheap: the ExtractResource clone
 /// runs every frame, and a ~900 KB by-value blob overflowed a render-thread stack (measured live).
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightStd430 {
     rows: [[f32; 4]; LIGHT_HEADER_ROWS],
     points: [[f32; 4]; 2 * MAX_POINT_LIGHTS],
@@ -307,8 +307,11 @@ fn build_light_data(
     // Per-kind water swatches (shallow/deep rgb + alpha). River/lake use the non-ocean path.
     let (rs, rd, rsa, rda) = l.water_colors(LiquidKind::Still);
     let (os, od, osa, oda) = l.water_colors(LiquidKind::Ocean);
-    data.0.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
-    let rows = &mut data.0.rows;
+    // Built in a scratch copy and written through `ResMut` only when a row moved: the extract
+    // clones this 8.5 KB blob every frame it reads as changed, and a parked frame changes nothing.
+    let mut fresh = data.0;
+    fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
+    let rows = &mut fresh.rows;
     rows[3] = [l.spec[0], l.spec[1], l.spec[2], 20.0]; // 3 light_spec (w=terrain shininess 20)
     rows[4] = [l.fog_color[0], l.fog_color[1], l.fog_color[2], fog_enable]; // 4 fog_color (w=enable)
     rows[5] = [l.fog_start, l.fog_end, 0.0, farclip]; // 5 fog_params (z unused; w=farclip)
@@ -368,10 +371,10 @@ fn build_light_data(
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     pts.truncate(MAX_POINT_LIGHTS);
-    data.0.rows[20] = [pts.len() as f32, 0.0, 0.0, 0.0];
+    fresh.rows[20] = [pts.len() as f32, 0.0, 0.0, 0.0];
     for (i, (_, p, range, rgb)) in pts.iter().enumerate() {
-        data.0.points[2 * i] = [p.x, p.y, p.z, *range];
-        data.0.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];
+        fresh.points[2 * i] = [p.x, p.y, p.z, *range];
+        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];
     }
     // `WOW_POINTS_DUMP=1`: print the committed point table once a second — the numeric probe for
     // "what is actually lighting this ground". A pool that reads wrong is one of a small set of
@@ -443,7 +446,7 @@ fn build_light_data(
                     (h ^ u64::from(v.to_bits())).wrapping_mul(0x1000_0000_01b3)
                 });
             eprintln!("[light] rows {hash:#018x}");
-            for (i, r) in data.0.rows.iter().enumerate() {
+            for (i, r) in fresh.rows.iter().enumerate() {
                 eprintln!(
                     "  {i:2} {:08x} {:08x} {:08x} {:08x}   {:9.5} {:9.5} {:9.5} {:9.5}",
                     r[0].to_bits(),
@@ -457,6 +460,9 @@ fn build_light_data(
                 );
             }
         }
+    }
+    if data.0 != fresh {
+        data.0 = fresh;
     }
 }
 

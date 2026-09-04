@@ -721,7 +721,13 @@ pub(super) fn attach_entity_visuals(
             // resolved equipment display rows; an NPC / naked default otherwise.
             // (The helm's hide-mask row pair, RF-0083: hair/facial/ears tuck under it. For a
             // character-model NPC the helm id is its CreatureDisplayInfoExtra head column.)
-            let equip_geosets = equip_geosets(displays.as_deref(), &equip, worn.cloak, worn.helm);
+            let equip_geosets = equip_geosets(
+                displays.as_deref(),
+                &equip,
+                worn.cloak,
+                worn.helm,
+                worn.tabard_preview,
+            );
             let visible_geosets: Option<Vec<u16>> = look.as_ref().and_then(|l| {
                 let cg = characters.as_deref()?;
                 Some(cg.0.visible_geosets(
@@ -743,6 +749,7 @@ pub(super) fn attach_entity_visuals(
                     equip,
                     worn.cloak,
                     worn.emblem,
+                    worn.tabard_preview,
                     displays.as_deref(),
                     sections.as_deref(),
                     world_assets.as_deref(),

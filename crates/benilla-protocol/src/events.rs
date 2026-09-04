@@ -492,6 +492,10 @@ pub enum SessionEvent {
     /// The battleground teammates' positions and the flag carrier
     /// (`MSG_BATTLEGROUND_PLAYER_POSITIONS`), raw world floats (decision 1980).
     BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// `MSG_TABARDVENDOR_ACTIVATE` — the vendor whose designer opens (decision 1977).
+    TabardVendorActivate(u64),
+    /// `MSG_SAVE_GUILD_EMBLEM` — the save's result row (decision 1977).
+    SaveGuildEmblemResult(u32),
     /// A group join's verdict (`SMSG_GROUP_JOINED_BATTLEGROUND`): `0xFFFFFFFE` deserters, a map id
     /// joined, anything else the generic failure — three message lines, no state (decision 1974).
     GroupJoinedBattleground { result: u32 },

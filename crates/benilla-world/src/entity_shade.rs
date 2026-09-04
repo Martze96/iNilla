@@ -297,7 +297,9 @@ pub(crate) fn update_ground_shade(
     dirty_roots: Res<ShadeDirtyRoots>,
     mut self_log: Local<f32>,
 ) {
-    root_shade.clear();
+    // The map persists across frames (decision 1979): a settled root's byte is already in it,
+    // and re-inserting ~1.3 k entries a frame was the walk's cost. A despawned root's entry is
+    // dead weight nothing reads — entity ids are generational, so a reuse never aliases it.
     let Some(streamer) = streamer else {
         return;
     };
@@ -383,7 +385,9 @@ pub(crate) fn update_ground_shade(
         // Every root enters the card map, hidden or not — the insert is one hash write, and a
         // hidden body's card used to walk its whole parent chain to a `None` precisely because
         // its root was left out.
-        root_shade.insert(root, byte);
+        if root_shade.get(&root) != Some(&byte) {
+            root_shade.insert(root, byte);
+        }
         // A root the election hid (1270/1475) draws nothing, so the re-assert walk below is
         // skipped whole — 1473's audit found it running over every part of every off-view body.
         // The ramps above kept stepping, so the byte is current the frame the body wakes; the

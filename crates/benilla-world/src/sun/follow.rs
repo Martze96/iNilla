@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use crate::clouds::{occ1_moon, occ1_sun, CloudCoverage};
 use crate::dev_state::DebugState;
 use crate::lighting::WowLighting;
-use crate::terrain_stream::{terrain_height_under, TerrainStreamer};
+use crate::terrain_stream::TerrainStreamer;
 use crate::view::WorldCamera;
 use crate::wdl::WdlStreamer;
 use crate::wmo_portal::CameraInteriorClaim;
@@ -337,9 +337,15 @@ impl FlareGate<'_, '_> {
             // Resident detailed terrain first; the coarse WDL surface everywhere else (it
             // covers the whole map, so it also plugs the ADT-ring-to-farclip gap).
             let (streamer, adt_tiles, wdl) = (&self.streamer, &self.adt_tiles, &self.wdl);
+            let tile = std::cell::RefCell::new(None);
             let oracle = |p| {
-                terrain_height_under(streamer, adt_tiles, p)
-                    .or_else(|| wdl.as_ref().and_then(|w| w.height_under(p)))
+                crate::terrain_stream::terrain_height_under_cached(
+                    streamer,
+                    adt_tiles,
+                    p,
+                    &mut tile.borrow_mut(),
+                )
+                .or_else(|| wdl.as_ref().and_then(|w| w.height_under(p)))
             };
             // The round-robin drip (decision 1436): an unprimed mask marches every cell once,
             // a primed one re-prices FLARE_RAYS_PER_FRAME — the slew smooths the ≤8-frame

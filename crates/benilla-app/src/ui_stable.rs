@@ -64,7 +64,11 @@ impl Plugin for UiStablePlugin {
                     // `PetStable_Update`'s own re-pick (`PetStable.lua:44-59`) runs inside the
                     // event dispatch `feed_stable` performs. Reading it before the tick would show
                     // the previous pet for a frame after every click.
-                    feed_stable_booth.after(UiInput),
+                    feed_stable_booth
+                        .after(UiInput)
+                        // Nothing samples the booth while no stable is open, and the feed's
+                        // first line is a name scan over the whole frame arena (1979's floor).
+                        .run_if(|open: Res<StableOpen>| open.npc.is_some()),
                 ),
             );
     }

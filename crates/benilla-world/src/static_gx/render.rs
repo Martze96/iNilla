@@ -115,7 +115,7 @@ fn mark_world_camera(
 /// regions are the SAME drain phase in the 1.12 order (both are the M2 scene, after the WMO
 /// phase), so the cull sorts them near-first TOGETHER — a far cell must not shade before a
 /// near building's furniture.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum GxDoodadVis {
     Cell((i32, i32)),
     /// A prop region + this frame's per-referrer-SET verdicts.
@@ -124,7 +124,7 @@ pub(crate) enum GxDoodadVis {
 
 /// One region's per-selection-grain verdicts for this frame — a WMO region's grain is the GROUP,
 /// a prop region's the referrer-SET index, and both index these vectors the same way.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct GxSel {
     /// Drawn this frame: PVS ∧ frustum ∧ farclip ∧ the exterior window gate.
     pub drawn: Vec<bool>,
@@ -900,11 +900,35 @@ pub(super) fn build(app: &mut App) {
 /// Copy the collector's published half into the extractable resource.
 pub(super) fn publish_gx_world(gx: Res<super::StaticGx>, mut out: ResMut<GxWorld>) {
     let _t = super::gx_perf_guard(2);
-    out.cells.clone_from(&gx.world.cells);
-    out.visible.clone_from(&gx.world.visible);
-    out.wmos.clone_from(&gx.world.wmos);
-    out.props.clone_from(&gx.world.props);
-    out.visible_wmos.clone_from(&gx.world.visible_wmos);
+    // Compare before writing: a parked frame's collector walk produces the same five
+    // structures it produced last frame, and an unconditional `clone_from` through `ResMut`
+    // both re-cloned them here and marked the resource changed, so the render world cloned
+    // the whole set again at extract — 1435's two 0.2 ms rows, paid on every frame that
+    // changed nothing (decision 1979). The maps hold `Arc`s, so identity is pointer identity.
+    fn same_arcs<K: std::hash::Hash + Eq>(
+        a: &HashMap<K, std::sync::Arc<GxCellDraw>>,
+        b: &HashMap<K, std::sync::Arc<GxCellDraw>>,
+    ) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .all(|(k, v)| b.get(k).is_some_and(|w| std::sync::Arc::ptr_eq(v, w)))
+    }
+    let w = &gx.world;
+    if !same_arcs(&out.cells, &w.cells) {
+        out.cells.clone_from(&w.cells);
+    }
+    if out.visible != w.visible {
+        out.visible.clone_from(&w.visible);
+    }
+    if !same_arcs(&out.wmos, &w.wmos) {
+        out.wmos.clone_from(&w.wmos);
+    }
+    if !same_arcs(&out.props, &w.props) {
+        out.props.clone_from(&w.props);
+    }
+    if out.visible_wmos != w.visible_wmos {
+        out.visible_wmos.clone_from(&w.visible_wmos);
+    }
 }
 
 #[cfg(test)]

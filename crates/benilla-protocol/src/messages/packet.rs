@@ -320,6 +320,10 @@ pub enum ServerPacket {
     BattlefieldList(crate::messages::BattlefieldList),
     /// `MSG_BATTLEGROUND_PLAYER_POSITIONS` inbound — the teammates and the flag carrier (1980).
     BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// `MSG_TABARDVENDOR_ACTIVATE` inbound — the vendor guid that opens the tabard designer (1977).
+    TabardVendorActivate(u64),
+    /// `MSG_SAVE_GUILD_EMBLEM` inbound — the save's result row (1977).
+    SaveGuildEmblemResult(u32),
     /// `SMSG_GROUP_JOINED_BATTLEGROUND` — a group join's verdict (decision 1974).
     GroupJoinedBattleground {
         result: u32,
@@ -1591,6 +1595,8 @@ impl ServerPacket {
             ServerPacket::PvpLogData(_) => "MSG_PVP_LOG_DATA".into(),
             ServerPacket::BattlefieldList(_) => "SMSG_BATTLEFIELD_LIST".into(),
             ServerPacket::BattlefieldPositions(_) => "MSG_BATTLEGROUND_PLAYER_POSITIONS".into(),
+            ServerPacket::TabardVendorActivate(_) => "MSG_TABARDVENDOR_ACTIVATE".into(),
+            ServerPacket::SaveGuildEmblemResult(_) => "MSG_SAVE_GUILD_EMBLEM".into(),
             ServerPacket::GroupJoinedBattleground { .. } => "SMSG_GROUP_JOINED_BATTLEGROUND".into(),
             ServerPacket::BattlegroundPlayer { joined: true, .. } => {
                 "SMSG_BATTLEGROUND_PLAYER_JOINED".into()

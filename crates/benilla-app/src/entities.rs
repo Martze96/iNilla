@@ -561,6 +561,8 @@ pub(super) struct SkinKey {
     /// guilds' members wear the *same* tabard display and must not share one atlas. Without it the
     /// first guild to composite would lend its crest to every other guild on screen.
     pub(super) emblem: Option<benilla_formats::GuildEmblem>,
+    /// The tabard designer's preview flag (1977): the emblem paints over an empty tabard slot.
+    pub(super) tabard_preview: bool,
 }
 
 /// Marks a net entity whose visual (model children or fallback cube) has been attached, so the attach
@@ -668,6 +670,15 @@ type WireBody = (
     Option<&'static benilla_world::world_unit::WorldUnit>,
 );
 
+/// The edges on which a body's [`WorldUnit`](benilla_world::world_unit::WorldUnit) restatement can
+/// move — [`publish_world_units`]' query filter (the anchor's removal is read separately).
+type WireBodyMoved = Or<(
+    Changed<NetEntity>,
+    Changed<collision_height::CollisionHeight>,
+    Changed<ModelBound>,
+    Added<crate::transport::TransportAnchor>,
+)>;
+
 /// **Restate every wire body as a [`WorldUnit`](benilla_world::world_unit::WorldUnit)** — the game's half
 /// of the unit inversion (see that module).
 ///
@@ -678,14 +689,24 @@ type WireBody = (
 /// visible to the world this frame.
 fn publish_world_units(
     mut commands: Commands,
-    bodies: Query<WireBody>,
+    // Only bodies whose inputs moved this frame: the restatement is a pure function of these
+    // four, and walking every resident body to compare equal answers was ~1.3 k struct builds
+    // a frame at the Stormwind pin (decision 1979's floor). A body leaving its transport loses
+    // the anchor without a `Changed` — that edge is read off `unanchored`.
+    bodies: Query<WireBody, WireBodyMoved>,
+    all_bodies: Query<WireBody>,
+    mut unanchored: RemovedComponents<crate::transport::TransportAnchor>,
     viewers: Query<(
         Entity,
         Has<crate::net::Embodied>,
         Has<benilla_world::world_unit::ViewerUnit>,
     )>,
 ) {
-    for (entity, net, height, bound, anchored, current) in &bodies {
+    let freed: Vec<Entity> = unanchored.read().collect();
+    let due = bodies
+        .iter()
+        .chain(freed.iter().filter_map(|&e| all_bodies.get(e).ok()));
+    for (entity, net, height, bound, anchored, current) in due {
         let want = benilla_world::world_unit::WorldUnit {
             // The wire kind is answered HERE and never handed over (1177): the engine asks "does
             // this body displace water", and translating its own vocabulary into that answer is

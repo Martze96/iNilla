@@ -137,6 +137,10 @@ pub(crate) struct Equipment {
     /// wears*: the composite key includes it, so the re-dress diff below is the one place a change
     /// of guild, of tabard, and a late-arriving identity all converge — no second latch.
     pub(crate) emblem: Option<benilla_formats::GuildEmblem>,
+    /// The tabard designer's preview (decision 1977, wow-re RF-0089 §7c `[cc+0xc]`): set on the
+    /// LOCAL player's body while the designer is open, so the body wears the tabard geoset over an
+    /// empty slot and the composite paints `emblem` (the design under preview) onto it.
+    pub(crate) tabard_preview: bool,
     pub(crate) settled: bool,
 }
 

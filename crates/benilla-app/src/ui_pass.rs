@@ -426,6 +426,14 @@ pub(crate) struct UiQuadMaterial {
     /// **per axis**, with `min > max` on an axis disabling that axis. See [`UiQuad::uv_clamp`].
     #[uniform(11)]
     uv_clamp: Vec4,
+    /// A whole-run colour multiplier, `ONE` for a pooled material. A run of ONE quad with one
+    /// colour carries that colour here and draws white vertices (decision 1979): the stock
+    /// PlayerFrame status glow pulses its colour every frame, and as a vertex colour that was
+    /// one `Assets<Mesh>` write a frame — which arms bevy's asset-changed probes over every
+    /// `Mesh3d` row in the scene (~44 k at the Stormwind pin, six material families' worth).
+    /// A material write arms only the 2D quad family's probe (~110 rows).
+    #[uniform(12)]
+    tint: Vec4,
 }
 
 impl UiQuadMaterial {
@@ -452,6 +460,7 @@ impl UiQuadMaterial {
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
             mask: None,
             // A tile samples its whole image; there is no cell to stay inside of.
+            tint: Vec4::ONE,
             uv_clamp: UV_CLAMP_OFF,
         }
     }
@@ -823,6 +832,9 @@ impl Run {
 /// material asset forever, so `prepare_assets` re-prepares nothing on a steady frame). Before
 /// this, every rebuild despawned every batch and allocated fresh meshes + materials — ~9 ms/frame
 /// of render-side churn in a live city (0365).
+/// A solo run's material with the key and tint it was built for.
+type SoloMaterial = (Handle<UiQuadMaterial>, MatKey, [f32; 4]);
+
 #[derive(Default)]
 struct BatchPools {
     entities: Vec<Entity>,
@@ -840,6 +852,10 @@ struct BatchPools {
     /// Goldshire pin).
     offsets: Vec<Vec2>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
+    /// Per slot: the solo-run material (key + tint it was built with), `None` while pooled.
+    solo: Vec<Option<SoloMaterial>>,
+    /// Per slot: the material the batch entity currently carries.
+    bound: Vec<Option<AssetId<UiQuadMaterial>>>,
 }
 
 /// One pooled batch slot's full identity: the mesh bytes plus everything the entity was last
@@ -1035,6 +1051,14 @@ fn rebuild_ui_mesh(
         .collect();
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
+        for slot in &mut pools.solo {
+            if slot
+                .as_ref()
+                .is_some_and(|(_, k, _)| retired.contains(&k.0))
+            {
+                *slot = None;
+            }
+        }
     }
     let (hidden, mesh_cost, cost_wanted) =
         (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
@@ -1309,13 +1333,82 @@ fn rebuild_ui_mesh(
         // GPU mesh allocator's free+realloc each frame (0.86 ms/frame at the Stormwind pin).
         // Full content compare, not a hash — a stale batch drawn over a collision would be a
         // rendering bug no one could reproduce.
+        // A solo run (one quad, one colour) hands its colour to the material's `tint` and
+        // stores white vertices — so a colour pulse is a material write, never a mesh write.
+        let solo_tint = (run.positions.len() == 4 && run.colors.windows(2).all(|w| w[0] == w[1]))
+            .then(|| run.colors[0]);
+        let colors = match solo_tint {
+            Some(_) => vec![[1.0; 4]; 4],
+            None => run.colors,
+        };
         let stored = StoredRun {
             positions: run.positions,
             uvs: run.uvs,
-            colors: run.colors,
+            colors,
             indices: run.indices,
             z_bits: z.to_bits(),
             key,
+        };
+        while pools.solo.len() <= used {
+            pools.solo.push(None);
+            pools.bound.push(None);
+        }
+        let material_handle = match solo_tint {
+            Some(tint) => {
+                let fresh = |materials: &mut Assets<UiQuadMaterial>| {
+                    materials.add(UiQuadMaterial {
+                        additive: u32::from(run.additive),
+                        texture: Some(run.texture.clone()),
+                        circular: u32::from(run.circular),
+                        desaturate: u32::from(run.desaturated),
+                        premultiplied: u32::from(run.premultiplied),
+                        alpha_ref,
+                        gamma_texel: u32::from(run.gamma_texel),
+                        mask_rect,
+                        mask: mask.clone(),
+                        uv_clamp,
+                        tint: Vec4::from_array(tint),
+                    })
+                };
+                match &mut pools.solo[used] {
+                    Some((handle, k, t)) if *k == key => {
+                        if *t != tint {
+                            if let Some(m) = materials.get_mut(&*handle) {
+                                m.tint = Vec4::from_array(tint);
+                            }
+                            *t = tint;
+                        }
+                        handle.clone()
+                    }
+                    slot => {
+                        let handle = fresh(materials);
+                        *slot = Some((handle.clone(), key, tint));
+                        handle
+                    }
+                }
+            }
+            None => {
+                pools.solo[used] = None;
+                pools
+                    .materials
+                    .entry(key)
+                    .or_insert_with(|| {
+                        materials.add(UiQuadMaterial {
+                            additive: u32::from(run.additive),
+                            texture: Some(run.texture.clone()),
+                            circular: u32::from(run.circular),
+                            desaturate: u32::from(run.desaturated),
+                            premultiplied: u32::from(run.premultiplied),
+                            alpha_ref,
+                            gamma_texel: u32::from(run.gamma_texel),
+                            mask_rect,
+                            mask: mask.clone(),
+                            uv_clamp,
+                            tint: Vec4::ONE,
+                        })
+                    })
+                    .clone()
+            }
         };
         // The pan gate (1463): a run that matches its slot's base up to one constant XY delta
         // moves on the batch entity's `Transform` — no mesh write, no `AssetChanged` arming.
@@ -1326,6 +1419,14 @@ fn rebuild_ui_mesh(
             .get(used)
             .and_then(|prev| prev.translation_from(&stored).map(|d| (d, prev.z_bits)));
         if let Some((d, z_bits)) = pan {
+            if pools.bound[used] != Some(material_handle.id()) {
+                pools.bound[used] = Some(material_handle.id());
+                if let Some(&entity) = pools.entities.get(used) {
+                    commands
+                        .entity(entity)
+                        .insert(MeshMaterial2d(material_handle.clone()));
+                }
+            }
             if pools.offsets[used] != d {
                 pools.offsets[used] = d;
                 if let Some(&entity) = pools.entities.get(used) {
@@ -1408,24 +1509,7 @@ fn rebuild_ui_mesh(
                 handle
             }
         };
-        let material_handle = pools
-            .materials
-            .entry(key)
-            .or_insert_with(|| {
-                materials.add(UiQuadMaterial {
-                    additive: u32::from(run.additive),
-                    texture: Some(run.texture),
-                    circular: u32::from(run.circular),
-                    desaturate: u32::from(run.desaturated),
-                    premultiplied: u32::from(run.premultiplied),
-                    alpha_ref,
-                    gamma_texel: u32::from(run.gamma_texel),
-                    mask_rect,
-                    mask,
-                    uv_clamp,
-                })
-            })
-            .clone();
+        pools.bound[used] = Some(material_handle.id());
         // Reuse the batch entity at this slot — same Mesh2d handle (the pooled asset), a material
         // handle that only changes when the run's identity does, a fresh z.
         match pools.entities.get(used) {

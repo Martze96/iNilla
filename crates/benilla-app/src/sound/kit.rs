@@ -1148,6 +1148,12 @@ pub(super) fn apply_kit_debug(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
+    // Read before borrowing mutably: a `&mut` through `ResMut` marks `DebugState` changed, and
+    // this ran every frame — so every still-frame gate that reads `debug.is_changed()`
+    // (decision 1979) saw a changed debug state on every frame of every run.
+    if !debug.sound.play_kit {
+        return;
+    }
     let s = &mut debug.sound;
     if !std::mem::take(&mut s.play_kit) {
         return;
