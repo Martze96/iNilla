@@ -353,7 +353,11 @@ pub(super) const BAG_UI: &[&str] = &[
     // `if ( ChatFrameEditBox:IsShown() )` (ContainerFrame.lua l.569) to decide between posting the
     // item's link and splitting the stack, so a VM without it raises before either.
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-    "ChatFrame.xml",
+    "Interface\\FrameXML\\ChatFrame.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
+    "Interface\\FrameXML\\UIPanelTemplates.lua",
+    "Interface\\FrameXML\\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\FloatingChatFrame.xml",
     // Our adapters over the reference's container files — the keyring tooltip wrapper, the three
     // bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`), and the item-push
     // card the reference draws with a `<Model>` this engine does not render (0887). It has to be

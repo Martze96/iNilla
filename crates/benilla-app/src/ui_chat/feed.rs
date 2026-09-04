@@ -287,12 +287,9 @@ impl ChatLog {
                 tries: 0,
             });
         } else {
-            self.pending.push(Pending::Event(notice_event(
-                notice_byte,
-                channel,
-                name,
-                None,
-            )));
+            if let Some(event) = notice_event(notice_byte, channel, name, None) {
+                self.pending.push(Pending::Event(event));
+            }
         }
     }
 
@@ -578,20 +575,55 @@ fn notice_event(
     channel: String,
     a: Option<String>,
     b: Option<String>,
-) -> ChatEvent {
+) -> Option<ChatEvent> {
+    // The display type per notice byte — wow-re `chat-msg-event-args.md`'s notice table, read
+    // off each arm's `mov edi`: 0x00/0x01 are the join/leave lines, MODE_CHANGE (0x0c) fires no
+    // chat event at all, a byte past THROTTLED fires SYSTEM with an empty token, and the rest
+    // split between CHANNEL_NOTICE (0x12) and CHANNEL_NOTICE_USER (0x13) exactly as listed.
+    use channel_notice as n;
     let kind = match notice_byte {
-        channel_notice::JOINED => ChatEventKind::ChannelJoin,
-        channel_notice::LEFT => ChatEventKind::ChannelLeave,
-        _ => ChatEventKind::ChannelNotice,
+        n::JOINED => ChatEventKind::ChannelJoin,
+        n::LEFT => ChatEventKind::ChannelLeave,
+        n::MODE_CHANGE => return None,
+        n::YOU_JOINED
+        | n::YOU_LEFT
+        | n::WRONG_PASSWORD
+        | n::NOT_MEMBER
+        | n::NOT_MODERATOR
+        | n::NOT_OWNER
+        | n::MUTED
+        | n::BANNED
+        | n::THROTTLED => ChatEventKind::ChannelNotice,
+        n::PASSWORD_CHANGED
+        | n::OWNER_CHANGED
+        | n::PLAYER_NOT_FOUND
+        | n::CHANNEL_OWNER
+        | n::ANNOUNCEMENTS_ON
+        | n::ANNOUNCEMENTS_OFF
+        | n::MODERATION_ON
+        | n::MODERATION_OFF
+        | n::PLAYER_KICKED
+        | n::PLAYER_BANNED
+        | n::PLAYER_UNBANNED
+        | n::PLAYER_NOT_BANNED
+        | n::PLAYER_ALREADY_MEMBER
+        | n::INVITE
+        | n::INVITE_WRONG_FACTION
+        | n::WRONG_FACTION
+        | n::INVALID_NAME
+        | n::NOT_MODERATED
+        | n::PLAYER_INVITED
+        | n::PLAYER_INVITE_BANNED => ChatEventKind::ChannelNoticeUser,
+        _ => ChatEventKind::System,
     };
-    ChatEvent {
+    Some(ChatEvent {
         kind: Some(kind),
         sender: a.unwrap_or_default(),
         target: b.unwrap_or_default(),
         channel,
         notice: notice_byte.to_string(),
         ..Default::default()
-    }
+    })
 }
 
 /// Deliver one built event: the joined-list upkeep on **both sides** of the render, with the
@@ -683,12 +715,10 @@ pub(super) fn feed_chat(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut log: ResMut<ChatLog>,
     mut windows: ResMut<ChatWindows>,
-    mut edit: ResMut<super::edit::ChatEditState>,
     mut channels: ResMut<ChannelState>,
     mut names: ResMut<NameCache>,
     mut speaker: SpeakerEffects,
     commands: Res<NetCommands>,
-    time: Res<Time>,
     // The text-emote sentence seam (decision 1274): the tables, plus the guid the composer's
     // "are you the performer?" test compares against.
     emote_texts: Option<Res<EmoteTexts>>,
@@ -708,7 +738,6 @@ pub(super) fn feed_chat(
     let Some(mut script) = script else {
         return;
     };
-    windows.tell_alert_left = (windows.tell_alert_left - time.delta_secs()).max(0.0);
     if log.pending.is_empty() {
         return;
     }
@@ -838,11 +867,6 @@ pub(super) fn feed_chat(
                     ..Default::default()
                 };
                 channels.stamp_channel(&mut event);
-                // A received whisper remembers its sender (`ChatEdit_SetLastTellTarget`,
-                // ChatFrame_OnEvent l.1471) — the `/r` + Tab-cycle ring.
-                if event.kind == Some(ChatEventKind::Whisper) && !event.sender.is_empty() {
-                    edit.remember_tell(&event.sender);
-                }
                 route(&mut script, &mut windows, &event);
                 // The speech bubble spawns the moment the line routes — the reference's
                 // `0x49acd9` sits in the same SMSG display path ([`crate::chat_bubble`]).
@@ -918,13 +942,14 @@ pub(super) fn feed_chat(
                 // changes what the player sees, which this pass is not allowed to do. Left for the
                 // director's call; the cost of leaving it is that arg7/arg8/arg9 are 0/0/empty on
                 // these events alone.
-                let event = notice_event(
+                if let Some(event) = notice_event(
                     notice,
                     channel,
                     Some(a.unwrap_or_else(|| "Unknown".into())),
                     b,
-                );
-                route(&mut script, &mut windows, &event);
+                ) {
+                    route(&mut script, &mut windows, &event);
+                }
             }
             Pending::Addon {
                 prefix,

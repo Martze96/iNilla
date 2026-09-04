@@ -707,7 +707,18 @@ fn render_loop(
 ) {
     // Held for the thread's life and dropped with it: on Windows that hands the MMCSS
     // registration back, everywhere else it is inert.
-    let _realtime = match device::set_realtime(period_ns) {
+    //
+    // `WOW_AUDIO_NO_RT=1` — the A/B lever (decision 1947): a raid with sound on reads a
+    // `cpu_p99` several ms over its mean while the annotation names no churn, and a realtime
+    // render thread preempting the compute pools on four performance cores is the standing
+    // suspect. Off, the thread takes the user-interactive QoS fallback below.
+    let no_rt = std::env::var_os("WOW_AUDIO_NO_RT").is_some();
+    let realtime = if no_rt {
+        Err(anyhow::anyhow!("WOW_AUDIO_NO_RT=1"))
+    } else {
+        device::set_realtime(period_ns)
+    };
+    let _realtime = match realtime {
         Ok(realtime) => {
             debug!(
                 "audio: render thread scheduled realtime, period {} µs",

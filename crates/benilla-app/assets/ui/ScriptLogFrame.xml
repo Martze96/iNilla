@@ -377,4 +377,31 @@
             <OnUpdate>BenillaScriptLogFrame_OnUpdate()</OnUpdate>
         </Scripts>
     </Frame>
+    <!-- benilla's own commands over the reference's SlashCmdList (decision 1948). The stock
+         ChatEdit_ParseText walks SlashCmdList after its own built-ins, so each of benilla's commands
+         (ui_chat::commands — the dev instruments and the three additions) hands its line to
+         SubmitChatInput, where ui_chat::input's parser still owns it. This file loads after the
+         reference's ChatFrame.xml, which is what declares the table. -->
+    <Script><![CDATA[
+        local BENILLA_COMMANDS = {
+            { "CHATTEST", "/chattest" },
+            { "SHOT", "/shot" },
+            { "LIQUID", "/liquid" },
+            { "CASTVIS", "/castvis" },
+            { "PARTYTEST", "/partytest" },
+            { "REACTION", "/reaction", "/react" },
+            { "RELOAD", "/reload" },
+            { "ERRORS", "/errors", "/err" },
+            { "CONVERTRAID", "/convertraid" },
+        }
+        for _, row in ipairs(BENILLA_COMMANDS) do
+            local key = "BENILLA_" .. row[1]
+            for i = 2, table.getn(row) do
+                setglobal("SLASH_" .. key .. (i - 1), row[i])
+            end
+            SlashCmdList[key] = function(msg)
+                SubmitChatInput(row[2] .. " " .. (msg or ""))
+            end
+        end
+    ]]></Script>
 </Ui>

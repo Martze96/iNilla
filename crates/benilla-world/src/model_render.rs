@@ -13,6 +13,7 @@ use benilla_assets::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY
 
 mod batch;
 pub mod lazy;
+pub mod park;
 mod visibility;
 
 pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials, SkyboxBatch};
@@ -1130,6 +1131,11 @@ pub fn plugin(app: &mut App) {
     // Deferred realization (`lazy`): a built material becomes an asset the frame something
     // visible binds it. `Last`, after every writer and the `PostUpdate` twin spawns.
     app.add_systems(Last, lazy::realize_bound);
+    // Parking (`park`): a long-hidden streamed part puts its `Mesh3d` down. `Update`, after the
+    // authority, on last frame's propagated verdict — the order the module doc explains.
+    if park::enabled() {
+        app.add_systems(Update, park::park_hidden_parts.after(ModelVisSet));
+    }
 }
 
 /// Expire the material dedup by **distance** (decision 0785).

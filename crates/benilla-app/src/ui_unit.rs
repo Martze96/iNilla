@@ -199,10 +199,11 @@ impl Plugin for UiUnitPlugin {
         .add_systems(Update, drain_worn_display_toggles.after(UiInput))
         .add_systems(Update, drain_action_bar_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
+        .add_systems(Update, feed_known_languages.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
         // `load_default_languages` only builds a Bevy resource and stays a one-shot.
         .add_systems(Update, load_exhaustion_rows)
-        .add_systems(PostStartup, load_default_languages);
+        .add_systems(PostStartup, (load_default_languages, load_languages));
     }
 }
 
@@ -213,6 +214,108 @@ impl Plugin for UiUnitPlugin {
 pub(crate) struct DefaultLanguagesRes(pub(crate) benilla_formats::DefaultLanguages);
 
 /// Load `Languages.dbc` × `ChrRaces.dbc` once at startup ([`load_exhaustion_rows`]'s shape).
+/// `Languages.dbc` in row order — the walk behind `GetNumLaguages`/`GetLanguageByIndex`.
+#[derive(Resource)]
+pub(crate) struct LanguagesRes(pub(crate) benilla_formats::Languages);
+
+fn load_languages(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        use benilla_assets::LockRecover;
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_languages(&mut chain)
+    };
+    match loaded {
+        Ok(langs) => {
+            info!("ui_unit: {} Languages.dbc rows", langs.len());
+            commands.insert_resource(LanguagesRes(langs));
+        }
+        Err(e) => warn!("ui_unit: Languages.dbc unavailable — {e:#}"),
+    }
+}
+
+/// The languages this character **knows**, folded the reference's way and fed to the VM for
+/// `GetNumLaguages`/`GetLanguageByIndex` (wow-re `chat-language-scramble.md` §8, C6):
+///
+/// 1. `0x4b25b0` runs on spell add and stores `[languageId] = spellId` for a spell whose
+///    `Effect_1 == 39` — so the table holds only languages *this character's known spells*
+///    declare ([`benilla_formats::SpellCatalog::declared_language`], spell → language, never the
+///    other way round: five shipped language spells declare Common, and that anomaly is the
+///    reference's).
+/// 2. `GetNumLaguages` walks `Languages.dbc` rows and keeps those `0x5ec720` answers non-zero
+///    for: the language's spell resolves to a `SkillLine` (`0x6de040`, race/class, spell) that is
+///    present in the player's `PLAYER_SKILL_INFO` block. Presence, not value: a found line
+///    returns 1 whatever its value.
+///
+/// One knowingly-unreproduced detail: a later learn overwrites an earlier spell on the same
+/// language id in the reference's table. The known-spell set here is unordered, so when two
+/// known spells declare one language, either's skill line passes — unobservable on shipped data
+/// (every language skill a character holds is 300, and the only shared id is Common's).
+pub(crate) fn known_languages(
+    known: impl IntoIterator<Item = u32>,
+    spells: &benilla_formats::SpellCatalog,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    has_skill_line: impl Fn(u32) -> bool,
+    languages: &benilla_formats::Languages,
+) -> Vec<String> {
+    let mut declared: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    for spell in known {
+        if let Some(lang) = spells.declared_language(spell) {
+            declared.entry(lang).or_default().push(spell);
+        }
+    }
+    languages
+        .names(0)
+        .filter(|(id, _)| {
+            declared.get(id).is_some_and(|spells| {
+                spells.iter().any(|&spell| {
+                    skill_lines
+                        .and_then(|sl| sl.spell_to_line(spell))
+                        .is_some_and(&has_skill_line)
+                })
+            })
+        })
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+fn feed_known_languages(
+    script: Option<NonSendMut<UiScript>>,
+    actions: Option<Res<crate::ui_action::PlayerActions>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    languages: Option<Res<LanguagesRes>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut pushed: Local<crate::ui_script::VmMemo<Option<Vec<String>>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let (Some(actions), Some(spells), Some(languages)) = (actions, spells, languages) else {
+        return;
+    };
+    let pushed = pushed.get(&script);
+    let store = self_q.iter().next();
+    let has_skill_line = |line: u32| {
+        store.is_some_and(|s| {
+            (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
+                .filter_map(|i| s.0.player_skill(i))
+                .any(|slot| u32::from(slot.skill_id) == line)
+        })
+    };
+    let names = known_languages(
+        actions.spells.iter().copied(),
+        &spells.catalog,
+        skill_lines.as_deref().map(|s| &s.catalog),
+        has_skill_line,
+        &languages.0,
+    );
+    if pushed.as_ref() != Some(&names) {
+        script.set_known_languages(names.clone());
+        *pushed = Some(names);
+    }
+}
+
 fn load_default_languages(
     mut commands: Commands,
     assets: Option<Res<benilla_assets::WorldAssets>>,

@@ -23,7 +23,25 @@ fn chat_frame() -> UiScript {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    // The UIParent slice (RaiseFrameLevel, MouseIsOver, the fade and flash kits) ahead of the
+    // bar and the chat files; `FCF_OnUpdate` — the dock's hover, fade and drag driver — runs
+    // from UIParent's OnUpdate, as in the reference.
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "UIParent.xml");
+    // `FCF_ValidateChatFramePosition` (a tab-drag stop) reads `MainMenuBar:GetHeight()`; the bar's
+    // own load-time chain precedes it, as in the action-bar harness.
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
+    super::fire_chat_login(&mut s);
     s.set_screen_size(1600.0, 900.0);
     s.resolve();
     s
@@ -110,24 +128,19 @@ fn newest_line_sits_at_the_bottom() {
 #[test]
 fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     let mut s = chat_frame();
-    // Short fade so a tick visibly ramps: straight into phase 2 (timeVisible 0), 4s ramp.
     s.run("ChatFrame1:SetTimeVisible(0); ChatFrame1:SetFadeDuration(4)")
         .unwrap();
     for t in ["L0", "L1", "L2"] {
         s.add_chat_message("ChatFrame1", t, 1.0, 1.0, 1.0);
     }
     s.resolve();
-
-    // One tick at the bottom ramps every line's alpha down.
     s.tick(1.0);
     s.resolve();
     let a1 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
     assert!(a1 < 1.0 && a1 > 0.0, "the line faded partway: {a1}");
-
-    // Scroll up via the wheel (a point inside the docked frame: BOTTOMLEFT (32,85), 430x160). The
-    // Lua OnMouseWheel handler calls ScrollUp, which re-arms every displayed line to full alpha —
-    // and, no longer AtBottom, the tick then holds it there.
-    s.mouse_wheel(100.0, 150.0, 1.0);
+    // The scroll verb is what the reference's scroll buttons call; the 1.12 chat frame takes
+    // no wheel of its own (`enableMouse="false"`, no OnMouseWheel).
+    s.run("ChatFrame1:ScrollUp()").unwrap();
     s.resolve();
     let a2 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
     assert!(close(a2, 1.0), "the scroll brought the line back: {a2}");
@@ -135,9 +148,7 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     s.resolve();
     let a3 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
     assert!(close(a3, 1.0), "frozen while scrolled up: {a3}");
-
-    // Wheel back down to the bottom — that scroll re-arms too, so the ramp restarts from full.
-    s.mouse_wheel(100.0, 150.0, -1.0);
+    s.run("ChatFrame1:ScrollToBottom()").unwrap();
     s.tick(1.0);
     s.resolve();
     let a4 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
@@ -148,18 +159,25 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
 #[test]
 fn input_editbox_enter_drains_the_typed_line() {
     let mut s = chat_frame();
-    // ENTER opens (the app calls focus_editbox); typing goes to the focused box.
     assert!(s.focus_editbox("ChatFrameEditBox"), "the edit box focuses");
     assert!(s.has_keyboard_focus(), "focus gates the world's keys");
     s.char_input("/yell hi");
-    // ENTER → OnEnterPressed → SubmitChatInput(GetText()) + SetText('') + ClearFocus + Hide.
     assert!(s.key_input("ENTER"), "the box consumes ENTER");
-    assert_eq!(s.take_chat_input(), vec!["/yell hi".to_string()]);
+    // The reference's own path: `ChatEdit_OnEnterPressed` → `ChatEdit_SendText` →
+    // `ChatEdit_ParseText` → `SendChatMessage("hi", "YELL", …)`.
+    let sends = s.take_chat_sends();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("hi", "YELL")]
+    );
     assert!(
         !s.has_keyboard_focus(),
-        "submit closes the box (ClearFocus + Hide)"
+        "submit closes the box (ChatEdit_OnEscapePressed: ClearFocus + Hide)"
     );
-    assert!(s.take_chat_input().is_empty(), "drained");
+    assert!(s.take_chat_sends().is_empty(), "drained");
 }
 
 #[test]
@@ -182,12 +200,13 @@ fn chat_box_arrows_edit_and_history_recalls() {
     let mut s = chat_frame();
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.char_input("ab");
-    // Plain LEFT must MOVE the caret (not be swallowed): a backspace after it deletes 'a', not 'b'.
-    s.editbox_action(EditAction::Move {
-        unit: EditUnit::Char,
-        back: true,
-        extend: false,
-    });
+    // The reference's ChatFrameEditBoxTemplate is `ignoreArrows="true"` — the engine's
+    // AltArrowKeyMode, which the app's key routing reads to hand a plain arrow to the bindings
+    // (the character turns while you type) rather than to the box. The box itself still edits.
+    assert!(
+        s.editbox_alt_arrow_mode(),
+        "the stock template's ignoreArrows landed as AltArrowKeyMode on the focused box"
+    );
     s.editbox_action(EditAction::Delete {
         unit: EditUnit::Char,
         back: true,
@@ -195,30 +214,38 @@ fn chat_box_arrows_edit_and_history_recalls() {
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
             .unwrap(),
-        "b",
-        "plain arrows move the caret in the shipped chat box"
+        "a"
     );
-
-    // Submit, then push the canonical line the router would (ui_chat::input::history_line) — the
-    // asynchronous ChatEdit_AddHistory slot.
     s.run("ChatFrameEditBox:SetText('')").unwrap();
     s.char_input("/yell hi");
     assert!(s.key_input("ENTER"));
-    assert_eq!(s.take_chat_input(), vec!["/yell hi".to_string()]);
-    assert!(
-        s.editbox_add_history("ChatFrameEditBox", "/yell hi"),
-        "the seam finds the shipped box by name after it closed"
+    // `ChatEdit_SendText` → `ChatEdit_ParseText` → the YELL type's send, and the reference's
+    // `AddHistoryLine` on the way.
+    let sends = s.take_chat_sends();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("hi", "YELL")]
     );
-
-    // Reopen (the app refocuses on the next Enter): Up recalls, Down restores the draft.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.char_input("dra");
     s.editbox_action(EditAction::HistoryPrev);
-    assert_eq!(
-        s.eval::<String>("return ChatFrameEditBox:GetText()")
+    // `ChatEdit_AddHistory` filed `SLASH_YELL1 .. " " .. text` = "/y hi" (ChatFrame.lua
+    // l.1913-1937); the recall lands it in the box, and the box's own `OnTextChanged` live parse
+    // (`ChatEdit_ParseText(this, 0)`) turns it straight into the YELL type with "hi" — which is
+    // what the player sees: a "Yell:" header and the text.
+    assert!(
+        s.eval::<bool>(
+            "return ChatFrameEditBox.chatType == 'YELL' and ChatFrameEditBox:GetText() == 'hi'"
+        )
+        .unwrap(),
+        "Up recalls the filed line, live-parsed: {:?} {:?}",
+        s.eval::<String>("return ChatFrameEditBox.chatType")
             .unwrap(),
-        "/yell hi",
-        "Up recalls the submitted line"
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap()
     );
     s.editbox_action(EditAction::HistoryNext);
     assert_eq!(
@@ -239,19 +266,13 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     use benilla_ui::script::{
         ContainerSlot, ContainerState, SpellBookState, SpellSlotView, SpellTabView,
     };
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
+    // The reference's spellbook wants the action-bar chain beneath it (1952); the chat window
+    // loads after it, as in the manifest.
+    let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     for f in [
-        "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-        "ChatFrame.xml",
-        "SpellBookFrame.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, f);
     }
@@ -742,11 +763,9 @@ fn hovering_the_dock_still_reveals_the_tabs() {
         s.resolve();
     }
     assert!(
-        s.eval::<f64>("return ChatFrame1Tab:GetAlpha()").unwrap() < 1e-6,
-        "the dock starts concealed"
+        !s.eval::<bool>("return ChatFrame1Tab:IsVisible()").unwrap(),
+        "the dock starts concealed — the tab template ships hidden"
     );
-
-    // The dock's own centre, asked of the layout rather than hardcoded.
     let (x, y): (f32, f32) = s
         .eval(
             "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
@@ -754,17 +773,15 @@ fn hovering_the_dock_still_reveals_the_tabs() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    // 0.2 s stationary to arm the reveal, then the 0.15 s ramp — 25 frames covers both with room.
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-
     let alpha: f64 = s.eval("return ChatFrame1Tab:GetAlpha()").unwrap();
     assert!(
-        (alpha - 1.0).abs() < 1e-6,
-        "a stationary hover reveals the selected tab at full alpha — got {alpha}"
+        s.eval::<bool>("return ChatFrame1Tab:IsVisible()").unwrap() && (alpha - 1.0).abs() < 1e-6,
+        "a stationary hover past CHAT_TAB_SHOW_DELAY reveals the selected tab at full alpha — got {alpha}"
     );
 }
 
@@ -787,8 +804,6 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
         s.tick(0.016);
         s.resolve();
     }
-
-    // At the bottom, flash hidden: the sentinel must survive.
     s.run("ChatFrame1.flashTimer = 0.42").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
@@ -805,20 +820,17 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
             .unwrap(),
         "the flash stays hidden at rest"
     );
-
-    // Control 1: scrolled up, the blink still runs — the timer accumulates past 0.5 and shows
-    // the flash (a point inside the docked frame, as the wheel test uses).
-    s.mouse_wheel(100.0, 150.0, 1.0);
-    s.tick(0.3); // 0.42 + 0.3 = 0.72 >= 0.5 -> toggle on
+    // The reference's ChatFrameTemplate takes no mouse and has no wheel script (1.12 scrolls its
+    // chat by the buttons), so the scroll is the frame's own verb.
+    s.run("ChatFrame1:ScrollUp()").unwrap();
+    s.tick(0.3); // 0.42 + 0.3 = 0.72 >= CHAT_BUTTON_FLASH_TIME -> toggle on
     s.resolve();
     assert!(
         s.eval::<bool>("return ChatFrame1BottomButtonFlash:IsVisible()")
             .unwrap(),
-        "scrolled up, the bottom-button blink still lights"
+        "scrolled up, the bottom-button blink lights"
     );
-
-    // Control 2: back to the bottom while the flash is LIT — the transition still writes.
-    s.mouse_wheel(100.0, 150.0, -1.0);
+    s.run("ChatFrame1:ScrollToBottom()").unwrap();
     s.tick(0.016);
     s.resolve();
     assert!(
@@ -826,10 +838,12 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
             .unwrap(),
         "returning to the bottom hides a lit flash"
     );
-    assert_eq!(
-        s.eval::<f64>("return ChatFrame1.flashTimer").unwrap(),
-        0.0,
-        "and zeroes the timer with it (our reset rides inside the reference's gate)"
+    // …and leaves the residual phase where it was: the reference's at-bottom arm hides the flash
+    // and returns, it never zeroes the timer (ChatFrame.lua `ChatFrame_OnUpdate`).
+    let timer: f64 = s.eval("return ChatFrame1.flashTimer").unwrap();
+    assert!(
+        (timer - 0.22).abs() < 1e-6,
+        "the residual phase stands: {timer}"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -851,7 +865,6 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
 #[test]
 fn selecting_the_combat_log_keeps_the_dock_driver_running() {
     let mut s = chat_frame();
-    // Hover the dock and let the reveal settle: General at full, Combat Log at half.
     let (x, y): (f32, f32) = s
         .eval(
             "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
@@ -859,7 +872,7 @@ fn selecting_the_combat_log_keeps_the_dock_driver_running() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
@@ -873,19 +886,16 @@ fn selecting_the_combat_log_keeps_the_dock_driver_running() {
         ),
         "the hovered dock starts with General selected — this test must not pass vacuously"
     );
-
-    // Click the Combat Log tab, then advance the clock WITHOUT touching FCF_OnUpdate.
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-
     assert!(
         s.eval::<bool>("return ChatFrame2:IsShown() and not ChatFrame1:IsShown()")
             .unwrap(),
-        "the click swapped the windows"
+        "the selection swapped the windows"
     );
     let (a1, a2): (f32, f32) = s
         .eval("return ChatFrame1Tab:GetAlpha(), ChatFrame2Tab:GetAlpha()")
@@ -908,11 +918,11 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
         )
         .unwrap();
     s.mouse_move(x, y);
-    for _ in 0..25 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for _ in 0..10 {
         s.tick(0.016);
         s.resolve();
@@ -924,17 +934,16 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
         ),
         "revealed before the cursor leaves"
     );
-
     s.mouse_move(1500.0, 850.0); // away from the dock
-    for _ in 0..20 {
+    for _ in 0..45 {
         s.tick(0.016);
         s.resolve();
     }
     assert!(s.errors().is_empty(), "{:?}", s.errors());
-    let a2: f32 = s.eval("return ChatFrame2Tab:GetAlpha()").unwrap();
+    // The reference fades the tab out and `FCF_ChatTabFadeFinished` hides it.
     assert!(
-        a2 < 1e-6,
-        "the dock conceals itself again on leave — got Combat Log tab alpha {a2}"
+        !s.eval::<bool>("return ChatFrame2Tab:IsVisible()").unwrap(),
+        "the dock conceals itself again on leave"
     );
 }
 
@@ -945,7 +954,7 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
 #[test]
 fn the_combat_log_window_runs_its_own_bottom_button_blink() {
     let mut s = chat_frame();
-    s.run("BenillaFCF_TabClick(2)").unwrap();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for i in 0..40 {
         s.add_chat_message("ChatFrame2", &format!("line {i}"), 1.0, 1.0, 1.0);
     }
@@ -987,7 +996,14 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "GameTooltip.xml",
         r"Interface\FrameXML\UIMenu.xml",
-        "ChatFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, f);
     }
@@ -1023,10 +1039,13 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
             .unwrap(),
         "the reference's row click hides the menu"
     );
+    // `ChatMenu_Say` → `ChatMenu_SetChatType(chatFrame, "SAY")`: the box opens and its type is
+    // set directly — no slash is typed into it (ChatFrame.lua l.2245-2255).
     assert!(
-        s.eval::<String>("return ChatFrameEditBox:GetText()")
-            .unwrap()
-            .starts_with("/s"),
-        "and it seeded the edit box with the row's slash"
+        s.eval::<bool>(
+            "return ChatFrameEditBox:IsVisible() and ChatFrameEditBox.chatType == 'SAY'"
+        )
+        .unwrap(),
+        "and it opened the edit box as SAY"
     );
 }

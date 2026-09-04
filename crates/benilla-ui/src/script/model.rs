@@ -517,6 +517,31 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_chat_window_changes`] drain — the persist cue. A set, so a slider
     /// drag costs one entry however many steps it took.
     pub(crate) chat_window_changes: HashSet<usize>,
+    /// The chat-type colour registry (`0xb4e518`): 94 fixed entries + 10 `CHANNELn` extras
+    /// (`chat_types`). Seeded from the compiled defaults; the app overlays `chat-cache.txt`'s
+    /// `COLORS` block through [`super::UiScript::set_chat_colors`].
+    pub(crate) chat_colors: Vec<super::chat_types::ChatTypeColor>,
+    /// A Lua-side colour write landed — [`super::UiScript::take_chat_color_changes`].
+    pub(crate) chat_colors_changed: bool,
+    /// The languages this character knows, `Languages.dbc` row order
+    /// ([`super::UiScript::set_known_languages`]).
+    pub(crate) known_languages: Vec<String>,
+    /// The zone-channel rows for the current zone ([`super::UiScript::set_zone_channel_catalog`]).
+    pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
+    /// Channel verbs since the last [`super::UiScript::take_channel_commands`] drain.
+    pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
+    /// `DoEmote` calls since the last drain.
+    pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
+    /// `RandomRoll` calls since the last drain.
+    pub(crate) roll_requests: Vec<(u32, u32)>,
+    /// `UninviteByName` calls since the last drain.
+    pub(crate) uninvite_requests: Vec<String>,
+    /// `ConsoleExec` lines that were not CVar writes.
+    pub(crate) console_lines: Vec<String>,
+    /// `LoggingChat` / `LoggingCombat` — the two flags and their change cue.
+    pub(crate) logging_chat: bool,
+    pub(crate) logging_combat: bool,
+    pub(crate) logging_changed: bool,
     /// Whether a **user-placed** frame's geometry moved since the app's last
     /// [`super::UiScript::take_user_placed_change`] drain — the layout cache's persist cue
     /// ([`super::layout_cache`]). One bit rather than a set of handles, because the file is
@@ -1643,6 +1668,18 @@ impl Model {
             // seven (`ChatWindowLook::stock`): 1 and 2 are the dock, 3..7 are undocked.
             chat_window_looks: std::array::from_fn(chat_window::ChatWindowLook::stock),
             chat_window_changes: HashSet::new(),
+            chat_colors: super::chat_types::seed(),
+            chat_colors_changed: false,
+            known_languages: Vec::new(),
+            zone_channel_catalog: Vec::new(),
+            channel_commands: Vec::new(),
+            emote_requests: Vec::new(),
+            roll_requests: Vec::new(),
+            uninvite_requests: Vec::new(),
+            console_lines: Vec::new(),
+            logging_chat: false,
+            logging_combat: false,
+            logging_changed: false,
             user_placed_changed: false,
             default_language: None,
             duel_requests: Vec::new(),

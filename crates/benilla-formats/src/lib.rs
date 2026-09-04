@@ -75,7 +75,8 @@ mod garble;
 pub use garble::{garble, garble_chat, Garble, FLUENT_SKILL};
 mod languages;
 pub use languages::{
-    load_default_languages, load_language_words, DefaultLanguages, LanguagePool, LanguageWords,
+    load_default_languages, load_language_words, load_languages, DefaultLanguages, LanguagePool,
+    LanguageWords, Languages,
 };
 mod creature_families;
 pub use creature_families::{

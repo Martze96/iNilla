@@ -414,16 +414,25 @@ pub fn spawn_model_entities(
             } else {
                 why = match site {
                     crate::static_gx::GxSite::Doodad { .. } if is_wmo => "doodad-site-wmo",
-                    crate::static_gx::GxSite::Doodad { .. } if !class.merges() => "no-merge",
+                    crate::static_gx::GxSite::Doodad { .. } if class.excluded => "no-merge-anim",
+                    crate::static_gx::GxSite::Doodad { .. } if !class.merges() => {
+                        "no-merge-transparent"
+                    }
                     crate::static_gx::GxSite::Doodad { .. } if class.interior_prop => {
                         "interior-prop"
                     }
                     crate::static_gx::GxSite::Doodad { .. } => "fader-lane-off",
                     crate::static_gx::GxSite::Wmo { .. } if !is_wmo => "wmo-site-m2",
-                    crate::static_gx::GxSite::Wmo { .. } if !class.merges() => "wmo-no-merge",
+                    crate::static_gx::GxSite::Wmo { .. } if class.excluded => "wmo-no-merge-anim",
+                    crate::static_gx::GxSite::Wmo { .. } if !class.merges() => {
+                        "wmo-no-merge-transparent"
+                    }
                     crate::static_gx::GxSite::Wmo { .. } => "wmo-no-group",
                     crate::static_gx::GxSite::Prop { .. } if is_wmo => "prop-site-wmo",
-                    crate::static_gx::GxSite::Prop { .. } if !class.merges() => "prop-no-merge",
+                    crate::static_gx::GxSite::Prop { .. } if class.excluded => "prop-no-merge-anim",
+                    crate::static_gx::GxSite::Prop { .. } if !class.merges() => {
+                        "prop-no-merge-transparent"
+                    }
                     crate::static_gx::GxSite::Prop { .. } => "exterior-fader-prop",
                 };
                 match site {

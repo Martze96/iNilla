@@ -771,6 +771,33 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 #[cfg(test)]
 mod test_ui;
 
+/// The chat loader's two login events (wow-re chat-cache-grammar.md §8; `ui_chat::settings`):
+/// `UPDATE_CHAT_WINDOWS` once, then `UPDATE_CHAT_COLOR` for every registry entry. The reference's
+/// `FloatingChatFrame_Update` docks, hides and colours the windows on the first and
+/// `ChatFrame_OnEvent` fills `ChatTypeInfo` from the second, so a test VM that loads the
+/// reference's chat files needs both before the windows look or route like a client's.
+#[cfg(test)]
+pub(crate) fn fire_chat_login(s: &mut benilla_ui::script::UiScript) {
+    // `FCF_OnUpdate` reads `UIOptionsFrame:IsShown()` every frame — the reference's options
+    // window, which OptionsFrame.xml aliases and a chat test VM does not load. A hidden stand-in
+    // is what a closed options window answers.
+    s.run("if not UIOptionsFrame then UIOptionsFrame = CreateFrame('Frame') UIOptionsFrame:Hide() end")
+        .expect("the options stand-in");
+    s.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
+    let renorm = |b: u8| f64::from(b as f32 * (1.0f32 / 255.0f32));
+    for entry in s.chat_colors() {
+        s.fire_event(
+            "UPDATE_CHAT_COLOR",
+            vec![
+                benilla_ui::script::ScriptValue::Str(entry.name),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[0])),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[1])),
+                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[2])),
+            ],
+        );
+    }
+}
+
 /// [`test_ui::load_ui`] for a test module OUTSIDE `ui_script` — `ui_action::feed_tests` drives the
 /// real `UIErrorsFrame` end to end and needs the same both-stores reader everything else uses.
 #[cfg(test)]

@@ -796,7 +796,12 @@ fn chat_harness() -> UiScript {
             "GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-            "ChatFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\ChatFrame.xml",
+            "Interface\\FrameXML\\UIPanelTemplates.lua",
+            "Interface\\FrameXML\\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\FloatingChatFrame.xml",
         ],
     );
     harness_on(s)

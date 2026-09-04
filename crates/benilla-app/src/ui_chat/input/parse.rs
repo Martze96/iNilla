@@ -98,6 +98,10 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// A `/name` line that resolved in `EmotesText` (`/wave` → text id 101) — sent as
     /// `CMSG_TEXT_EMOTE` targeted at the current selection.
     TextEmote(u32),
+    /// A channel verb the stock `ChatFrame.lua` handler already parsed and the VM queued
+    /// (`JoinChannelByName`, `ChannelKick`, … — `benilla_ui::script::ChannelCommand`). Never
+    /// produced by [`parse_line`]; it enters the executor from the engine's queue.
+    Channel(benilla_ui::script::ChannelCommand),
     /// The `/castvis` **dev instrument** (decision 0099 phase 2): synthesize a cast edge locally
     /// — the exact [`crate::creature_anim::CastEvent`] the wire would produce — on the selection
     /// (else self), no server round-trip. Runtime-available like every current instrument
@@ -477,44 +481,4 @@ fn dev_command(dev: DevCmd, args: &str) -> ParsedChat {
             name: slash_target_name(args),
         },
     }
-}
-
-/// The Enter-path type switch (`ChatEdit_ParseText(send=1)` runs the same conversion the live
-/// parse does, but without the live parse's trailing-space requirement — "/g hi" + Enter
-/// converts and sends in one stroke; "/g" alone converts and commits the sticky).
-pub(in crate::ui_chat) fn parse_enter_type_switch(
-    channels: &crate::ui_chat::edit::ChannelState,
-    text: &str,
-) -> Option<(crate::ui_chat::edit::TypeSwitch, String)> {
-    use crate::ui_chat::edit::{SendType, TypeSwitch};
-    let rest = text.strip_prefix('/')?;
-    let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
-    let lower = cmd.to_ascii_lowercase();
-    // `/2 hi` and `/c world hi` convert-and-send on the enter path too.
-    if let Some(switch) = crate::ui_chat::edit::channel_switch(channels, &lower, args) {
-        return Some(switch);
-    }
-    if ["w", "whisper", "t", "tell", "send"].contains(&lower.as_str()) {
-        let (target, remainder) = args.split_once(' ').unwrap_or((args, ""));
-        if target.is_empty() || target.starts_with('|') || remainder.trim().is_empty() {
-            return None; // needs a name AND a message on the enter path
-        }
-        return Some((
-            TypeSwitch::Whisper(target.to_string()),
-            remainder.to_string(),
-        ));
-    }
-    let t = match lower.as_str() {
-        "s" | "say" => SendType::Say,
-        "y" | "yell" | "sh" | "shout" => SendType::Yell,
-        "e" | "em" | "emote" | "me" => SendType::Emote,
-        "p" | "party" => SendType::Party,
-        "raid" | "ra" | "rsay" => SendType::Raid,
-        "rw" => SendType::RaidWarning,
-        "g" | "gc" | "gu" | "guild" => SendType::Guild,
-        "o" | "osay" => SendType::Officer,
-        "bg" | "battleground" => SendType::Battleground,
-        _ => return None,
-    };
-    Some((TypeSwitch::Plain(t), args.to_string()))
 }

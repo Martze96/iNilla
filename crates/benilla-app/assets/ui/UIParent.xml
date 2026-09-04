@@ -40,6 +40,12 @@
                 this:RegisterEvent("CONFIRM_LOOT_ROLL")
             </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
+            <!-- The reference's own UIParent OnUpdate line (its UIParent.xml l.19): the floating
+                 chat frames' hover reveal, the tab fades and the dock-drag driver run from here,
+                 once a frame, since the chat window became the reference's (1948). The fade and
+                 flash kits keep their own tick sources in UiPanels.xml. The guard is for a VM that
+                  loaded this file without the chat files — a test's, never the manifest's. -->
+            <OnUpdate>if FCF_OnUpdate then FCF_OnUpdate(arg1) end</OnUpdate>
         </Scripts>
     </Frame>
 

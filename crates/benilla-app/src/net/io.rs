@@ -908,6 +908,33 @@ fn writer_loop(
                     ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
                     ClientCommand::ChannelList { name } => w.channel_list(&name),
                     ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
+                    ClientCommand::ChannelOwner { name } => w.channel_owner(&name),
+                    ClientCommand::ChannelSetOwner { name, player } => {
+                        w.channel_set_owner(&name, &player)
+                    }
+                    ClientCommand::ChannelPassword { name, password } => {
+                        w.channel_password(&name, &password)
+                    }
+                    ClientCommand::ChannelModerator { name, player } => {
+                        w.channel_moderator(&name, &player)
+                    }
+                    ClientCommand::ChannelUnmoderator { name, player } => {
+                        w.channel_unmoderator(&name, &player)
+                    }
+                    ClientCommand::ChannelMute { name, player } => w.channel_mute(&name, &player),
+                    ClientCommand::ChannelUnmute { name, player } => {
+                        w.channel_unmute(&name, &player)
+                    }
+                    ClientCommand::ChannelInvite { name, player } => {
+                        w.channel_invite(&name, &player)
+                    }
+                    ClientCommand::ChannelKick { name, player } => w.channel_kick(&name, &player),
+                    ClientCommand::ChannelBan { name, player } => w.channel_ban(&name, &player),
+                    ClientCommand::ChannelUnban { name, player } => {
+                        w.channel_unban(&name, &player)
+                    }
+                    ClientCommand::ChannelAnnouncements { name } => w.channel_announcements(&name),
+                    ClientCommand::ChannelModerate { name } => w.channel_moderate(&name),
                     ClientCommand::PlayedTime => w.played_time(),
                     ClientCommand::NameQuery { guid } => w.name_query(guid),
                     ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),

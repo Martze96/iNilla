@@ -268,6 +268,47 @@ mod tests {
     /// block), Lua `--[[ … ]]` blocks, and XML `<!-- … -->` blocks. It does not track string
     /// literals, so a `"--"` inside a string truncates that line — which can only ever cause an
     /// UNDER-report, the safe direction for every reader of it.
+    /// Blank the contents of every Lua string literal (`"…"`, `'…'`, `[[…]]`), keeping the quotes,
+    /// so a pattern like `"/([^%s]+)%s(.*)"` cannot read as a call to `s`.
+    fn strip_strings(text: &str) -> String {
+        let b: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == '"' || c == '\'' {
+                out.push(c);
+                i += 1;
+                while i < b.len() && b[i] != c && b[i] != '\n' {
+                    if b[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < b.len() && b[i] == c {
+                    out.push(c);
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '[' && i + 1 < b.len() && b[i + 1] == '[' {
+                out.push_str("[[");
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == ']' && b[i + 1] == ']') {
+                    i += 1;
+                }
+                if i + 1 < b.len() {
+                    out.push_str("]]");
+                    i += 2;
+                }
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
     fn strip_comments(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut in_xml = false;
@@ -1455,6 +1496,13 @@ mod tests {
                  update; our `inventory_alerts` snapshot is recomputed on every inventory push \
                  instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
+            (
+                "ChatFrame.xml",
+                "value",
+                "not a global: `for index, value in SlashCmdList do … value(msg)` \
+                 (ChatFrame.lua l.2168-2171) calls the addon's handler through the table's loop \
+                 variable. The scan has no scopes, so the name reads as a call.",
+            ),
         ];
 
         let toc = &super::super::addons::Addon::builtin().toc.files;
@@ -1481,7 +1529,7 @@ mod tests {
                     text.push('\n');
                 }
             }
-            let text = strip_comments(&text);
+            let text = strip_strings(&strip_comments(&text));
             let defines: std::collections::HashSet<String> = text
                 .lines()
                 .filter_map(|l| l.trim_start().strip_prefix("function "))
@@ -2022,7 +2070,6 @@ mod tests {
         // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
         const UNPRODUCED: &[(&str, &str)] = &[
             ("BAG_OPEN", "ContainerFrame.lua"),
-            ("CHAT_MSG_RAID_WARNING", "RaidWarning.lua"),
             (
                 "CVAR_UPDATE",
                 "TextStatusBar.lua — a CVar change does not repaint the bar text",
@@ -2036,6 +2083,12 @@ mod tests {
                  flow works without it",
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
+            (
+                "LEARNED_SPELL_IN_TAB",
+                "SpellBookFrame.lua — the tab flash when a new spell lands in it; the reference \
+                 fires it with the tab index on spell add, which benilla's spellbook feed does not \
+                 derive yet (1952)",
+            ),
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
@@ -2058,6 +2111,11 @@ mod tests {
                 "four files — the paperdoll model refresh",
             ),
             ("UNIT_PORTRAIT_UPDATE", "three files — the portrait refresh"),
+            (
+                "ZONE_UNDER_ATTACK",
+                "ChatFrame.lua — the reference's `SMSG_ZONE_UNDER_ATTACK` line (\"%s is under \
+                 attack!\"); the wire handler is not built (1948)",
+            ),
         ];
 
         let mut fired: std::collections::HashSet<String> =
@@ -2067,6 +2125,50 @@ mod tests {
             .and_then(|p| p.parent())
             .expect("workspace root")
             .join("crates");
+        let caps = |lit: &str| {
+            !lit.is_empty()
+                && lit
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        };
+        // The two literal shapes an indirect fire's file can carry: `"EVENT", vec!` and a match
+        // arm `=> "EVENT",` — the event-name table a `fire_event(name_of(kind), …)` reads.
+        let scan_arms = |text: &str, fired: &mut std::collections::HashSet<String>| {
+            const SHAPE: &str = "\", vec!";
+            for (i, _) in text.match_indices(SHAPE) {
+                let before = &text[..i];
+                let Some(q) = before.rfind('"') else { continue };
+                let lit = &before[q + 1..];
+                if caps(lit) {
+                    fired.insert(lit.to_string());
+                }
+            }
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            for (i, t) in lines.iter().enumerate() {
+                let (t, arm_value) = match t.find("=> \"") {
+                    Some(k) => (t[k + 3..].trim_end_matches(','), true),
+                    None => (*t, false),
+                };
+                let Some(lit) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')) else {
+                    continue;
+                };
+                if arm_value && caps(lit) {
+                    fired.insert(lit.to_string());
+                    continue;
+                }
+                let arm = i > 0
+                    && lines[i - 1].ends_with('{')
+                    && lines.get(i + 1).is_some_and(|n| n.starts_with('}'));
+                if arm && caps(lit) {
+                    fired.insert(lit.to_string());
+                }
+            }
+        };
+        // An indirect fire — `fire_event(EXECUTE_CHAT_LINE, …)`, `fire_event(event_name(kind), …)`
+        // — names a const or a function; the literal lives where THAT is defined, which may be
+        // another file (1948: `ui_chat::event::event_name` answers for `frames::route`'s fire).
+        let mut indirect: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut texts: Vec<String> = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
             for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -2075,11 +2177,6 @@ mod tests {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
-                    // Split so this file cannot match its own walker (see the sibling gate).
-                    // Two producer shapes: `UiScript::fire_event(` and its `&Lua` twin
-                    // `tick::fire_event_into(` (1924), which an engine verb fires from inside a
-                    // binding — `UpdateSpells` → SPELLS_CHANGED, `ChangeActionBarPage` →
-                    // ACTIONBAR_PAGE_CHANGED (1938).
                     const CALLS: [&str; 2] =
                         [concat!("fire_event", "("), concat!("fire_event_into", "(")];
                     let mut fires_indirectly = false;
@@ -2090,59 +2187,40 @@ mod tests {
                             from = at;
                             let rest = text[at..].trim_start();
                             let rest = rest.strip_prefix("lua,").map_or(rest, str::trim_start);
-                            if !rest.starts_with('"') {
-                                fires_indirectly = true;
-                            }
                             if let Some(body) = rest.strip_prefix('"') {
                                 if let Some(end) = body.find('"') {
                                     fired.insert(body[..end].to_string());
+                                }
+                            } else {
+                                fires_indirectly = true;
+                                let ident: String = rest
+                                    .chars()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect();
+                                if !ident.is_empty() {
+                                    indirect.insert(ident);
                                 }
                             }
                         }
                     }
                     if fires_indirectly {
-                        // An indirect fire names its event either as `"NAME", vec![…]` or as one
-                        // arm of an `if … { "A" } else { "B" }` chosen before the call — a literal
-                        // standing alone on its line (`ui_action/state.rs`'s START/STOP_AUTOREPEAT).
-                        const SHAPE: &str = "\", vec!";
-                        let caps = |lit: &str| {
-                            !lit.is_empty()
-                                && lit.chars().all(|c| {
-                                    c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()
-                                })
-                        };
-                        for (i, _) in text.match_indices(SHAPE) {
-                            let before = &text[..i];
-                            let Some(q) = before.rfind('"') else { continue };
-                            let lit = &before[q + 1..];
-                            if caps(lit) {
-                                fired.insert(lit.to_string());
-                            }
-                        }
-                        let lines: Vec<&str> = text.lines().map(str::trim).collect();
-                        for (i, t) in lines.iter().enumerate() {
-                            // …or the value of a `match` arm (`QuestPanel::Progress =>
-                            // "QUEST_PROGRESS",` — `ui_quest.rs`'s `panel_event`).
-                            let (t, arm_value) = match t.find("=> \"") {
-                                Some(k) => (t[k + 3..].trim_end_matches(','), true),
-                                None => (*t, false),
-                            };
-                            let Some(lit) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"'))
-                            else {
-                                continue;
-                            };
-                            if arm_value && caps(lit) {
-                                fired.insert(lit.to_string());
-                                continue;
-                            }
-                            let arm = i > 0
-                                && lines[i - 1].ends_with('{')
-                                && lines.get(i + 1).is_some_and(|n| n.starts_with('}'));
-                            if arm && caps(lit) {
-                                fired.insert(lit.to_string());
-                            }
-                        }
+                        scan_arms(&text, &mut fired);
                     }
+                    texts.push(text);
+                }
+            }
+        }
+        for text in &texts {
+            for ident in &indirect {
+                let decl = format!("const {ident}: &str = \"");
+                if let Some(k) = text.find(&decl) {
+                    let body = &text[k + decl.len()..];
+                    if let Some(end) = body.find('"') {
+                        fired.insert(body[..end].to_string());
+                    }
+                }
+                if text.contains(&format!("fn {ident}(")) {
+                    scan_arms(text, &mut fired);
                 }
             }
         }

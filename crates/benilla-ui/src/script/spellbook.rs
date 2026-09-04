@@ -229,9 +229,46 @@ fn is_pet_book(book_type: &str) -> bool {
     book_type.eq_ignore_ascii_case(BOOKTYPE_PET)
 }
 
-/// The book-id → 0-based slot-list index seam (module docs). `None` for an id of `0` (the ref's
-/// ids start at 1, so `id - 1` would otherwise underflow) — the reference's own `arg1 - 1` with its
-/// `[0, 0x400)` bound, which our slot lists enforce by being shorter than that anyway.
+/// The shared argument marshaller of the reference's spell-slot bindings (`0x4b3ec0`, wow-re
+/// `getspellname-return-contract.md` §6 — `GetSpellName`, `GetSpellTexture`, `IsCurrentCast`,
+/// `GetSpellCooldown`, `IsSpellPassive`, `CastSpell`, `PickupSpell` and the two autocast verbs all
+/// call it): arg 1 must be a number and arg 2 a number or string — the book type is **not**
+/// optional; the index is `trunc(arg1 - 1)` and must land in `[0, 0x400)`, else the binding
+/// raises `Invalid spell slot in <Verb>` and abandons the caller's statement. `"pet"`
+/// (case-insensitively) selects the pet list; any other book type, `"spell"` included, reads the
+/// player's. Answers the 1-based id the rest of this module indexes by ([`slot_index`]), and the
+/// book type normalised to the two names the model knows.
+fn spell_slot_args(id: Value, book_type: Value, verb: &str) -> mlua::Result<(u32, String)> {
+    let invalid = || mlua::Error::runtime(format!("Invalid spell slot in {verb}"));
+    // `lua_isnumber` + `lua_tonumber` (`0x6f34d0`/`0x6f3620`): a numeric string is a number.
+    let index = match id {
+        Value::Integer(i) => i as f64,
+        Value::Number(n) => n,
+        Value::String(s) => s
+            .to_str()
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .ok_or_else(invalid)?,
+        _ => return Err(invalid()),
+    };
+    let book = match book_type {
+        Value::String(s) => s.to_str().map(|s| s.to_string()).map_err(|_| invalid())?,
+        Value::Integer(_) | Value::Number(_) => String::new(),
+        _ => return Err(invalid()),
+    };
+    let index = (index - 1.0).trunc();
+    if !(0.0..1024.0).contains(&index) {
+        return Err(invalid());
+    }
+    let book = if is_pet_book(&book) {
+        BOOKTYPE_PET
+    } else {
+        BOOKTYPE_SPELL
+    };
+    Ok((index as u32 + 1, book.to_string()))
+}
+
+/// The book-id → 0-based slot-list index seam (module docs).
 fn slot_index(id: u32) -> Option<usize> {
     usize::try_from(id.checked_sub(1)?).ok()
 }
@@ -530,17 +567,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // as nil at the Lua boundary; the reference renders it as the empty string the pointer targets.
     g.set(
         "GetSpellName",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
-            // An out-of-range index RAISES rather than answering nil. `0x4b3ec0` gates the index to
-            // `[0, 0x400)` (`0x4b3f0a`/`0x4b3f11`) before the binding proper runs, and the miss arm
-            // is `luaL_error("Invalid spell slot in GetSpellName")`, which longjmps and abandons
-            // the caller's statement (`super::binding_abi`). The in-binding bound check at
-            // `0x4b4018` is unreachable-as-taken. This file previously assumed the bound was
-            // "enforced by our slot lists being shorter than that anyway" — a short list answers
-            // nil, which is a different thing entirely.
-            if id >= 0x400 {
-                return Err(mlua::Error::runtime("Invalid spell slot in GetSpellName"));
-            }
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "GetSpellName")?;
+            // An out-of-range index RAISES rather than answering nil (`spell_slot_args`); the
+            // in-binding bound check at `0x4b4018` is unreachable-as-taken. This file previously
+            // assumed the bound was "enforced by our slot lists being shorter than that anyway" —
+            // a short list answers nil, which is a different thing entirely.
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(slot) = book_slot(&model, id, &book_type) else {
                 // An unfilled slot inside the range answers **two** nils (`0x4b4086` → `mov eax,0x2`
@@ -557,7 +589,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetSpellTexture",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "GetSpellTexture")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let tex = book_slot(&model, id, &book_type).and_then(|s| s.texture.clone());
             match tex {
@@ -573,7 +606,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ([`SpellSlotView::current`]); this only reads it back.
     g.set(
         "IsCurrentCast",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "IsCurrentCast")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let current = book_slot(&model, id, &book_type).is_some_and(|s| s.current);
             // The ref's binding convention: 1 or nil, never false.
@@ -591,7 +625,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // out-of-range answers the cold `(0, 0, 1)` — the ref's own no-cooldown shape.
     g.set(
         "GetSpellCooldown",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "GetSpellCooldown")?;
             let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let cooldown = book_slot(&model, id, &book_type).and_then(|s| s.cooldown);
@@ -612,7 +647,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "IsSpellPassive",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "IsSpellPassive")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(book_slot(&model, id, &book_type).is_some_and(|s| s.passive))
         })?,
@@ -631,7 +667,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`0x4b34af`-`0x4b34bb`), exactly as `CastPetAction` does; the app supplies it at the drain.
     g.set(
         "CastSpell",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "CastSpell")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(slot) = book_slot(&model, id, &book_type) {
                 if !slot.passive {
@@ -679,7 +716,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // no-record path uses, so the arity is 2 on every path including a bad index.
     g.set(
         "GetSpellAutocast",
-        lua.create_function(move |lua, (id, book_type): (u32, String)| {
+        lua.create_function(move |lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "GetSpellAutocast")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let (allowed, enabled) = book_slot(&model, id, &book_type)
                 .filter(|_| is_pet_book(&book_type))
@@ -701,7 +739,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // owns, so it happens at the drain.
     g.set(
         "ToggleSpellAutocast",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "ToggleSpellAutocast")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let spell_id = book_slot(&model, id, &book_type)
                 .filter(|_| is_pet_book(&book_type))
@@ -736,7 +775,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "PickupSpell",
-        lua.create_function(|lua, (id, book_type): (u32, String)| {
+        lua.create_function(|lua, (id, book_type): (Value, Value)| {
+            let (id, book_type) = spell_slot_args(id, book_type, "PickupSpell")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             Ok(pickup_spell(&mut model, id, &book_type))
         })?,
@@ -990,6 +1030,63 @@ mod tests {
 
         // Out of range -> nil.
         assert!(s.eval::<bool>("return GetSpellTabInfo(3) == nil").unwrap());
+    }
+
+    /// The shared marshaller's law (`0x4b3ec0`): the index is `trunc(arg - 1)` gated to
+    /// `[0, 0x400)` and a miss RAISES; the book type is mandatory and `"pet"` is matched without
+    /// case; anything else is the player's book.
+    #[test]
+    fn the_slot_marshaller_gates_the_index_and_names_the_book() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+        for bad in ["0", "-11", "1025", "nil", "\"x\"", "{}"] {
+            let err = s
+                .eval::<mlua::Value>(&format!("return GetSpellTexture({bad}, BOOKTYPE_SPELL)"))
+                .expect_err(bad)
+                .to_string();
+            assert!(
+                err.contains("Invalid spell slot in GetSpellTexture"),
+                "{bad}: {err}"
+            );
+        }
+        assert!(
+            s.eval::<mlua::Value>("return GetSpellTexture(1)")
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid spell slot in GetSpellTexture"),
+            "the book type is not optional"
+        );
+        // Inside the range but past the book: nil, not an error — the bound is the marshaller's,
+        // the emptiness is the slot's.
+        assert!(s
+            .eval::<bool>("return GetSpellTexture(1024, BOOKTYPE_SPELL) == nil")
+            .unwrap());
+        // Truncation toward zero: 1.9 is slot 1, and so is 0.99 (`trunc(-0.01)` is 0). A numeric
+        // string is a number (`lua_isnumber`).
+        for one in ["1.9", "0.99", "\"1\""] {
+            assert_eq!(
+                s.eval::<String>(&format!("return GetSpellName({one}, BOOKTYPE_SPELL)"))
+                    .unwrap(),
+                "Fireball",
+                "{one}"
+            );
+        }
+        let (name, _) = s
+            .eval::<(String, String)>("return GetSpellName(1, \"PET\")")
+            .unwrap();
+        assert_eq!(
+            name,
+            pet_book().slots[0].name,
+            "the pet list, case-insensitively"
+        );
+        let (name, _) = s
+            .eval::<(String, String)>("return GetSpellName(1, 7)")
+            .unwrap();
+        assert_eq!(
+            name, "Fireball",
+            "a number is an accepted, player-book type"
+        );
     }
 
     #[test]
@@ -1460,9 +1557,10 @@ mod tests {
             .eval::<bool>(r#"local a, b = GetSpellName(9, "spell") return a == nil and b == nil"#)
             .unwrap());
 
-        // Past the reference's [0, 0x400) gate it RAISES rather than answering nil.
+        // Past the reference's [0, 0x400) gate — an id of 1025 is index 1024 — it RAISES rather
+        // than answering nil.
         let err = s
-            .run(r#"GetSpellName(1024, "spell")"#)
+            .run(r#"GetSpellName(1025, "spell")"#)
             .expect_err("an out-of-range slot must raise");
         assert!(
             format!("{err}").contains("Invalid spell slot in GetSpellName"),

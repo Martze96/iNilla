@@ -614,7 +614,7 @@ Interface\FrameXML\DurabilityFrame.xml
 # shadowed name with no caller is building against a guess" rule (1222). That rule is about names
 # WE would invent; this one is the reference's own declaration, so there is nothing left to guess.
 #
-# `ChatTypeInfo["RAID_WARNING"]` comes from ChatFrame.xml far below — read at call time, so the
+# `ChatTypeInfo["RAID_WARNING"]` comes from the reference's ChatFrame.xml far below — read at call time, so the
 # order does not bind.
 Interface\FrameXML\UIErrorsFrame.xml
 Interface\FrameXML\RaidWarning.xml
@@ -798,11 +798,18 @@ Interface\AddOns\Blizzard_InspectUI\InspectHonorFrame.xml
 # is a global resolved at call time. Needs UiPanels (the panel manager, its left-slot row) and
 # Fonts; its booth pane needs nothing loaded at all.
 DressUpFrame.xml
-# The spellbook window (decision 0216 §8, slice 5): the P-key window, the spell SOURCE
-# for the cursor-payload arc. Loaded right after CharacterFrame (the same "player-state
-# windows grouped" posture, same Fonts/UiPanels/GameTooltip-only dependency set); the
-# 'P' binding (ui_script/input.rs) calls its bare ToggleSpellBook(BOOKTYPE_SPELL).
-SpellBookFrame.xml
+# ══ THE SPELLBOOK — the reference's own, off the player's chain (1751; decision 1952) ══
+# SpellBookFrame.xml + SpellBookFrame.lua: the book, the twelve page buttons, the skill-line tabs,
+# the Spell/Pet toggle tabs. Its whole engine surface was already ours (1924's UpdateSpells, 1931's
+# GetSpellTabInfo tuple); what stopped it in 1926 — MultiActionBar_ShowAllGrids/HideAllGrids on
+# show/hide — has been the reference's MultiActionBars.lua since 1938. Loaded here, after the
+# action-bar files it calls into and after MicroMenu (UpdateMicroButtons on show). The 'P' binding
+# calls its own ToggleSpellBook(BOOKTYPE_SPELL). 0216's transcription is gone.
+Interface\FrameXML\SpellBookFrame.xml
+# The one adapter the reference's file needs from this engine: its pet-page autocast shine is a
+# <Model> (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla
+# draws is its own token texture (1383/1392/1393). BENILLA_ALLOW_OWN_UI=1.
+SpellBookAdapters.xml
 # ══ THE TALENT WINDOW — the reference's own, off the player's chain (1751, window 25) ══
 # The second LoadOnDemand addon (1832 was the first, and its header carries the mechanics).
 # `Blizzard_TalentUI` is FIVE files behind one manifest line: the `.xml` sources its own `.lua`
@@ -1020,7 +1027,18 @@ Interface\FrameXML\QuestLogFrame.xml
 # and SecondsToTime), GameTooltip (its row hover), and QuestLogFrame — whose window a row
 # click opens, and whose MAX_QUESTS it shares.
 Interface\FrameXML\QuestTimerFrame.xml
-ChatFrame.xml
+# ══ THE CHAT WINDOW — the reference's own, off the player's chain (1751; decision 1948) ══
+# ChatFrame.xml (ChatFrameEditBox, ChatMenu/EmoteMenu/LanguageMenu/VoiceMacroMenu, ChatFrameMenuButton,
+# the frame/tab/edit-box templates, ChatFrame.lua) then FloatingChatFrame.xml (ChatFrame1..7, their tabs
+# and dock regions, the tab dropdown, FloatingChatFrame.lua) — the reference's pair in its own order
+# (FrameXML.toc l.48-49). What they call and we built for them: the window record verbs and the colour
+# registry (benilla-ui script/chat_window.rs, chat_types.rs), the channel verbs (channel.rs), the
+# language walk (chat_send.rs), the slash-handler verbs (chat_misc.rs), and UpdateColorByID. Our own
+# transcription (0288's ChatFrame.xml) is gone; benilla's instrument commands (/chattest, /shot, …)
+# register through SlashCmdList from ScriptLogFrame.xml's dev block, and the app's chat feed FIRES the
+# CHAT_MSG_* events the reference's ChatFrame_OnEvent prints from — it no longer prints them itself.
+Interface\FrameXML\ChatFrame.xml
+Interface\FrameXML\FloatingChatFrame.xml
 # ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
 # The fourth LoadOnDemand addon (1832's header carries the mechanics). ONE manifest line: its toc
 # lists `Blizzard_MacroUI.xml`, which sources its own `.lua`, plus the empty `Localization.lua`.

@@ -44,6 +44,7 @@ mod clock;
 mod gpu;
 mod hud;
 mod journal;
+mod main_split;
 mod phases;
 #[cfg(target_os = "macos")]
 mod stall;
@@ -53,10 +54,11 @@ mod trace;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
-pub(crate) use clock::{process_cpu_secs, system_cpu_ticks};
+pub(crate) use clock::{process_cpu_secs, system_cpu_ticks, thread_cpu_table};
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
 pub(crate) use hud::PerfHud;
 pub(crate) use journal::FpsJournalPlugin;
+pub(crate) use main_split::MainThreadSplit;
 
 /// The frame budget: a 60 fps floor. No frame should exceed this.
 pub const FRAME_BUDGET_MS: f32 = 1000.0 / 60.0;
@@ -67,6 +69,7 @@ impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
         // Render-pass timing (CPU-only on Apple Silicon — see the module header). Harmless if
         // the backend can't record it; also the hook Tracy GPU uses on Vulkan/DX12.
+        main_split::plugin(app);
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<stats::FrameStats>()
             .init_resource::<PerfHud>()

@@ -272,6 +272,12 @@ pub(crate) fn name_cache_path(realm: &str) -> Option<PathBuf> {
 /// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev
 /// affordance (`/shot`, compiled out by `--no-default-features` since 1179), but it persists on a
 /// real machine, so it resolves here like everything else rather than through a private path.
+/// `Logs/` — `WoWChatLog.txt` and `WoWCombatLog.txt`, the reference's two names beside its
+/// `WTF`, kept here beside ours ([`crate::ui_chat`]'s logging).
+pub(crate) fn logs_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("Logs"))
+}
+
 pub(crate) fn shots_path() -> Option<PathBuf> {
     home().map(|h| h.join("shots.txt"))
 }

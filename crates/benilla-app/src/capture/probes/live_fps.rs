@@ -57,6 +57,7 @@ impl Plugin for LiveFpsPlugin {
             decodes_prev: 0,
             load_samples: Vec::new(),
             paced_samples: Vec::new(),
+            threads_at_start: None,
             cpu_at_start: None,
             sys_at_start: None,
             occluded_now: false,
@@ -108,6 +109,9 @@ struct LiveFps {
     /// snaps a cadenced delta to whole refreshes; a paced delta of two periods is a frame the
     /// display actually skipped.
     paced_samples: Vec<f32>,
+    /// Per-thread CPU at the window's first frame (`perf::thread_cpu_table`), keyed by pthread
+    /// identity — subtracted at the window's end for `thr=[name:ms/frame,…]`.
+    threads_at_start: Option<Vec<(usize, String, f64, f64)>>,
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
@@ -169,6 +173,7 @@ type ScreenParams<'w, 's> = (
     MessageReader<'w, 's, AssetEvent<Mesh>>,
     MessageReader<'w, 's, AssetEvent<benilla_assets::materials::WowModelMaterial>>,
     Res<'w, Time<bevy::time::Virtual>>,
+    ResMut<'w, crate::perf::MainThreadSplit>,
 );
 
 #[derive(SystemParam)]
@@ -223,6 +228,7 @@ fn drive_live_fps(
     );
     let (mesh_events, mat_events) = (&mut screen.7, &mut screen.8);
     let paced_ms = screen.9.delta_secs() * 1000.0;
+    let main_split = &mut screen.10;
     // Read every frame (a reader that only reads inside the window would report the whole
     // backlog on its first sampled frame).
     let mesh_added = mesh_events
@@ -295,6 +301,8 @@ fn drive_live_fps(
         LiveFpsPhase::Sampling => {
             if probe.samples.is_empty() {
                 probe.cpu_at_start = crate::perf::process_cpu_secs();
+                probe.threads_at_start = crate::perf::thread_cpu_table();
+                main_split.restart();
                 probe.sys_at_start = crate::perf::system_cpu_ticks();
                 // The churn census restarts with the window — warmup noise (streaming, shader
                 // warms) would otherwise read as steady-state ratchets.
@@ -427,6 +435,7 @@ fn drive_live_fps(
             };
             // CPU cost per frame across every thread — the load-robust half of the measurement
             // (`perf::process_cpu_secs`), and directly comparable with a reporter's CPU %.
+            let v_len = v.len();
             let cpu = match (probe.cpu_at_start, crate::perf::process_cpu_secs()) {
                 (Some(t0), Some(t1)) => {
                     let per_frame_ms = (t1 - t0) * 1000.0 / v.len() as f64;
@@ -463,9 +472,45 @@ fn drive_live_fps(
                         })
                         .collect::<Vec<_>>()
                         .join(",");
+                    // Per thread, ms per frame over the window — the split that says which
+                    // thread a tax landed on; threads sharing a name (a pool) are summed.
+                    let threads = match (&probe.threads_at_start, crate::perf::thread_cpu_table()) {
+                        (Some(t0), Some(t1)) => {
+                            let start: std::collections::HashMap<usize, (f64, f64)> =
+                                t0.iter().map(|(k, _, u, s)| (*k, (*u, *s))).collect();
+                            let mut by_name: std::collections::HashMap<String, (f64, f64)> =
+                                std::collections::HashMap::new();
+                            for (k, name, u1, s1) in &t1 {
+                                let (u0, s0) = start.get(k).copied().unwrap_or((0.0, 0.0));
+                                let name = match name.rfind(" (") {
+                                    Some(i) if name.ends_with(')') => name[..i].to_string(),
+                                    _ => name.clone(),
+                                };
+                                let e = by_name.entry(name).or_default();
+                                e.0 += u1 - u0;
+                                e.1 += s1 - s0;
+                            }
+                            let mut v: Vec<(String, (f64, f64))> = by_name.into_iter().collect();
+                            v.sort_by(|a, b| (b.1 .0 + b.1 .1).total_cmp(&(a.1 .0 + a.1 .1)));
+                            let per = |secs: f64| secs * 1000.0 / v_len as f64;
+                            // `name:user+sys`, ms per frame.
+                            let list = v
+                                .iter()
+                                .take(8)
+                                .map(|(n, (u, s))| format!("{n}:{:.2}+{:.2}", per(*u), per(*s)))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let inside = main_split
+                                .inside_ms()
+                                .map(|m| format!(" main_in={m:.2}"))
+                                .unwrap_or_default();
+                            format!(" thr=[{list}]{inside}")
+                        }
+                        _ => String::new(),
+                    };
                     format!(
                         " cpu_ms={per_frame_ms:.2} cpu_pct={:.0} cpu_p95={:.2} cpu_p99={:.2} \
-                         frames_over={over} dropped={dropped} paced_max={paced_max:.1} worst=[{worst}]",
+                         frames_over={over} dropped={dropped} paced_max={paced_max:.1} worst=[{worst}]{threads}",
                         per_frame_ms / mean as f64 * 100.0,
                         cat(0.95),
                         cat(0.99),

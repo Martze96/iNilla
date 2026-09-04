@@ -51,7 +51,9 @@ mod button;
 mod camera_view;
 mod channel;
 mod char_stats;
+mod chat_misc;
 mod chat_send;
+mod chat_types;
 mod chat_window;
 mod clip;
 mod colorselect;
@@ -160,12 +162,15 @@ pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
 pub use bind_confirm::PendingEquipAnswer;
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
+pub use channel::{ChannelCommand, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
+pub use chat_misc::EmoteRequest;
 pub use chat_send::ChatSend;
-pub use chat_window::ChatWindowLook;
+pub use chat_types::ChatTypeColor;
+pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
     PetitionSlotView, RandomPropertyView, UiCursorMode,
@@ -555,6 +560,8 @@ impl UiScript {
         addon::install(&lua)?;
         addon_message::install(&lua)?;
         chat_send::install(&lua)?;
+        chat_types::install(&lua)?;
+        chat_misc::install(&lua)?;
         channel::install(&lua)?;
         chat_window::install(&lua)?;
         client::install(&lua)?;

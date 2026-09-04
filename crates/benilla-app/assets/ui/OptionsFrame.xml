@@ -220,6 +220,23 @@
         RegisterForSave("QUEST_FADING_DISABLE")
         AUTO_QUEST_WATCH = "1"
         RegisterForSave("AUTO_QUEST_WATCH")
+        -- CHAT_LOCKED / REMOVE_CHAT_DELAY — the chat window's two uvars, the reference's own
+        -- UIOptionsFrame.lua l.96-99 defaults ("0" and "0"), read every frame by
+        -- FloatingChatFrame.lua's FCF_Get_ChatLocked and FCF_OnUpdate since the chat window went
+        -- stock (1948). Declared here because this is where the reference declares them.
+        CHAT_LOCKED = "0"
+        RegisterForSave("CHAT_LOCKED")
+        REMOVE_CHAT_DELAY = "0"
+        RegisterForSave("REMOVE_CHAT_DELAY")
+
+        -- The Remove Chat Hover Delay row's applyFunc: the reference's own line
+        -- (UIOptionsFrame.lua l.216, `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)`) under the name the
+        -- row resolves at apply time. `SetChatMouseOverDelay` is FloatingChatFrame.lua's.
+        function ChatFrame_ApplyMouseOverDelay()
+            if SetChatMouseOverDelay then -- a VM that loaded this file without the chat files — a test's
+                SetChatMouseOverDelay(REMOVE_CHAT_DELAY)
+            end
+        end
 
         UIOptionsFrameCheckButtons = { };
         ------------------- Basic Options -------------------
@@ -3977,4 +3994,11 @@
             </OnHide>
         </Scripts>
     </Frame>
+    <!-- The reference names its options window UIOptionsFrame, and its FloatingChatFrame.lua reads
+         `UIOptionsFrame:IsShown()` every frame (FCF_OnUpdate's hover gate). Ours is OptionsFrame
+         until the options window migrates (1751); this alias is the adapter, and it retires with
+         the file. BENILLA_ALLOW_OWN_UI=1 -->
+    <Script><![CDATA[
+        UIOptionsFrame = OptionsFrame
+    ]]></Script>
 </Ui>

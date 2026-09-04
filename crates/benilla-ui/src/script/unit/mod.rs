@@ -41,6 +41,10 @@ pub enum SelectionRequest {
     /// `AssistUnit(unit)` — select the token's own `UNIT_FIELD_TARGET`; a basis with no target is
     /// a silent no-op (the reference's shared assist tail bails before any send).
     Assist(String),
+    /// `AssistByName(name)` (`0x489c40`) — the `/assist Bob` handler's verb: select what the
+    /// *named player* is targeting. A name, not a unit token, so it is the app's name→unit
+    /// resolution (`AssistRequest`) rather than `Assist`'s token walk.
+    AssistByName(String),
     /// `TargetLastEnemy()` — select the last *attackable* unit that was committed.
     LastEnemy,
 }

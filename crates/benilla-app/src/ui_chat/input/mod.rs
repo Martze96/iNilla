@@ -13,65 +13,11 @@
 use bevy::prelude::*;
 
 mod parse;
-pub(super) use parse::{parse_enter_type_switch, parse_line, ParsedChat};
+pub(super) use parse::{parse_line, ParsedChat};
 
 use crate::creature_anim::{move_flags, MovementState};
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 use crate::target::Selection;
-
-/// Send `text` as the box's CURRENT type (`ChatEdit_SendText`): whisper/channel targets ride
-/// along; a sent whisper remembers its target (`ChatEdit_SetLastToldTarget`); a sticky type
-/// commits (`ChatEdit_OnEnterPressed`'s `stickyType = type`).
-fn send_current(state: &mut super::edit::ChatEditState, commands: &NetCommands, text: String) {
-    use super::edit::SendType;
-    if text.trim().is_empty() {
-        if state.chat_type.sticky() {
-            state.sticky = state.chat_type;
-        }
-        return;
-    }
-    let target = match state.chat_type {
-        SendType::Whisper => Some(state.tell_target.clone()),
-        SendType::Channel => Some(state.channel_target.clone()),
-        _ => None,
-    };
-    if state.chat_type == SendType::Whisper {
-        state.last_told = Some(state.tell_target.clone());
-    }
-    if state.chat_type.sticky() {
-        state.sticky = state.chat_type;
-    }
-    let cmd = ClientCommand::Chat {
-        kind: state.chat_type.wire(),
-        target,
-        text,
-    };
-    match commands.0.send(cmd) {
-        Ok(()) => {}
-        Err(_) => warn!("chat: not connected; line dropped"),
-    }
-}
-
-/// The canonical recallable form of a submitted line — the ref's `ChatEdit_AddHistory`
-/// (ChatFrame.lua 1916-1938: `SLASH_<type>1`, plus the whisper target / the channel number,
-/// then the typed text) — so a recalled line re-Entered reproduces the send even after the
-/// box's mode has moved on. A typed slash line recalls exactly as typed; that also stores
-/// command lines (`/join …`), which the ref never recalls — a deliberate, useful divergence
-/// (decision 0301).
-fn history_line(state: &super::edit::ChatEditState, msg: &str) -> String {
-    use super::edit::SendType;
-    if msg.starts_with('/') {
-        return msg.to_string();
-    }
-    match state.chat_type {
-        SendType::Whisper => format!("/w {} {}", state.tell_target, msg),
-        SendType::Channel => format!("/{} {}", state.channel_number, msg),
-        t => match t.canonical_slash() {
-            Some(a) => format!("/{a} {msg}"),
-            None => msg.to_string(), // the leader types: no 1.12 slash — recall raw
-        },
-    }
-}
 
 #[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 /// The target half of the ref's `GetSlashCmdTarget` (ChatFrame.lua:650-658): a bare party
@@ -194,11 +140,53 @@ pub(super) struct ChatOut<'w> {
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
+/// The chat verbs the stock `ChatFrame.lua` slash handlers call once *they* have parsed the
+/// line — `DoEmote`, `RandomRoll`, `UninviteByName`, `ConsoleExec`, the channel verbs — drained
+/// from the VM into the same [`ParsedChat`] values our own parser produces, so one executor
+/// below serves both the reference's Lua and the lines it never sees.
+fn engine_verbs(
+    script: &mut benilla_ui::script::UiScript,
+    emotes: Option<&crate::sound::EmoteSounds>,
+) -> Vec<(String, ParsedChat)> {
+    let mut out = Vec::new();
+    for e in script.take_emote_requests() {
+        // The token is the `EmotesText.dbc` NAME (`EMOTE<i>_TOKEN`, "WAVE"), which is how the
+        // slash table resolved `/wave` before the Lua did the resolving.
+        match emotes.and_then(|c| c.text_id(&e.token)) {
+            Some(id) => out.push((String::new(), ParsedChat::TextEmote(id))),
+            None => warn!(
+                "chat: DoEmote({:?}): no EmotesText row for that token",
+                e.token
+            ),
+        }
+    }
+    for (min, max) in script.take_roll_requests() {
+        out.push((String::new(), ParsedChat::Random { min, max }));
+    }
+    for name in script.take_uninvite_requests() {
+        out.push((String::new(), ParsedChat::Uninvite { name: Some(name) }));
+    }
+    for line in script.take_console_lines() {
+        // `ConsoleExec` already wrote the CVar lines to the store; what reaches here is a
+        // console COMMAND, of which this client implements the one the reference's `/reload`
+        // alias spells out.
+        let cmd = line.trim().to_string();
+        if cmd.eq_ignore_ascii_case("reloadui") {
+            out.push((line, ParsedChat::ReloadUi));
+        } else {
+            out.push((line, ParsedChat::ConsoleUnknown { cmd }));
+        }
+    }
+    for cmd in script.take_channel_commands() {
+        out.push((String::new(), ParsedChat::Channel(cmd)));
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_chat_input(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut chat_log: ResMut<super::feed::ChatLog>,
-    mut state: ResMut<super::edit::ChatEditState>,
     channels: Res<super::edit::ChannelState>,
     commands: Res<NetCommands>,
     emotes: Option<Res<crate::sound::EmoteSounds>>,
@@ -235,57 +223,24 @@ pub(super) fn drain_chat_input(
     let Some(mut script) = script else {
         return;
     };
+    let mut queue = engine_verbs(&mut script, emotes.as_deref());
+    // What `take_chat_input` carries now is benilla's own commands, handed over by the
+    // `SlashCmdList` shim in ScriptLogFrame.xml once the reference's `ChatEdit_ParseText` has
+    // found no built-in for the line — the history line, the type switch and the send are the
+    // reference's Lua before the line ever reaches here (1948).
     for raw in script.take_chat_input() {
         let msg = raw.trim();
         if msg.is_empty() {
-            continue; // empty Enter = cancel (sticky already committed on prior sends)
-        }
-        // Every non-blank submit becomes recallable (Up/Down) in its canonical form — the ref's
-        // `ChatEdit_AddHistory` slot. Plain lines canonicalize from the same state the send
-        // below uses, so this pre-branch placement equals the ref's post-parse one.
-        script.editbox_add_history("ChatFrameEditBox", &history_line(&state, msg));
-        // A plain line sends as the box's CURRENT type — the whole point of the edit machine
-        // (the v1 always-SAY default dies here).
-        if !msg.starts_with('/') {
-            send_current(&mut state, &commands, msg.to_string());
             continue;
         }
-        // A slash line typed whole + Entered (never live-parsed — no trailing space): the type
-        // switch still applies on the send path (`ChatEdit_ParseText(send=1)` runs the same
-        // conversion first), then the remainder sends as the new type.
-        if let Some((switch, remainder)) = parse_enter_type_switch(&channels, msg) {
-            match switch {
-                super::edit::TypeSwitch::Plain(t) => state.chat_type = t,
-                super::edit::TypeSwitch::Whisper(target) => {
-                    state.chat_type = super::edit::SendType::Whisper;
-                    state.tell_target = target;
-                }
-                super::edit::TypeSwitch::Channel { name, number } => {
-                    state.chat_type = super::edit::SendType::Channel;
-                    state.channel_target = name;
-                    state.channel_number = number;
-                }
-            }
-            state.header_dirty = true;
-            send_current(&mut state, &commands, remainder);
-            continue;
-        }
-        match parse_line(&table, msg) {
-            ParsedChat::Reply { text } => match state.last_tell.front().cloned() {
-                Some(target) => {
-                    state.chat_type = super::edit::SendType::Whisper;
-                    state.tell_target = target;
-                    state.header_dirty = true;
-                    send_current(&mut state, &commands, text);
-                }
-                None => {
-                    // ERR_NO_REPLY_TARGET (GlobalStrings:1748).
-                    chat_log.push_event(super::event::ChatEvent::text_only(
-                        super::event::ChatEventKind::System,
-                        "You have nobody to reply to yet.".to_string(),
-                    ));
-                }
-            },
+        queue.push((msg.to_string(), parse_line(&table, msg)));
+    }
+    for (msg, parsed) in queue {
+        let msg = msg.as_str();
+        match parsed {
+            // `/r` is `SLASH_REPLY`, one of the reference's own built-ins (`ChatEdit_ParseText`'s
+            // REPLY arm over the box's tell ring) — the line never reaches this queue.
+            ParsedChat::Reply { .. } => {}
             ParsedChat::Join { name, password } => {
                 let _ = commands
                     .0
@@ -981,6 +936,53 @@ pub(super) fn drain_chat_input(
                         format!("{e}"),
                     ));
                 }
+            }
+            ParsedChat::Channel(cmd) => {
+                use benilla_ui::script::ChannelCommand as C;
+                let cmd = match cmd {
+                    C::Join { name, password } => ClientCommand::JoinChannel { name, password },
+                    C::Leave { name } => ClientCommand::LeaveChannel { name },
+                    C::List { name } => ClientCommand::ChannelList { name },
+                    // `ListChannels()` — the joined roster, numbered the way `/N` addresses it.
+                    C::ListAll => {
+                        let roster: Vec<String> = channels
+                            .joined
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, c)| c.as_ref().map(|c| format!("{}. {c}", i + 1)))
+                            .collect();
+                        let text = if roster.is_empty() {
+                            "You are not in any channels.".to_string()
+                        } else {
+                            format!("Channels: {}", roster.join(", "))
+                        };
+                        chat_log.push_event(super::event::ChatEvent::text_only(
+                            super::event::ChatEventKind::System,
+                            text,
+                        ));
+                        continue;
+                    }
+                    C::DisplayOwner { name } => ClientCommand::ChannelOwner { name },
+                    C::SetOwner { name, player } => ClientCommand::ChannelSetOwner { name, player },
+                    C::SetPassword { name, password } => {
+                        ClientCommand::ChannelPassword { name, password }
+                    }
+                    C::Ban { name, player } => ClientCommand::ChannelBan { name, player },
+                    C::Invite { name, player } => ClientCommand::ChannelInvite { name, player },
+                    C::Kick { name, player } => ClientCommand::ChannelKick { name, player },
+                    C::Moderator { name, player } => {
+                        ClientCommand::ChannelModerator { name, player }
+                    }
+                    C::Unmoderator { name, player } => {
+                        ClientCommand::ChannelUnmoderator { name, player }
+                    }
+                    C::Mute { name, player } => ClientCommand::ChannelMute { name, player },
+                    C::Unmute { name, player } => ClientCommand::ChannelUnmute { name, player },
+                    C::Unban { name, player } => ClientCommand::ChannelUnban { name, player },
+                    C::Moderate { name } => ClientCommand::ChannelModerate { name },
+                    C::ToggleAnnouncements { name } => ClientCommand::ChannelAnnouncements { name },
+                };
+                let _ = commands.0.send(cmd);
             }
             ParsedChat::Unknown => {
                 // Before the help line: an ADDON may claim it (decision 1195). The reference

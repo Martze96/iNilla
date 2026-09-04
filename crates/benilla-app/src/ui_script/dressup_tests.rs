@@ -40,7 +40,13 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\StackSplitFrame.xml",
     "DressUpFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-    "ChatFrame.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\ChatFrame.xml",
+    "Interface\\FrameXML\\UIPanelTemplates.lua",
+    "Interface\\FrameXML\\UIPanelTemplates.xml",
+    "UiPanels.xml",
+    "Interface\\FrameXML\\FloatingChatFrame.xml",
 ];
 
 /// The shipped files the dressing room's click sites need, in manifest order — **with no bag
@@ -99,7 +105,18 @@ fn shown_paper_doll() -> UiScript {
     for file in CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, file);
     }
-    for file in ["DressUpFrame.xml", "ChatFrame.xml"] {
+    for file in [
+        "DressUpFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\UIPanelTemplates.lua",
+        "Interface\\FrameXML\\UIPanelTemplates.xml",
+        "UiPanels.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
+    ] {
         super::test_ui::load_ui_strict(&s, file);
     }
     s.set_unit(

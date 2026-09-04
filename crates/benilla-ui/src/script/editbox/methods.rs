@@ -134,6 +134,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetInputLanguage() / ToggleInputLanguage() — `0x799550` / `0x799610`, the edit box's
+    // **IME** language, not the chat language: `ChatEdit_OnInputLanguageChanged` shows
+    // `INPUT_<name>` on the box's language button, and the toggle is what a Korean client
+    // flips between its two input modes. On a client with no IME the answer is the Roman
+    // alphabet and the toggle moves nothing; benilla has no IME.
+    m.set(
+        "GetInputLanguage",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
+            Ok("ROMAN")
+        })?,
+    )?;
+    m.set(
+        "ToggleInputLanguage",
+        lua.create_function(|lua, this: Table| {
+            frame_handle_of(lua, &this)?;
+            Ok(())
+        })?,
+    )?;
+
     // HighlightText([start [, end]]) — defaults (0, -1) = select-all.
     m.set(
         "HighlightText",

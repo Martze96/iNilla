@@ -1436,6 +1436,7 @@ pub(super) fn selection_requests(
     // the classification too, which is why this drain no longer states one: hand-stating it here
     // is exactly how a `false` that the binary refutes got written down.
     mut commit: super::by_name::SelectCommit,
+    mut assist_by_name: MessageWriter<super::by_name::AssistRequest>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1461,6 +1462,11 @@ pub(super) fn selection_requests(
                 Some((basis, _)) => commit.assist(basis, "AssistUnit"),
                 None => info!("assist (AssistUnit): \"{token}\" names nothing; silent no-op"),
             },
+            // `0x489c40` — the `/assist Bob` handler's verb: a player NAME, resolved by the
+            // app's name scan (prefix-ok, players only) the way the slash line always was.
+            SelectionRequest::AssistByName(name) => {
+                assist_by_name.write(super::by_name::AssistRequest { name: Some(name) });
+            }
             // `0x489b45` reads the last-attackable pair and hands it to the same `0x489a40`.
             // **Empty memory is a no-op, and that is derived now**: the shim `0x489b40` is
             // thirteen bytes with no emptiness test at all, where `TargetLastTarget 0x489b00`
@@ -2053,6 +2059,7 @@ mod tests {
         world.init_resource::<crate::net::Reputations>();
         world.init_resource::<Selection>();
         world.init_resource::<scan::LastEnemy>();
+        world.init_resource::<Messages<super::by_name::AssistRequest>>();
         world.insert_non_send_resource(UiScript::new().expect("a bare VM"));
 
         world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));

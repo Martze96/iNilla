@@ -112,7 +112,10 @@ fn setup() -> UiScript {
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GuildRegistrarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PetitionFrame.xml");
     s

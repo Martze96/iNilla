@@ -192,6 +192,13 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
             }
         }
     }
+    // The spell book's overlay is the reference's own template resized by SpellBookAdapters.xml's
+    // script (1952), so its number is measured off a VM, not read off an XML.
+    let s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
+    let (overlay, button): (f32, f32) = s
+        .eval("return SpellButton1AutoCastable:GetWidth(), SpellButton1:GetWidth()")
+        .unwrap();
+    found.push(("SpellButton1AutoCastable".into(), overlay * ART, button));
     assert_eq!(found.len(), 2, "expected two autocast overlays: {found:?}");
     for (name, brackets, button) in &found {
         assert!(
@@ -213,8 +220,10 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
 /// The spell book is **one deliberate deviation** (decision 1392). The reference writes
 /// `scale="1.22"` into a 36-unit viewport — a 0.87x rim that floats clear of the edge, is never
 /// clipped, and washes the icon; the real 1.12 client looks the same way (director-checked), so
-/// this is taste, not fidelity. We write 1.44 to borrow the pet button's ratio. This test is what
-/// stops that drifting, or being "corrected" back to 1.22 by someone who only read the ref.
+/// this is taste, not fidelity. We write 1.48 on a 37-unit rim (1393's numbers, set by
+/// SpellBookAdapters.xml over the reference's own template since 1952) to borrow the pet button's
+/// ratio. This test is what stops that drifting, or being "corrected" back to 1.22 by someone
+/// who only read the ref.
 #[test]
 fn the_shine_tokens_ask_for_the_rims_we_meant() {
     use benilla_ui::framexml::{Element, TopLevel};
@@ -272,6 +281,41 @@ fn the_shine_tokens_ask_for_the_rims_we_meant() {
             }
         }
     }
+    // The spell book's shine is created by SpellBookAdapters.xml's script beside the reference's
+    // own Model (1952), so its token is read off a VM's extract — where the renderer reads it —
+    // not an XML. (Not `GetTexture`, which answers the path up to its last dot, the reference's
+    // own shape, and so would cut the token's scale in half.)
+    let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    s.tick(0.05);
+    s.resolve();
+    s.run("SpellButton1Shine:Show()").unwrap();
+    s.resolve();
+    let quads = s.extract();
+    let token = quads
+        .iter()
+        .find_map(|q| match &q.content {
+            benilla_ui::script::QuadContent::Texture { path: Some(p), .. }
+                if p.starts_with(crate::autocast_shine::SHINE_TOKEN) =>
+            {
+                Some(p.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            let owned: Vec<_> = quads
+                .iter()
+                .filter(|q| {
+                    s.quad_owner_name(q.target)
+                        .is_some_and(|n| n.starts_with("SpellButton1"))
+                })
+                .map(|q| (s.quad_owner_name(q.target), format!("{:?}", q.content)))
+                .collect();
+            panic!("no shine token among SpellButton1's quads: {owned:?}")
+        });
+    let scale = crate::autocast_shine::token_model_scale(&token).expect("a shine token");
+    let view: f32 = s.eval("return SpellButton1Shine:GetWidth()").unwrap();
+    found.push(("SpellButton1Shine".into(), 0.02 * 1280.0 * scale, view));
     assert_eq!(
         found.len(),
         2,

@@ -148,7 +148,14 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     }
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
@@ -237,7 +244,14 @@ fn escape_closes_an_open_stack_split_frame() {
         load_xml(&s, file);
     }
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
-    load_xml(&s, "ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 

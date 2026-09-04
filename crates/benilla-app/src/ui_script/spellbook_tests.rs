@@ -80,9 +80,49 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
     s.mouse_button(x, y, button, false);
 }
 
+/// The reference's spellbook needs the action-bar chain beneath it: `SpellBookFrame_OnShow` and
+/// `_OnHide` call `MultiActionBar_ShowAllGrids`/`HideAllGrids` (MultiActionBars.lua, whose file
+/// wants the options window's uvars), `OnShow` calls `UpdateMicroButtons`, and the window docks
+/// in UiPanels' left slot. One chain, in the manifest's order, for every test that opens it.
+pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(w, h);
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "UiPanels.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        "MicroMenu.xml",
+        "Interface\\FrameXML\\SpellBookFrame.xml",
+        "SpellBookAdapters.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s
+}
+
 /// The loader itself: every file the window depends on parses and materializes with no errors —
-/// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown child)
-/// + 8 skill-line tabs + the 3 Spell/Pet toggle tabs.
+/// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown and an
+/// AutoCast Model child) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame.
 #[test]
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
@@ -92,22 +132,28 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/SpellBookFrame.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors: {:?}",
-        report.errors
-    );
+    // The reference's own file, off the chain, with the one adapter it needs from this engine.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    let frames = load_xml(&s, "Interface\\FrameXML\\SpellBookFrame.xml");
+    load_xml(&s, "SpellBookAdapters.xml");
+    assert!(s.errors().is_empty(), "loader errors: {:?}", s.errors());
     assert_eq!(
-        report.frames, 39,
-        "window + close + prev/next + 12 spell buttons (each with a Cooldown child) + 8 \
-         skill-line tabs + the 3 Spell/Pet toggle tabs (decision 1032)"
+        frames, 52,
+        "window + close + prev/next + 12 spell buttons (each with its Cooldown and AutoCast \
+         Model children) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame"
     );
+    for name in [
+        "SpellBookFrame",
+        "SpellButton12",
+        "SpellButton1AutoCast",
+        "SpellButton1Shine",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
+            "{name} exists"
+        );
+    }
 }
 
 /// The whole contract in one end-to-end drive: `ToggleSpellBook` (the 'P' binding's entry point)
@@ -117,32 +163,7 @@ fn shipped_spellbook_loads_clean() {
 /// bar-to-bar drag uses — packing kind 0x00 (SPELL) with the spell id.
 #[test]
 fn shipped_spellbook_drives_end_to_end() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
-    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
-    // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
-    // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
-    // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
-    // two template files its check boxes inherit through (1875).
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\ReputationFrame.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
     s.set_spellbook(book());
@@ -234,20 +255,7 @@ fn shipped_spellbook_drives_end_to_end() {
 fn shipped_spellbook_shows_the_cooldown_pie() {
     use benilla_ui::script::QuadContent;
 
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    for f in [
-        "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "SpellBookFrame.xml",
-    ] {
-        load_xml(&s, f);
-    }
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.set_spellbook(book());
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.tick(10.0); // GetTime = 10
@@ -314,16 +322,15 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
 /// putting a gold ring on all 12 slots — the director's "spellbook looks very wrong".
 #[test]
 fn shipped_spellbook_empty_slot_draws_only_the_background() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(640.0, 700.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "SpellBookFrame.xml");
-    // An EMPTY book: every slot takes the `id > offset + numSpells` disable path.
+    let mut s = spellbook_ui(640.0, 700.0);
+    // A one-spell book: slot 5 takes the reference's `id > offset + numSpells` disable path. (A
+    // book with NO spells is a state no character is ever in — the reference's own
+    // `ToggleSpellBook` clamps the page to 0 for it and every button id goes negative.)
+    let mut b = book();
+    b.tabs.truncate(1);
+    b.tabs[0].num_spells = 1;
+    b.slots.truncate(1);
+    s.set_spellbook(b);
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.tick(0.05);
     s.resolve();
@@ -352,9 +359,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
 /// l.132/134/268/296-303/336): 1/"true"/true check; 0/"false"/nil/non-numeric strings uncheck.
 #[test]
 fn set_checked_uses_blizzard_bool_coercion() {
-    let s = UiScript::new().unwrap();
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let s = spellbook_ui(1024.0, 768.0);
     for (arg, want) in [
         ("1", true),
         ("0", false),
@@ -421,16 +426,7 @@ fn pet_book() -> benilla_ui::script::PetBookState {
 /// the class token's label, and a right-click flips autocast instead of casting.
 #[test]
 fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "SpellBookFrame.xml");
+    let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.set_spellbook(book());
 
@@ -713,7 +709,14 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
         r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
-        "SpellBookFrame.xml",
+        // The reference's spellbook shows and hides the multibar grids (MultiActionBars.lua),
+        // whose file wants the options window's uvars — the same tail `spellbook_ui` carries.
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        "Interface\\FrameXML\\SpellBookFrame.xml",
+        "SpellBookAdapters.xml",
     ] {
         load_xml(&s, file);
     }

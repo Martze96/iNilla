@@ -130,3 +130,88 @@ pub(crate) fn system_cpu_ticks() -> Option<(u64, u64)> {
         None
     }
 }
+
+/// CPU seconds consumed so far by **every thread of this process, by name** — the split of
+/// [`process_cpu_secs`] that says *which* thread a tax landed on. A frame's `cpu_ms` rose by
+/// ~1.8 ms under vsync with no system growing on a sampled profile and no thread spinning
+/// (decision 1947): the number that resolves that is per-thread CPU across a window, which
+/// no sampler reports and this call does.
+///
+/// macOS only (`task_threads` + `thread_info(THREAD_BASIC_INFO)`, names through
+/// `pthread_getname_np`); elsewhere `None`, like the twins above. Threads are keyed by their
+/// pthread identity so two snapshots subtract, user and system time apart — the vsync tax
+/// turned out to be the main thread's kernel time, which a user-mode sampler never sees; a
+/// thread without a name reports as `"?"`.
+/// Cost: one kernel round-trip per thread — tens of microseconds, taken twice per probe
+/// window, never per frame.
+pub(crate) fn thread_cpu_table() -> Option<Vec<(usize, String, f64, f64)>> {
+    // `libc` deprecates its mach port bindings in favour of a crate this module does not need
+    // for two symbols; both are libSystem's, the import every mach caller links.
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        static mach_task_self_: libc::mach_port_t;
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CStr;
+        let mut out = Vec::new();
+        // SAFETY: mach's own out-param protocol — `task_threads` hands back a kernel-allocated
+        // array of thread ports and its count, each port is inspected with a stack-allocated,
+        // count-checked `thread_basic_info`, and every port and the array are released after.
+        unsafe {
+            let task = mach_task_self_;
+            let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut count: libc::mach_msg_type_number_t = 0;
+            if libc::task_threads(task, &mut list, &mut count) != libc::KERN_SUCCESS {
+                return None;
+            }
+            for i in 0..count as usize {
+                let port = *list.add(i);
+                let mut info: libc::thread_basic_info = std::mem::zeroed();
+                let mut n = libc::THREAD_BASIC_INFO_COUNT;
+                let kr = libc::thread_info(
+                    port,
+                    libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+                    (&mut info as *mut libc::thread_basic_info).cast(),
+                    &mut n,
+                );
+                if kr == libc::KERN_SUCCESS {
+                    let secs = |t: libc::time_value_t| {
+                        f64::from(t.seconds) + f64::from(t.microseconds) * 1e-6
+                    };
+                    let (user, system) = (secs(info.user_time), secs(info.system_time));
+                    let pthread = libc::pthread_from_mach_thread_np(port);
+                    let mut name = [0 as libc::c_char; 64];
+                    let label = if pthread != 0
+                        && libc::pthread_getname_np(pthread, name.as_mut_ptr(), name.len()) == 0
+                    {
+                        let s = CStr::from_ptr(name.as_ptr()).to_string_lossy();
+                        if s.is_empty() {
+                            "?".to_string()
+                        } else {
+                            s.into_owned()
+                        }
+                    } else {
+                        "?".to_string()
+                    };
+                    out.push((pthread as usize, label, user, system));
+                }
+                mach_port_deallocate(task, port);
+            }
+            libc::vm_deallocate(
+                task,
+                list as libc::vm_address_t,
+                (count as usize * std::mem::size_of::<libc::thread_act_t>()) as libc::vm_size_t,
+            );
+        }
+        Some(out)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}

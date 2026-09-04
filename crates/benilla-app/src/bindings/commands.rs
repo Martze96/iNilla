@@ -129,10 +129,6 @@ pub(crate) mod cmd {
     pub(crate) const TOGGLE_SHEATH: Cmd = by_name("TOGGLESHEATH");
     pub(crate) const TOGGLE_AUTORUN: Cmd = by_name("TOGGLEAUTORUN");
     pub(crate) const TOGGLE_RUN: Cmd = by_name("TOGGLERUN");
-    pub(crate) const OPEN_CHAT: Cmd = by_name("OPENCHAT");
-    pub(crate) const OPEN_CHAT_SLASH: Cmd = by_name("OPENCHATSLASH");
-    pub(crate) const REPLY: Cmd = by_name("REPLY");
-    pub(crate) const REPLY2: Cmd = by_name("REPLY2");
     pub(crate) const TARGET_NEAREST_ENEMY: Cmd = by_name("TARGETNEARESTENEMY");
     pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = by_name("TARGETPREVIOUSENEMY");
     pub(crate) const NAMEPLATES: Cmd = by_name("NAMEPLATES");
@@ -191,34 +187,89 @@ const TABLE: &[Spec] = &[
         None
     ),
     // ── Chat (BINDING_HEADER_CHAT) ──────────────────────────────────────────────────────
-    spec!("OPENCHAT", CHAT, Kind::Host, Some("ENTER"), None),
-    spec!("OPENCHATSLASH", CHAT, Kind::Host, Some("/"), None),
+    spec!(
+        "OPENCHAT",
+        CHAT,
+        Kind::Edge("ChatFrame_OpenChat(\"\")"),
+        Some("ENTER"),
+        None
+    ),
+    spec!(
+        "OPENCHATSLASH",
+        CHAT,
+        Kind::Edge("ChatFrame_OpenChat(\"/\")"),
+        Some("/"),
+        None
+    ),
     spec!(
         "CHATPAGEUP",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):PageUp()"#),
+        Kind::Edge("ChatFrame_ChatPageUp()"),
         Some("PAGEUP"),
         None
     ),
     spec!(
         "CHATPAGEDOWN",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):PageDown()"#),
+        Kind::Edge("ChatFrame_ChatPageDown()"),
         Some("PAGEDOWN"),
         None
     ),
     spec!(
         "CHATBOTTOM",
         CHAT,
-        Kind::Edge(r#"getglobal("ChatFrame" .. BenillaFCF.selected):ScrollToBottom()"#),
+        Kind::Edge("ChatFrame_ScrollToBottom()"),
         Some("SHIFT-PAGEDOWN"),
         None
     ),
-    spec!("REPLY", CHAT, Kind::Host, Some("R"), None),
+    spec!(
+        "REPLY",
+        CHAT,
+        Kind::Edge("ChatFrame_ReplyTell()"),
+        Some("R"),
+        None
+    ),
     // The other reply: the last person YOU told, not the last who told you
     // (`ChatEdit_GetLastToldTarget`, ChatFrame.lua l.1650). The memory was already being kept by
     // the send path and read by nothing — 1745.
-    spec!("REPLY2", CHAT, Kind::Host, Some("SHIFT-R"), None),
+    spec!(
+        "REPLY2",
+        CHAT,
+        Kind::Edge("ChatFrame_ReplyTell2()"),
+        Some("SHIFT-R"),
+        None
+    ),
+    // The combat-log four (Bindings.xml l.108-119): ChatFrame2's own paging and the reference's
+    // `ToggleCombatLog`, both FloatingChatFrame.lua's since the chat window became the
+    // reference's (1948). Chords from `bindings-cache.wtf`, account ONE.
+    spec!(
+        "COMBATLOGPAGEUP",
+        CHAT,
+        Kind::Edge("ChatFrame2:PageUp()"),
+        Some("CTRL-PAGEUP"),
+        None
+    ),
+    spec!(
+        "COMBATLOGPAGEDOWN",
+        CHAT,
+        Kind::Edge("ChatFrame2:PageDown()"),
+        Some("CTRL-PAGEDOWN"),
+        None
+    ),
+    spec!(
+        "COMBATLOGBOTTOM",
+        CHAT,
+        Kind::Edge("ChatFrame2:ScrollToBottom()"),
+        Some("CTRL-SHIFT-PAGEDOWN"),
+        None
+    ),
+    spec!(
+        "TOGGLECOMBATLOG",
+        CHAT,
+        Kind::Edge("ToggleCombatLog()"),
+        Some("SHIFT-C"),
+        None
+    ),
     // ── Action bar (BINDING_HEADER_ACTIONBAR) ───────────────────────────────────────────
     // The ref's runOnUp pair (Bindings.xml:121: DOWN shows the pushed visual, UP fires) —
     // exactly what the old hardcoded number-row table sent.
@@ -1775,28 +1826,6 @@ pub(crate) static ABSENT: &[Absent] = &[
         "PITCHDOWN",
         ["PitchDownStart", "PitchDownStop"],
         "no keyboard pitch — see PITCHUP"
-    ),
-    // ── Chat ────────────────────────────────────────────────────────────────────────────
-    absent!(
-        "COMBATLOGPAGEUP",
-        ["ToggleCombatLog"],
-        "ChatFrame2 is a real frame that nothing writes into — the combat-log line pipeline does \
-         not exist, which is why 1.12's own ToggleCombatLog has no home here"
-    ),
-    absent!(
-        "COMBATLOGPAGEDOWN",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
-    ),
-    absent!(
-        "COMBATLOGBOTTOM",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
-    ),
-    absent!(
-        "TOGGLECOMBATLOG",
-        ["ToggleCombatLog"],
-        "nothing writes the combat log — see COMBATLOGPAGEUP"
     ),
     // ── Action bar ──────────────────────────────────────────────────────────────────────
     // ── Interface ───────────────────────────────────────────────────────────────────────

@@ -1762,6 +1762,60 @@ pub(crate) enum ClientCommand {
         min: u32,
         max: u32,
     },
+    /// `DisplayChannelOwner` — `CMSG_CHANNEL_OWNER`.
+    ChannelOwner {
+        name: String,
+    },
+    /// `SetChannelOwner` — `CMSG_CHANNEL_SET_OWNER`.
+    ChannelSetOwner {
+        name: String,
+        player: String,
+    },
+    /// `SetChannelPassword` — `CMSG_CHANNEL_PASSWORD` (an empty password clears it).
+    ChannelPassword {
+        name: String,
+        password: String,
+    },
+    ChannelModerator {
+        name: String,
+        player: String,
+    },
+    ChannelUnmoderator {
+        name: String,
+        player: String,
+    },
+    ChannelMute {
+        name: String,
+        player: String,
+    },
+    ChannelUnmute {
+        name: String,
+        player: String,
+    },
+    ChannelInvite {
+        name: String,
+        player: String,
+    },
+    ChannelKick {
+        name: String,
+        player: String,
+    },
+    ChannelBan {
+        name: String,
+        player: String,
+    },
+    ChannelUnban {
+        name: String,
+        player: String,
+    },
+    /// `ChannelToggleAnnouncements` — `CMSG_CHANNEL_ANNOUNCEMENTS`.
+    ChannelAnnouncements {
+        name: String,
+    },
+    /// `ChannelModerate` — `CMSG_CHANNEL_MODERATE`.
+    ChannelModerate {
+        name: String,
+    },
     /// `/played` (`CMSG_PLAYED_TIME`).
     PlayedTime,
     /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`) — sent by

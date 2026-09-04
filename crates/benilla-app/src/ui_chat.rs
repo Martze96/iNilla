@@ -31,6 +31,7 @@ mod input;
 mod language;
 /// The chat windows' saved look (B246, decision 1589) — where the tab menu's tint/alpha/font-size
 /// picks are read from at login and written back at logout.
+mod logging;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -54,7 +55,6 @@ impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatLog>()
             .init_resource::<frames::ChatWindows>()
-            .init_resource::<edit::ChatEditState>()
             .init_resource::<edit::ChannelState>()
             .init_resource::<channels::ZoneChannelWalk>()
             .init_resource::<language::ChatLanguages>()
@@ -127,14 +127,6 @@ impl Plugin for UiChatPlugin {
             .add_systems(
                 Update,
                 (
-                    edit::open_chat_keys,
-                    edit::open_tell_requests,
-                    // An addon's `ChatFrame_OpenChat` — before the live parse in the same chain,
-                    // so a box opened prefilled `/w Bob ` has its type switched on the very next
-                    // frame rather than showing the raw slash to the user first.
-                    edit::open_chat_requests,
-                    edit::chat_edit_live,
-                    edit::chat_tab_cycle,
                     input::drain_chat_input,
                     // An addon's own line into the wire (decision 1199). AFTER the box's drain
                     // and in the same chain, so a `SendChatMessage` fired from a slash handler
@@ -171,6 +163,7 @@ impl Plugin for UiChatPlugin {
             );
         // The per-character saved look (B246) — its own load/watch/save edges.
         settings::plugin(app);
+        logging::plugin(app);
     }
 }
 
@@ -196,31 +189,18 @@ impl Plugin for UiChatPlugin {
 /// its scrollback is the whole point.
 fn end_session_chat(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut windows: ResMut<frames::ChatWindows>,
-    mut edit: ResMut<edit::ChatEditState>,
     mut log: ResMut<ChatLog>,
 ) {
-    end_chat_session(
-        script.map(NonSendMut::into_inner),
-        &mut windows,
-        &mut edit,
-        &mut log,
-    );
+    end_chat_session(script.map(NonSendMut::into_inner), &mut log);
 }
 
 /// [`end_session_chat`]'s body, callable without a `World` — the clear is the law, the system is
 /// the wiring.
 pub(crate) fn end_chat_session(
     script: Option<&mut benilla_ui::script::UiScript>,
-    windows: &mut frames::ChatWindows,
-    edit: &mut edit::ChatEditState,
     log: &mut ChatLog,
 ) {
     *log = ChatLog::default();
-    windows.tell_alert_left = 0.0;
-    // The channel target/number are [`channels::end_session_channels`]'s (1284); everything else
-    // the box remembers across an open is this session's too.
-    *edit = edit::ChatEditState::default();
     if let Some(script) = script {
         for frame in ["ChatFrame1", "ChatFrame2"] {
             crate::ui_script::run_or_warn(script, &format!("{frame}:Clear()"));

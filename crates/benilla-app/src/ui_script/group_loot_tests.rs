@@ -611,7 +611,14 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
     load_xml(&s, "DressUpFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_loot_rolls(rolls());
 
     // Roll 8 (BoE Worn Shortsword) claims frame 1 — a non-BoP roll, so the dice below can land a

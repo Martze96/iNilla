@@ -180,97 +180,6 @@ const KNOWN: &[Known] = &[
     // because OUR `ScrollFrame` ctor took the mouse and the reference's does not. Correcting the
     // ctor list to the client's made both sides agree, and an accepted divergence that has been
     // fixed is documentation claiming a defect we do not have.
-    Known {
-        frame: "ChatFrame1",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame2",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame3",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame4",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame5",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame6",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
-    Known {
-        frame: "ChatFrame7",
-        flag: Flag::Mouse,
-        why: "our chat window takes the mouse and the reference's does not. It was believed a \
-              `<ScrollingMessageFrame>` takes it BY CONSTRUCTION; wow-re's follow-up round \
-              (`68987021`) proved that ctor leaves the bit clear, and that a 1.12 chat link is \
-              clickable through one synthesised `CSimpleHyperlinkButton` child per link span. Our \
-              hit test now carries that law as a span disjunct, so the LINKS no longer need the \
-              flag — but ChatFrame.xml still sets it, and a documented chain of choices hangs off \
-              the old premise (no `SetFrameLevel-1` OnLoad because it would sink the resize grips \
-              under a mouse-enabled parent; `OnClick` dismisses a held spell, 0843). Unwinding \
-              that is the chat window's own piece of work, not this flag's.",
-    },
     // The two `TargetofTarget*Bar` entries RETIRED here (the unit-frame migration), for the same
     // reason their twin the pet page's XP bar went: they said our bars were plain StatusBars where
     // the reference inherits `TextStatusBar` — true of our transcription, and no longer true of
@@ -694,7 +603,10 @@ fn the_shipped_frames_carry_the_references_flags() {
     }
 
     assert!(
-        compared > 400,
+        // 1948 retired our ChatFrame.xml and 1952 our SpellBookFrame.xml (their frames are the
+        // reference's own now), which took the paired count from the low 400s to the low 360s;
+        // the floor guards the pairing, not the census.
+        compared > 350,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

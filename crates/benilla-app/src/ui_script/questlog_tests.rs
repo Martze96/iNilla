@@ -343,7 +343,10 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -485,7 +488,10 @@ fn watch_guards_no_op_without_erroring() {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
@@ -1416,7 +1422,10 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
-    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     s.set_quest_log(eight_entries());
     s.run("ToggleQuestLog()").unwrap();
@@ -1507,7 +1516,10 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
-    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // ChatFrameEditBox lives here
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     s.set_quest_log(eight_entries());
     s.run("ToggleQuestLog()").unwrap();

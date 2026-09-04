@@ -1254,9 +1254,9 @@ pub(super) fn seed_ui_fixture(
                 "ChatFrameEditBox:SetText(\"hello northshire\")\n\
                  ChatFrameEditBox:HighlightText(6, 16)\n\
                  ChatFrame1:SetScript('OnUpdate', function()\n\
-                     BenillaFCF_TabResize(ChatFrame1Tab)\n\
+                     PanelTemplates_TabResize(10, ChatFrame1Tab)\n\
                      ChatFrame1Tab:SetAlpha(1.0)\n\
-                     for _, t in ipairs(BenillaFCF_Textures(1)) do t:SetAlpha(0.25) end\n\
+                     FCF_SetWindowAlpha(ChatFrame1, 0.25, 1)\n\
                  end)",
             ) {
                 warn!("capture: ui-chatedit seed failed: {e}");
@@ -1293,7 +1293,7 @@ pub(super) fn seed_ui_fixture(
             //                                                             a tab quad is measured against
             let mode = std::env::var("WOW_TABHOVER").unwrap_or_else(|_| "1".into());
             let select = if mode == "3" { 1 } else { 2 };
-            if let Err(e) = script.run(&format!("BenillaFCF_TabClick({select})")) {
+            if let Err(e) = script.run(&format!("FCF_SelectDockFrame(ChatFrame{select})")) {
                 warn!("capture: ui-chat-tabhover select failed: {e}");
             }
             script.resolve();
