@@ -1251,6 +1251,57 @@ mod tests {
             .unwrap());
     }
 
+    /// `UnitPlayerOrPetInParty`/`InRaid` (1958): a member's own guid, or a unit whose OWNER is a
+    /// member — the party's for the one, the raid roster's for the other; a stranger's pet is
+    /// nobody's; ungrouped is nil.
+    #[test]
+    fn unit_player_or_pet_in_party_reads_the_owner() {
+        let mut s = UiScript::new().unwrap();
+        s.set_party(two_member_party());
+        s.set_unit("player", Some(unit(true, 0x10)));
+        let mut alices_pet = unit(true, 0xC0FFEE);
+        alices_pet.owner = 0xA11CE;
+        s.set_unit("target", Some(alices_pet));
+        assert_eq!(
+            s.eval::<i64>(r#"return UnitPlayerOrPetInParty("target")"#)
+                .unwrap(),
+            1,
+            "Alice's pet is in the party by its owner"
+        );
+        assert!(
+            s.eval::<bool>(r#"return UnitPlayerOrPetInRaid("target") == nil"#)
+                .unwrap(),
+            "no raid: the raid twin says nil"
+        );
+        let mut strangers_pet = unit(true, 0xC0FFEE);
+        strangers_pet.owner = 0xDEAD;
+        s.set_unit("target", Some(strangers_pet));
+        assert!(s
+            .eval::<bool>(r#"return UnitPlayerOrPetInParty("target") == nil"#)
+            .unwrap());
+        // A member's own guid still answers, as UnitInParty does.
+        s.set_unit("target", Some(unit(true, 0xB0B)));
+        assert_eq!(
+            s.eval::<i64>(r#"return UnitPlayerOrPetInParty("target")"#)
+                .unwrap(),
+            1
+        );
+        // The raid twin over the raid roster.
+        s.set_party(ten_player_raid());
+        let mut raiders_pet = unit(true, 0xC0FFEE);
+        raiders_pet.owner = ten_player_raid().raid[0].guid;
+        s.set_unit("target", Some(raiders_pet));
+        assert_eq!(
+            s.eval::<i64>(r#"return UnitPlayerOrPetInRaid("target")"#)
+                .unwrap(),
+            1
+        );
+        s.set_party(crate::script::PartyState::default());
+        assert!(s
+            .eval::<bool>(r#"return UnitPlayerOrPetInParty("target") == nil"#)
+            .unwrap());
+    }
+
     #[test]
     fn unit_in_party_matches_roster_guids() {
         let mut s = UiScript::new().unwrap();

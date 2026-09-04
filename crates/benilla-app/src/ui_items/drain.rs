@@ -1176,6 +1176,11 @@ mod bind_confirm_tests {
             "Interface\\FrameXML\\Fonts.xml",
             "MoneyFrame.xml",
             "UiPanels.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\StaticPopup.xml",
+            "UIParent.xml",
         ] {
             crate::ui_script::load_ui_for_test(s, file);
         }

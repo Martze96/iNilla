@@ -96,6 +96,8 @@ fn setup() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `QuestTitleButtonTemplate`, which the reference's registrar inherits for its two service
     // rows — 1.12 declares it in QuestFrameTemplates.xml, an `<Include>` of QuestFrame.xml, and
     // ours declares it in QuestFrame.xml directly. An unknown template is a loader WARNING, so

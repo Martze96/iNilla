@@ -15,50 +15,9 @@ use super::test_ui::load_ui_strict as load_xml;
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    // The row right-click menu is the shared UnitPopup "FRIEND" menu, so the window's slice of
-    // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    // The guild pane's frames inherit the reference's shared UIPanelButtonTemplate /
-    // UIPanelCloseButton / UIPanelScrollFrameTemplate rather than a private copy (decision 1257),
-    // so this file's slice needs the shared kit — and the strict `load_xml` above is what would
-    // otherwise let those frames load art-less and silent.
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "FriendsFrame.xml");
-    // The social window's fourth tab lives in its own file, and it is part of THIS window's
-    // manifest slice now: `BENILLA_FRIENDS_SUBFRAMES` names "RaidFrame", and both
-    // `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide` resolve every name in that list
-    // through `getglobal` and call `:Hide()` on it. The reference's list names it too and never
-    // guards, because there RaidFrame.xml is FrameXML and always loaded — so the guard belongs in
-    // the harness's load order, not in shipped Lua defending against a state the client cannot be
-    // in (decision 1549).
-    // Stock `RaidFrame_OnLoad` reconciles the party frames the moment it loads
-    // (`RaidOptionsFrame_UpdatePartyFrames` -> `HidePartyFrame`/`ShowPartyFrame`), so this pane
-    // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
-    // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
-    // iterates. The manifest already seats these far above RaidFrame (1874).
-    // The reference's own `BasicControls.xml`, which is manifest entry 3 — far above the pane
-    // (1874). It is here for the error/message pair and `TEXT`. NOTE: unlike `raid_tests`, this
-    // harness does not load `UIParent.xml`, so `UIParentLoadAddOn` — which 1881 moved there out
-    // of BasicControls — is absent. Nothing this file exercises reaches it; if a future
-    // assertion drives `RaidFrame_LoadUI`, that is the line to add.
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
-    load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UnitFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\CombatFeedback.xml");
-    load_xml(&s, r"Interface\FrameXML\PartyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\RaidFrame.xml");
-    load_xml(&s, r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml");
+    for f in super::test_ui::SOCIAL_UI {
+        load_xml(&s, f);
+    }
     s
 }
 
@@ -171,17 +130,17 @@ fn friend_rows_render_the_online_and_offline_templates() {
     );
 
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton1NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1ButtonTextNameLocation:GetText()")
             .unwrap(),
         "Onerogue |cffffffff- Elwynn Forest|r <AFK>"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton1Info:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1ButtonTextInfo:GetText()")
             .unwrap(),
         "Level 60 Rogue"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameFriendButton2NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton2ButtonTextNameLocation:GetText()")
             .unwrap(),
         "|cff999999Twomage - Offline|r"
     );
@@ -270,8 +229,19 @@ fn the_friend_buttons_queue_their_verbs() {
         benilla_ui::script::PartyRequest::InviteName(n) if n == "Twomage"
     )));
 
+    // Send Message is the reference's `ChatFrame_OpenChat("/w Twomage ")`: the box shows with
+    // the text PENDING (`editBox.setText = 1`), applied by its next OnUpdate, whose OnTextSet
+    // runs the parse that turns the line into a whisper to the friend (1959).
     s.run("FriendsFrame_SendMessage()").unwrap();
-    assert_eq!(s.take_tell_requests(), vec!["Twomage".to_string()]);
+    s.tick(0.05);
+    assert!(s
+        .eval::<bool>("return ChatFrameEditBox:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Twomage".to_string())
+    );
 }
 
 /// The Ignore toggle-tab swaps tab 1's list without leaving the tab, and the ignore rows render
@@ -304,12 +274,12 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
         "Ignore List"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameIgnoreButton1Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton1ButtonTextName:GetText()")
             .unwrap(),
         "Spammer"
     );
     assert_eq!(
-        s.eval::<String>("return FriendsFrameIgnoreButton2Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton2ButtonTextName:GetText()")
             .unwrap(),
         "Ninja"
     );
@@ -328,9 +298,12 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
     assert!(s
         .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
+    // The reference's `ShowIgnorePanel` shows the WINDOW (its tab switch is commented out in the
+    // stock file), so the list that was up stays up — the friends list here (1959).
     s.run("ShowIgnorePanel()").unwrap();
+    assert!(s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
     assert!(s
-        .eval::<bool>("return IgnoreListFrame:IsVisible()")
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
 }
 
@@ -483,10 +456,13 @@ fn the_who_buttons_need_a_selected_row() {
         },
         "WHO_LIST_UPDATE",
     );
+    // The reference keeps the selection across answers: `WhoList_Update` enables the buttons
+    // whenever `WhoFrame.selectedWho` is set, and its WHO_LIST_UPDATE arm clears nothing. (Our
+    // transcription dropped it; 1959.)
     assert!(
-        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
+        s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled() ~= 0")
             .unwrap(),
-        "a fresh answer drops the old selection"
+        "a fresh answer keeps the selection"
     );
 }
 
@@ -527,57 +503,6 @@ fn the_who_edit_box_sends_its_filter() {
     );
 }
 
-/// The slash bodies are the reference's: a NAMED `/friends` befriends, a bare one refreshes; a
-/// bare `/who` opens the panel and fills the edit box with the default filter.
-#[test]
-fn the_slash_bodies_match_the_reference() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = setup();
-    // The WhoFrame's OnLoad routes results to chat until it is shown; drain that so each
-    // assertion below sees only what its own call queued.
-    let _ = s.take_social_requests();
-
-    s.run("BenillaSlashFriends(\"Onerogue\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::AddFriend("Onerogue".to_string())]
-    );
-    s.run("BenillaSlashFriends(\"\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::RefreshFriends]
-    );
-
-    // `/ignore <name>` toggles rather than adds — the ref's AddOrDelIgnore.
-    s.run("BenillaSlashIgnore(\"Spammer\")").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::ToggleIgnore("Spammer".to_string())]
-    );
-
-    // A bare `/who` opens the Who panel and sends the default filter, which it also shows.
-    s.run("BenillaSlashWho(\"\")").unwrap();
-    assert!(s.eval::<bool>("return WhoFrame:IsVisible()").unwrap());
-    let requests = s.take_social_requests();
-    let sent = requests
-        .iter()
-        .find_map(|r| match r {
-            SocialRequest::Who(filter) => Some(filter.clone()),
-            _ => None,
-        })
-        .expect("a bare /who still sends a query");
-    assert!(
-        sent.starts_with("z-\""),
-        "the default filter is zone-scoped: {sent}"
-    );
-    assert_eq!(
-        s.eval::<String>("return WhoFrameEditBox:GetText()")
-            .unwrap(),
-        sent,
-        "and the edit box shows what was sent"
-    );
-}
-
 /// The Add Friend button with no friendly target opens the name-entry dialog — the first
 /// customer of the popup engine's `hasEditBox` capability. Accepting sends what was typed.
 #[test]
@@ -604,7 +529,9 @@ fn add_friend_without_a_target_opens_the_name_dialog() {
 
     let _ = s.take_social_requests();
     s.run("StaticPopup1EditBox:SetText(\"Onerogue\")").unwrap();
-    s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
+    // Through the button: the stock dialog's OnAccept reads `this:GetParent()`, which only a
+    // real click seats.
+    s.run("StaticPopup1Button1:Click()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::AddFriend("Onerogue".to_string())]
@@ -684,7 +611,14 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         Some(1),
         "the menu has a Whisper row"
     );
-    assert_eq!(s.take_tell_requests(), vec!["Tigole".to_string()]);
+    // The stock WHISPER row is `ChatFrame_SendTell(name)`: the chat box opens on the tell, its
+    // pending text applied by the box's next OnUpdate (1959).
+    s.tick(0.05);
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Tigole".to_string())
+    );
 }
 
 /// An OFFLINE friend's right-click opens nothing — there is no verb to offer them, which is the
@@ -741,105 +675,4 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
     assert!(s
         .take_social_requests()
         .contains(&SocialRequest::SelectFriend(2)));
-}
-
-/// **The window's geometry, diffed against the reference FrameXML itself.**
-///
-/// Every number in `FriendsFrame.xml` is a transcription of one in the reference's own file, and a
-/// wrong one is invisible to every other test here: the frame loads, the clicks work, only the
-/// *look* is wrong — so it surfaces as a screenshot from the director, one tab at a time. Two
-/// rounds of that is what this replaces. Four of the five it caught on its first run were the
-/// FriendsListFrame's values that had leaked into the IgnoreListFrame subtree, which is exactly
-/// the failure mode of building a sibling pane by copy-adapting instead of transcribing.
-///
-/// It scrapes both files for `<AbsDimension>` pairs per named element and compares the elements
-/// that exist in both (ours carry a `Benilla` prefix). Deliberately narrow — it does not try to
-/// understand the XML, only to notice that a number moved. Known-benign differences are listed
-/// explicitly rather than filtered by a pattern, so a NEW difference can never hide inside an
-/// exemption. Skips without the extracted reference.
-#[test]
-fn the_window_geometry_matches_the_reference_framexml() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let Some(reference) = super::framexml_diff::reference("FriendsFrame.xml") else {
-        eprintln!("skipping: no extracted FrameXML");
-        return;
-    };
-
-    // Differences that are ours on purpose. Each is a *deliberate* deviation with a reason, not a
-    // tolerance: the list is short and every entry names why.
-    const EXPECTED: &[&str] = &[
-        // The ref omits an all-zero <Offset>; we write none at all. Same anchor, fewer bytes.
-        "FriendsFrameFriendButton2",
-        "FriendsFrameFriendButton3",
-        "FriendsFrameFriendButton4",
-        "FriendsFrameFriendButton5",
-        "FriendsFrameFriendButton6",
-        "FriendsFrameFriendButton7",
-        "FriendsFrameFriendButton8",
-        "FriendsFrameFriendButton9",
-        "FriendsFrameFriendButton10",
-        "FriendsFrameIgnoreButton2",
-        "FriendsFrameIgnoreButton3",
-        "FriendsFrameIgnoreButton4",
-        "FriendsFrameIgnoreButton5",
-        "FriendsFrameIgnoreButton6",
-        "FriendsFrameIgnoreButton7",
-        "FriendsFrameIgnoreButton8",
-        "FriendsFrameIgnoreButton9",
-        "FriendsFrameIgnoreButton10",
-        "FriendsFrameIgnoreButton11",
-        "FriendsFrameIgnoreButton12",
-        "FriendsFrameIgnoreButton13",
-        "FriendsFrameIgnoreButton14",
-        "FriendsFrameIgnoreButton15",
-        "FriendsFrameIgnoreButton16",
-        "FriendsFrameIgnoreButton17",
-        "FriendsFrameIgnoreButton18",
-        "FriendsFrameIgnoreButton19",
-        "FriendsFrameIgnoreButton20",
-        "WhoFrameButton2",
-        "WhoFrameButton3",
-        "WhoFrameButton4",
-        "WhoFrameButton5",
-        "WhoFrameButton6",
-        "WhoFrameButton7",
-        "WhoFrameButton8",
-        "WhoFrameButton9",
-        "WhoFrameButton10",
-        "WhoFrameButton11",
-        "WhoFrameButton12",
-        "WhoFrameButton13",
-        "WhoFrameButton14",
-        "WhoFrameButton15",
-        "WhoFrameButton16",
-        "WhoFrameButton17",
-        "FriendsFrameToggleTab2",
-        "IgnoreFrameToggleTab2",
-        "FriendsFrameTopLeft",
-        "FriendsFrameTopRight",
-        "FriendsFrameBottomLeft",
-        "FriendsFrameBottomRight",
-        "WhoFrameAddFriendButton",
-        "WhoFrameWhoButton",
-        // The ref writes an all-zero <Offset> on these two row columns; we write none.
-        "FriendsFrameButtonTemplate/Info",
-        "FriendsFrameWhoButtonTemplate/Variable",
-        // Our column header carries the highlight's two anchors inline (the ref's sit in a
-        // separate <HighlightTexture> block the scrape attributes to the same element).
-        "WhoFrameColumnHeaderTemplate/Right",
-        // The three faux-scroll frames: the ref decorates each with two UI-Character-ScrollBar
-        // trough textures. benilla's FauxScrollFrameTemplate draws its own complete bar
-        // (decisions 0247/0250/0251), so the ref's loose art would double it.
-        "FriendsFrameFriendsScrollFrame",
-        "FriendsFrameIgnoreScrollFrame",
-        "WhoListScrollFrame",
-        // …and the guild pane's, the fourth of the same kind (decision 1257).
-        "GuildListScrollFrame",
-        // The window's own close button predates UIPanelTemplates.xml shipping the reference's
-        // `UIPanelCloseButton`, so it states inline the 32x32 that template confers. The guild
-        // pane's two close buttons inherit it and therefore need no entry here.
-        "FriendsFrameCloseButton",
-    ];
-
-    super::framexml_diff::assert_geometry_matches("FriendsFrame.xml", &reference, EXPECTED, 210);
 }

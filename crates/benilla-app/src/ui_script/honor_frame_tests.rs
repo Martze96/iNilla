@@ -373,6 +373,9 @@ fn shown_inspect_honor_page() -> UiScript {
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // `InspectUnit`'s home since 1832.
         "UIParent.xml",
         "GameTooltip.xml",

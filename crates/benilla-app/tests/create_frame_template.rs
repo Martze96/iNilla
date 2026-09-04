@@ -26,7 +26,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UiPanels.xml` exactly as
 /// the manifest seats it. So this list carries the chain pair and the loader below has to be able
 /// to READ a chain entry, which a disk-only provider under `assets/ui` cannot.
-const FILES: [&str; 8] = [
+const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     // A REGRESSION GUARD, not a dependency (1923). FadingFrame.xml's entire body is a single
     // `<Script file="FadingFrame.lua"/>`, so it loads correctly ONLY if that relative reference
@@ -45,6 +45,10 @@ const FILES: [&str; 8] = [
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which StaticPopup.lua reads at file scope
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "UIParent.xml",
     "ScrollTemplates.xml",
 ];

@@ -356,7 +356,12 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// is the whole of the crossing: one function, "make this handle's asset exist now", the
 /// doorway's own rule about when a material is real. The alternative — eager materials for
 /// the two lanes that read early — would put the store's law in the caller's hands.
-const CEILING: usize = 173;
+/// And 173 → 174: `particles::render::EFFECT_DRAW_STATS`, an instrument PUBLISH — the effect
+/// lane's own per-frame draw census (items in the transparent phase, draws after the merge),
+/// the number the `FPS_PROBE` line prints as `fx=`. It is the reading that refuted the
+/// additive-window regroup on the crowd rig (decision 1955): a lane whose merge walk is the
+/// only place the count exists has to publish it or stay unmeasurable.
+const CEILING: usize = 174;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

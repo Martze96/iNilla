@@ -82,11 +82,14 @@ type DressQuery = (
 );
 
 /// One line per streamed player within [`DEFAULT_RADIUS`], contradictions first.
+#[allow(clippy::too_many_arguments)]
 fn fire_dress_census(
     mut probe: ResMut<DressCensus>,
     time: ProbeClock,
     names: Res<NameCache>,
-    body: Query<&Transform, With<SelfPlayer>>,
+    body: Query<(Entity, &Transform), With<SelfPlayer>>,
+    // The self body's parts, one line each (`DRESS_PART`) — the draw-population inventory.
+    body_parts: crate::entities::BodyPartsDesc,
     entities: Query<DressQuery>,
     // The body's draw population (`parts=`/`mats=`): every mesh part hanging under the unit —
     // body batches, each attach model's batches, cards — and how many DISTINCT materials
@@ -105,7 +108,7 @@ fn fire_dress_census(
     } else {
         -1.0
     };
-    let Ok(body) = body.single() else {
+    let Ok((self_entity, body)) = body.single() else {
         println!("DRESS_CENSUS t={now:.1} NO BODY — not in world, nothing measured");
         return;
     };
@@ -176,6 +179,9 @@ fn fire_dress_census(
         at[2],
     );
     for (_, _, line) in &rows {
+        println!("{line}");
+    }
+    for line in body_parts.describe(self_entity, &children) {
         println!("{line}");
     }
 }

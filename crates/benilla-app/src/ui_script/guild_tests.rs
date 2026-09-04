@@ -203,39 +203,9 @@ fn setup() -> UiScript {
             ..UnitState::default()
         }),
     );
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "FriendsFrame.xml");
-    // The social window's fourth tab lives in its own file, and it is part of THIS window's
-    // manifest slice now: `BENILLA_FRIENDS_SUBFRAMES` names "RaidFrame", and both
-    // `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide` resolve every name in that list
-    // through `getglobal` and call `:Hide()` on it. The reference's list names it too and never
-    // guards, because there RaidFrame.xml is FrameXML and always loaded — so the guard belongs in
-    // the harness's load order, not in shipped Lua defending against a state the client cannot be
-    // in (decision 1549).
-    // Stock `RaidFrame_OnLoad` reconciles the party frames the moment it loads
-    // (`RaidOptionsFrame_UpdatePartyFrames` -> `HidePartyFrame`/`ShowPartyFrame`), so this pane
-    // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
-    // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
-    // iterates. The manifest already seats these far above RaidFrame (1874).
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
-    load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UnitFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\CombatFeedback.xml");
-    load_xml(&s, r"Interface\FrameXML\PartyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\RaidFrame.xml");
-    load_xml(&s, r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml");
+    for f in super::test_ui::SOCIAL_UI {
+        load_xml(&s, f);
+    }
     s
 }
 
@@ -1436,11 +1406,13 @@ fn every_list_in_the_window_takes_the_mouse_wheel() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = setup();
     open(&s);
+    // The reference's wheel lives on each list's FauxScrollFrameTemplate scroll frame, not on
+    // the pane (1959).
     for frame in [
-        "FriendsListFrame",
-        "IgnoreListFrame",
-        "WhoFrame",
-        "GuildFrame",
+        "FriendsFrameFriendsScrollFrame",
+        "FriendsFrameIgnoreScrollFrame",
+        "WhoListScrollFrame",
+        "GuildListScrollFrame",
     ] {
         assert!(
             s.eval::<bool>(&format!(

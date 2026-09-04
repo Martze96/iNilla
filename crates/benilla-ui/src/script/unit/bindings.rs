@@ -553,6 +553,61 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     //    string, unlike its `GetRaidRosterInfo` sibling.
     //  * **The player is in the roster array**, so no `t == "player"` special case is needed here
     //    — unlike `UnitInParty` below, whose roster excludes the recipient.
+    // HasFullControl() → 1 | nil: the reference's `[0xb4b3e4]` read at `0x51a158` (wow-re
+    // `control-loss-and-restore.md`) — the control flag `SMSG_CLIENT_CONTROL_UPDATE` writes for
+    // the local player, which the stock unit menu greys its follow/trade rows on (1958).
+    g.set(
+        "HasFullControl",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.player_control {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
+    // UnitPlayerOrPetInParty(unit) / UnitPlayerOrPetInRaid(unit) → 1 | nil: the unit is a
+    // member of the group, or a member's pet — its owner (`UNIT_FIELD_SUMMONEDBY`, else the
+    // charmer, else the creator: `UnitState::owner`) is. The bindings are registered
+    // (`0x5162f0` / `0x5163b0`) and delegate to a C++ predicate wow-re has not carved; the
+    // owner reading is this file's, flagged in 1958.
+    for (name, raid) in [
+        ("UnitPlayerOrPetInParty", false),
+        ("UnitPlayerOrPetInRaid", true),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, token: Option<String>| {
+                check_unit_token(&token)?;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
+                    return Ok(Value::Nil);
+                };
+                if !u.exists || u.guid == 0 {
+                    return Ok(Value::Nil);
+                }
+                let me = model.unit("player").map(|p| p.guid).unwrap_or(0);
+                let in_group = |guid: u64| {
+                    guid != 0
+                        && if raid {
+                            model.party.raid.iter().any(|m| m.guid == guid)
+                        } else {
+                            guid == me || model.party.members.iter().any(|m| m.guid == guid)
+                        }
+                };
+                let grouped = if raid {
+                    !model.party.raid.is_empty()
+                } else {
+                    !model.party.members.is_empty()
+                };
+                let hit = grouped && (in_group(u.guid) || in_group(u.owner));
+                Ok(if hit { Value::Integer(1) } else { Value::Nil })
+            })?,
+        )?;
+    }
+
     g.set(
         "UnitInRaid",
         lua.create_function(|lua, token: Option<String>| {

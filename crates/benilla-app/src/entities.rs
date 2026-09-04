@@ -120,7 +120,7 @@ use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // The container feed reads the icon column off the same catalog resource (one DBC parse).
 // The one InventoryType → equipment-slot table (`attach::preview`): the dressing-room feed places a
 // tried-on item by the very same map the preview it feeds dresses by (decision 1060).
-pub(crate) use attach::equip_slot;
+pub(crate) use attach::{equip_slot, BodyPartsDesc};
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 // The instruments' read of what a body is actually WEARING vs what it resolved (`WOW_DRESS_CENSUS`).

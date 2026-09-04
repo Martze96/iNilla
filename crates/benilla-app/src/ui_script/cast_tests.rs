@@ -398,6 +398,8 @@ fn managed_positions_track_the_bottom_bar_stack() {
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     // The loader's post-load bootstrap, replayed with no bars in existence: the bare bases.

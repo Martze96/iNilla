@@ -193,12 +193,6 @@ const KNOWN: &[Known] = &[
               ordinary PlayerTradeItemTemplate. A structural difference in our own trade window.",
     },
     Known {
-        frame: "WhoFrameDropDown",
-        flag: Flag::Mouse,
-        why: "the reference's /who sort dropdown carries its own handlers over the shared \
-              UIDropDownMenuTemplate; ours takes the template alone.",
-    },
-    Known {
         frame: "WorldStateAlwaysUpFrame",
         flag: Flag::Mouse,
         why:
@@ -603,11 +597,11 @@ fn the_shipped_frames_carry_the_references_flags() {
     }
 
     assert!(
-        // 1948 retired our ChatFrame.xml, 1952 our SpellBookFrame.xml, 1953 our PetActionBar.xml
-        // and 1956 our SkillFrame.xml (their frames are the reference's own now), which took the
-        // paired count from the low 400s to the high 310s; the floor guards the pairing, not the
-        // census.
-        compared > 300,
+        // 1948 retired our ChatFrame.xml, 1952 our SpellBookFrame.xml, 1953 our PetActionBar.xml,
+        // 1956 our SkillFrame.xml, 1958 our UnitPopup.xml and 1959 our FriendsFrame.xml (their
+        // frames are the reference's own now), which took the paired count from the low 400s to
+        // the high 150s; the floor guards the pairing, not the census.
+        compared > 120,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

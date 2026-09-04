@@ -31,7 +31,11 @@ fn setup() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "ConfirmSummon.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "UIParent.xml");
     s.set_summon_confirm(SummonConfirmUiState {
         summoner: "Twomage".into(),
         area: "Stormwind City".into(),
@@ -66,7 +70,7 @@ fn the_confirm_names_the_summoner_and_accept_queues_the_response() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "Twomage wants to summon you to Stormwind City.  The spell will be cancelled in 2 minutes.",
+        "Twomage wants to summon you to Stormwind City.  The spell will be cancelled in 2 Minutes.",
         "the tick composes summoner + area + the count and its unit word"
     );
 
@@ -93,7 +97,7 @@ fn the_countdown_line_switches_to_seconds_and_singularises() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "Twomage wants to summon you to Elwynn Forest.  The spell will be cancelled in 45 seconds."
+        "Twomage wants to summon you to Elwynn Forest.  The spell will be cancelled in 45 Seconds."
     );
 
     // OnShow seeded 45 and the first tick spent 0.1 of it, so 44.9 stands; spending 44.2 more
@@ -103,7 +107,7 @@ fn the_countdown_line_switches_to_seconds_and_singularises() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "Twomage wants to summon you to Elwynn Forest.  The spell will be cancelled in 1 second."
+        "Twomage wants to summon you to Elwynn Forest.  The spell will be cancelled in 1 Second."
     );
 }
 
@@ -124,7 +128,7 @@ fn a_summoner_whose_name_is_still_resolving_fills_in_on_a_later_tick() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        " wants to summon you to Stormwind City.  The spell will be cancelled in 30 seconds.",
+        " wants to summon you to Stormwind City.  The spell will be cancelled in 30 Seconds.",
         "no name yet: a blank, not a raise and not a withheld dialog"
     );
 
@@ -137,7 +141,7 @@ fn a_summoner_whose_name_is_still_resolving_fills_in_on_a_later_tick() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "Twomage wants to summon you to Stormwind City.  The spell will be cancelled in 30 seconds.",
+        "Twomage wants to summon you to Stormwind City.  The spell will be cancelled in 30 Seconds.",
         "the name query landed; the same open dialog picks it up"
     );
 }

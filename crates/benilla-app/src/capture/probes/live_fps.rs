@@ -422,15 +422,19 @@ fn drive_live_fps(
                         let ld = |a: &std::sync::atomic::AtomicU64| {
                             a.load(std::sync::atomic::Ordering::Relaxed)
                         };
+                        let fx = &benilla_world::particles::render::EFFECT_DRAW_STATS;
                         format!(
-                            " wgpu_bufs={} wgpu_texs={} wgpu_bgs={} draws=o{}/t{}/s{}/ui{}",
+                            " wgpu_bufs={} wgpu_texs={} wgpu_bgs={} draws=o{}/t{}/s{}/ui{} \
+                             fx={}/{}",
                             ld(&c.0.buffers),
                             ld(&c.0.textures),
                             ld(&c.0.bind_groups),
                             ld(&c.0.draws_opaque),
                             ld(&c.0.draws_transparent),
                             ld(&c.0.draws_shadow),
-                            ld(&c.0.draws_ui)
+                            ld(&c.0.draws_ui),
+                            fx[0].load(std::sync::atomic::Ordering::Relaxed),
+                            fx[1].load(std::sync::atomic::Ordering::Relaxed)
                         )
                     })
                     .unwrap_or_default();

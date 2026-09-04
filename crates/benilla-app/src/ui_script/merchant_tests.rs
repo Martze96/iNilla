@@ -1147,6 +1147,8 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);

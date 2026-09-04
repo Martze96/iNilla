@@ -33,11 +33,48 @@
         <Scripts>
             <OnLoad>
                 this:RegisterEvent("VARIABLES_LOADED")
+                this:RegisterEvent("TRAINER_SHOW")
+                this:RegisterEvent("TRAINER_CLOSED")
+                this:RegisterEvent("GUILD_INVITE_REQUEST")
+                this:RegisterEvent("GUILD_INVITE_CANCEL")
                 this:RegisterEvent("MIRROR_TIMER_START")
                 this:RegisterEvent("PLAYER_ENTERING_WORLD")
                 this:RegisterEvent("READY_CHECK")
                 this:RegisterEvent("START_LOOT_ROLL")
                 this:RegisterEvent("CONFIRM_LOOT_ROLL")
+                -- The dialog-raising events below (ref UIParent.lua l.76-127), registered here
+                -- since the dialog engine became the reference's file (1960); what the engine does
+                -- not produce yet is left unregistered and named in that record, never armed blind.
+                this:RegisterEvent("PLAYER_DEAD")
+                this:RegisterEvent("PLAYER_ALIVE")
+                this:RegisterEvent("PLAYER_UNGHOST")
+                this:RegisterEvent("RESURRECT_REQUEST")
+                this:RegisterEvent("PARTY_INVITE_REQUEST")
+                this:RegisterEvent("PARTY_INVITE_CANCEL")
+                this:RegisterEvent("PLAYER_CAMPING")
+                this:RegisterEvent("PLAYER_QUITING")
+                this:RegisterEvent("LOGOUT_CANCEL")
+                this:RegisterEvent("LOOT_BIND_CONFIRM")
+                this:RegisterEvent("EQUIP_BIND_CONFIRM")
+                this:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
+                this:RegisterEvent("USE_BIND_CONFIRM")
+                this:RegisterEvent("DELETE_ITEM_CONFIRM")
+                this:RegisterEvent("QUEST_ACCEPT_CONFIRM")
+                this:RegisterEvent("CURSOR_UPDATE")
+                this:RegisterEvent("DUEL_REQUESTED")
+                this:RegisterEvent("DUEL_OUTOFBOUNDS")
+                this:RegisterEvent("DUEL_INBOUNDS")
+                this:RegisterEvent("DUEL_FINISHED")
+                this:RegisterEvent("CONFIRM_XP_LOSS")
+                this:RegisterEvent("CORPSE_IN_RANGE")
+                this:RegisterEvent("CORPSE_IN_INSTANCE")
+                this:RegisterEvent("CORPSE_OUT_OF_RANGE")
+                this:RegisterEvent("BIND_ENCHANT")
+                this:RegisterEvent("REPLACE_ENCHANT")
+                this:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+                this:RegisterEvent("CONFIRM_TALENT_WIPE")
+                this:RegisterEvent("CONFIRM_BINDER")
+                this:RegisterEvent("CONFIRM_SUMMON")
             </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
             <!-- The reference's own UIParent OnUpdate line (its UIParent.xml l.19): the floating
@@ -45,7 +82,7 @@
                  once a frame, since the chat window became the reference's (1948). The fade and
                  flash kits keep their own tick sources in UiPanels.xml. The guard is for a VM that
                   loaded this file without the chat files — a test's, never the manifest's. -->
-            <OnUpdate>if FCF_OnUpdate then FCF_OnUpdate(arg1) end</OnUpdate>
+            <OnUpdate>if FCF_OnUpdate then FCF_OnUpdate(arg1) end if ButtonPulse_OnUpdate then ButtonPulse_OnUpdate(arg1) end if UnitPopup_OnUpdate then UnitPopup_OnUpdate(arg1) end</OnUpdate>
         </Scripts>
     </Frame>
 
@@ -337,6 +374,13 @@
             UIParentLoadAddOn("Blizzard_GMSurveyUI")
         end
 
+        -- ref UIParent.lua l.162-164, verbatim — the trainer window's loader, reached from the
+        -- TRAINER_SHOW arm below. The addon is a LoadOnDemand registry row read off the chain
+        -- (`ui_script::addons`, 1957), so this is the reference's own mechanism, not a stand-in.
+        function ClassTrainerFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TrainerUI")
+        end
+
         -- ref UIParent.lua's own `ShowMacroFrame`, moved here from our MacroFrame.xml when 1848
         -- retired that file — the third such squatter after `InspectUnit` (1832) and
         -- `ToggleTalentFrame` (1833), and by now the expected shape.
@@ -377,6 +421,35 @@
                 if ( LocalizeFrames ) then
                     LocalizeFrames()
                 end
+                return
+            end
+            -- The trainer arms (ref UIParent.lua l.590-602), verbatim: `Blizzard_TrainerUI` is a
+            -- LoadOnDemand addon off the player's chain, loaded here on the first trainer the
+            -- way the reference loads it — which is when its ADDON_LOADED arm pushes the saved
+            -- filters, after the list packet that resets them (1957). The guards are the
+            -- reference's own, and are what keeps the per-window harnesses that load this file
+            -- without the trainer safe.
+            if ( event == "TRAINER_SHOW" ) then
+                ClassTrainerFrame_LoadUI()
+                if ( ClassTrainerFrame_Show ) then
+                    ClassTrainerFrame_Show()
+                end
+                return
+            end
+            if ( event == "TRAINER_CLOSED" ) then
+                if ( ClassTrainerFrame_Hide ) then
+                    ClassTrainerFrame_Hide()
+                end
+                return
+            end
+            -- The guild invitation (ref UIParent.lua l.296-303, verbatim): the dialog rode a driver
+            -- frame in our FriendsFrame.xml until that file became the reference's (1959).
+            if ( event == "GUILD_INVITE_REQUEST" ) then
+                StaticPopup_Show("GUILD_INVITE", arg1, arg2)
+                return
+            end
+            if ( event == "GUILD_INVITE_CANCEL" ) then
+                StaticPopup_Hide("GUILD_INVITE")
                 return
             end
             -- The mirror bars' START driver (ref UIParent.lua l.97 + l.374-377). It lived on a
@@ -426,6 +499,190 @@
                     dialog.data = arg1
                     dialog.data2 = arg2
                 end
+                return
+            end
+            -- ── The dialog-raising arms, ref UIParent.lua l.237-268 and l.284-360, l.378-453,
+            -- l.533-552, verbatim (1960). Until the dialog engine became the reference's own file
+            -- these rode nine hidden driver frames — one per dialog file, plus two in UiPanels.xml
+            -- — each explaining that it existed because benilla had no UIParent OnEvent to put the
+            -- arm in. It does, and the reference's placement is the one that survives the dialogs
+            -- being someone else's. Two guards are ours, each marked. ─────────────────────────────
+            if ( event == "PLAYER_DEAD" ) then
+                if ( not StaticPopup_Visible("DEATH") ) then
+                    CloseAllWindows(1)
+                    if ( GetReleaseTimeRemaining() > 0 or GetReleaseTimeRemaining() == -1 ) then
+                        StaticPopup_Show("DEATH")
+                    end
+                end
+                return
+            end
+            if ( event == "PLAYER_ALIVE" ) then
+                StaticPopup_Hide("DEATH")
+                StaticPopup_Hide("RESURRECT_NO_SICKNESS")
+                return
+            end
+            if ( event == "PLAYER_UNGHOST" ) then
+                StaticPopup_Hide("RESURRECT")
+                StaticPopup_Hide("RESURRECT_NO_SICKNESS")
+                StaticPopup_Hide("RESURRECT_NO_TIMER")
+                StaticPopup_Hide("SKINNED")
+                StaticPopup_Hide("SKINNED_REPOP")
+                return
+            end
+            if ( event == "RESURRECT_REQUEST" ) then
+                if ( ResurrectHasSickness() ) then
+                    StaticPopup_Show("RESURRECT", arg1)
+                elseif ( ResurrectHasTimer() ) then
+                    StaticPopup_Show("RESURRECT_NO_SICKNESS", arg1)
+                else
+                    StaticPopup_Show("RESURRECT_NO_TIMER", arg1)
+                end
+                return
+            end
+            if ( event == "PARTY_INVITE_REQUEST" ) then
+                StaticPopup_Show("PARTY_INVITE", arg1)
+                return
+            end
+            if ( event == "PARTY_INVITE_CANCEL" ) then
+                StaticPopup_Hide("PARTY_INVITE")
+                return
+            end
+            if ( event == "PLAYER_CAMPING" ) then
+                StaticPopup_Show("CAMP")
+                return
+            end
+            if ( event == "PLAYER_QUITING" ) then
+                StaticPopup_Show("QUIT")
+                return
+            end
+            if ( event == "LOGOUT_CANCEL" ) then
+                StaticPopup_Hide("CAMP")
+                StaticPopup_Hide("QUIT")
+                return
+            end
+            if ( event == "LOOT_BIND_CONFIRM" ) then
+                local dialog = StaticPopup_Show("LOOT_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "EQUIP_BIND_CONFIRM" ) then
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                local dialog = StaticPopup_Show("EQUIP_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "AUTOEQUIP_BIND_CONFIRM" ) then
+                StaticPopup_Hide("EQUIP_BIND")
+                local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "USE_BIND_CONFIRM" ) then
+                StaticPopup_Show("USE_BIND")
+                return
+            end
+            if ( event == "DELETE_ITEM_CONFIRM" ) then
+                -- Check quality
+                if ( arg2 >= 3 ) then
+                    StaticPopup_Show("DELETE_GOOD_ITEM", arg1)
+                else
+                    StaticPopup_Show("DELETE_ITEM", arg1)
+                end
+                return
+            end
+            if ( event == "QUEST_ACCEPT_CONFIRM" ) then
+                StaticPopup_Show("QUEST_ACCEPT", arg1, arg2)
+                return
+            end
+            if ( event == "CURSOR_UPDATE" ) then
+                StaticPopup_Hide("EQUIP_BIND")
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                return
+            end
+            if ( event == "DUEL_REQUESTED" ) then
+                StaticPopup_Show("DUEL_REQUESTED", arg1)
+                return
+            end
+            if ( event == "DUEL_OUTOFBOUNDS" ) then
+                StaticPopup_Show("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "DUEL_INBOUNDS" ) then
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "DUEL_FINISHED" ) then
+                StaticPopup_Hide("DUEL_REQUESTED")
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "CONFIRM_XP_LOSS" ) then
+                local resSicknessTime = GetResSicknessDuration()
+                if ( resSicknessTime ) then
+                    local dialog = StaticPopup_Show("XP_LOSS", resSicknessTime)
+                    if ( dialog ) then
+                        dialog.data = resSicknessTime
+                    end
+                else
+                    local dialog = StaticPopup_Show("XP_LOSS_NO_SICKNESS")
+                    if ( dialog ) then
+                        dialog.data = 1
+                    end
+                end
+                -- Ours: the reference's `HideUIPanel(GossipFrame)` unguarded — the per-window
+                -- harnesses load this file without the gossip window.
+                if ( GossipFrame ) then
+                    HideUIPanel(GossipFrame)
+                end
+                return
+            end
+            if ( event == "CORPSE_IN_RANGE" ) then
+                StaticPopup_Show("RECOVER_CORPSE")
+                return
+            end
+            if ( event == "CORPSE_IN_INSTANCE" ) then
+                StaticPopup_Show("RECOVER_CORPSE_INSTANCE")
+                return
+            end
+            if ( event == "CORPSE_OUT_OF_RANGE" ) then
+                StaticPopup_Hide("RECOVER_CORPSE")
+                StaticPopup_Hide("RECOVER_CORPSE_INSTANCE")
+                StaticPopup_Hide("XP_LOSS")
+                return
+            end
+            if ( event == "BIND_ENCHANT" ) then
+                StaticPopup_Show("BIND_ENCHANT")
+                return
+            end
+            if ( event == "REPLACE_ENCHANT" ) then
+                StaticPopup_Show("REPLACE_ENCHANT", arg1, arg2)
+                return
+            end
+            if ( event == "CURRENT_SPELL_CAST_CHANGED" ) then
+                StaticPopup_Hide("BIND_ENCHANT")
+                StaticPopup_Hide("REPLACE_ENCHANT")
+                StaticPopup_Hide("TRADE_REPLACE_ENCHANT")
+                return
+            end
+            if ( event == "CONFIRM_TALENT_WIPE" ) then
+                local dialog = StaticPopup_Show("CONFIRM_TALENT_WIPE")
+                if ( dialog ) then
+                    MoneyFrame_Update(dialog:GetName().."MoneyFrame", arg1)
+                end
+                return
+            end
+            if ( event == "CONFIRM_BINDER" ) then
+                StaticPopup_Show("CONFIRM_BINDER", arg1)
+                return
+            end
+            if ( event == "CONFIRM_SUMMON" ) then
+                StaticPopup_Show("CONFIRM_SUMMON")
                 return
             end
             -- The ready-check popup's opener (decision 1549), ref UIParent.lua l.570-572. The

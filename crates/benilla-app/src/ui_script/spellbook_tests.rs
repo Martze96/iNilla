@@ -106,6 +106,8 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
@@ -131,6 +133,10 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "GameTooltip.xml");
     // The reference's own file, off the chain, with the one adapter it needs from this engine.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -679,6 +685,8 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // `ShowMacroFrame` lives here since 1848.
         "UIParent.xml",
         "GameTooltip.xml",

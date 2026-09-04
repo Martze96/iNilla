@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(
             s.eval::<String>(&format!("return {ROW}9Description:GetText()"))
                 .unwrap(),
-            "JUMP"
+            crate::ui_script::keybindings_tests::label(&s, "BINDING_NAME_JUMP", "JUMP")
         );
         assert!(s.bind_capture_armed());
         let mut app = vm_harness(s);

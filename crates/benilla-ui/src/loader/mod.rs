@@ -139,6 +139,7 @@ pub fn load_into(
         path: path.to_string(),
         report: LoadReport::default(),
         warned: HashSet::new(),
+        deferred_anchors: Vec::new(),
     };
     // Fold the document layer's own parse warnings in (decision 0068: reuse framexml's warnings).
     loader.report.warnings.extend(doc.warnings.iter().cloned());
@@ -192,6 +193,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         path: String::new(),
         report: LoadReport::default(),
         warned: HashSet::new(),
+        deferred_anchors: Vec::new(),
     };
 
     let (own_name, parent_name) = loader.frame_names(wrapper);
@@ -368,6 +370,24 @@ struct Loader<'a> {
     pub(super) report: LoadReport,
     /// Warn-once keys (so a document with 200 `OnClick` handlers doesn't emit 200 identical warnings).
     pub(super) warned: HashSet<String>,
+    /// Anchors whose named `relativeTo` did not resolve when its element was read, applied once
+    /// the enclosing frame's subtree exists ([`Loader::drain_deferred_anchors`]). The real
+    /// client is order-free here because it resolves anchors at layout, after every child of
+    /// the frame is built; this loader resolves a name at `SetPoint` time, so a `<ButtonText>`
+    /// hung off a `<HighlightTexture>` declared after it (the stock trainer row) — or a state
+    /// texture hung off the label declared after IT (the sort-header arrow) — needs the same
+    /// grace. Each entry belongs to the `decorate` that pushed it and drains there, so a nested
+    /// frame's anchors never wait for its parent (1957).
+    pub(super) deferred_anchors: Vec<DeferredAnchor>,
+}
+
+/// One `SetPoint` the loader holds until its target can exist — see `Loader::deferred_anchors`.
+pub(super) struct DeferredAnchor {
+    pub(super) wrapper: Table,
+    /// A region wrapper (`call_region`) rather than a frame's (`call`).
+    pub(super) region: bool,
+    pub(super) args: (String, Option<String>, String, f32, f32),
+    pub(super) dbg: String,
 }
 
 impl Loader<'_> {
@@ -813,6 +833,9 @@ impl Loader<'_> {
         parent_name: &str,
         dbg_name: &str,
     ) {
+        // Everything this frame defers drains before its OnLoad (step 8 below); a nested frame's
+        // own deferrals drain inside ITS decorate, so the mark is this frame's alone.
+        let deferred_mark = self.deferred_anchors.len();
         // 2 · LoadXML attributes (rf24 `0x769820`).
         self.apply_attrs(el, wrapper, dbg_name);
         // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, rf24 `0x767800`).
@@ -883,6 +906,10 @@ impl Loader<'_> {
             }
         }
 
+        // 7c · the anchors this frame's own elements could not resolve while their targets were
+        //      still unbuilt — every child exists now, which is when the client's own layout
+        //      pass would have read them.
+        self.drain_deferred_anchors(deferred_mark);
         // 8 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
             self.fire_onload(wrapper, &func, dbg_name);
@@ -897,6 +924,25 @@ impl Loader<'_> {
     /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
     /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
     /// is none.
+    /// Can a `relativeTo` name resolve right now — a frame in the arena or a named region?
+    pub(super) fn anchor_target_exists(&self, name: &str) -> bool {
+        let model = self.model();
+        model.arena.lookup(name).is_some() || model.region_names.contains_key(name)
+    }
+
+    /// Apply the anchors deferred since `mark` (the enclosing `decorate`'s entry), in order. A
+    /// target still missing now is a real miss and warns through the resolver like any other.
+    pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
+        let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
+        for d in pending {
+            if d.region {
+                self.call_region(&d.wrapper, "SetPoint", d.args, &d.dbg);
+            } else {
+                self.call(&d.wrapper, "SetPoint", d.args, &d.dbg);
+            }
+        }
+    }
+
     fn frame_names(&self, wrapper: &Table) -> (Option<String>, String) {
         let own = wrapper
             .call_method::<Option<String>>("GetName", ())

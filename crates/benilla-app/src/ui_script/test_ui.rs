@@ -149,6 +149,8 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml",
     "GameTooltip.xml", // app load order: tooltip before merchant
 ];
 
@@ -160,6 +162,9 @@ pub(super) const LOOT_UI: &[&str] = &[
     "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\StaticPopup.xml",
     "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
     // `UnitPopup.xml` reads ITEM_QUALITY_COLORS at FILE SCOPE for its three loot-threshold rows,
@@ -167,7 +172,8 @@ pub(super) const LOOT_UI: &[&str] = &[
     // That declarer is UIParent (ref UIParent.lua:65); 1888 moved the table there when Fonts.xml
     // went on the chain, because the reference's Fonts.xml does not declare it.
     "UIParent.xml",
-    "UnitPopup.xml",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+    "Interface\\FrameXML\\UnitPopup.xml",
     // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
     // `UnitFrame_Initialize`, which lives in UnitFrame.lua and itself calls
     // `SetTextStatusBarText` out of TextStatusBar.lua. Naming PartyFrame without these loads
@@ -238,12 +244,13 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\StaticPopup.xml",
     // The unit frames' four right-click dropdowns call `UIDropDownMenu_Initialize` at LOAD, so the
     // kit and the menu table it initialises from both precede them — the manifest's own order
     // (175 → 189 → 193 → 263).
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "Interface\\FrameXML\\UIMenu.xml",
-    "UnitPopup.xml",
+    "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
     // `UnitFrame_Initialize` and `CombatFeedback_Initialize`, which the two windows below call in
@@ -288,6 +295,52 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Interface\\FrameXML\\HonorFrame.xml",
 ];
 
+/// The social window's slice of the manifest (1959): everything the reference's
+/// `FriendsFrame.xml` + `RaidFrame.xml` reach at load or on show — `TEXT` and `GetText`, the
+/// bar chain under `UpdateMicroButtons`, the chat window whose edit box `FriendsFrame_SendMessage`
+/// opens, the unit menu, the party frames `RaidFrame_OnLoad` reconciles, and the raid tab's
+/// LoadOnDemand addon — in the manifest's own order. Shared by the friends, guild and raid
+/// harnesses.
+pub(super) const SOCIAL_UI: &[&str] = &[
+    "Interface\\FrameXML\\Fonts.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "UIParent.xml",
+    "Cooldown.xml",
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "Interface\\FrameXML\\MainMenuBar.xml",
+    "MoneyFrame.xml",
+    "GameTooltip.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    "ScrollTemplates.xml",
+    "Interface\\FrameXML\\UIPanelTemplates.lua",
+    "Interface\\FrameXML\\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\OptionsFrameTemplates.xml",
+    "Interface\\FrameXML\\ReputationFrame.xml",
+    "UiPanels.xml",
+    "Interface\\FrameXML\\StaticPopup.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
+    "KeyBindingsPage.xml",
+    "OptionsFrame.xml",
+    "Interface\\FrameXML\\MultiActionBars.xml",
+    "MicroMenu.xml",
+    "Interface\\FrameXML\\UnitPopup.xml",
+    "Interface\\FrameXML\\UIMenu.xml",
+    "Interface\\FrameXML\\ChatFrame.xml",
+    "Interface\\FrameXML\\FloatingChatFrame.xml",
+    "Interface\\FrameXML\\BuffFrame.xml",
+    "Interface\\FrameXML\\UnitFrame.xml",
+    "Interface\\FrameXML\\CombatFeedback.xml",
+    "Interface\\FrameXML\\PartyFrame.xml",
+    "Interface\\FrameXML\\FriendsFrame.xml",
+    "Interface\\FrameXML\\RaidFrame.xml",
+    "Interface\\AddOns\\Blizzard_RaidUI\\Blizzard_RaidUI.xml",
+];
+
 pub(super) const BAG_UI: &[&str] = &[
     // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
     // the `*_FONT_COLOR_CODE` pair. The app loads this at VM setup, ahead of the manifest
@@ -311,6 +364,7 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
     "GameTooltip.xml",
     "Cooldown.xml",
     // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
@@ -327,6 +381,8 @@ pub(super) const BAG_UI: &[&str] = &[
     "MicroMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // The dialog engine, after the UIPanelCloseButton it inherits (1960).
+    r"Interface\FrameXML\StaticPopup.xml",
     "Interface\\FrameXML\\ContainerFrame.xml",
     // `PaperDollItemSlotButtonTemplate` and the `PaperDollItemSlotButton_*` family behind it,
     // which every bag button inherits and runs — resolved at load, so this has to precede the bar

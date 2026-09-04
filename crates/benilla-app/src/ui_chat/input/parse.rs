@@ -27,32 +27,10 @@ pub(in crate::ui_chat) fn escape_lua_string(s: &str) -> String {
         .collect()
 }
 
-/// Which social slash command was typed — the selector for the Lua body it runs
-/// ([`ParsedChat::Social`], decision 0668).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::ui_chat) enum SocialVerb {
-    /// `/who [filter]` — SLASH_WHO 1-2.
-    Who,
-    /// `/friends [name]` (aliases `/friend`) — SLASH_FRIENDS 1-4.
-    Friends,
-    /// `/removefriend <name>` (alias `/remfriend`) — SLASH_REMOVEFRIEND 1-4.
-    RemoveFriend,
-    /// `/ignore [name]` — SLASH_IGNORE 1-2. Toggles: an ignored name is un-ignored.
-    Ignore,
-    /// `/unignore [name]` — SLASH_UNIGNORE 1-2.
-    Unignore,
-}
-
-impl SocialVerb {
-    /// The Lua function in `FriendsFrame.xml` holding this verb's reference body.
-    pub(in crate::ui_chat) fn lua_fn(self) -> &'static str {
-        match self {
-            Self::Who => "BenillaSlashWho",
-            Self::Friends => "BenillaSlashFriends",
-            Self::RemoveFriend => "BenillaSlashRemoveFriend",
-            Self::Ignore => "BenillaSlashIgnore",
-            Self::Unignore => "BenillaSlashUnignore",
-        }
+/// A social slash line as the reference runs it: `SlashCmdList["<KEY>"](<arg>)` (1959).
+fn social_body(key: &str, args: &str) -> ParsedChat {
+    ParsedChat::Lua {
+        body: format!("SlashCmdList[\"{key}\"](\"{}\")", escape_lua_string(args)),
     }
 }
 
@@ -156,13 +134,6 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// `/pvp` — `TogglePVP()` (decision 0646 §3). Takes no argument: the binding has no state
     /// form, and the server reads the toggle from our current preference.
     Pvp,
-    /// The social verbs (decision 0668) — `/who`, `/friends`, `/removefriend`, `/ignore`,
-    /// `/unignore`. Each carries the raw argument (`/who`'s is a whole filter string, not a
-    /// name), and each runs the reference's OWN `SlashCmdList` body, transcribed into
-    /// `FriendsFrame.xml` as `BenillaSlash*`: those bodies do more than send (a bare `/who`
-    /// opens the panel and fills its edit box, a bare `/ignore` opens the ignore list), and
-    /// keeping them in the FrameXML is what stops that behaviour being re-derived here.
-    Social { verb: SocialVerb, arg: String },
     /// `/partytest [lead|raid|invite|mark|ping|off]` — the party-frame dev instrument (decision 0434, the
     /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
     /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
@@ -341,28 +312,15 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
         },
         S::DuelCancel => ParsedChat::Forfeit,
         S::Pvp => ParsedChat::Pvp,
-        // The social verbs (decision 0668). The argument is passed WHOLE: `/who`'s is a filter
-        // expression (`z-"Elwynn Forest" 1-10`), not a name.
-        S::Who => ParsedChat::Social {
-            verb: SocialVerb::Who,
-            arg: args.to_string(),
-        },
-        S::Friends => ParsedChat::Social {
-            verb: SocialVerb::Friends,
-            arg: args.to_string(),
-        },
-        S::RemoveFriend => ParsedChat::Social {
-            verb: SocialVerb::RemoveFriend,
-            arg: args.to_string(),
-        },
-        S::Ignore => ParsedChat::Social {
-            verb: SocialVerb::Ignore,
-            arg: args.to_string(),
-        },
-        S::Unignore => ParsedChat::Social {
-            verb: SocialVerb::Unignore,
-            arg: args.to_string(),
-        },
+        // The social verbs (decision 0668): the reference's own `SlashCmdList` bodies, which the
+        // stock ChatFrame.lua carries since 1948 — and whose parser claims these lines before
+        // they ever reach here, so these rows are the shape kept for the day the arm is pruned
+        // (1948's follow-on). The argument is passed WHOLE: `/who`'s is a filter expression.
+        S::Who => social_body("WHO", args),
+        S::Friends => social_body("FRIENDS", args),
+        S::RemoveFriend => social_body("REMOVEFRIEND", args),
+        S::Ignore => social_body("IGNORE", args),
+        S::Unignore => social_body("UNIGNORE", args),
         // The one-line reference bodies over globals benilla already implements (decision 0881,
         // the 0668 posture): `InitiateTrade("target")`, `InspectUnit("target")`,
         // `SetLootMethod(...)`, `RunScript(msg)`. Running the reference's own call keeps the

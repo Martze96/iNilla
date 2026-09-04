@@ -32,6 +32,8 @@ fn setup() -> UiScript {
         "MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // The stock file's `HelpFrame_OnShow` calls `UpdateMicroButtons()` before
         // `GetGMStatus()`, so without the micro row the OnShow raises and the status ask never
         // happens. Ours never called it. MicroMenu needs the bar's button kit under it.

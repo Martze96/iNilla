@@ -34,7 +34,9 @@ const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
 /// with these, in manifest order.
 const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\UIDropDownMenu.xml",
-    "UnitPopup.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+    "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
@@ -46,6 +48,8 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
     "UiPanels.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
 ];
 
@@ -60,6 +64,10 @@ fn load_room(s: &UiScript) {
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
@@ -115,6 +123,8 @@ fn shown_paper_doll() -> UiScript {
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         super::test_ui::load_ui_strict(&s, file);

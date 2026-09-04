@@ -45,6 +45,10 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
@@ -722,6 +726,9 @@ fn interface_harness() -> UiScript {
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "UIParent.xml",
             // The target-of-target pair's definer (1576) and the three files ahead of it, all in
             // their manifest seats. The chain is a real load-ORDER requirement rather than
@@ -732,7 +739,8 @@ fn interface_harness() -> UiScript {
             // loader takes it.
             "GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "UnitPopup.xml",
+            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+            "Interface\\FrameXML\\UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\BuffFrame.xml",
@@ -792,6 +800,10 @@ fn chat_harness() -> UiScript {
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "UIParent.xml",
             "GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -844,6 +856,9 @@ fn actionbars_harness() -> UiScript {
             "ScrollTemplates.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "KeyBindingsPage.xml",
             "OptionsFrame.xml",
             "Interface\\FrameXML\\MultiActionBars.xml",

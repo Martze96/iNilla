@@ -207,6 +207,10 @@ fn load_action_bar(s: &UiScript) {
     // reference declares them in UIOptionsFrame_Init (1938) — and the manifest loads it before
     // the bars.
     super::test_ui::load_ui(s, "UiPanels.xml");
+    // The dialog engine — the keybindings page registers its two confirms into its table (1960).
+    super::test_ui::load_ui(s, r"Interface\FrameXML\BasicControls.xml"); // `TEXT`
+    super::test_ui::load_ui(s, r"Interface\FrameXML\LocaleProperties.lua"); // `GetText`
+    super::test_ui::load_ui(s, r"Interface\FrameXML\StaticPopup.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     super::test_ui::load_ui(s, "ScrollTemplates.xml");
     super::test_ui::load_ui(s, "KeyBindingsPage.xml");
@@ -1371,6 +1375,9 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",

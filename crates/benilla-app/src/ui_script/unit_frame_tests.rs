@@ -28,7 +28,8 @@ fn load_unit_frames(s: &UiScript) {
     load_xml(s, "MoneyFrame.xml");
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(s, "UnitPopup.xml");
+    load_xml(s, "Interface\\FrameXML\\BasicControls.xml"); // `TEXT`, which UnitPopup.lua reads at file scope
+    load_xml(s, "Interface\\FrameXML\\UnitPopup.xml");
     load_xml(s, "Interface\\FrameXML\\BuffFrame.xml");
     load_xml(s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(s, "Interface\\FrameXML\\CombatFeedback.xml");
@@ -650,6 +651,9 @@ fn shipped_target_frame_runs_the_level_law() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
@@ -1212,12 +1216,16 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE and its
     // declarer is UIParent (ref UIParent.lua:65) since 1888.
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:
     // `RaiseFrameLevel`/`LowerFrameLevel` live in it (ref UIParent.lua l.1890-1896) and stock
     // `TargetofTargetTextureFrame`'s OnLoad calls one of them.

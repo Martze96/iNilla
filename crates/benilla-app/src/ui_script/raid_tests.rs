@@ -24,37 +24,9 @@ use super::test_ui::load_ui_strict as load_xml;
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "UIParent.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "UnitPopup.xml");
-    load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "FriendsFrame.xml");
-    // Stock `RaidFrame_OnLoad` reconciles the party frames the moment it loads
-    // (`RaidOptionsFrame_UpdatePartyFrames` -> `HidePartyFrame`/`ShowPartyFrame`), so this pane
-    // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
-    // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
-    // iterates. The manifest already seats these far above RaidFrame (1874).
-    // The reference's own `BasicControls.xml`, which is manifest entry 3 — far above the pane
-    // (1874). `UIParentLoadAddOn` used to be what this line was here for; 1881 moved that
-    // function to `UIParent.xml`, its home in the reference, and this harness already loads
-    // `UIParent.xml` above, so the `RaidFrame_LoadUI` arm on `RAID_ROSTER_UPDATE` still
-    // resolves. What is left here is the error/message pair and `TEXT`.
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
-    load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
-    load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UnitFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\CombatFeedback.xml");
-    load_xml(&s, r"Interface\FrameXML\PartyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\RaidFrame.xml");
-    load_xml(&s, r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml");
+    for f in super::test_ui::SOCIAL_UI {
+        load_xml(&s, f);
+    }
     s
 }
 

@@ -15,6 +15,10 @@ fn setup() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     s
 }
 
@@ -78,7 +82,7 @@ fn start_delay_gates_button1_then_swaps_the_text_in() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "2 seconds until resurrection",
+        "2 Seconds until resurrection",
         "the delayText countdown renders (ceil of 1.5s)"
     );
     s.tick(1.6);
@@ -181,14 +185,14 @@ fn the_death_countdown_text_rerenders_each_tick() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "2 minutes until release",
+        "2 Minutes until release",
         "above 60s renders ceil-minutes"
     );
     s.tick(31.0);
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "59 seconds until release",
+        "59 Seconds until release",
         "below 60s renders seconds"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

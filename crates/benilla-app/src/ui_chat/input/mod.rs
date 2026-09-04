@@ -233,6 +233,24 @@ pub(super) fn drain_chat_input(
         if msg.is_empty() {
             continue;
         }
+        // A line with no slash is SPEECH — which is also how a `.gm`-style server command
+        // travels (the server reads the dot off a SAY). That is the seam's contract
+        // (`UiScript::push_chat_input`): a typed line takes the stock `ChatEdit_SendText` →
+        // `SendChatMessage` route since 1948, and a probe's line, which never touched the edit
+        // box, must reach the wire the same way. The migration dropped this branch with the
+        // old edit-state sender, and every `WOW_PROBE_CHAT` rig — the crowd raid's forty
+        // `.partybot add`s, the probe shield's `.cheat god on` — went silent on the server.
+        if !msg.starts_with('/') {
+            let cmd = ClientCommand::Chat {
+                kind: super::edit::SendType::Say.wire(),
+                target: None,
+                text: msg.to_string(),
+            };
+            if commands.0.send(cmd).is_err() {
+                warn!("chat: not connected; line dropped");
+            }
+            continue;
+        }
         queue.push((msg.to_string(), parse_line(&table, msg)));
     }
     for (msg, parsed) in queue {
@@ -697,15 +715,6 @@ pub(super) fn drain_chat_input(
             // over the same binding the popup row calls, so it enters the same intent queue
             // (decision 0646 §3; the `/duel` reasoning above, verbatim).
             ParsedChat::Pvp => script.queue_pvp_toggle(),
-            // Run the reference's own slash body (see the variant's doc). The argument is a Lua
-            // string literal, so it is escaped: a `/who` filter legitimately contains quotes
-            // (`z-"Elwynn Forest"`), and a newline would end the statement.
-            ParsedChat::Social { verb, arg } => {
-                let lua = format!("{}(\"{}\")", verb.lua_fn(), parse::escape_lua_string(&arg));
-                if let Err(e) = script.run(&lua) {
-                    warn!("ui_chat(social): {e}");
-                }
-            }
             ParsedChat::Help => {
                 // An honest benilla summary (the ref's HELP_TEXT_LINE pages are a settings-era
                 // nicety; this stays useful and never stale-quotes them).

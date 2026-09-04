@@ -20,12 +20,16 @@ mod common;
 /// The tradeskill window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// CraftFrame.xml rides along (it loads right after TradeSkillFrame.xml in the app and shares
 /// its guarded-global utilities) so a load error in EITHER window fails here.
-const FILES: [&str; 10] = [
+const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",

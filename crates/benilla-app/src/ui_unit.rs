@@ -749,6 +749,8 @@ fn feed_player_control(
     let lost = lost.get(&script);
     if *lost != player.control_lost {
         *lost = player.control_lost;
+        // `HasFullControl`'s flag rides the same edge (1958).
+        script.set_player_control(!player.control_lost);
         let event = if player.control_lost {
             "PLAYER_CONTROL_LOST"
         } else {
@@ -951,6 +953,12 @@ pub(crate) fn snapshot(
         // sets it without being a player.
         player_controlled: store.0.unit_flags() & 0x8 != 0,
         flags: store.0.unit_flags(),
+        owner: store
+            .0
+            .unit_summoned_by()
+            .or_else(|| store.0.unit_charmed_by())
+            .or_else(|| store.0.unit_created_by())
+            .unwrap_or(0),
         // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
         // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
         // that idiom found the local-player readers reading this identical bit, so there is no
@@ -1227,10 +1235,13 @@ pub(crate) fn fire_transitions(
     if changed(|u| u64::from(u.power_type)) {
         script.fire_event("UNIT_DISPLAYPOWER", vec![tok()]);
     }
-    // `UNIT_FLAGS` — on a change of the unit's `UNIT_FIELD_FLAGS`, the field the reference's
-    // per-unit reflex is registered on by byte offset (wow-re `pet-action-bar-api.md` §9's
-    // `0x5ff580`). The stock pet bar filters it for `"pet"` and re-derives its usability (1953).
-    if changed(|u| u64::from(u.flags)) {
+    // `UNIT_FLAGS` (id 40) — the per-field watch bridge (wow-re `unit-field-event-bridge.md`,
+    // VERIFIED): `0x51bbb0` registers one watch per named unit field, the notifier `0x465570`
+    // fires `0x51bd50` → `0x515e50` on any change of the dword's bytes, once per token mapping to
+    // the unit, `arg1` the token. The create leg runs no notify pass, so a unit's FIRST snapshot
+    // is not a transition here — unlike the fields above, whose first-appearance fire is this
+    // feed's own posture (1953, corrected in 1957). The stock pet bar filters it for `"pet"`.
+    if prev.is_some() && changed(|u| u64::from(u.flags)) {
         script.fire_event("UNIT_FLAGS", vec![tok()]);
     }
     // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
@@ -1987,7 +1998,8 @@ mod tests {
     /// instructions and 12 branches of the watcher. The negative half is asserted too, because
     /// "fire on both, it's cheaper" is the obvious wrong simplification.
     /// `UNIT_FLAGS` rides the raw field: any change of `UNIT_FIELD_FLAGS` fires it with the
-    /// token, an unchanged field does not, and a unit's first snapshot is a transition (1953).
+    /// token, an unchanged field does not, and a unit's first snapshot is NOT a transition — the
+    /// reference's watch bridge has no watch to fire on the create leg (1953, corrected 1957).
     #[test]
     fn a_flags_change_fires_unit_flags_with_the_token() {
         let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
@@ -2024,10 +2036,7 @@ mod tests {
             fired(Some(base.clone()), base.clone()),
             Vec::<String>::new()
         );
-        assert_eq!(
-            fired(None, base.clone()),
-            vec!["UNIT_FLAGS:pet".to_string()]
-        );
+        assert_eq!(fired(None, base.clone()), Vec::<String>::new());
     }
 
     /// The two edges on the player's own state (1953): the control flag's, which fires LOST on

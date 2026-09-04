@@ -93,6 +93,8 @@ fn harness_with(player: &str) -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.
         "GameTooltip.xml",
         "UIParent.xml", // `ShowMacroFrame` lives here now

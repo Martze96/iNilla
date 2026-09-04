@@ -31,6 +31,10 @@ pub(crate) struct Model {
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
+    /// The host's reader for a chain-sourced addon's files (`AddOnInfo::chain`), by
+    /// chain-internal path — `None` in a VM with no chain behind it, where such an addon
+    /// answers `MISSING`.
+    pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
     /// The host's font engine ([`super::UiScript::set_text_measurer`]) — what lets a metric read
     /// answer inside the Lua call that asked, instead of a frame later. `None` in every VM without
     /// a font atlas, which is the measure round-trip's own world and behaves exactly as it did.
@@ -477,6 +481,10 @@ pub(crate) struct Model {
     /// Social intents (`AddFriend`/`RemoveFriend`/`SendWho`/…) queued since the app's last
     /// [`super::UiScript::take_social_requests`] drain — the outbound seam ([`social`]).
     pub(crate) social_requests: Vec<social::SocialRequest>,
+    /// `GetLookingForGroup`'s flag, written by `SetLookingForGroup` — the Who and Guild frames'
+    /// LFG check box. Client-side here; the wire (`CMSG_SET_LOOKING_FOR_GROUP`) waits on its
+    /// carve, and both local emulators ignore it anyway (1959).
+    pub(crate) looking_for_group: bool,
     /// The guild snapshot the app pushes (roster, ranks, MOTD, info text — decision 1257):
     /// `GetNumGuildMembers`/`GetGuildRosterInfo`/`GuildControlGetRankFlags`/… read it
     /// ([`guild`]). Already display-resolved and already sorted + filtered, because the sort
@@ -808,6 +816,14 @@ pub(crate) struct Model {
     pub(crate) pet_autocast_toggles: Vec<u32>,
     /// `PetStopAttack()` calls queued — a count, since the verb takes no argument.
     pub(crate) pet_stop_attacks: u32,
+    /// The pet one-shot orders (`PetAttack`, `PetFollow`, `PetWait`, the three modes), each the
+    /// packed slot word the bar's own command or reaction slot would carry — the app's drain
+    /// presses them exactly as a slot (1958).
+    pub(crate) pet_orders: Vec<u32>,
+    /// `HasFullControl`'s flag — the reference's `[0xb4b3e4]`, written by
+    /// `SMSG_CLIENT_CONTROL_UPDATE` naming the local player and read as "if zero, refuse" by
+    /// every cast, item and cursor gate (wow-re `control-loss-and-restore.md`). Boot value 1.
+    pub(crate) player_control: bool,
     /// Pet bar writes queued by the drag ([`cursor::pet`], decision 1010) — **one entry per
     /// `CMSG_PET_SET_ACTION`**, each holding the one or two `(0-based position, packed word)` pairs
     /// that send names. The nesting is the point: the server tells the one-pair form from the
@@ -1580,6 +1596,7 @@ impl Model {
         Model {
             addons: Vec::new(),
             addons_root: None,
+            addons_chain_reader: None,
             measurer: None,
             texture_probe: None,
             texture_size_probe: None,
@@ -1657,6 +1674,7 @@ impl Model {
             reset_instance_asks: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
+            looking_for_group: false,
             guild: guild::GuildState::default(),
             guild_control: guild::GuildRankEdit::default(),
             guild_requests: Vec::new(),
@@ -1735,6 +1753,8 @@ impl Model {
             pet_actions_pressed: Vec::new(),
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
+            pet_orders: Vec::new(),
+            player_control: true,
             pet_set_actions: Vec::new(),
             pet_abandons: 0,
             pet_dismisses: 0,

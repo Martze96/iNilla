@@ -1472,6 +1472,16 @@ mod tests {
         // binding or one sourced file away.
         const KNOWN: &[(&str, &str, &str)] = &[
             (
+                "ClassTrainerFrameTemplates.xml",
+                "ClassTrainerSkillButton_OnClick",
+                "defined by `Blizzard_TrainerUI`, which is a LoadOnDemand addon here as it is in \
+                 the reference (1957): it loads on the first trainer, through UIParent's \
+                 TRAINER_SHOW arm, and the skill-button template that carries this handler is \
+                 instantiated only by that addon, so no click can reach the name before its \
+                 definer exists. The reference is in exactly this state until its addon loads. \
+                 Permanent by design, not a gap to close.",
+            ),
+            (
                 "ContainerFrame.xml",
                 "KeyRingButtonIDToInvSlotID",
                 "an engine binding (`1.12-globals.tsv`). `ContainerFrame.lua:617` hovers a KEYRING \
@@ -1507,16 +1517,6 @@ mod tests {
                  skill-point wire exists; not built (1956).",
             ),
             (
-                "ClassTrainerFrameTemplates.xml",
-                "ClassTrainerSkillButton_OnClick",
-                "defined by `Blizzard_TrainerUI`, a LoadOnDemand addon we do not load yet. The \
-                 file is on the manifest for ONE of its templates — the icon chooser's \
-                 `ClassTrainerListScrollFrameTemplate` (1862) — and the skill-button template that \
-                 carries this handler is never instantiated, so no click can reach it. The \
-                 reference is in the same state until its trainer addon loads on demand. It \
-                 resolves when that window migrates.",
-            ),
-            (
                 "DurabilityFrame.xml",
                 "UpdateInventoryAlertStatus",
                 "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
@@ -1524,11 +1524,70 @@ mod tests {
                  instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
             (
-                "ChatFrame.xml",
-                "value",
-                "not a global: `for index, value in SlashCmdList do … value(msg)` \
-                 (ChatFrame.lua l.2168-2171) calls the addon's handler through the table's loop \
-                 variable. The scan has no scopes, so the name reads as a call.",
+                "StaticPopup.xml",
+                "AcceptAreaSpiritHeal",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's Accept, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "CancelAreaSpiritHeal",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's Cancel, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "GetAreaSpiritHealerTime",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's OnShow, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "AcceptBattlefieldPort",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_BATTLEFIELD_ENTRY / CONFIRM_LEAVE_QUEUE, raised only by BattlefieldFrame.lua, which is not on the chain yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "BeginTrade",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by the TRADE dialog, which 1.12.1 can never show (wow-re `incoming-trade-request-law.md`: TRADE_REQUEST is signalled by nothing).",
+            ),
+            (
+                "StaticPopup.xml",
+                "CancelTrade",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by the TRADE dialog, which 1.12.1 can never show (wow-re `incoming-trade-request-law.md`: TRADE_REQUEST is signalled by nothing).",
+            ),
+            (
+                "StaticPopup.xml",
+                "ReplaceTradeEnchant",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "CancelMeetingStoneRequest",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_LEAVE_QUEUE's meeting-stone arm, raised only by BattlefieldFrame.lua / the meeting-stone gossip, neither on the chain yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "CheckPetUntrainerDist",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_PET_UNLEARN's OnUpdate, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "ConfirmPetUnlearn",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_PET_UNLEARN's Accept, an event this engine does not fire yet.",
+            ),
+            (
+                "StaticPopup.xml",
+                "GetInstanceBootTimeRemaining",
+                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
+                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by INSTANCE_BOOT's OnShow, an event this engine does not fire yet.",
             ),
         ];
 
@@ -1571,6 +1630,37 @@ mod tests {
             // are not are the ones a stat tooltip is built out of: `strupper`, `strsub`, `abs`,
             // `max`, `floor`, `format`, `getglobal`. `reference/1.12-globals.tsv` is the filter
             // that actually belongs here, and it does not care about case.
+            // Names the file binds LOCALLY — `local X`, `local function X`, a `for` loop's
+            // variables — are not globals however they are called: the stock StaticPopup.lua
+            // reads a dialog's handlers into locals (`local OnAccept = …; OnAccept(…)`) and
+            // ChatFrame.lua walks `SlashCmdList` with `for index, value in …; value(msg)`.
+            let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for line in text.lines() {
+                let l = line.trim_start();
+                let rest = if let Some(r) = l.strip_prefix("local function ") {
+                    Some(r)
+                } else if let Some(r) = l.strip_prefix("local ") {
+                    Some(r)
+                } else {
+                    l.strip_prefix("for ")
+                };
+                if let Some(rest) = rest {
+                    for name in rest
+                        .split(['=', ' ', '\t'])
+                        .take_while(|w| *w != "in" && *w != "=" && !w.starts_with('('))
+                        .flat_map(|w| w.split(','))
+                        .map(|w| w.trim())
+                        .filter(|w| !w.is_empty())
+                    {
+                        let name: String =
+                            name.chars().take_while(|c| super::is_word(*c)).collect();
+                        if !name.is_empty() {
+                            locals.insert(name);
+                        }
+                    }
+                }
+            }
+
             let b: Vec<char> = text.chars().collect();
             let mut called: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut i = 0;
@@ -1599,6 +1689,7 @@ mod tests {
             let mut gaps: Vec<&String> = called
                 .iter()
                 .filter(|n| !defines.contains(*n))
+                .filter(|n| !locals.contains(*n))
                 .filter(|n| reference.contains(n.as_str()))
                 .filter(|n| !have.contains(*n))
                 .collect();

@@ -15,7 +15,11 @@ fn setup() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "DuelFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "UIParent.xml");
     s
 }
 
@@ -77,7 +81,7 @@ fn out_of_bounds_counts_down_and_inbounds_dismisses_it() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "Exiting duel area, you will forfeit in 10 seconds.",
+        "Exiting duel area, you will forfeit in 10 Seconds.",
         "the engine's countdown branch fills %d %s"
     );
     s.fire_event("DUEL_INBOUNDS", vec![]);

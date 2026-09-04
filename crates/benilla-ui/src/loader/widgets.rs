@@ -150,6 +150,11 @@ impl Loader<'_> {
                     // exactly like a named `<Layers>` region or the ButtonText.
                     if let Some(rname) = t.name().map(|raw| framexml::resolve_name(raw, self_name))
                     {
+                        // …and into the region-name registry, which is what a sibling's
+                        // `relativeTo` resolves through — the stock trainer row hangs its label
+                        // off `$parentHighlight`'s RIGHT, and a name that lives only in `_G`
+                        // sent that label to the button's edge instead (1957).
+                        crate::script::region::publish_region_name(this.lua(), &rname, &region);
                         if let Err(e) = this.lua().globals().set(rname.clone(), region) {
                             this.report
                                 .warnings
@@ -236,6 +241,8 @@ impl Loader<'_> {
                 // the ref kit addresses tab/button labels by exactly this global
                 // (PanelTemplates_TabResize's `getglobal(tabName.."Text")`).
                 if let Some(rname) = bt_name {
+                    // The registry too, for the same reason as the state textures below (1957).
+                    crate::script::region::publish_region_name(self.lua(), &rname, &region);
                     if let Err(e) = self.lua().globals().set(rname.clone(), region) {
                         self.report
                             .warnings

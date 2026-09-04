@@ -207,6 +207,44 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetLookingForGroup() → four values, the first the flag (1 | nil); SetLookingForGroup(flag):
+    // the LFG check box's pair (`0x4e95d0` / `0x4e96b0`, registered; the getter's arity of FOUR
+    // is `reference/1.12-shapes.tsv`'s, its other three values and both bodies uncarved — a
+    // wow-re orchestrator is out, and the stock FrameXML reads only the first). The flag is
+    // client-side until the wire is read: `SetLookingForGroup` writes it and sends nothing yet,
+    // which is also what both local emulators do with the packet (1959).
+    g.set(
+        "GetLookingForGroup",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let flag = if model.looking_for_group {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            };
+            Ok(mlua::MultiValue::from_vec(vec![
+                flag,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ]))
+        })?,
+    )?;
+    g.set(
+        "SetLookingForGroup",
+        lua.create_function(|lua, flag: Value| {
+            let on = match flag {
+                Value::Nil | Value::Boolean(false) => false,
+                Value::Integer(i) => i != 0,
+                Value::Number(n) => n != 0.0,
+                _ => true,
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.looking_for_group = on;
+            Ok(())
+        })?,
+    )?;
+
     // ShowFriends() — ask the server for the list again.
     g.set(
         "ShowFriends",
@@ -421,5 +459,33 @@ fn clamp_index(index: i64, len: usize) -> u32 {
         index as u32
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::script::UiScript;
+
+    /// The LFG pair (1959): the setter writes the flag, the getter answers it first of four —
+    /// the reference's arity — with nothing on the wire until the bodies are carved.
+    #[test]
+    fn the_looking_for_group_flag_round_trips_with_the_references_arity() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s
+            .eval::<bool>("return select('#', GetLookingForGroup()) == 4")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetLookingForGroup() == nil")
+            .unwrap());
+        s.run("SetLookingForGroup(1)").unwrap();
+        assert_eq!(s.eval::<i64>("return (GetLookingForGroup())").unwrap(), 1);
+        s.run("SetLookingForGroup(nil)").unwrap();
+        assert!(s
+            .eval::<bool>("return GetLookingForGroup() == nil")
+            .unwrap());
+        assert!(
+            s.take_social_requests().is_empty(),
+            "nothing queued for the wire"
+        );
     }
 }

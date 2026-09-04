@@ -39,6 +39,50 @@ mod preview;
 pub(crate) use preview::equip_slot;
 pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
 mod redress;
+
+/// The instruments' view of one body's draw population — what `WOW_DRESS_CENSUS` prints per
+/// part (`DRESS_PARTS`): index, merge group, blend, and the material id, so "why nine draws
+/// for one body" is a line of output and not a reading of the M2. Lives here because the
+/// group and index components are this module's private bookkeeping (0026's dev seam).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BodyPartsDesc<'w, 's> {
+    parts: Query<
+        'w,
+        's,
+        (
+            &'static dress::DressedPart,
+            Option<&'static merge::DressedGroup>,
+            &'static benilla_world::model_render::ModelPart,
+            &'static MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
+        ),
+    >,
+}
+
+impl BodyPartsDesc<'_, '_> {
+    /// One line per drawn part under `unit`, sorted by part index.
+    pub(crate) fn describe(&self, unit: Entity, children: &Query<&Children>) -> Vec<String> {
+        let mut rows: Vec<(u32, String)> = children
+            .iter_descendants(unit)
+            .filter_map(|e| self.parts.get(e).ok())
+            .map(|(part, group, model, mat)| {
+                let group = group
+                    .map(|g| format!("{:?}", &g.0[..]))
+                    .unwrap_or_else(|| "-".into());
+                (
+                    part.index,
+                    format!(
+                        "DRESS_PART #{:<3} group={group:<14} blend={:?} mat={:?}",
+                        part.index,
+                        model.blend,
+                        mat.0.id()
+                    ),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|(i, _)| *i);
+        rows.into_iter().map(|(_, l)| l).collect()
+    }
+}
 pub(super) use redress::redress_player_looks;
 
 /// Set up the skinned instance shared by creatures/players (decision 0019) and animated

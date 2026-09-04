@@ -29,6 +29,8 @@ fn chat_frame() -> UiScript {
     // bar and the chat files; `FCF_OnUpdate` — the dock's hover, fade and drag driver — runs
     // from UIParent's OnUpdate, as in the reference.
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "UIParent.xml");
     // `FCF_ValidateChatFramePosition` (a tab-drag stop) reads `MainMenuBar:GetHeight()`; the bar's
     // own load-time chain precedes it, as in the action-bar harness.
@@ -994,6 +996,10 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "GameTooltip.xml",
         r"Interface\FrameXML\UIMenu.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",

@@ -34,7 +34,8 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml"); // BENILLA_FALLBACK_ICON
                                                                   // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE, and its
                                                                   // declarer is UIParent (ref UIParent.lua:65) since 1888.
-    load_xml(&s, "UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");

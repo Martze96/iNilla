@@ -1551,3 +1551,32 @@ fn set_number_on_a_numeric_box_empties_it_when_the_text_is_not_all_digits() {
         "a sign empties a numeric box rather than partly filling it"
     );
 }
+
+/// `SetMaxBytes` (1960): the exact count gate and raw coerce of its sibling, a BYTE cap on the
+/// buffer, and -1 as the no-limit sentinel where `SetMaxLetters` reads 0.
+#[test]
+fn set_max_bytes_caps_the_buffer_in_bytes_with_minus_one_unlimited() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
+        .unwrap();
+    let max = |s: &UiScript| s.eval::<i64>("return E:GetMaxBytes()").unwrap();
+    assert_eq!(max(&s), -1, "unlimited from the ctor");
+    s.run("E:SetMaxBytes(4)").unwrap();
+    assert_eq!(max(&s), 4);
+    // Four bytes hold two two-byte letters and not a third.
+    s.run(r#"E:SetText("ééé")"#).unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "éé");
+    s.run(r#"E:SetMaxBytes(0) E:SetText("ééé")"#).unwrap();
+    assert_eq!(max(&s), -1, "a non-positive value is unlimited");
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "ééé");
+    s.run(r#"E:SetMaxBytes("3") E:SetText("abcd")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "abc",
+        "a numeric string coerces"
+    );
+    s.run("E:SetMaxBytes(nil)").unwrap();
+    assert_eq!(max(&s), -1, "nil coerces to 0, which is unlimited");
+    assert!(s.run("E:SetMaxBytes()").is_err(), "too few raises");
+    assert!(s.run("E:SetMaxBytes(1, 2)").is_err(), "too many raises");
+}

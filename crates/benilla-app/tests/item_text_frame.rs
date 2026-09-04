@@ -18,7 +18,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
 /// `UIPanelTemplates.xml` joined it with decisions 1337/1338: the page sits in a real ScrollFrame
 /// now, whose template is in the second and whose `ScrollFrame_OnLoad` is in the first.
-const FILES: [&str; 9] = [
+const FILES: &[&str] = &[
     // `ITEM_TEXT_FROM`, which the reference's READY arm concatenates into the creator tail — and
     // `attempt to concatenate a nil value` kills the handler before it reaches its `ShowUIPanel`,
     // so the window simply never opens. Our deleted copy carried the string as a local fallback.
@@ -32,6 +32,9 @@ const FILES: [&str; 9] = [
     "ScrollTemplates.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "Interface\\FrameXML\\ItemTextFrame.xml",
 ];
 

@@ -12,7 +12,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
-const FILES: [&str; 10] = [
+const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
@@ -23,6 +23,9 @@ const FILES: [&str; 10] = [
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "GameTooltip.xml",
     "MailFrame.xml",
 ];

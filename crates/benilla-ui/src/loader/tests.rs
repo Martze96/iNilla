@@ -508,6 +508,60 @@ mod loader_tests {
         );
     }
 
+    /// A named state texture and a named `<ButtonText>` are anchor targets by NAME, not only
+    /// globals: the stock trainer row hangs its label off `$parentHighlight`'s RIGHT, and a name
+    /// published only into `_G` sent the label to the button's own edge (1957).
+    #[test]
+    fn a_named_state_texture_is_an_anchor_target_for_its_sibling_label() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="Row">
+                    <Size><AbsDimension x="293" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-50"/></Offset></Anchor>
+                    </Anchors>
+                    <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor>
+                        </Anchors>
+                    </HighlightTexture>
+                    <ButtonText name="$parentText">
+                        <Size><AbsDimension x="0" y="13"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="$parentHighlight" relativePoint="RIGHT">
+                                <Offset><AbsDimension x="2" y="1"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                    </ButtonText>
+                    <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+        let (hl_right, text_left): (f64, f64) = s
+            .eval("return RowHighlight:GetRight(), RowText:GetLeft()")
+            .unwrap();
+        assert_eq!(hl_right, 22.0 + 3.0 + 16.0);
+        assert_eq!(
+            text_left,
+            hl_right + 2.0,
+            "the label hangs off the highlight, not the button"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|w| !w.contains("does not resolve")),
+            "no unresolved relativeTo: {:?}",
+            report.warnings
+        );
+    }
+
     /// A handler with a syntax error yields an `errors[]` entry, the load continues, and the other
     /// frame is still built with a working handler.
     #[test]

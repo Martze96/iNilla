@@ -20,7 +20,7 @@ mod common;
 /// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `MoneyInputFrame_*` money-entry
 /// helpers used to mean loading MerchantFrame.xml as well; 1751 moved that kit to MoneyFrame.xml
 /// on its way to the chain, so the dependency is gone.
-const FILES: [&str; 12] = [
+const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The four money-entry frames come off the chain since 1882 — `MoneyInputFrameTemplate` and
@@ -36,6 +36,10 @@ const FILES: [&str; 12] = [
     "ScrollTemplates.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "AuctionFrame.xml",
 ];
 

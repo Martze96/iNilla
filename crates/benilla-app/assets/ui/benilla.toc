@@ -162,9 +162,11 @@ MoneyFrame.xml
 # `every_chain_xml_brings_its_own_lua` is now a gate so neither can recur.
 Interface\FrameXML\MoneyInputFrame.lua
 Interface\FrameXML\MoneyInputFrame.xml
-# The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
-# before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
-# when those frames' OnLoad/OnEvent reference them.
+# The UIPanel slot manager (decision 0084 §2) and the fade/flash/pulse kits — the UIParent.lua
+# halves this engine still carries itself: script-only but for the kits' tick drivers, loaded
+# before any panel frame so ShowUIPanel/HideUIPanel already exist when those frames' OnLoad/OnEvent
+# reference them. The StaticPopup engine and every dialog it used to carry are the reference's
+# own file now, far below at the reference's own slot after UIPanelTemplates (decision 1960).
 UiPanels.xml
 # The tooltip: a hover window the bag/merchant/loot/unit frames drive. Loaded before them so
 # `GameTooltip` + its verbs exist when their OnEnter handlers fire (runtime, so order
@@ -203,10 +205,13 @@ Interface\FrameXML\UIDropDownMenu.xml
 # needs for the tooltip backdrop its menu wears). Far above ChatFrame.xml, which is the one thing
 # that used it here — resolved at load, and now satisfied earlier rather than in the same file.
 Interface\FrameXML\UIMenu.xml
-# The unit right-click popups (0434 phase 5): UnitPopupMenus/Buttons + UnitPopup_ShowMenu
-# — after the dropdown kit it drives, before the unit/party frames whose DropDown
-# children's OnLoad initialize into it.
-UnitPopup.xml
+# ══ THE UNIT MENUS — the reference's own, off the player's chain (1751; decision 1958) ══
+# UnitPopup.xml + UnitPopup.lua: UnitPopupButtons/Menus and UnitPopup_ShowMenu, the nine menus
+# and every row's facts — after the dropdown kit it drives (its own position, FrameXML.toc
+# l.16), before the unit/party frames whose DropDown children's OnLoad initialize into it. Its
+# enable pass runs from UIParent's OnUpdate line, the reference's own hook. 0434's
+# transcription is gone.
+Interface\FrameXML\UnitPopup.xml
 # ══ THE CHAT-LINK TOOLTIP — the reference's own, off the player's chain (1751, window 6) ══
 # `SetItemRef` (the chat-link click router) and `ItemRefTooltip` / `ItemRefCloseButton`.
 #
@@ -311,35 +316,6 @@ Interface\FrameXML\ComboFrame.xml
 # transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
 # only Fonts.xml (CombatTextFont) + UIParent before it.
 CombatText.xml
-# The death arc's dialogs + event driver (decision 0308): registry entries on the shared
-# StaticPopup engine, so after UiPanels.xml.
-DeathFrame.xml
-# The two duel dialogs + their event driver (decision 0633): registry entries on the same
-# StaticPopup engine, and DUEL_OUTOFBOUNDS leans on its per-tick countdown branch.
-DuelFrame.xml
-# The escort-quest confirm + its event driver (decision 1733): one more registry entry on the same
-# StaticPopup engine. Not QuestFrame.xml's or QuestLogFrame.xml's — it belongs to no window, the
-# way the duel dialogs above belong to none.
-QuestShareFrame.xml
-# The two enchant-apply confirms + their event driver (decision 0928): the same StaticPopup
-# registry again. Not CraftFrame's — the gate that raises them is the generic item-target
-# bind, reached by a poison or a sharpening stone with no profession window open.
-EnchantConfirm.xml
-# The innkeeper's bind confirm + its event driver (decision 1331): the same StaticPopup registry.
-# Not GossipFrame's, and the wire is why — the server closes the gossip menu BEFORE it asks, so
-# this dialog is free-standing by the time it shows. Needs only UiPanels.xml, far above.
-BinderConfirm.xml
-# The summon confirm + its event driver (decision 1747): the same StaticPopup registry once more.
-# Free-standing like the two around it, and for a stronger reason — a warlock's ritual, a meeting
-# stone and a GM `.summon` all raise it with nothing whatever on screen. The only entry here whose
-# event carries no arguments: the dialog reads the summoner, the destination and the clock back out
-# of the engine every tick, so it needs UiPanels.xml's countdown branch as well as its registry.
-ConfirmSummon.xml
-# The class trainer's respec confirm + its event driver (decision 1580): the binder confirm's twin
-# one line up, free-standing for the identical reason — the server closes the gossip menu before it
-# asks. The only entry in the registry that raises a money frame, so it needs MoneyFrame.xml (far
-# above, ahead of UiPanels.xml) as well as the StaticPopup engine itself.
-TalentWipeConfirm.xml
 # ── MEASUREMENT (1938): the options window at the reference's slot (FrameXML.toc l.21, before
 #    MainMenuBar l.34) with the four rows it inherits from. ──
 # The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
@@ -371,6 +347,17 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
+# ══ THE DIALOG ENGINE — the reference's own, off the player's chain (1751; decision 1960) ══
+# StaticPopup.xml + StaticPopup.lua: StaticPopupDialogs (all 76 of the reference's entries),
+# StaticPopup_Show/Hide/Visible/Resize/OnUpdate, the four dialog instances, the edit boxes and the
+# money frame. The reference's toc has it at l.23, right after UIPanelTemplates and UIOptionsFrame;
+# here too it sits after UIPanelTemplates — the CloseButton it inherits (UIPanelCloseButton) is that
+# file's, and UIPanelTemplates cannot rise above ScrollTemplates.xml (see above). Everything that
+# registers a dialog of its own (Mail, Auction, the keybindings page) loads below this line. The
+# event arms that raise these dialogs are UIParent.xml's, the reference's own home. 0308's engine,
+# the 37 dialogs UiPanels.xml carried and the seven free-standing dialog files (Death, Duel,
+# QuestShare, EnchantConfirm, BinderConfirm, ConfirmSummon, TalentWipeConfirm) are gone.
+Interface\FrameXML\StaticPopup.xml
 
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
@@ -828,13 +815,15 @@ SpellBookAdapters.xml
 # What we GAIN: `TalentFrameTab4` and `TalentFrameTab5`. The reference lays out five tab slots
 # where our transcription stopped at the three a 1.12 class actually has.
 Interface\AddOns\Blizzard_TalentUI\Blizzard_TalentUI.xml
-# The social window (decision 0668): the O-key friends/ignore/who window over the social
-# API (`benilla-ui/src/script/social.rs`) + `crate::ui_social`'s feed/drain. Needs
-# UiPanels (the panel manager, `CharacterFrameTabButtonTemplate`, and the StaticPopup
-# engine its two name-entry dialogs register into), ScrollTemplates (three faux lists),
-# GameTooltip (the newbie tips) and UIDropDownMenu (the who list's variable column) —
-# all loaded above.
-FriendsFrame.xml
+# ══ THE SOCIAL WINDOW — the reference's own, off the player's chain (1751; decision 1959) ══
+# FriendsFrame.xml + FriendsFrame.lua: the O-key window's four tabs — friends/ignore, who, the
+# guild roster with its control and info panes, and the raid tab whose pane is the stock
+# RaidFrame.xml right below (the reference's own file split, its toc l.71-72). Over the social
+# API (`benilla-ui/src/script/social.rs`) and `crate::ui_social`'s feed/drain, the guild seam,
+# the party roster. Its twelve dialogs live with the other dialogs in UiPanels.xml; the
+# GUILD_INVITE arms are UIParent.xml's, the reference's own home. 0668/1257/1549's transcription
+# is gone.
+Interface\FrameXML\FriendsFrame.xml
 # ══ THE RAID PANE — the reference's own, off the player's chain (1751, scoped by 1839) ══
 # The social window's fourth tab, in its own file because RaidFrame is a child of FriendsFrame and
 # a child cannot be declared before its parent — the reference splits it the same way and for the
@@ -888,11 +877,16 @@ TradeFrame.xml
 # rather than the `BENILLA_`-prefixed pair this file kept privately. Fonts.xml's own note said
 # those two tables would arrive "the day something does" read them; the sourced file is that day.
 Interface\FrameXML\ItemTextFrame.xml
-# The trainer window (decision 0237 phase 3): the read-only class/profession trainer list.
-# Loaded right after MerchantFrame per the director's brief (kept adjacent even though this
-# v1 uses plain-text costs, not MerchantFrame's coin helpers) and before the other NPC
-# session windows below.
-TrainerFrame.xml
+# ══ THE TRAINER WINDOW — the reference's own LoadOnDemand addon, off the chain (1751; decision 1957) ══
+# No row: `Blizzard_TrainerUI` is the first Blizzard addon benilla loads the way the reference
+# does — on demand, from UIParent.xml's TRAINER_SHOW arm through `ClassTrainerFrame_LoadUI` →
+# `UIParentLoadAddOn` → `LoadAddOn`, off a registry row `ui_script::addons` reads from the
+# chain (its toc, its `## SavedVariables`, its ADDON_LOADED at the end of ITS load). The timing
+# is the mechanism: the list packet resets the engine's filter mask, and the addon's
+# ADDON_LOADED arm re-pushes the saved filters after it — which eager loading cannot do. Its
+# list inherits `ClassTrainerListScrollFrameTemplate` from
+# `Interface\FrameXML\ClassTrainerFrameTemplates.xml`, far below, resolved at the addon's
+# load. 0237/0247/0251's transcription is gone.
 # ══ THE BANK WINDOW — the reference's own, off the player's chain (decision 1751, window 2) ══
 # `BankFrame`, `BankFrameItem1..24`, `BankFrameBag1..6`, `BankFramePurchaseInfo` and the
 # `BANK_CONTAINER`/`NUM_BAG_SLOTS`/`NUM_BANKGENERIC_SLOTS`/`NUM_BANKBAGSLOTS` constants — the real

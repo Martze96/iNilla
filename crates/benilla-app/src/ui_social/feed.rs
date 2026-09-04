@@ -82,7 +82,12 @@ pub(super) fn feed_social(
     fed.seeded = true;
     if social.friends_dirty || first {
         social.friends_dirty = false;
-        script.fire_event("FRIENDLIST_UPDATE", Vec::new());
+        let event = if std::mem::take(&mut social.friends_show_pending) {
+            "FRIENDLIST_SHOW"
+        } else {
+            "FRIENDLIST_UPDATE"
+        };
+        script.fire_event(event, Vec::new());
     }
     if social.ignores_dirty || first {
         social.ignores_dirty = false;
@@ -314,6 +319,7 @@ pub(super) fn drain_social(
     for request in requests {
         match request {
             SocialRequest::RefreshFriends => {
+                social.friends_show_pending = true;
                 let _ = commands.0.send(ClientCommand::FriendListRequest);
             }
             SocialRequest::AddFriend(name) => {

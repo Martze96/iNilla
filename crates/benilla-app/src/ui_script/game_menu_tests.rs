@@ -45,6 +45,10 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
     ]
     .into_iter()
     .chain(extra.iter().copied())
@@ -270,7 +274,9 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
             "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "UnitPopup.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+            "Interface\\FrameXML\\UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\UnitFrame.xml",
@@ -394,7 +400,7 @@ fn player_camping_opens_a_counting_dialog_whose_early_close_cancels() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "20 seconds until logout",
+        "20 Seconds until logout",
         "the countdown text is the engine's, from the server's 20 s clock"
     );
     // Cancel is the only button (the ref's CAMP_NOW is commented out in 1.12).
@@ -457,7 +463,7 @@ fn player_quiting_offers_exit_now_and_logout_cancel_closes_it() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "20 seconds until exit"
+        "20 Seconds until exit"
     );
     assert_eq!(
         s.eval::<String>("return StaticPopup1Button1:GetText()")
@@ -618,7 +624,9 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
-        "UnitPopup.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+        "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\UnitFrame.xml",

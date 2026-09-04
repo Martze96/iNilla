@@ -111,6 +111,9 @@ pub(crate) struct SocialState {
     pending_lines: Vec<FriendStatusUpdate>,
     /// Set whenever a list changed, so the feed knows to fire the Era update event.
     friends_dirty: bool,
+    /// An explicit `ShowFriends()` is out: the next list answers it with `FRIENDLIST_SHOW`
+    /// rather than `FRIENDLIST_UPDATE` (the reference's two arms, 1959).
+    pub(crate) friends_show_pending: bool,
     ignores_dirty: bool,
     who_dirty: bool,
 }
