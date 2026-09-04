@@ -116,7 +116,7 @@ fn armed() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
     // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -163,7 +163,7 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
     // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");

@@ -593,8 +593,15 @@ impl Loader<'_> {
         let templates = model.framexml_templates.borrow();
         let view: HashMap<&str, &Element> =
             templates.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        // The font namespace, so a font object inside an inherit chain is skipped rather than
+        // warned as an unknown template (1874).
+        let fonts = model.framexml_fonts.borrow();
+        let font_names: std::collections::HashSet<&str> =
+            fonts.keys().map(|k| k.as_str()).collect();
         let mut warns = Vec::new();
-        let out = framexml::expand(el, &view, &mut warns);
+        let out = framexml::expand_known(el, &view, &font_names, &mut warns);
+        drop(font_names);
+        drop(fonts);
         drop(view);
         drop(templates);
         drop(model);

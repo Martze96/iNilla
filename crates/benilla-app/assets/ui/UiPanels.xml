@@ -1583,6 +1583,57 @@
             end
         end
 
+        -- ── Two dialogs rehomed from our retired RaidFrame.xml (1874) ──────────────────────────
+        -- Their reference home is `StaticPopup.lua`, which we do not load — this file is our
+        -- stand-in for that engine, so this is where they belong. They came here because the raid
+        -- pane went to the chain and the reference's own `RaidFrame.lua` does not declare them:
+        -- deleting our file took `CONFIRM_RESET_INSTANCES` with it, and `UnitPopup.xml`'s "Reset
+        -- all instances" row calls `StaticPopup_Show` on exactly that name.
+        -- ── Add Member's dialog (ref StaticPopup.lua l.871-895) ─────────────────────────────────
+        StaticPopupDialogs["ADD_RAIDMEMBER"] = {
+            text = ADD_RAIDMEMBER_LABEL,
+            button1 = "Accept",
+            button2 = "Cancel",
+            hasEditBox = 1,
+            maxLetters = 12,
+            timeout = 0,
+            hideOnEscape = 1,
+            OnAccept = function()
+                InviteByName(getglobal("StaticPopup1EditBox"):GetText())
+            end,
+            OnShow = function()
+                getglobal("StaticPopup1EditBox"):SetFocus()
+            end,
+            EditBoxOnEnterPressed = function()
+                InviteByName(getglobal("StaticPopup1EditBox"):GetText())
+                StaticPopup_Hide("ADD_RAIDMEMBER")
+            end,
+        }
+
+        -- ── "Reset all instances" (ref StaticPopup.lua l.23-33; decision 1748) ──────────────────
+        -- Raised by UnitPopup's SELF menu, and registered HERE because this file is the instance
+        -- house — the same rule that keeps the pet dialogs in PetActionBar.xml. `ResetInstances()`
+        -- is the only call in the client that sends `CMSG_RESET_INSTANCES`; everything else in the
+        -- lockout family is the server talking.
+        --
+        -- The answer is per instance rather than one verdict, and it arrives as CHAT_MSG_SYSTEM
+        -- lines the engine composes: an `SMSG_INSTANCE_RESET` per dungeon that reset, and — on
+        -- the group path only — an `SMSG_INSTANCE_RESET_FAILED` per dungeon that would not.
+        -- Nothing back at all is the ordinary answer for a character with nothing resettable. So
+        -- there is nothing to show here and no result to wait for.
+        StaticPopupDialogs["CONFIRM_RESET_INSTANCES"] = {
+            text = CONFIRM_RESET_INSTANCES,
+            button1 = YES,
+            button2 = NO,
+            timeout = 0,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnAccept = function()
+                ResetInstances()
+            end,
+        }
+
+
         StaticPopupDialogs["PARTY_INVITE"] = {
             text = INVITATION,
             button1 = ACCEPT,
@@ -2042,6 +2093,110 @@
             return nil
         end
 
+        -- ── The FLASH kit (ref UIParent.lua l.1166, l.1231-1333), transcribed ────────────────
+        -- Its home is `UIParent.lua`, which we do not load; this file is our stand-in for that
+        -- engine's half, and the FADE kit it drives through already lives here for the same reason.
+        -- Every field it sets on the frame — `fadeInTime`, `fadeOutTime`, `flashDuration`,
+        -- `showWhenDone`, `flashTimer`, `flashMode`, `flashInHoldTime`, `flashOutHoldTime` — is the
+        -- reference's own, and it reaches the fade kit through `fadeHoldTime`/`finishedFunc`, both
+        -- of which `UIFrameFade` above already honours.
+        --
+        -- Built because two stock windows call it and nothing answered: `SpellBookFrame` and
+        -- `HelpFrame` (1879). It is FrameXML, not an engine verb, so this is a transcription and
+        -- not the stub 1203 forbids.
+        FLASHFRAMES = {}
+
+        function UIFrameFlashRemoveFrame(frame)
+            local index = 1
+            while FLASHFRAMES[index] do
+                if FLASHFRAMES[index] == frame then
+                    table.remove(FLASHFRAMES, index)
+                else
+                    index = index + 1
+                end
+            end
+        end
+
+        function UIFrameFlash(frame, fadeInTime, fadeOutTime, flashDuration, showWhenDone, flashInHoldTime, flashOutHoldTime)
+            if not frame then return end
+            -- Already flashing: the reference returns rather than re-arming (l.1234-1240).
+            local index = 1
+            while FLASHFRAMES[index] do
+                if FLASHFRAMES[index] == frame then return end
+                index = index + 1
+            end
+            frame.fadeInTime = fadeInTime
+            frame.fadeOutTime = fadeOutTime
+            frame.flashDuration = flashDuration
+            frame.showWhenDone = showWhenDone
+            frame.flashTimer = 0
+            frame.flashMode = "IN"
+            frame.flashInHoldTime = flashInHoldTime
+            frame.flashOutHoldTime = flashOutHoldTime
+            table.insert(FLASHFRAMES, frame)
+            BenillaFlashDriver:Show()
+        end
+
+        function UIFrameFlashSwitch(frameName, mode)
+            local frame = getglobal(frameName)
+            if frame then frame.flashMode = mode end
+        end
+
+        function UIFrameIsFlashing(frame)
+            local index = 1
+            while FLASHFRAMES[index] do
+                if FLASHFRAMES[index] == frame then return 1 end
+                index = index + 1
+            end
+            return nil
+        end
+
+        function UIFrameFlashStop(frame)
+            frame.flashDuration = 0
+            frame:Hide()
+        end
+
+        -- `flashDuration == -1` means flash forever, which is why the timer check carries that
+        -- guard rather than a plain `>` (ref l.1272).
+        function UIFrameFlashUpdate(elapsed)
+            local index = 1
+            while FLASHFRAMES[index] do
+                local frame = FLASHFRAMES[index]
+                frame.flashTimer = (frame.flashTimer or 0) + elapsed
+                if frame.flashTimer > frame.flashDuration and frame.flashDuration ~= -1 then
+                    UIFrameFadeRemoveFrame(frame)
+                    UIFrameFlashRemoveFrame(frame)
+                    frame:SetAlpha(1.0)
+                    frame.flashTimer = nil
+                    if frame.showWhenDone then frame:Show() else frame:Hide() end
+                else
+                    -- A flashMode is only set once the previous fade finished (ref l.1283).
+                    if frame.flashMode then
+                        local fadeInfo = {}
+                        if frame.flashMode == "IN" then
+                            fadeInfo.timeToFade = frame.fadeInTime
+                            fadeInfo.mode = "IN"
+                            fadeInfo.finishedFunc = UIFrameFlashSwitch
+                            fadeInfo.finishedArg1 = frame:GetName()
+                            fadeInfo.finishedArg2 = "OUT"
+                            fadeInfo.fadeHoldTime = frame.flashOutHoldTime
+                            UIFrameFade(frame, fadeInfo)
+                        elseif frame.flashMode == "OUT" then
+                            fadeInfo.timeToFade = frame.fadeOutTime
+                            fadeInfo.mode = "OUT"
+                            fadeInfo.finishedFunc = UIFrameFlashSwitch
+                            fadeInfo.finishedArg1 = frame:GetName()
+                            fadeInfo.finishedArg2 = "IN"
+                            fadeInfo.fadeHoldTime = frame.flashInHoldTime
+                            UIFrameFade(frame, fadeInfo)
+                        end
+                        frame.flashMode = nil
+                    end
+                    index = index + 1
+                end
+            end
+        end
+
         function UIFrameFadeRemoveFrame(frame)
             local index = FadeIndexOf(frame)
             while index do
@@ -2319,6 +2474,16 @@
          It runs only while FADEFRAMES has entries: the engine dispatches OnUpdate to visible
          frames only (tick.rs), so hiding itself on an empty list stops the per-frame walk cold,
          and UIFrameFade — the single inserter — shows it again (decision 1396's class). -->
+    <!-- The flash kit's tick source, the fade driver's twin (1879) — same reason, same shape: the
+         reference hangs `UIFrameFlashUpdate` on UIParent's OnUpdate and walks an empty list every
+         frame; this runs only while FLASHFRAMES has entries, and `UIFrameFlash` is the single
+         inserter that shows it again. Hidden at load: nothing flashes until something asks. -->
+    <Frame name="BenillaFlashDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts><OnUpdate>if not FLASHFRAMES[1] then this:Hide() return end UIFrameFlashUpdate(arg1)</OnUpdate></Scripts>
+    </Frame>
+
     <Frame name="BenillaFadeDriver">
         <Size><AbsDimension x="1" y="1"/></Size>
         <Anchors><Anchor point="TOPLEFT"/></Anchors>

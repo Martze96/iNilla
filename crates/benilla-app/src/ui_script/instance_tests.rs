@@ -15,6 +15,7 @@ use super::test_ui::load_ui as load_xml;
 /// `ResetInstances` a queue.
 #[test]
 fn the_three_bindings_have_the_reference_shapes() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
 
     // Nothing pushed yet: the app has not said where we are.
@@ -66,13 +67,17 @@ fn the_three_bindings_have_the_reference_shapes() {
 /// and Yes is the only thing that sends.
 #[test]
 fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The row labels a bare harness has no GlobalStrings.lua for. Verbatim 1.12 values
-    // (`RESET_INSTANCES` l.3342, `CONFIRM_RESET_INSTANCES` l.851, `YES` l.5463, `NO` l.2794) —
-    // production runs the player's own string table at boot.
+    // (`RESET_INSTANCES` l.3342, `CONFIRM_RESET_INSTANCES` l.851, `YES` l.5463, `NO` l.2794,
+    // `GROUP` l.2029) — production runs the player's own string table at boot.
     s.run(
         r#"
+        -- The stock raid pane concatenates this into each of its eight group headers inside
+        -- their own OnLoad, so it has to exist before the addon loads (1874).
+        GROUP = "Group"
         RESET_INSTANCES = "Reset all instances"
         CONFIRM_RESET_INSTANCES = "Do you really want to reset all of your instances?"
         YES = "Yes"
@@ -100,7 +105,8 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
-        "RaidFrame.xml",
+        r"Interface\FrameXML\RaidFrame.xml",
+        r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml",
     ] {
         load_xml(&s, file);
     }

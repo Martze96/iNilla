@@ -90,7 +90,7 @@ fn harness_with(player: &str) -> UiScript {
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
         "Fonts.xml",
-        "BasicControls.xml", // `TEXT`
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
         // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.

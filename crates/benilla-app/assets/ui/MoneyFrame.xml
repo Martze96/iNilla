@@ -164,56 +164,6 @@
             end
         end
 
-        -- ── The editable money-input kit (ref MoneyInputFrame.lua) ────────────────────────────────
-        -- A <prefix> naming three numeric EditBoxes <prefix>Gold/Silver/Copper — the shared money entry
-        -- both the send-mail and trade windows inline (decision 0592 P2 builds it here, the money home,
-        -- so both reuse it). GetCopper folds the three digits into a copper total; SetCopper splits a
-        -- copper amount back across the boxes. SetCopper is a *programmatic* fill, so it must not re-fire
-        -- a box's OnTextChanged value-changed callback (the loop the reference's `expectChanges` counter
-        -- guards, MoneyInputFrame.lua l.44-73). Because benilla fires OnTextChanged synchronously inside
-        -- SetText, a bracket flag is exact and simpler than the counter: a window's box calls
-        -- BenillaMoneyInput_Consume(prefix) at the top of its OnTextChanged — false (swallow) while a
-        -- SetCopper is in flight, true for a genuine keystroke.
-        BENILLA_MONEYINPUT_SUPPRESS = {}
-
-        function BenillaMoneyInput_ResetMoney(prefix)
-            getglobal(prefix .. "Gold"):SetText("")
-            getglobal(prefix .. "Silver"):SetText("")
-            getglobal(prefix .. "Copper"):SetText("")
-        end
-
-        function BenillaMoneyInput_GetCopper(prefix)
-            local function n(box) return tonumber(getglobal(prefix .. box):GetText()) or 0 end
-            return n("Gold") * 10000 + n("Silver") * 100 + n("Copper")
-        end
-
-        function BenillaMoneyInput_ClearFocus(prefix)
-            getglobal(prefix .. "Gold"):ClearFocus()
-            getglobal(prefix .. "Silver"):ClearFocus()
-            getglobal(prefix .. "Copper"):ClearFocus()
-        end
-
-        function BenillaMoneyInput_SetCopper(prefix, money)
-            money = money or 0
-            local parts = {
-                Gold = math.floor(money / 10000),
-                Silver = math.floor((money % 10000) / 100),
-                Copper = money % 100,
-            }
-            BENILLA_MONEYINPUT_SUPPRESS[prefix] = true
-            for box, val in pairs(parts) do
-                local eb = getglobal(prefix .. box)
-                if (tonumber(eb:GetText()) or 0) ~= val then
-                    eb:SetText(val == 0 and "" or tostring(val))
-                end
-            end
-            BENILLA_MONEYINPUT_SUPPRESS[prefix] = false
-        end
-
-        function BenillaMoneyInput_Consume(prefix)
-            return not BENILLA_MONEYINPUT_SUPPRESS[prefix]
-        end
-
         -- ── What a coin is worth ─────────────────────────────────────────────────────────────────
         -- Published globals: an addon that formats a price does the same split we do below, and
         -- reads these rather than spelling 100 twice.
@@ -394,7 +344,10 @@
         function MoneyFrame_SetType(type)
             local info = MoneyTypeInfo[type]
             if not info then
-                -- ref l.145 diagnoses this with `message()`, which we do not ship (see the header).
+                -- ref l.145 diagnoses this with `message()`, which we DO have: it comes off the
+                -- chain in `Interface\FrameXML\BasicControls.xml` (1881 migrated that file; before
+                -- it, our own copy carried the same function). The `if` is therefore belt-and-braces
+                -- for a harness that loads this file without BasicControls, not a missing verb.
                 if message then
                     message("Invalid money type: " .. type)
                 end

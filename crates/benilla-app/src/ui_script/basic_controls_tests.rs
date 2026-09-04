@@ -13,7 +13,7 @@ use super::test_ui::load_ui as load_xml;
 fn basic_controls() -> UiScript {
     let mut s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     s.set_screen_size(1024.0, 768.0);
     s.resolve();
     s

@@ -25,7 +25,7 @@ const FILES: [&str; 13] = [
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
     // `TEXT`.
-    "BasicControls.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",

@@ -17,12 +17,16 @@ mod common;
 /// Every one of these is a real dependency: UiPanels for the panel manager + tab kit + StaticPopup
 /// engine, ScrollTemplates for the faux lists, UIPanelTemplates for the button/input/checkbox
 /// templates, UIDropDownMenu for the rarity capsule, MoneyFrame for `SmallMoneyFrameTemplate` +
-/// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `BenillaMoneyInput_*` money-entry
+/// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `MoneyInputFrame_*` money-entry
 /// helpers used to mean loading MerchantFrame.xml as well; 1751 moved that kit to MoneyFrame.xml
 /// on its way to the chain, so the dependency is gone.
-const FILES: [&str; 9] = [
+const FILES: [&str; 11] = [
     "Fonts.xml",
     "MoneyFrame.xml",
+    // The four money-entry frames come off the chain since 1882 — `MoneyInputFrameTemplate` and
+    // the `MoneyInputFrame_*` verbs, replacing our own verbatim copy of both.
+    r"Interface\FrameXML\MoneyInputFrame.lua",
+    r"Interface\FrameXML\MoneyInputFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -368,7 +372,7 @@ fn the_bid_and_buyout_gates_read_the_purse() {
         "50s is affordable on 2g"
     );
     assert_eq!(
-        s.eval::<i64>("return BenillaMoneyInput_GetCopper('BrowseBidPrice')")
+        s.eval::<i64>("return MoneyInputFrame_GetCopper(BrowseBidPrice)")
             .unwrap(),
         1000,
         "with no bids the required bid IS the minimum bid"
@@ -529,9 +533,9 @@ fn the_create_gate_and_the_deposit() {
     );
 
     // With no item, the form does not even reach the price checks — the buyout error stays hidden.
-    s.run("BenillaMoneyInput_SetCopper('StartPrice', 10000)")
+    s.run("MoneyInputFrame_SetCopper(StartPrice, 10000)")
         .unwrap();
-    s.run("BenillaMoneyInput_SetCopper('BuyoutPrice', 5000)")
+    s.run("MoneyInputFrame_SetCopper(BuyoutPrice, 5000)")
         .unwrap();
     s.run("AuctionsFrameAuctions_ValidateAuction()").unwrap();
     assert!(!s
@@ -604,8 +608,7 @@ fn the_create_gate_and_the_deposit() {
         .unwrap());
 
     // Clear the buyout and the form opens; pressing Create sends exactly what is on screen.
-    s.run("BenillaMoneyInput_SetCopper('BuyoutPrice', 0)")
-        .unwrap();
+    s.run("MoneyInputFrame_SetCopper(BuyoutPrice, 0)").unwrap();
     s.run("AuctionsFrameAuctions_ValidateAuction()").unwrap();
     assert!(
         s.eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled() ~= 0")

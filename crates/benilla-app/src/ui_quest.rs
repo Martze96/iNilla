@@ -71,6 +71,18 @@ pub(crate) struct QuestGiver {
     messages: Vec<UiError>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
+    /// The last `SMSG_QUESTGIVER_STATUS` we **refused**, and how many we have refused this session
+    /// — `(guid, status)`.
+    ///
+    /// The only trace of a packet class benilla deliberately throws on the floor. benilla asks the
+    /// server about quest-flagged GameObjects because the reference does, and vmangos — unlike the
+    /// real 1.12 service, which never answered one — replies; the reference's own handler drops
+    /// that reply at the typemask-8 lookup and so does ours (decision 1872,
+    /// [`crate::net::apply`]'s `quest_giver_status`). Without this, the *whole* GameObject half of
+    /// the feature is invisible from inside the client: a correct drop and a query that was never
+    /// sent both read as "no status", which is exactly the pair a live probe has to tell apart.
+    refused: Option<(u64, u32)>,
+    refused_count: u32,
 }
 
 impl QuestGiver {
@@ -139,6 +151,17 @@ impl QuestGiver {
     /// The current re-ask epoch — see [`Self::bump_reask`].
     pub(crate) fn reask_epoch(&self) -> u32 {
         self.reask
+    }
+
+    /// Record a dialog status the typemask gate refused — see [`Self::refused`].
+    pub(crate) fn refuse_status(&mut self, npc: u64, status: u32) {
+        self.refused = Some((npc, status));
+        self.refused_count = self.refused_count.saturating_add(1);
+    }
+
+    /// The last refused `(guid, status)` and the session's refusal count — see the field.
+    pub(crate) fn refused(&self) -> (Option<(u64, u32)>, u32) {
+        (self.refused, self.refused_count)
     }
 
     /// The stored dialog status for `npc`, if any. The store-now half of DIALOG_STATUS

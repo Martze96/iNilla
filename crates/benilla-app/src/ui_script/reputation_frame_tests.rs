@@ -218,8 +218,9 @@ fn the_reputation_page_opens_on_the_windows_third_tab() {
         "slot 9 has nothing to hold"
     );
     assert!(!shown(&mut s, "ReputationHeader9"), "neither twin shows");
+    // No trough line here: it was ours, and the stock pane declares none (1875). Asserting a frame
+    // that cannot exist would pass for the wrong reason.
     assert!(!visible(&mut s, "ReputationListScrollFrameScrollBar"));
-    assert!(!visible(&mut s, "ReputationListScrollFrameScrollBarTrough"));
 
     // Switching away hides it again through the same one-page-at-a-time switch.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
@@ -383,28 +384,11 @@ fn the_scroll_offset_rebinds_the_fixed_row_slots() {
         visible(&mut s, "ReputationListScrollFrameScrollBar"),
         "21 rows in 15 slots raises the scroll bar"
     );
-    assert!(
-        visible(&mut s, "ReputationListScrollFrameScrollBarTrough"),
-        "and the trough it rides in comes up with it (the kit shows the pair together)"
-    );
-
-    // **The trough fits this window to the pixel, and that is not a coincidence.**
-    // `BenillaScrollTrough_Seat`'s 21-above / 20-below / 8-left hang was DERIVED from
-    // ReputationFrame's own reference anchors (ScrollTemplates.xml cites ref l.573-599 against
-    // ref-UIPanelTemplates.xml l.166-181), so the seated trough has to land back on the reference's
-    // own numbers here: TOPRIGHT + (-2, +5), BOTTOMRIGHT + (+29, -4), 31 wide. Miss it by 4 and the
-    // arrow buttons ride out of their sockets onto the caps, which is what B224 reported.
-    let d = |s: &mut UiScript, expr: &str| s.eval::<f64>(&format!("return {expr}")).unwrap();
-    let sf_right = d(&mut s, "ReputationListScrollFrame:GetRight()");
-    let sf_top = d(&mut s, "ReputationListScrollFrame:GetTop()");
-    let sf_bottom = d(&mut s, "ReputationListScrollFrame:GetBottom()");
-    let t = "ReputationListScrollFrameScrollBarTrough";
-    assert_eq!(d(&mut s, &format!("{t}:GetLeft()")), sf_right - 2.0);
-    assert_eq!(d(&mut s, &format!("{t}:GetRight()")), sf_right + 29.0);
-    assert_eq!(d(&mut s, &format!("{t}:GetTop()")), sf_top + 5.0);
-    assert_eq!(d(&mut s, &format!("{t}:GetBottom()")), sf_bottom - 4.0);
-    assert_eq!(d(&mut s, &format!("{t}:GetWidth()")), 31.0);
-
+    // **The trough is GONE with our pane.** `ReputationListScrollFrameScrollBarTrough` was the one
+    // name in this window that was never the reference's (1844) — it belongs to our own scroll
+    // templates, and stock `ReputationFrame.xml` declares no such thing. B224's law (the 21/20/8
+    // hang that drops each arrow into its socket) is unchanged and still asserted, by the
+    // keybindings page's own trough, which is a window we still own (1875).
     // Scroll three rows down: every slot re-binds, and slot 1 stops being a header.
     s.run("FauxScrollFrame_SetOffset(ReputationListScrollFrame, 3) ReputationFrame_Update()")
         .unwrap();

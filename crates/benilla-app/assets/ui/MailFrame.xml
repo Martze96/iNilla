@@ -48,8 +48,10 @@
         MAX_COD_AMOUNT = 10000      -- MAX_COD_AMOUNT (ref l.6)
         STATIONERY_PATH = "Interface\\Stationery\\"  -- STATIONERY_PATH (ref l.5)
 
-        -- The money entry uses the shared BenillaMoneyInput_* kit (MerchantFrame.xml, loaded first) —
-        -- the send tab's three numeric edit boxes are named SendMailMoneyGold/Silver/Copper.
+        -- The money entry is the reference's own `MoneyInputFrame_*` off the chain (1882 retired
+        -- our BenillaMoneyInput_* duplicate) — the send tab's three numeric edit boxes are named
+        -- SendMailMoneyGold/Silver/Copper, which is what both kits read and why the swap was a
+        -- rename plus an `inherits=`.
 
         -- ── Load / event dispatch (ref MailFrame_Onload l.8-24 / MailFrame_OnEvent l.26-62) ──────
         function BenillaMailFrame_OnLoad(frame)
@@ -538,7 +540,7 @@
 
         -- ── Send tab (ref SendMail* l.484-611 / l.936-960) ──────────────────────────────────────
         function SendMailMailButton_OnClick()
-            local copper = BenillaMoneyInput_GetCopper("SendMailMoney")
+            local copper = MoneyInputFrame_GetCopper(SendMailMoney)
             if SendMailSendMoneyButton:GetChecked() then
                 SetSendMailCOD(0)
                 if copper > 0 then
@@ -593,7 +595,7 @@
             SendMailNameEditBox:SetText("")
             SendMailSubjectEditBox:SetText("")
             SendMailBodyEditBox:SetText("")
-            BenillaMoneyInput_ResetMoney("SendMailMoney")
+            MoneyInputFrame_ResetMoney(SendMailMoney)
             SendMailRadioButton_OnClick(1)
             SendMailFrame_Update()
         end
@@ -607,7 +609,7 @@
             if string.len(SendMailSubjectEditBox:GetText()) > 0 then checks = checks + 1 end
             if SendMailCODButton:GetChecked() then
                 checksRequired = 3
-                if BenillaMoneyInput_GetCopper("SendMailMoney") > MAX_COD_AMOUNT * 10000 then
+                if MoneyInputFrame_GetCopper(SendMailMoney) > MAX_COD_AMOUNT * 10000 then
                     SendMailErrorText:Show()
                     SendMailErrorCoin:Show()
                 else
@@ -684,7 +686,7 @@
             button1 = "Accept",
             button2 = "Cancel",
             OnAccept = function()
-                if SetSendMailMoney(BenillaMoneyInput_GetCopper("SendMailMoney")) then
+                if SetSendMailMoney(MoneyInputFrame_GetCopper(SendMailMoney)) then
                     SendMailFrame_SendMail()
                 end
             end,
@@ -1114,136 +1116,18 @@
                             </Layer>
                         </Layers>
                         <Frames>
-                            <!-- ref SendMailMoney l.892-905: MoneyInputFrameTemplate at BOTTOMLEFT
-                                 relativePoint BOTTOMRIGHT +15,1 — the template's three boxes +
-                                 Common-Input-Border art quoted verbatim (MoneyInputFrame.xml
-                                 l.3-260: gold 58×20 TOPLEFT, silver/copper 30×20 chained +26/+16;
-                                 each box's L slice 8×20 at (-5,0), R slice at RIGHT (gold 0,
-                                 silver/copper -10), M stretched between; coin 13×13 LEFT→RIGHT at
-                                 +2 (gold) / -8 (silver, copper)). -->
-                            <Frame name="SendMailMoney">
-                                <Size><AbsDimension x="176" y="18"/></Size>
+                            <!-- ref SendMailMoney l.892-905. The three boxes come off the chain since 1882:
+                                 `MoneyInputFrameTemplate` out of `Interface\FrameXML\MoneyInputFrame.xml`. Our inline
+                                 trio was a verbatim copy of it — same child names, textures, TexCoords and 58/30/30
+                                 geometry — and the template carries the 176x18 itself, so the reference declares no
+                                 Size here and neither do we now. The per-box `OnTextChanged`s are gone: the callback is
+                                 registered through the reference's own slot instead, which is what the template's
+                                 `expectChanges` guard is written against. -->
+                            <Frame name="SendMailMoney" inherits="MoneyInputFrameTemplate">
                                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="15" y="1"/></Offset></Anchor></Anchors>
-                                <Frames>
-                                    <EditBox name="$parentGold" historyLines="0" numeric="true" autoFocus="false">
-                                        <Size><AbsDimension x="58" y="20"/></Size>
-                                        <Anchors><Anchor point="TOPLEFT"/></Anchors>
-                                        <Layers>
-                                            <Layer level="BACKGROUND">
-                                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="10" y="20"/></Size>
-                                                    <Anchors>
-                                                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                                                    </Anchors>
-                                                    <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                                                    <Size><AbsDimension x="13" y="13"/></Size>
-                                                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0" right="0.25" top="0" bottom="1"/>
-                                                </Texture>
-                                            </Layer>
-                                        </Layers>
-                                        <Scripts>
-                                            <OnTabPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnTabPressed>
-                                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnEnterPressed>
-                                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
-                                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                                        </Scripts>
-                                        <FontString inherits="ChatFontNormal"/>
-                                    </EditBox>
-                                    <EditBox name="$parentSilver" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                                        <Size><AbsDimension x="30" y="20"/></Size>
-                                        <Anchors><Anchor point="LEFT" relativeTo="$parentGold" relativePoint="RIGHT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor></Anchors>
-                                        <Layers>
-                                            <Layer level="BACKGROUND">
-                                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="10" y="20"/></Size>
-                                                    <Anchors>
-                                                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                                                    </Anchors>
-                                                    <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                                                    <Size><AbsDimension x="13" y="13"/></Size>
-                                                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
-                                                </Texture>
-                                            </Layer>
-                                        </Layers>
-                                        <Scripts>
-                                            <OnTabPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnTabPressed>
-                                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnEnterPressed>
-                                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
-                                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                                        </Scripts>
-                                        <FontString inherits="ChatFontNormal"/>
-                                    </EditBox>
-                                    <EditBox name="$parentCopper" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                                        <Size><AbsDimension x="30" y="20"/></Size>
-                                        <Anchors><Anchor point="LEFT" relativeTo="$parentSilver" relativePoint="RIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor></Anchors>
-                                        <Layers>
-                                            <Layer level="BACKGROUND">
-                                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="8" y="20"/></Size>
-                                                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                                                    <Size><AbsDimension x="10" y="20"/></Size>
-                                                    <Anchors>
-                                                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                                                    </Anchors>
-                                                    <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                                                </Texture>
-                                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                                                    <Size><AbsDimension x="13" y="13"/></Size>
-                                                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
-                                                    <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
-                                                </Texture>
-                                            </Layer>
-                                        </Layers>
-                                        <Scripts>
-                                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
-                                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                                        </Scripts>
-                                        <FontString inherits="ChatFontNormal"/>
-                                    </EditBox>
-                                </Frames>
+                                <Scripts>
+                                    <OnLoad>MoneyInputFrame_SetOnvalueChangedFunc(this, SendMailFrame_CanSend)</OnLoad>
+                                </Scripts>
                             </Frame>
                             <!-- ref SendMailSendMoneyButton l.906-919 / SendMailCODButton l.920-933. -->
                             <CheckButton name="SendMailSendMoneyButton" inherits="BenillaSendMailRadioButtonTemplate" id="1">

@@ -106,3 +106,75 @@ fn a_started_fade_still_ramps_and_the_driver_reparks_after() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The FLASH kit alternates and stops** — the fade kit's twin, transcribed from `UIParent.lua`
+/// because two stock windows call it and nothing answered (1879).
+///
+/// Driven rather than merely loaded: a kit that is present but never exercised is exactly how
+/// twelve faux lists shipped unable to scroll (1868), so this runs a real flash to completion.
+#[test]
+fn a_flash_alternates_then_stops_and_the_driver_reparks() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    s.resolve();
+
+    // Parked until something asks — the whole point of the driver over UIParent's own OnUpdate.
+    assert!(
+        !s.eval::<bool>("return BenillaFlashDriver:IsShown()")
+            .unwrap(),
+        "an empty FLASHFRAMES parks the driver"
+    );
+
+    s.run(
+        r#"Probe = CreateFrame("Frame", "BenillaFlashProbe", UIParent)
+           Probe:SetWidth(10) Probe:SetHeight(10) Probe:SetPoint("TOPLEFT")
+           UIFrameFlash(Probe, 0.05, 0.05, 0.3, nil, 0, 0)"#,
+    )
+    .unwrap();
+    assert!(
+        s.eval::<bool>("return UIFrameIsFlashing(BenillaFlashProbe) == 1")
+            .unwrap(),
+        "the frame is on the flash list"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaFlashDriver:IsShown()")
+            .unwrap(),
+        "UIFrameFlash is the single inserter and wakes the driver"
+    );
+
+    // Re-arming an already-flashing frame is a no-op, not a second entry (ref UIParent.lua:1234).
+    s.run("UIFrameFlash(BenillaFlashProbe, 1, 1, 1, nil, 0, 0)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return table.getn(FLASHFRAMES)").unwrap(),
+        1,
+        "already flashing: the reference returns rather than re-arming"
+    );
+
+    // Run past flashDuration: the frame leaves both lists, is restored to full alpha, and — with
+    // `showWhenDone` nil — ends hidden.
+    for _ in 0..40 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "flashing raised: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return table.getn(FLASHFRAMES)").unwrap(),
+        0,
+        "the flash finished and the frame left the list"
+    );
+    assert!(
+        !s.eval::<bool>("return BenillaFlashProbe:IsShown()")
+            .unwrap(),
+        "showWhenDone was nil, so it ends hidden"
+    );
+    assert!(
+        !s.eval::<bool>("return BenillaFlashDriver:IsShown()")
+            .unwrap(),
+        "and the driver re-parks on the first empty tick"
+    );
+}

@@ -35,7 +35,26 @@ fn setup() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "FriendsFrame.xml");
-    load_xml(&s, "RaidFrame.xml");
+    // Stock `RaidFrame_OnLoad` reconciles the party frames the moment it loads
+    // (`RaidOptionsFrame_UpdatePartyFrames` -> `HidePartyFrame`/`ShowPartyFrame`), so this pane
+    // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
+    // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
+    // iterates. The manifest already seats these far above RaidFrame (1874).
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    // The reference's own `BasicControls.xml`, which is manifest entry 3 — far above the pane
+    // (1874). `UIParentLoadAddOn` used to be what this line was here for; 1881 moved that
+    // function to `UIParent.xml`, its home in the reference, and this harness already loads
+    // `UIParent.xml` above, so the `RaidFrame_LoadUI` arm on `RAID_ROSTER_UPDATE` still
+    // resolves. What is left here is the error/message pair and `TEXT`.
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
+    load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
+    load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UnitFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\CombatFeedback.xml");
+    load_xml(&s, r"Interface\FrameXML\PartyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\RaidFrame.xml");
+    load_xml(&s, r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml");
     s
 }
 
@@ -738,7 +757,18 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
             .unwrap(),
         0
     );
-    assert!(!visible(&s, "RaidInfoInstance1"));
+    // **The stale row STAYS, and that is the reference's own defect.** `RaidInfoFrame_Update`
+    // wraps its whole row loop in `if ( savedInstances > 0 )` (RaidFrame.lua:93-106), so the
+    // count dropping to zero never reaches the `Hide()` in its else-arm — the last lockout
+    // remains painted under an already-open panel. Our retired file hid them; the migration
+    // reverts that, and it is the director's call, not ours to re-author (1874).
+    //
+    // What DOES protect the player is the line above: the button is disabled, so the flyout
+    // cannot be reopened onto the stale row.
+    assert!(
+        visible(&s, "RaidInfoInstance1"),
+        "the reference leaves the last row standing when the count hits zero"
+    );
 
     // The button toggles the flyout.
     assert!(visible(&s, "RaidInfoFrame"));
@@ -779,12 +809,21 @@ fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
         "an empty lockout list is a dead button"
     );
 
-    // And the panel behind it is emptied, not left in the state the XML loaded: every row away,
-    // and no scroll bar standing over a list of nothing.
+    // **The panel IS left in the state the XML loaded, and that is the reference's own defect.**
+    // `RaidInfoFrame_Update` wraps its entire row loop in `if ( savedInstances > 0 )`
+    // (RaidFrame.lua:93-106), so with a lockout list that has never had anything in it the loop
+    // never runs at all and no row is ever hidden — they keep the visibility stock
+    // `Blizzard_RaidUI.xml` declared. Our retired file cleared them; the migration reverts that,
+    // and a look the migration reverts is the director's call, not ours to re-author (1874).
+    //
+    // What protects the player is the line above: the button is disabled, so this panel cannot be
+    // reached by a click at all. The rows below are only visible because the test showed the frame
+    // by hand.
     s.run("RaidInfoFrame:Show()").unwrap();
-    assert!(!visible(&s, "RaidInfoInstance1"));
-    assert!(!visible(&s, "RaidInfoInstance10"));
-    assert!(!visible(&s, "RaidInfoScrollFrameScrollBar"));
+    assert!(
+        visible(&s, "RaidInfoInstance1") && visible(&s, "RaidInfoInstance10"),
+        "with no lockouts the reference's update never runs, so the XML's own rows stand"
+    );
     s.run("RaidInfoFrame:Hide()").unwrap();
 
     // The button is dead to a real click, not merely drawn grey — the half the director asked for
@@ -909,51 +948,10 @@ fn the_ready_check_popup_opens_and_answers() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// The reference-geometry diff (decision 0675's discipline)
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/// Every element this file shares with the reference carries the reference's numbers.
-///
-/// The pane's specification is TWO reference files — `RaidFrame.xml` from FrameXML and
-/// `Blizzard_RaidUI.xml` from the load-on-demand addon — so this runs twice. The addon half is
-/// read straight out of the patch chain rather than from an extraction on disk: `_extracted_framexml/`
-/// holds FrameXML only, and requiring someone to have extracted the addon first would leave half
-/// the window's geometry guarded by nothing.
-#[test]
-fn the_geometry_matches_both_reference_files() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    // The FrameXML half: the pane, its two buttons, the info flyout and the lockout row template.
-    if let Some(reference) = super::framexml_diff::reference("RaidFrame.xml") {
-        super::framexml_diff::assert_geometry_matches(
-            "RaidFrame.xml",
-            &reference,
-            &[
-                // The reference's close button inherits `UIPanelCloseButton`, which carries the
-                // 32x32; no such template ships in this house (FriendsFrame's own close button
-                // says the same), so ours states the size the template would have given it. The
-                // ANCHOR offsets match; only the extra size pair differs.
-                "RaidInfoCloseButton",
-            ],
-            10,
-        );
-    }
-
-    // The addon half: the row, the slot, the group frame and the ready-check popup.
-    let Some(data) = benilla_formats::wow_data() else {
-        return;
-    };
-    let chain = benilla_formats::open_chain(&data).expect("open chain");
-    let bytes = chain
-        .read("Interface\\AddOns\\Blizzard_RaidUI\\Blizzard_RaidUI.xml")
-        .expect("Blizzard_RaidUI.xml is in the patch chain");
-    super::framexml_diff::assert_geometry_matches_text(
-        "RaidFrame.xml",
-        &String::from_utf8_lossy(&bytes),
-        &[],
-        10,
-    );
-}
+// The reference-geometry diff that stood here is GONE with the transcription it policed (1874).
+// It compared our `RaidFrame.xml`'s numbers against the reference's; the pane is now the
+// reference's own file off the player's chain, so there is nothing left to diff — the geometry is
+// the reference's by construction rather than by assertion.
 
 /// **A drag the cursor carries off the window edge ENDS — it does not glue the row to the mouse
 /// for the rest of the session** (B310).

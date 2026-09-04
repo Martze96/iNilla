@@ -13,11 +13,21 @@ fn load_pet_bar(s: &UiScript) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        "Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        "Fonts.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
         "PetActionBar.xml",
     ] {
         load_xml(s, file);
@@ -353,11 +363,21 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
+        "Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        "Fonts.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
     ] {
         load_xml(&s, file);
     }
@@ -643,6 +663,14 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "GameTooltip.xml",
         "Cooldown.xml",
         "ActionBar.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
         "PetActionBar.xml",
     ] {
         load_xml(s, file);

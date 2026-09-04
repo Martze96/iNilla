@@ -30,12 +30,24 @@ fn shipped_action_bar_drives_end_to_end() {
         );
         if file == "ActionBar.xml" {
             assert_eq!(
-                report.frames, 62,
+                report.frames, 59,
                 "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
-                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223), + ReputationWatchBar with its status bar and its numerals overlay (3 — hidden, ref ReputationFrame.xml:869-994)"
+                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223) — and NO ReputationWatchBar: its three frames went home to the reference's own ReputationFrame.xml with 1875"
             );
         }
     }
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
 
     // A warrior in battle stance: offset 1 ⇒ the bar shows actions 73..84.
     s.set_bonus_bar_offset(1);
@@ -164,6 +176,18 @@ fn load_action_bar(s: &UiScript) {
             report.errors
         );
     }
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(s, "Fonts.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\ReputationFrame.xml");
 }
 
 /// The state/feedback layer (decision 0137 phase 4) through the REAL shipped XML: a pushed
@@ -1273,20 +1297,24 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
+        // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
+        "Fonts.xml",
         "UIParent.xml",
         "Cooldown.xml",
         "ActionBar.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
         "MultiBars.xml",
     ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        // `test_ui::load_ui`, not a disk read: this list names chain entries now (the reputation
+        // pane and the templates it inherits through), and `assets/ui` cannot answer for those.
+        super::test_ui::load_ui(&s, file);
     }
 
     assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 1);
@@ -1413,6 +1441,18 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
         let report = benilla_ui::loader::load(&s, &doc, &|_| None);
         assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
     }
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.tick(10.0); // a nonzero clock epoch
     let _ = s.take_sounds();
@@ -1592,6 +1632,18 @@ fn bonus_bar_turnaround_continues_from_position() {
         let report = benilla_ui::loader::load(&s, &doc, &|_| None);
         assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
     }
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     s.tick(10.0);
     let _ = s.take_sounds();
 
@@ -1647,6 +1699,18 @@ fn the_page_arrows_do_not_steal_each_other_s_clicks() {
         let report = benilla_ui::loader::load(&s, &doc, &|_| None);
         assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
     }
+
+    // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
+    // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
+    // 1875 that file is the reference's own, so a harness that drives the XP bar has to load it too
+    // or the tick raises on its first event.
+    // In manifest order: the fonts its check-box labels colour from, the panel templates those
+    // boxes inherit through, then the pane.
+    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\ReputationFrame.xml");
     // The post-login state, which is what a player clicks into. Without it `ExhaustionTick_Update`
     // never runs, and the rested marker — DIALOG strata, declared CENTER on the XP strip, which is
     // exactly where the arrows are — sits unhidden over both and eats every click. That is the

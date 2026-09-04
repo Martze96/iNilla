@@ -215,6 +215,41 @@
         -- statements on the same event). `MultiActionBar_Update` is existence-guarded because the
         -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
         -- level and always installed. Decision 1500.
+        -- ── UIParentLoadAddOn (ref UIParent.lua l.638-647, and now our slot for it) ──────
+        -- It lived in our own BasicControls.xml until 1881 migrated that file to the chain;
+        -- the reference never put it there, so the move is back to where it belongs.
+        -- The on-demand loader every "open the auction house / tradeskill / talent panel" path
+        -- goes through, and the one 5 corpus addons name — FuBar_MCPFu, Fubar_RareTrackerFu, MCP,
+        -- MikScrollingBattleText, SpecialTalent: five separate addons, not one library replicated
+        -- (1207/1240).
+        --
+        -- Every piece was already here and only the join was missing: `LoadAddOn` answers the
+        -- reference's own `(1, nil)` / `(nil, reason)` pair, `message` and `TEXT` are directly
+        -- above, and the `ADDON_*` reason words come from the real `GlobalStrings.lua` we RUN off
+        -- the patch chain rather than copy (1234).
+        --
+        -- **`FailedAddOnLoad` is the reference's own latch, and it is not decoration.** Without it
+        -- an addon that retries the load from a handler raises a modal on every attempt; with it
+        -- the failure shows once per addon name per session. It is exactly the detail this would
+        -- have lacked had it been reconstructed from the name instead of read.
+        --
+        -- Every reason our `LoadAddOn` can answer resolves to a string: MISSING, DISABLED,
+        -- NOT_DEMAND_LOADED, DEP_MISSING and DEP_DISABLED all have an `ADDON_..reason` word
+        -- (GlobalStrings l.16-31), the same reason set wow-re's `ui.md` l.2396 carves off
+        -- `0x51e780`. So the `getglobal` below cannot hand `format` a nil.
+        FailedAddOnLoad = {};
+
+        function UIParentLoadAddOn(name)
+            local loaded, reason = LoadAddOn(name)
+            if not loaded then
+                if not FailedAddOnLoad[name] then
+                    message(format(TEXT(ADDON_LOAD_FAILED), name, TEXT(getglobal("ADDON_" .. reason))))
+                    FailedAddOnLoad[name] = true
+                end
+            end
+            return loaded
+        end
+
         -- ref UIParent.lua:223, whose slot this is — immediately above `UIParent_OnEvent`, the
         -- same neighbour it has there. It moved here from our own InspectFrame.xml when 1832
         -- retired that file: the name belongs to UIParent in the reference, and the window it
@@ -261,6 +296,20 @@
             if ( MacroFrame_Show ) then
                 MacroFrame_Show();
             end
+        end
+
+        -- ref UIParent.lua's own `RaidFrame_LoadUI` (l.182-184), verbatim — the fourth squatter,
+        -- after `InspectUnit` (1832), `ToggleTalentFrame` (1833) and `ShowMacroFrame` (1848).
+        --
+        -- **Unlike `MacroFrame_LoadUI`, this one cannot be left out.** That one was omitted because
+        -- nothing on the chain calls it; the reference's own `RaidFrame.lua` calls THIS on
+        -- `RAID_ROSTER_UPDATE` and again at `PLAYER_LOGIN` with a raid up (l.34, l.39), so its
+        -- absence is a raise every time the roster moves. It is a FrameXML function, not an engine
+        -- verb, and this file is our stand-in for `UIParent.lua` — the same relationship the three
+        -- above have. `UIParentLoadAddOn` is just above, and it no-ops on an addon that is
+        -- already loaded, which ours is: benilla.toc takes `Blizzard_RaidUI` eagerly (1874).
+        function RaidFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_RaidUI");
         end
 
         function UIParent_OnEvent(event)

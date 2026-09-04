@@ -96,7 +96,7 @@ Interface\FrameXML\LocaleProperties.lua
 # ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
 # DialogButtonNormalText/HighlightText) and everything above it in FrameXML.toc is engine.
-BasicControls.xml
+Interface\FrameXML\BasicControls.xml
 # **UIParent itself, and it must come before every frame that declares `parent="UIParent"`** —
 # a parent name is resolved at LOAD, and a name that does not exist yet does not error: the loader
 # warns and silently falls back to the enclosing frame (`loader/mod.rs`, "names no frame"). With
@@ -678,7 +678,19 @@ ContainerFrameAdapters.xml
 # file's own comment carries the justification — so `FACTION_BAR_COLORS` and
 # `ReputationWatchBar_Update` are already defined when this page paints a row or ticks the
 # "Show as Experience Bar" box.
-ReputationFrame.xml
+# ══ THE REPUTATION PANE — the reference's own, off the player's chain (1751, scoped by 1844) ══
+# One line replaces one of ours: 47 of our 48 declared names were already the reference's, and the
+# one that was not (`ReputationListScrollFrameScrollBarTrough`) is our own scroll kit's. Nothing
+# gated it — the stock file inherits its own two row templates plus `UIPanelCloseButton`, fonts and
+# `OptionsCheckButtonTemplate`, and that last came off the chain with 1841.
+#
+# THE CO-EDIT was compulsory. The reference declares the reputation WATCH BAR in this same file;
+# ours lived in `ActionBar.xml` behind a note defending the placement. Frame globals publish
+# NON-overwritingly and ActionBar.xml is manifest line 340 against this file's — so ours would have
+# kept the name and the chain's bar would have been built and unreachable, which is exactly what
+# `GroupLootFrame` did for months (1838). The bar, its update, its two text verbs,
+# `MAX_PLAYER_LEVEL` and `FACTION_BAR_COLORS` all went home with it (1875).
+Interface\FrameXML\ReputationFrame.xml
 # The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
 # top-level file — it declares `parent="CharacterFrame"`, which really attaches (1734), and
 # is positioned by name via `<Anchors relativeTo="CharacterFrame">`, the geometry it ships
@@ -767,10 +779,21 @@ Interface\AddOns\Blizzard_TalentUI\Blizzard_TalentUI.xml
 # GameTooltip (the newbie tips) and UIDropDownMenu (the who list's variable column) —
 # all loaded above.
 FriendsFrame.xml
+# ══ THE RAID PANE — the reference's own, off the player's chain (1751, scoped by 1839) ══
 # The social window's fourth tab, in its own file because RaidFrame is a child of FriendsFrame and
 # a child cannot be declared before its parent — the reference splits it the same way and for the
 # same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
-RaidFrame.xml
+#
+# TWO entries replace one of ours: the pane itself, and the LoadOnDemand half that carries the
+# group frames and the tear-off pullouts. 1839 measured the swap — 83 of our 84 frame names were
+# already the reference's, 20 of our 22 Lua functions were, and NOTHING needed building. The one
+# name that was not is `BenillaRaidDropDown`, and the reference has no raid drop-down at all: it
+# reuses `FriendsDropDown`, which FriendsFrame.xml declares four manifest lines above.
+#
+# GAINED: `RaidPulloutFrameTemplate`, `RaidPulloutButtonTemplate`, `RaidBuffButtonTemplate` and the
+# fifteen `RaidPullout*` verbs — the tear-off group pullouts we never transcribed.
+Interface\FrameXML\RaidFrame.xml
+Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml
 # ══ THE GOSSIP WINDOW — the reference's own, off the player's chain (1751) ══════════════════
 # No engine verb, no widget method, no shadowed name — all three instruments clean. It was
 # deferred once on `GossipResize` reading `GetTextHeight()` in the same repaint that sets the
@@ -877,7 +900,7 @@ Interface\FrameXML\PetStable.xml
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
 # money displays are SmallMoneyFrameTemplate, and it registers the AUCTION_DEPOSIT money type
 # into that file's MoneyTypeInfo), after MerchantFrame (grouping only now — that file's global
-# BenillaMoneyInput_* helpers for its four money inputs), after ScrollTemplates (four faux lists), after
+# chain's MoneyInputFrame_* for its four money inputs, 1882), after ScrollTemplates (four faux lists), after
 # UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton / InputBoxTemplate /
 # UICheckButtonTemplate), after UIDropDownMenu (the rarity capsule) and after UiPanels (the
 # panel manager's `doublewide` seat, `CharacterFrameTabButtonTemplate`, the PanelTemplates

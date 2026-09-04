@@ -143,7 +143,7 @@ fn read(req: &str) -> Option<Vec<u8>> {
 pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
-    "BasicControls.xml", // TEXT()
+    "Interface\\FrameXML\\BasicControls.xml", // TEXT()
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
@@ -220,7 +220,11 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // concatenates `SPELL_STAT0_NAME`..`4` on every repaint.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Fonts.xml",
-    "BasicControls.xml", // TEXT(), which every one of those label sets goes through
+    // `GetText` — the reference's gendered-string helper, which stock
+    // `ReputationFrame.lua:65` calls for every row's standing label. Manifest line 94
+    // (1875).
+    r"Interface\FrameXML\LocaleProperties.lua",
+    "Interface\\FrameXML\\BasicControls.xml", // TEXT(), which every one of those label sets goes through
     "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
     "MoneyFrame.xml",
     "UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
@@ -267,7 +271,11 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     "Interface\\FrameXML\\PetPaperDollFrame.xml",
-    "ReputationFrame.xml",
+    // `updateContainerFrameAnchors` — `ReputationWatchBar_Update` hard-calls it when the bar
+    // moves (ReputationFrame.lua:248), because in the reference the bar's presence reflows the
+    // bag row. It comes with `ContainerFrame.xml`, manifest 585 against the pane's 693 (1875).
+    "Interface\\FrameXML\\ContainerFrame.xml",
+    r"Interface\FrameXML\ReputationFrame.xml",
     "SkillFrame.xml",
     "Interface\\FrameXML\\HonorFrame.xml",
 ];
@@ -286,7 +294,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // `MainMenuBarBackpackButton`'s OnEnter calls (`GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP)…)`)
     // and `BagSlotButton_OnEnter` calls for `EQUIP_CONTAINER`. Manifest entry 3, and not optional
     // for the bag bar since 1751's third window made that bar the reference's own.
-    "BasicControls.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
     // `UIParent` itself: the twelve `ContainerFrame`s declare `parent="UIParent"`, and
     // `updateContainerFrameAnchors` anchors each open bag to `frame:GetParent()` while
     // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the

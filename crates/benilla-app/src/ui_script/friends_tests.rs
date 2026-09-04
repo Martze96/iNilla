@@ -38,7 +38,26 @@ fn setup() -> UiScript {
     // guards, because there RaidFrame.xml is FrameXML and always loaded — so the guard belongs in
     // the harness's load order, not in shipped Lua defending against a state the client cannot be
     // in (decision 1549).
-    load_xml(&s, "RaidFrame.xml");
+    // Stock `RaidFrame_OnLoad` reconciles the party frames the moment it loads
+    // (`RaidOptionsFrame_UpdatePartyFrames` -> `HidePartyFrame`/`ShowPartyFrame`), so this pane
+    // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
+    // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
+    // iterates. The manifest already seats these far above RaidFrame (1874).
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    // The reference's own `BasicControls.xml`, which is manifest entry 3 — far above the pane
+    // (1874). It is here for the error/message pair and `TEXT`. NOTE: unlike `raid_tests`, this
+    // harness does not load `UIParent.xml`, so `UIParentLoadAddOn` — which 1881 moved there out
+    // of BasicControls — is absent. Nothing this file exercises reaches it; if a future
+    // assertion drives `RaidFrame_LoadUI`, that is the line to add.
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
+    load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
+    load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UnitFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\CombatFeedback.xml");
+    load_xml(&s, r"Interface\FrameXML\PartyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\RaidFrame.xml");
+    load_xml(&s, r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml");
     s
 }
 

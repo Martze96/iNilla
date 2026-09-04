@@ -363,6 +363,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_CHEST").is_ok() {
                 app.add_plugins(crate::capture::ProbeChestPlugin);
             }
+            // The GameObject-questgiver live probe: `WOW_PROBE_GOQUEST=1` parks at the Goldshire
+            // wanted poster and reports the dialog status the server answers for it, below and
+            // above the quest's own MinLevel — the numeric answer to "quest objects are never
+            // status-queried" (decision 1872; see `capture::ProbeGoQuestPlugin`).
+            if std::env::var("WOW_PROBE_GOQUEST").is_ok() {
+                app.add_plugins(crate::capture::ProbeGoQuestPlugin);
+            }
             // The openable-item live probe: `WOW_PROBE_CLAM=1` stocks a clam, right-clicks it
             // through the live VM's own `UseContainerItem` and reports whether a loot window opens
             // on the item's own guid — the numeric answer to the director's "clams don't open"

@@ -244,10 +244,19 @@ pub(in crate::minimap) fn emit_tracking_dots(
         }
     };
     // Cell 0 — tracked GameObjects (gold): template lockId through Lock.dbc.
+    //
+    // **No quest-status precedence on this leg** (decision 1872). This loop used to skip a
+    // GameObject whose status was 7, mirroring the unit loop below — but the classifier's
+    // `cmp dword ptr [edi+0xcb8],7` at `0x4eac31` is reachable **only** from the UNIT and PLAYER
+    // legs (machine-enumerated predecessors, wow-re `minimap-poi-questdot.md` via
+    // `questgiver-marker.md` §W14.9): the GameObject leg at `0x4eab43` falls straight into
+    // `0x5ed2b0`, GameObject *tracking*, and emits category 0. A GameObject never draws a quest
+    // dot in the reference, so nothing about a quest status may suppress its tracking dot — and
+    // a GameObject can no longer *hold* a status here anyway (`net/apply` drops it, §W14.1).
     if tracking.resources != 0 {
         if let Some(locks) = locks {
             for (guid, net, tf, _) in candidates.iter() {
-                if net.kind != EntityKind::GameObject || statuses.get(&guid.0).copied() == Some(7) {
+                if net.kind != EntityKind::GameObject {
                     continue;
                 }
                 let Some(t) = templates.get(guid.0) else {

@@ -134,7 +134,7 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     s.run("LocalizeFrames()").unwrap();
     load_xml(&s, "Fonts.xml");
     // `TEXT()`, which the reference's own tooltip and label formatting passes every string through.
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTime.xml");

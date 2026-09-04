@@ -63,7 +63,7 @@
                 TradeFrameTradeButton:Enable()
                 TradeFrame_Update()
             elseif event == "PLAYER_TRADE_MONEY" then
-                BenillaMoneyInput_SetCopper("TradePlayerInputMoney", GetPlayerTradeMoney())
+                MoneyInputFrame_SetCopper(TradePlayerInputMoney, GetPlayerTradeMoney())
             elseif event == "TRADE_CLOSED" then
                 HideUIPanel(frame)
             elseif event == "TRADE_PLAYER_ITEM_CHANGED" then
@@ -82,17 +82,17 @@
         function TradeFrame_OnHide()
             -- The client-side close verb (ref TradeFrame_OnHide l.144) → CMSG_CANCEL_TRADE + a local
             -- clear (the app's drain); clear our money entry so a later trade opens fresh (ref l.146).
-            BenillaMoneyInput_ResetMoney("TradePlayerInputMoney")
+            MoneyInputFrame_ResetMoney(TradePlayerInputMoney)
             CloseTrade()
         end
 
         -- A keystroke in our money input (ref TradeFrame_UpdateMoney l.162): read the copper total,
         -- clamp to what we actually carry, and offer it → SetTradeMoney → CMSG_SET_TRADE_GOLD.
         function TradeFrame_UpdateMoney()
-            local copper = BenillaMoneyInput_GetCopper("TradePlayerInputMoney")
+            local copper = MoneyInputFrame_GetCopper(TradePlayerInputMoney)
             if GetMoney and copper > GetMoney() then
                 copper = GetPlayerTradeMoney()
-                BenillaMoneyInput_SetCopper("TradePlayerInputMoney", copper)
+                MoneyInputFrame_SetCopper(TradePlayerInputMoney, copper)
             end
             SetTradeMoney(copper)
         end
@@ -468,77 +468,28 @@
                 <Scripts><OnClick>HideUIPanel(TradeFrame)</OnClick></Scripts>
             </Button>
 
-            <!-- Our gold — EDITABLE (decision 0592 P2, ref TradePlayerInputMoneyFrame l.553): the shared
-                 BenillaMoneyInput trio (three numeric edit boxes Gold/Silver/Copper). A keystroke drives
-                 TradeFrame_UpdateMoney → SetTradeMoney → CMSG_SET_TRADE_GOLD; the server's echo is
-                 reflected back through PLAYER_TRADE_MONEY (below). Box layout copied from the proven
-                 send-mail widget (MailFrame.xml). -->
-            <Frame name="TradePlayerInputMoney">
+            <!-- Our gold — EDITABLE (ref TradeFrame.xml l.553 `TradePlayerInputMoneyFrame`). The three
+                 boxes come off the chain now: `MoneyInputFrameTemplate` out of
+                 `Interface\FrameXML\MoneyInputFrame.xml`, which benilla.toc has sourced since 1751
+                 window 23. Our inline trio was a verbatim copy of it — same child names, same
+                 textures and TexCoords, same tab chain, same 58/30/30 geometry — so this is the
+                 rare swap that changes no pixel by itself (1882).
+                 `SetMode("compact")` is the reference's own call on this frame and DOES move
+                 things: Gold 58->56 wide, Silver's offset 26->22, Copper's 16->11. We did not have
+                 it, so the trade money boxes tighten by a few pixels. That is the migration
+                 restoring the reference's layout, not a new choice.
+                 A keystroke drives TradeFrame_UpdateMoney -> SetTradeMoney -> CMSG_SET_TRADE_GOLD,
+                 registered through the reference's own callback slot rather than a hand-written
+                 OnTextChanged on each box; the server's echo comes back on PLAYER_TRADE_MONEY. -->
+            <Frame name="TradePlayerInputMoney" inherits="MoneyInputFrameTemplate">
                 <Size><AbsDimension x="176" y="18"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="26" y="-73"/></Offset></Anchor></Anchors>
-                <Frames>
-                    <EditBox name="$parentGold" historyLines="0" numeric="true" autoFocus="false">
-                        <Size><AbsDimension x="58" y="20"/></Size>
-                        <Anchors><Anchor point="TOPLEFT"/></Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
-                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnTabPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnTabPressed>
-                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnEnterPressed>
-                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                            <OnTextChanged>if ( BenillaMoneyInput_Consume("TradePlayerInputMoney") ) then TradeFrame_UpdateMoney() end</OnTextChanged>
-                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                        </Scripts>
-                        <FontString inherits="ChatFontNormal"/>
-                    </EditBox>
-                    <EditBox name="$parentSilver" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                        <Size><AbsDimension x="30" y="20"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="$parentGold" relativePoint="RIGHT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor></Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
-                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnTabPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnTabPressed>
-                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnEnterPressed>
-                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                            <OnTextChanged>if ( BenillaMoneyInput_Consume("TradePlayerInputMoney") ) then TradeFrame_UpdateMoney() end</OnTextChanged>
-                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                        </Scripts>
-                        <FontString inherits="ChatFontNormal"/>
-                    </EditBox>
-                    <EditBox name="$parentCopper" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                        <Size><AbsDimension x="30" y="20"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="$parentSilver" relativePoint="RIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor></Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
-                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
-                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture>
-                            </Layer>
-                        </Layers>
-                        <Scripts>
-                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                            <OnTextChanged>if ( BenillaMoneyInput_Consume("TradePlayerInputMoney") ) then TradeFrame_UpdateMoney() end</OnTextChanged>
-                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                        </Scripts>
-                        <FontString inherits="ChatFontNormal"/>
-                    </EditBox>
-                </Frames>
+                <Scripts>
+                    <OnLoad>
+                        MoneyInputFrame_SetMode(this, "compact")
+                        MoneyInputFrame_SetOnvalueChangedFunc(this, TradeFrame_UpdateMoney)
+                    </OnLoad>
+                </Scripts>
             </Frame>
             <!-- The partner's gold (read-only — GetTargetTradeMoney; ref TradeRecipientMoneyFrame l.574). -->
             <Frame name="TradeRecipientMoneyFrame">

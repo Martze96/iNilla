@@ -127,6 +127,14 @@ fn shipped_spellbook_drives_end_to_end() {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "ActionBar.xml");
+    // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+    // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+    // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+    // two template files its check boxes inherit through (1875).
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\ReputationFrame.xml");
     load_xml(&s, "SpellBookFrame.xml");
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
@@ -657,7 +665,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
         "Fonts.xml",
-        "BasicControls.xml", // `TEXT`
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
         // `ShowMacroFrame` lives here since 1848.
@@ -675,6 +683,14 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml",
         "ActionBar.xml",
+        // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+        // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+        // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+        // two template files its check boxes inherit through (1875).
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
         r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
         "SpellBookFrame.xml",
     ] {

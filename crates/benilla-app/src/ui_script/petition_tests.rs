@@ -91,7 +91,7 @@ fn setup() -> UiScript {
     // never paints.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Fonts.xml");
-    load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");

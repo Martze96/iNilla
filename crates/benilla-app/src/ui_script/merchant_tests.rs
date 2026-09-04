@@ -1078,6 +1078,9 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the BenillaMoney_* helpers
+                                                            // TradeFrame's money entry is the chain's own since 1882 — its OnLoad calls MoneyInputFrame_*.
+    load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.lua");
+    load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.xml");
     load_xml(&s, "TradeFrame.xml");
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 

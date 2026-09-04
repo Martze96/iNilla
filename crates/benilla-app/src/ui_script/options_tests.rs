@@ -750,6 +750,14 @@ fn interface_harness() -> UiScript {
             "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
             "ActionBar.xml",
+            // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+            // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+            // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+            // two template files its check boxes inherit through (1875).
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            r"Interface\FrameXML\OptionsFrameTemplates.xml",
+            r"Interface\FrameXML\ReputationFrame.xml",
             "ScrollTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             "QuestFrame.xml",
@@ -801,6 +809,14 @@ fn actionbars_harness() -> UiScript {
             "UIParent.xml",
             "Cooldown.xml",
             "ActionBar.xml",
+            // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+            // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+            // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+            // two template files its check boxes inherit through (1875).
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            r"Interface\FrameXML\OptionsFrameTemplates.xml",
+            r"Interface\FrameXML\ReputationFrame.xml",
             "MultiBars.xml",
         ],
     );

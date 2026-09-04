@@ -20,7 +20,7 @@ fn setup() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
-        "BasicControls.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "ScrollTemplates.xml",

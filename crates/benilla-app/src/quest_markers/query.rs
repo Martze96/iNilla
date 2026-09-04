@@ -1,5 +1,14 @@
 //! The **query** half of the overhead questgiver markers: when to ask the server what an NPC's
-//! `!`/`?` should be. The rendering half is [`super`].
+//! `!`/`?` should be — and, for a GameObject, when to ask a question whose answer is thrown away.
+//! The rendering half is [`super`].
+//!
+//! **A GameObject is queried and never rendered** (decision 1872, wow-re `questgiver-marker.md`
+//! §W14). The reference sends `CMSG_QUESTGIVER_STATUS_QUERY` for a quest-flagged GameObject from
+//! both object sweeps, but its answer handler `0x5dc9f0` resolves the GUID with typemask **8**
+//! (`0x468460` is a bitmask AND against `OBJECT_FIELD_TYPE`), so a GameObject's `0x21` returns NULL
+//! and the packet dies at `0x5dca2f` — and even if it did not, a GameObject has no `+0xcb8` status
+//! slot, no `+0xb2c` marker slot, and (11 models out of ~1600, none of them a poster) no
+//! attachment 18 to hang a marker from. So: **send the query, drop the answer, render nothing.**
 //!
 //! The server only ever *answers* `CMSG_QUESTGIVER_STATUS_QUERY` (vmangos `QuestHandler.cpp`) — it
 //! never pushes — so every refresh point is the client's own to trigger, and a status that is never
@@ -11,11 +20,27 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use benilla_protocol::EntityKind;
+
 use crate::net::{ClientCommand, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::target::cursor_mode::go_reaction;
+use crate::target::ring::Factions;
 use crate::ui_quest::QuestGiver;
 
 /// `UNIT_NPC_FLAGS` questgiver service bit (vanilla; `update_object.rs`'s accessor doc).
 const NPC_FLAG_QUESTGIVER: u32 = 0x2;
+/// `GAMEOBJECT_FLAGS` bit **2** (mask `0x4`) — the whole of the sweep's GameObject gate, and the
+/// one place a GameObject GUID can reach this opcode at all.
+///
+/// Byte-pinned (wow-re `questgiver-marker.md` §W14.6): `0x5eb0ef mov eax,[edx+0xc];
+/// 0x5eb0f2 shr eax,0x2; 0x5eb0f5 test al,1` — shift **2**, so mask `0x4`, not the `0x2` the unit
+/// leg tests 25 bytes later. `[<GO block>+0xc]` is absolute field index 9 = `GAMEOBJECT_FLAGS`,
+/// named from the binary's own UpdateField name table (`0x83b8a8` → the string at `0x83be84`).
+/// The *name* `GO_FLAG_INTERACT_COND` is vmangos's, not the image's — but the bit is settled from
+/// shipped content as well as from the branch: across the genuine 2005-06 sniff corpus, all 122
+/// GameObjects the real client sent a status query for carry it, and none without it does, against
+/// a 79.2 % base rate.
+const GO_FLAG_INTERACT_COND: u32 = 0x4;
 
 /// Ask the dialog status of every questgiver-flagged creature, and re-ask when the answer could
 /// have changed. The server only ever *answers* queries (vmangos `QuestHandler.cpp`), so every
@@ -42,8 +67,28 @@ const NPC_FLAG_QUESTGIVER: u32 = 0x2;
 /// leaves [`GuidIndex`], which is the create-path query (the reference caches the answer *on* the
 /// unit at `unit+0xcb8`, so its cache dies with the object — ours is a map and needs the prune).
 ///
+/// **Per GameObject — on a sweep, and ONLY on a sweep.** A quest-giving GameObject (a wanted
+/// poster, a suspicious barrel) is a questgiver on the wire exactly as a creature is: the same
+/// sweep callback tests typemask bit 5 and sends the same opcode for it (`0x5eb0a0` @ `0x5eb159`,
+/// and its sibling `0x5eb3f0` @ `0x5eb456`), gated on [`GO_FLAG_INTERACT_COND`] and on the
+/// GameObject's own reaction toward us being **> 1** ([`go_reaction`], the reference's `0x5f7fd0`).
+/// The wire corpus shows it happening in 20 of 62 real sessions.
+///
+/// But there is **no bring-up query for a GameObject** — the contrast with units is exact and it
+/// is the point (wow-re §W14.8, a closed caller census: a GameObject GUID can reach this opcode
+/// through exactly two instructions in the whole image and both are inside a sweep callback; the
+/// `CGGameObject_C` ctor and its vtable slot 3 call no sender, where `CGUnit_C`'s slot 3 does). So
+/// a GameObject is asked about only when a sweep happens to run while it is in view, and a player
+/// who completes a quest elsewhere and then walks up to the turn-in object never asks about it at
+/// all. That is a real, slightly surprising reference behaviour, and **a per-guid asked-set that
+/// queries on first sight is a deviation, not a fix** — hence the `swept` gate below rather than
+/// an [`unit_ask_key`] analogue. Nothing visible turns on any of this: the answer is dropped
+/// ([`crate::net::apply`]'s own typemask gate), which is decision 1872's whole point.
+///
 /// **The teardown leg** — an NPC whose questgiver bit goes off loses its cached status, so the
-/// marker goes with it (`0x5eb0a0`'s own branch), and is re-asked if the bit returns.
+/// marker goes with it (`0x5eb0a0`'s own branch), and is re-asked if the bit returns. There is no
+/// GameObject counterpart: a GameObject has no status to invalidate (`+0xcb8` is `0x9a8` bytes past
+/// the end of a `0x310`-byte `CGGameObject_C`), and all 8 of `0x6073f0`'s call sites are unit-side.
 ///
 /// **Still not covered**, and why: the reference also sweeps when an *item* moves between
 /// containers (an `ITEM` typeid watch, `0x5d9375` — quest availability can depend on carried
@@ -55,8 +100,9 @@ const NPC_FLAG_QUESTGIVER: u32 = 0x2;
 #[allow(clippy::type_complexity)] // a Bevy system: each param is one resource, the app's convention
 pub(super) fn query_statuses(
     self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
-    units: Query<(&crate::net::Guid, &ObjectStore), (With<NetEntity>, Without<SelfPlayer>)>,
+    objects: Query<(&crate::net::Guid, &NetEntity, &ObjectStore), Without<SelfPlayer>>,
     index: Res<GuidIndex>,
+    factions: Option<Res<Factions>>,
     mut quest: ResMut<QuestGiver>,
     commands: Res<NetCommands>,
     mut state: Local<QueryState>,
@@ -71,7 +117,13 @@ pub(super) fn query_statuses(
         state.fields = self_generation(&store.0);
     }
     let generation = state.fields ^ (u64::from(quest.reask_epoch()) << 32);
-    if state.generation != generation {
+    // **This frame IS the sweep.** Both of the reference's object sweeps (`0x5eb070` and the full
+    // re-query `0x5eb3c0`) walk every object in the manager once, synchronously, when one of the
+    // 13 local-player state changes fires them; a changed generation is that moment, here. The
+    // GameObject leg below fires only on it, because that is the only way a GameObject GUID ever
+    // reaches the wire (§W14.8).
+    let swept = state.generation != generation;
+    if swept {
         state.generation = generation;
         state.asked.clear();
     }
@@ -79,29 +131,59 @@ pub(super) fn query_statuses(
     // its "already asked" mark and its cached status, so re-entering view re-asks from scratch.
     state.asked.retain(|guid, _| index.0.contains_key(guid));
     quest.retain_statuses(|npc| index.0.contains_key(&npc));
-    for (guid, obj) in &units {
-        if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER == 0 {
-            // No longer a questgiver: drop the stale answer (and the marker with it) —
-            // **unconditionally**, never "only if we had asked". The reference's sweep callback
-            // (`0x5eb0a0`) tears the marker down on the flag test alone, with no prior-asked
-            // precondition (decision 0647), and the gate we used to put here was disarmed by the
-            // very sweep that arrives with it: an escort's giver drops `UNIT_NPC_FLAGS` in the same
-            // server tick as the quest-log write (vmangos `FollowerAI::StartFollow`,
-            // `ScriptedEscortAI`'s "disable npcflags"), so the quest-log change bumps the
-            // generation, `asked` is cleared above, `remove` finds nothing, and the cached
-            // AVAILABLE status — with its `!` — was frozen over the NPC for the whole escort, with
-            // no way back: the flag stays off, so this arm never queries either (B257).
-            state.asked.remove(&guid.0);
-            quest.clear_status(guid.0);
-            continue;
-        }
-        // Re-ask when this unit's own key moves — its service bits or its faction template. The
-        // reference does the same per-unit query off those field watches.
-        let key = unit_ask_key(&obj.0);
-        if state.asked.insert(guid.0, key) != Some(key) {
-            let _ = commands
-                .0
-                .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+    for (guid, net, obj) in &objects {
+        match net.kind {
+            // `0x5eb0a0` @ `0x5eb0d3`: `cmp eax,9; je` — typemask EXACTLY `OBJECT|UNIT`, a plain
+            // creature. A player is `0x19` and falls out of the sweep here, before any flag test.
+            EntityKind::Unit => {
+                if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER == 0 {
+                    // No longer a questgiver: drop the stale answer (and the marker with it) —
+                    // **unconditionally**, never "only if we had asked". The reference's sweep
+                    // callback (`0x5eb0a0`) tears the marker down on the flag test alone, with no
+                    // prior-asked precondition (decision 0647), and the gate we used to put here
+                    // was disarmed by the very sweep that arrives with it: an escort's giver drops
+                    // `UNIT_NPC_FLAGS` in the same server tick as the quest-log write (vmangos
+                    // `FollowerAI::StartFollow`, `ScriptedEscortAI`'s "disable npcflags"), so the
+                    // quest-log change bumps the generation, `asked` is cleared above, `remove`
+                    // finds nothing, and the cached AVAILABLE status — with its `!` — was frozen
+                    // over the NPC for the whole escort, with no way back: the flag stays off, so
+                    // this arm never queries either (B257).
+                    state.asked.remove(&guid.0);
+                    quest.clear_status(guid.0);
+                    continue;
+                }
+                // Re-ask when this unit's own key moves — its service bits or its faction template.
+                // The reference does the same per-unit query off those field watches.
+                let key = unit_ask_key(&obj.0);
+                if state.asked.insert(guid.0, key) != Some(key) {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+                }
+            }
+            // `0x5eb0da shr ecx,5; test cl,1` — typemask bit 5, `TYPEMASK_GAMEOBJECT`. Sweep-only,
+            // no asked-set, no teardown: see this function's doc and §W14.8.
+            EntityKind::GameObject if swept => {
+                if obj.0.gameobject_flags() & GO_FLAG_INTERACT_COND == 0 {
+                    continue;
+                }
+                // `0x5eb101 cmp eax,1; jle` — the GameObject's reaction toward us must be at least
+                // **2**. Not a friendliness test: Unfriendly(2) and Neutral(3) both pass, and a
+                // faction-less GameObject resolves Neutral. `None` = unresolvable (no catalog yet)
+                // and passes, the same "no opinion" rule the cursor's own gate uses.
+                let reaction = go_reaction(
+                    factions.as_deref(),
+                    obj.0.gameobject_faction(),
+                    Some(&store),
+                );
+                if !reaction.is_none_or(|r| r > 1) {
+                    continue;
+                }
+                let _ = commands
+                    .0
+                    .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+            }
+            _ => {}
         }
     }
 }
@@ -141,10 +223,15 @@ fn self_generation(fields: &benilla_protocol::ObjectFields) -> u64 {
     // packets, 70 → 2 HP, with zero bursts; the single packet crossing to 0 has the only burst in
     // the stretch).
     //
-    // One named over-refresh: our bit flips on BOTH crossings, so we sweep units on resurrect too.
-    // The reference sweeps GameObject questgivers there (`0x5eb3c0`) plus one conditional unit
-    // query — and benilla has no GameObject markers at all, so a unit sweep is the nearest thing we
-    // can do with what we actually render. It costs one extra sweep per resurrect. 0654.
+    // Our bit flips on BOTH crossings, and that is now known to be exactly right — the note this
+    // comment used to carry ("one named over-refresh... the reference sweeps GameObject questgivers
+    // there") was wrong on both halves and is CORRECTED by wow-re §W14.5/§W14.11. `0x5eb3c0` is not
+    // a GameObject sweep: `0x468380` applies no type filter at all, so it walks **every** object in
+    // the manager — it is the FULL re-query sweep, and its creature arm is the heavier one
+    // (`0x607380`: an unconditional marker teardown plus two queries, questgiver `0x182` and taxi
+    // `0x1aa`), the GameObject arm the lighter. So the death edge sweeps (`0x5eb070`) and the
+    // **revive** edge sweeps too (`0x5eb3c0`), and one sweep per crossing is the reference's own
+    // behaviour rather than a deviation we were paying for. 0654, 1872.
     fold(u64::from(fields.unit_health().unwrap_or(1) == 0));
     fold(u64::from(fields.player_flags()));
     fold(u64::from(fields.player_money().unwrap_or(0)));
@@ -396,6 +483,146 @@ mod tests {
                 .status(ESCORT)
                 .is_none(),
             "still nothing cached — the answer arrives from the server, not from us"
+        );
+    }
+
+    /// **A GameObject is asked about on a SWEEP, and only on a sweep** (decision 1872, wow-re
+    /// `questgiver-marker.md` §W14.6/§W14.8). Three things are being pinned here, and the third is
+    /// the one a client "improves" without noticing:
+    ///
+    /// - the gate is `GAMEOBJECT_FLAGS` bit 2 (mask `0x4`) — `0x5eb0ef shr eax,0x2; test al,1` —
+    ///   and a quest-less GameObject beside it is never asked about at all;
+    /// - a sweep asks exactly once, and the frames between sweeps are silent;
+    /// - **there is no bring-up query.** A GameObject entering view asks nothing; it waits for the
+    ///   next sweep. The unit control in the same world does the opposite on the same frame, which
+    ///   is what makes this a contrast and not an accident of ordering.
+    #[test]
+    fn a_gameobject_is_asked_on_a_sweep_and_never_at_first_sight() {
+        use crate::net::{Guid, NetEntity};
+        use benilla_protocol::ObjectFields;
+
+        /// The Goldshire `Wanted Poster`'s real guid (`HIGHGUID_GAMEOBJECT`, template 68, spawn
+        /// 26843) and its real `GAMEOBJECT_FLAGS` — INTERACT_COND | NODESPAWN, read off the live
+        /// wire by `WOW_PROBE_GOQUEST`.
+        const POSTER: u64 = 0xf110_0000_0044_68db;
+        const POSTER_FLAGS: u32 = 0x24;
+        /// A GameObject next to it with no quest condition: a plain door, `NODESPAWN` only.
+        const DOOR: u64 = 0xf110_0000_0045_0001;
+        const DOOR_FLAGS: u32 = 0x20;
+        /// The control: an ordinary creature questgiver, which the same sweep treats differently.
+        const NPC: u64 = 0x2222;
+        const FIELD_LEVEL: u16 = 34;
+        const FIELD_NPC_FLAGS: u16 = 147;
+        const FIELD_GAMEOBJECT_FLAGS: u16 = 9;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .add_systems(Update, query_statuses);
+
+        let spawn = |app: &mut App, guid: u64, kind: EntityKind, fields: &[(u16, u32)]| {
+            let e = app
+                .world_mut()
+                .spawn((
+                    NetEntity {
+                        kind,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(fields)),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+        };
+        app.world_mut().spawn((
+            SelfPlayer,
+            Guid(1),
+            ObjectStore(ObjectFields::from_pairs(&[(FIELD_LEVEL, 5)])),
+        ));
+        // Drain per update, then count per guid — several objects are in flight at once here.
+        let asked = |app: &mut App| -> Vec<u64> {
+            app.update();
+            rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::QuestgiverStatusQuery { npc } => Some(npc),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Settle the generation first: the very first frame in a fresh world IS a sweep (nothing
+        // has been folded yet), so "first sight" can only be asked of a later frame.
+        assert!(asked(&mut app).is_empty(), "nothing in view yet");
+
+        spawn(
+            &mut app,
+            POSTER,
+            EntityKind::GameObject,
+            &[(FIELD_GAMEOBJECT_FLAGS, POSTER_FLAGS)],
+        );
+        spawn(
+            &mut app,
+            DOOR,
+            EntityKind::GameObject,
+            &[(FIELD_GAMEOBJECT_FLAGS, DOOR_FLAGS)],
+        );
+        spawn(
+            &mut app,
+            NPC,
+            EntityKind::Unit,
+            &[(FIELD_NPC_FLAGS, NPC_FLAG_QUESTGIVER)],
+        );
+
+        assert_eq!(
+            asked(&mut app),
+            vec![NPC],
+            "first sight: the creature is asked from its own create path, the poster is NOT — \
+             the GameObject class has no bring-up query (§W14.8)"
+        );
+        assert!(
+            asked(&mut app).is_empty(),
+            "and the frames after it stay silent"
+        );
+
+        // A sweep: any of the reference's 13 local-player triggers. The packet epoch stands in for
+        // its four packet handlers.
+        app.world_mut().resource_mut::<QuestGiver>().bump_reask();
+        let swept = asked(&mut app);
+        assert!(
+            swept.contains(&POSTER),
+            "the sweep asks about the poster — {swept:x?}"
+        );
+        assert!(
+            swept.contains(&NPC),
+            "and re-asks the creature, as it always did — {swept:x?}"
+        );
+        assert!(
+            !swept.contains(&DOOR),
+            "but never the GameObject without GAMEOBJECT_FLAGS bit 2 — {swept:x?}"
+        );
+        assert_eq!(
+            swept.iter().filter(|g| **g == POSTER).count(),
+            1,
+            "exactly once per sweep"
+        );
+
+        assert!(
+            asked(&mut app).is_empty(),
+            "between sweeps, nothing — a GameObject has no per-object key to re-ask on"
+        );
+
+        // ...and it is not one-shot: the next sweep asks again, because the reference keeps no
+        // per-GameObject memo of having asked (there is nowhere on a CGGameObject_C to keep one).
+        app.world_mut().resource_mut::<QuestGiver>().bump_reask();
+        assert!(
+            asked(&mut app).contains(&POSTER),
+            "and again on the next sweep"
         );
     }
 

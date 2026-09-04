@@ -199,22 +199,6 @@
             collapse = 1,
         }
 
-        -- ── The money-entry kit (ref MoneyInputFrame.lua) ───────────────────────────────────────
-        -- The three boxes ride the shared BenillaMoneyInput_* helpers (MerchantFrame.xml), which
-        -- own the gold/silver/copper fold and the SetCopper suppression bracket. All this adds is
-        -- the per-instance value-changed callback the reference sets with
-        -- `MoneyInputFrame_SetOnvalueChangedFunc`: the create-auction pane re-validates on every
-        -- keystroke, the two bid boxes do not.
-        function BenillaAuctionMoneyInput_OnChanged(box)
-            local frame = box:GetParent()
-            -- False while a programmatic SetCopper is in flight — the reference's `expectChanges`
-            -- counter, as MerchantFrame.xml's bracket flag.
-            if not BenillaMoneyInput_Consume(frame:GetName()) then return end
-            if frame.onValueChanged then
-                frame.onValueChanged()
-            end
-        end
-
         -- ── Load / show / hide / events (ref-lua l.65-125) ──────────────────────────────────────
         function AuctionFrame_OnLoad(frame)
             PanelTemplates_SetNumTabs(frame, 3)
@@ -227,8 +211,8 @@
             AuctionsBuyoutText:SetText(gs("BUYOUT_PRICE") .. " |cff808080(" .. gs("OPTIONAL") .. ")|r")
             -- The create pane's two inputs re-validate on every keystroke (ref-xml l.1811/1877);
             -- the gold box is capped at six digits there, which is the price ceiling in practice.
-            StartPrice.onValueChanged = AuctionsFrameAuctions_ValidateAuction
-            BuyoutPrice.onValueChanged = AuctionsFrameAuctions_ValidateAuction
+            MoneyInputFrame_SetOnvalueChangedFunc(StartPrice, AuctionsFrameAuctions_ValidateAuction)
+            MoneyInputFrame_SetOnvalueChangedFunc(BuyoutPrice, AuctionsFrameAuctions_ValidateAuction)
             StartPriceGold:SetMaxLetters(6)
             -- Each faux list repaints through its own tab's Update.
         end
@@ -925,8 +909,8 @@
                         -- The bid box is SEATED at the required bid, and the gate is read back off
                         -- the box rather than off the number — so a player who types a different
                         -- amount is gated on what they typed (ref-lua l.555-559).
-                        BenillaMoneyInput_SetCopper("BrowseBidPrice", requiredBid)
-                        local offered = BenillaMoneyInput_GetCopper("BrowseBidPrice")
+                        MoneyInputFrame_SetCopper(BrowseBidPrice, requiredBid)
+                        local offered = MoneyInputFrame_GetCopper(BrowseBidPrice)
                         if not highBidder and owner ~= UnitName("player")
                             and GetMoney() >= offered and offered <= BENILLA_MAX_BID then
                             BrowseBidButton:Enable()
@@ -1040,11 +1024,11 @@
                         elseif not (buyoutPrice > 0 and buyoutPrice >= currentBid) then
                             AuctionFrame.buyoutPrice = nil
                         end
-                        BenillaMoneyInput_SetCopper("BidBidPrice", currentBid + minIncrement)
+                        MoneyInputFrame_SetCopper(BidBidPrice, currentBid + minIncrement)
                         -- Looser than Browse's: this list is auctions you already bid on, so the
                         -- "not your own auction" test is redundant and the ceiling is not applied
                         -- (ref-lua l.737).
-                        if not highBidder and GetMoney() >= BenillaMoneyInput_GetCopper("BidBidPrice") then
+                        if not highBidder and GetMoney() >= MoneyInputFrame_GetCopper(BidBidPrice) then
                             BidBidButton:Enable()
                         end
                     end
@@ -1249,9 +1233,9 @@
             local name, texture, count, quality, canUse, price = GetAuctionSellItemInfo()
             -- The suggested opening price: half again the stack's vendor value, floored at one
             -- silver (ref-lua l.1023).
-            BenillaMoneyInput_SetCopper("StartPrice", max(100, floor(price * 1.5)))
+            MoneyInputFrame_SetCopper(StartPrice, max(100, floor(price * 1.5)))
             UpdateDeposit()
-            BenillaMoneyInput_SetCopper("BuyoutPrice", 0)
+            MoneyInputFrame_SetCopper(BuyoutPrice, 0)
             AuctionsFrameAuctions_ValidateAuction()
         end
 
@@ -1279,8 +1263,8 @@
             if not GetAuctionSellItemInfo() then
                 return
             end
-            local start = BenillaMoneyInput_GetCopper("StartPrice")
-            local buyout = BenillaMoneyInput_GetCopper("BuyoutPrice")
+            local start = MoneyInputFrame_GetCopper(StartPrice)
+            local buyout = MoneyInputFrame_GetCopper(BuyoutPrice)
             -- A buyout under the opening price is the one error this form explains out loud.
             if buyout > 0 and start > buyout then
                 AuctionsBuyoutErrorText:Show()
@@ -1293,141 +1277,12 @@
         end
 
         function AuctionsCreateAuctionButton_OnClick()
-            StartAuction(BenillaMoneyInput_GetCopper("StartPrice"),
-                BenillaMoneyInput_GetCopper("BuyoutPrice"),
+            StartAuction(MoneyInputFrame_GetCopper(StartPrice),
+                MoneyInputFrame_GetCopper(BuyoutPrice),
                 AuctionFrameAuctions.duration)
         end
     ]]></Script>
 
-    <!-- The editable money entry (ref MoneyInputFrameTemplate, MoneyInputFrame.xml l.3-260, quoted
-         verbatim: 176x18 overall; gold 58x20 at TOPLEFT, silver/copper 30x20 chained +26/+16; each
-         box's L slice 8x20 at (-5,0), R slice at RIGHT (gold 0, silver/copper -10), M stretched
-         between; the denomination coin 13x13 at LEFT->RIGHT +2 (gold) / -8 (silver, copper)). The
-         boxes are named $parentGold/Silver/Copper, which is the prefix contract the shared
-         BenillaMoneyInput_* helpers read. -->
-    <Frame name="BenillaAuctionMoneyInputTemplate" virtual="true">
-        <Size><AbsDimension x="176" y="18"/></Size>
-        <Frames>
-            <EditBox name="$parentGold" historyLines="0" numeric="true" autoFocus="false">
-                <Size><AbsDimension x="58" y="20"/></Size>
-                <Anchors><Anchor point="TOPLEFT"/></Anchors>
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="RIGHT"/></Anchors>
-                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="10" y="20"/></Size>
-                            <Anchors>
-                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                            </Anchors>
-                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
-                        </Texture>
-                    </Layer>
-                </Layers>
-                <Scripts>
-                    <OnTabPressed>getglobal(this:GetParent():GetName() .. "Silver"):SetFocus()</OnTabPressed>
-                    <OnEnterPressed>getglobal(this:GetParent():GetName() .. "Silver"):SetFocus()</OnEnterPressed>
-                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
-                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                </Scripts>
-                <FontString inherits="ChatFontNormal"/>
-            </EditBox>
-            <EditBox name="$parentSilver" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                <Size><AbsDimension x="30" y="20"/></Size>
-                <Anchors><Anchor point="LEFT" relativeTo="$parentGold" relativePoint="RIGHT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor></Anchors>
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="10" y="20"/></Size>
-                            <Anchors>
-                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                            </Anchors>
-                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
-                        </Texture>
-                    </Layer>
-                </Layers>
-                <Scripts>
-                    <OnTabPressed>getglobal(this:GetParent():GetName() .. "Copper"):SetFocus()</OnTabPressed>
-                    <OnEnterPressed>getglobal(this:GetParent():GetName() .. "Copper"):SetFocus()</OnEnterPressed>
-                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
-                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                </Scripts>
-                <FontString inherits="ChatFontNormal"/>
-            </EditBox>
-            <EditBox name="$parentCopper" letters="2" historyLines="0" numeric="true" autoFocus="false">
-                <Size><AbsDimension x="30" y="20"/></Size>
-                <Anchors><Anchor point="LEFT" relativeTo="$parentSilver" relativePoint="RIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor></Anchors>
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="8" y="20"/></Size>
-                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
-                            <Size><AbsDimension x="10" y="20"/></Size>
-                            <Anchors>
-                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
-                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
-                            </Anchors>
-                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
-                        </Texture>
-                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
-                            <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
-                        </Texture>
-                    </Layer>
-                </Layers>
-                <Scripts>
-                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
-                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
-                </Scripts>
-                <FontString inherits="ChatFontNormal"/>
-            </EditBox>
-        </Frames>
-    </Frame>
 
     <!-- ref-tmpl l.3-28: the duration radio. Three crops of one 64x16 strip. -->
     <CheckButton name="AuctionRadioButtonTemplate" virtual="true">
@@ -2173,7 +2028,7 @@
                             <OnShow>BrowseDropDown_OnLoad()</OnShow>
                         </Scripts>
                     </Frame>
-                    <Frame name="BrowseBidPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                    <Frame name="BrowseBidPrice" inherits="MoneyInputFrameTemplate">
                         <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="25" y="18"/></Offset></Anchor></Anchors>
                     </Frame>
                     <Button name="BrowseCloseButton" inherits="UIPanelButtonTemplate" text="CLOSE">
@@ -2191,7 +2046,7 @@
                         <Anchors><Anchor point="RIGHT" relativeTo="BrowseBuyoutButton" relativePoint="LEFT"/></Anchors>
                         <Scripts>
                             <OnClick>
-                                PlaceAuctionBid("list", GetSelectedAuctionItem("list"), BenillaMoneyInput_GetCopper("BrowseBidPrice"))
+                                PlaceAuctionBid("list", GetSelectedAuctionItem("list"), MoneyInputFrame_GetCopper(BrowseBidPrice))
                                 this:Disable()
                             </OnClick>
                         </Scripts>
@@ -2293,7 +2148,7 @@
                         <Scripts><OnClick>BidPageButton_OnClick(1)</OnClick></Scripts>
                     </Button>
 
-                    <Frame name="BidBidPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                    <Frame name="BidBidPrice" inherits="MoneyInputFrameTemplate">
                         <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-15" y="18"/></Offset></Anchor></Anchors>
                     </Frame>
                     <Button name="BidCloseButton" inherits="UIPanelButtonTemplate" text="CLOSE">
@@ -2311,7 +2166,7 @@
                         <Anchors><Anchor point="RIGHT" relativeTo="BidBuyoutButton" relativePoint="LEFT"/></Anchors>
                         <Scripts>
                             <OnClick>
-                                PlaceAuctionBid("bidder", GetSelectedAuctionItem("bidder"), BenillaMoneyInput_GetCopper("BidBidPrice"))
+                                PlaceAuctionBid("bidder", GetSelectedAuctionItem("bidder"), MoneyInputFrame_GetCopper(BidBidPrice))
                                 this:Disable()
                             </OnClick>
                         </Scripts>
@@ -2450,7 +2305,7 @@
                         </Scripts>
                         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
                     </Button>
-                    <Frame name="StartPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                    <Frame name="StartPrice" inherits="MoneyInputFrameTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsPriceText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-2"/></Offset></Anchor></Anchors>
                     </Frame>
                     <CheckButton name="AuctionsShortAuctionButton" inherits="AuctionRadioButtonTemplate" id="1">
@@ -2474,7 +2329,7 @@
                             <OnClick>AuctionsRadioButton_OnClick(3)</OnClick>
                         </Scripts>
                     </CheckButton>
-                    <Frame name="BuyoutPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                    <Frame name="BuyoutPrice" inherits="MoneyInputFrameTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsBuyoutText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-2"/></Offset></Anchor></Anchors>
                     </Frame>
                     <!-- The deposit (ref-xml l.1882). Its own money type, and the ONLY money in
