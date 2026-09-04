@@ -307,10 +307,10 @@ const TABLE: &[Spec] = &[
         None
     ),
     // The stance/shapeshift row (ref ShapeshiftBar_ChangeForm(n)) — ours clicks the bar's own
-    // buttons, which carry the full form-switch law (StanceBar.xml).
+    // buttons, which carry the full form-switch law (stock BonusActionBarFrame.xml, 1938).
     // ── The self-cast dozen (1.12 `Bindings.xml`:257-293) ───────────────────────────────
     // The same two halves as ACTIONBUTTON, with `ActionButtonUp`'s second argument set: the
-    // reference's own `onSelf`, which `ActionBar.xml` has always forwarded to `UseAction`'s third
+    // reference's own `onSelf`, which stock `ActionButtonUp` forwards to `UseAction`'s third
     // and the host used to drop (1745). `ALT-1`…`ALT-=` are byte-real from DefaultBindings.wtf,
     // and they sit one modifier off the plain bar exactly as the reference lays them out.
     spec!(
@@ -567,8 +567,9 @@ const TABLE: &[Spec] = &[
     ),
     // ── The action-bar PAGES (1.12 `Bindings.xml`:395-431) ──────────────────────────────
     // The bar is six pages of twelve (action slots 1..72) and it has been since 1500 shipped the
-    // multibars; `ChangeActionBarPage` and the `ActionBar_Page{Up,Down}` wrap are ActionBar.xml's
-    // own, quoted 1:1 from the reference. `SHIFT-1..6` and the SHIFT-arrow / SHIFT-wheel steps are
+    // multibars; `ChangeActionBarPage` is the engine's (it fires ACTIONBAR_PAGE_CHANGED and nothing
+    // else — 1938) and the `ActionBar_Page{Up,Down}` wrap is stock ActionButton.lua's. `SHIFT-1..6`
+    // and the SHIFT-arrow / SHIFT-wheel steps are
     // byte-real from `WTF\\DefaultBindings.wtf`.
     spec!(
         "ACTIONPAGE1",
@@ -645,7 +646,7 @@ const TABLE: &[Spec] = &[
         Some("SHIFT-MOUSEWHEELDOWN")
     ),
     // The action-bar lock (decision 1136), the ref's own binding body verbatim (Bindings.xml:433-
-    // 439) — it flips the `LOCK_ACTIONBAR` uvar `ActionBar.xml` declares, the same global the
+    // 439) — it flips the `LOCK_ACTIONBAR` uvar OptionsFrame.xml declares (1938), the same global the
     // Options window's Action Bars row writes. It sits here because the reference files it under
     // this header (l.433 carries no `header=`, so it inherits l.121's ACTIONBAR), and it ships
     // **unbound**: no `TOGGLEACTIONBARLOCK` line in any of the install's three
@@ -1148,10 +1149,10 @@ const TABLE: &[Spec] = &[
         None
     ),
     // ── MultiActionBar (BINDING_HEADER_MULTIACTIONBAR) ──────────────────────────────────
-    // The two bottom bars' buttons (MultiBars.xml renders exactly these; 1.12's right bars
+    // The two bottom bars' buttons (stock MultiActionBars.xml renders exactly these; 1.12's right bars
     // and their MULTIACTIONBAR3/4 commands stay out — honest tree). Ref bodies are the
-    // MultiActionButtonDown/Up runOnUp pair (Bindings.xml:799-966), transcribed in
-    // MultiBars.xml; shipped UNBOUND like the ref (no MULTIACTIONBAR* line in any of the
+    // MultiActionButtonDown/Up runOnUp pair (Bindings.xml:799-966), defined in stock
+    // MultiActionBars.lua; shipped UNBOUND like the ref (no MULTIACTIONBAR* line in any of the
     // install's bindings-cache.wtf files). 1.12 files bar 2 under a BLANK spacer-header;
     // both bars sit under the one MULTIACTIONBAR header here (1008, recorded).
     spec!(

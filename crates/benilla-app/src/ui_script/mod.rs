@@ -651,7 +651,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
             ),
             (80, "Interface\\Icons\\INV_Misc_Food_16", 0x80, 117, 5),
             (84, "Interface\\Icons\\Spell_Holy_SealOfMight", 0x00, 103, 0),
-            // The always-on multibars (MultiBars.xml): BottomLeft = actions 61..72, BottomRight
+            // The always-on multibars (stock MultiActionBars.xml): BottomLeft = actions 61..72, BottomRight
             // = 49..60. A few occupied wells on each so the capture shows both rows seated
             // (empty multibar wells hide — the ref's own default — so without these the rows
             // would be invisible).
@@ -696,7 +696,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                 }),
             );
         }
-        // The stance bar (StanceBar.xml): the synthetic warrior's three stances, battle active —
+        // The stance bar (stock BonusActionBarFrame.xml): the synthetic warrior's three stances, battle active —
         // matches the bonus offset 1 above (battle stance page). Defensive shows the not-castable
         // grey; berserker a running cooldown swipe.
         script.set_shapeshift_forms(vec![

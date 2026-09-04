@@ -832,6 +832,9 @@ fn writer_loop(
                         orientation,
                         spline_id,
                     } => w.move_spline_done(flags, pos, orientation, spline_id),
+                    ClientCommand::MoveTimeSkipped { guid, lag_ms } => {
+                        w.move_time_skipped(guid, lag_ms)
+                    }
                     ClientCommand::ForceSpeedAck {
                         kind,
                         guid,
@@ -919,6 +922,12 @@ fn writer_loop(
                         target,
                     } => w.use_item(bag_index, slot, spell_index, target),
                     ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
+                    ClientCommand::WrapItem {
+                        gift_bag,
+                        gift_slot,
+                        item_bag,
+                        item_slot,
+                    } => w.wrap_item(gift_bag, gift_slot, item_bag, item_slot),
                     ClientCommand::AutoEquipItem { bag_index, slot } => {
                         w.auto_equip_item(bag_index, slot)
                     }

@@ -85,6 +85,13 @@
     </Button>
 
     <Script><![CDATA[
+        -- Seat a micro button above the bar's art plate (was ActionBar.xml's; moved here with 1938 —
+        -- this file is its one caller, and it goes when this window migrates).
+        function BenillaActionBarArt_SeatAbove(frame)
+            local art = getglobal("MainMenuBarArtFrame")
+            if art then frame:SetFrameLevel(art:GetFrameLevel() + 1) end
+        end
+
         -- ref GlobalStrings.lua — the eight labels (enUS), in the `X = X or` FALLBACK form: the
         -- app runs the real localized GlobalStrings.lua off the patch chain BEFORE this file
         -- (ui_script/mod.rs load_global_strings), so the installed locale wins and these copies

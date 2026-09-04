@@ -106,11 +106,17 @@ pub(super) fn apply_net_updates(
     mut reputations: ResMut<Reputations>,
     mut transforms: Query<&mut Transform>,
     mut stores: Query<&mut ObjectStore>,
-    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the two
+    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the three
     // per-unit motion states the drain writes. [`RemoteMotion`] is a relayed player's dead-reckon;
-    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780). Different
-    // components, one concern — what the wire says about how a body we don't control is moving.
-    mut motion: (Query<&mut RemoteMotion>, Query<&mut UnitMoveModes>),
+    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780);
+    // [`crate::transport::TransportRider`] is the deck a unit is standing on and its pose there
+    // (decision 1936). Different components, one concern — what the wire says about how a body we
+    // don't control is moving.
+    mut motion: (
+        Query<&mut RemoteMotion>,
+        Query<&mut UnitMoveModes>,
+        Query<&mut crate::transport::TransportRider>,
+    ),
     // One tuple param (the 16-SystemParam ceiling): the session-lifecycle one-shot writers — the
     // player's teleport/worldport snaps + the glue-screen edges (decision 0193).
     session_msgs: (
@@ -651,6 +657,16 @@ pub(super) fn apply_net_updates(
                 &index,
                 &mut transforms,
             ),
+            // **An observed mover skipped time** (decision 1935). No pose moved — only that
+            // unit's clock ran on — so this touches its relay chain and nothing else, which is
+            // the whole of what the reference's handler does (`0x603b40` → `0x61ab90`:
+            // `[CMovement+0xac] += lag`). A guid we do not hold is dropped, faithfully: the
+            // reference resolves under `TYPEMASK_UNIT` and returns on a miss.
+            SessionEvent::MoveTimeSkipped { guid, lag_ms } => {
+                if let Some(mut m) = index.0.get(&guid).and_then(|&e| motion.0.get_mut(e).ok()) {
+                    m.relay.skip_time(lag_ms);
+                }
+            }
             SessionEvent::UnitMove {
                 guid,
                 position,
@@ -717,6 +733,7 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::MonsterMove {
                 guid,
+                transport,
                 start,
                 spline_id,
                 path,
@@ -727,6 +744,7 @@ pub(super) fn apply_net_updates(
                 run_mode,
             } => objects::monster_move(
                 guid,
+                transport,
                 start,
                 spline_id,
                 path,
@@ -739,6 +757,7 @@ pub(super) fn apply_net_updates(
                 &mut commands,
                 &index,
                 &mut transforms,
+                &mut motion.2,
             ),
             SessionEvent::Teleport {
                 guid,
@@ -1668,6 +1687,12 @@ pub(super) fn apply_net_updates(
                 item_guid,
                 spell_id,
             } => item_cooldown(item_guid, spell_id, &items, &mut ui_actions.10),
+            // The item-lifetime countdown's ONLY feed (decision 1933): park the deadline on the
+            // item store, exactly as the enchant timer below does — vmangos's own writer says the
+            // `ITEM_FIELD_DURATION` field the client also holds is not what it displays from.
+            SessionEvent::ItemTime { item_guid, seconds } => {
+                items.set_item_duration(item_guid, seconds)
+            }
             // The temporary-enchant countdown's ONLY feed (decision 0920): park the deadline on the
             // item store, which every tooltip surface reads back through `enchant_remaining_ms`.
             SessionEvent::ItemEnchantTime {

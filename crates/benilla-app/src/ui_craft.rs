@@ -216,19 +216,24 @@ fn feed_craft(
                 if reagents.is_empty() {
                     num_available = 0;
                 }
+                // **Focus first, then the totems** — `0x4ff980`'s own push order, and
+                // `GetCraftSpellFocus 0x4f78b0` returns the very same pair list despite its name
+                // (wow-re `tradeskill-tools-and-spell-focus.md`). The focus's flag is the literal
+                // `1.0` with no predicate: the reference never reddens it. See
+                // [`crate::ui_tradeskill`]'s twin, where the law is written out.
                 let mut tools = Vec::new();
-                for &t in d.totems.iter().filter(|&&t| t != 0) {
-                    let have = count_of(&store.0, &items, t, InventoryScope::CARRIED) > 0;
-                    if let Some(info) = items.template(t, 0, &commands) {
-                        tools.push((info.name.clone(), have));
-                    }
-                }
                 if d.requires_spell_focus != 0 {
                     if let Some(n) = focus
                         .as_deref()
                         .and_then(|f| f.catalog.name(d.requires_spell_focus))
                     {
                         tools.push((n.to_string(), true));
+                    }
+                }
+                for &t in d.totems.iter().filter(|&&t| t != 0) {
+                    let have = count_of(&store.0, &items, t, InventoryScope::CARRIED) > 0;
+                    if let Some(info) = items.template(t, 0, &commands) {
+                        tools.push((info.name.clone(), have));
                     }
                 }
                 let needs_item_target = matches!(

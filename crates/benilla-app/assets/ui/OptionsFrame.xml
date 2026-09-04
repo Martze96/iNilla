@@ -190,6 +190,111 @@
     </Font>
 
     <Script><![CDATA[
+        -- ── The reference's own option table, verbatim (stock UIOptionsFrame.lua l.1-84; 1938) ──
+        -- Stock MultiActionBars.lua:10 writes five rows of this table from MultiActionBarFrame_OnLoad
+        -- ("Hack to get around load order dependencies": the reference's toc loads UIOptionsFrame.xml
+        -- at l.21, before MultiActionBars.xml at l.39, so the MultiBar*_IsVisible funcs named at
+        -- l.55-59 are still nil when the table is declared, exactly as they are here). Our rows
+        -- below keep their own store (OptionsRow_Get's three kinds) and do not read this table; it
+        -- is published because the reference's bar file indexes it at LOAD, and this file is the
+        -- options window — the table's home — now seated at the reference's position in the
+        -- manifest. It goes with the window when UIOptionsFrame.xml migrates.
+        -- The two Action Bars uvars the reference's own options window inits in UIOptionsFrame_Init
+        -- (stock UIOptionsFrame.lua l.102-107), at file scope here because the rows below capture the
+        -- value at their OnLoad as the registered default. LOCK_ACTIONBAR is read by stock
+        -- ActionBarFrame.xml's drag guards and PetActionBarFrame.lua:270/278 (ours PetActionBar.xml);
+        -- ALWAYS_SHOW_MULTIBARS by stock MultiActionBar_UpdateGridVisibility. Both lived in the bar
+        -- files until 1938 took those stock.
+        LOCK_ACTIONBAR = "0"
+        RegisterForSave("LOCK_ACTIONBAR")
+        ALWAYS_SHOW_MULTIBARS = "0"
+        RegisterForSave("ALWAYS_SHOW_MULTIBARS")
+
+        UIOptionsFrameCheckButtons = { };
+        ------------------- Basic Options -------------------
+        -- Controls
+        UIOptionsFrameCheckButtons["INVERT_MOUSE"] =				{ index = 1, cvar = "mouseInvertPitch" };
+
+        -- General
+        UIOptionsFrameCheckButtons["CLICK_TO_MOVE"] =				{ index = 6,  cvar = "autointeract" };
+        UIOptionsFrameCheckButtons["GAMEFIELD_DESELECT_TEXT"] =			{ index = 45, cvar = "deselectOnClick"};
+        UIOptionsFrameCheckButtons["ASSIST_ATTACK"] =				{ index = 3,  cvar = "assistAttack" };
+        UIOptionsFrameCheckButtons["CLEAR_AFK"] =				{ index = 16, cvar = "autoClearAFK" };
+        UIOptionsFrameCheckButtons["BLOCK_TRADES"] =				{ index = 14, cvar = "BlockTrades" };
+        UIOptionsFrameCheckButtons["AUTO_SELF_CAST_TEXT"] =			{ index = 61, cvar = "autoSelfCast"};
+
+        -- Display
+        UIOptionsFrameCheckButtons["USE_UBERTOOLTIPS"] =			{ index = 12, cvar = "UberTooltips" };
+        UIOptionsFrameCheckButtons["STATUS_BAR_TEXT"] =				{ index = 2,  cvar = "statusBarText" };
+        UIOptionsFrameCheckButtons["PROFANITY_FILTER"] =			{ index = 5,  cvar = "profanityFilter" };
+        UIOptionsFrameCheckButtons["SHOW_CLOAK"] =				{ index = 31, func = ShowingCloak, setFunc = ShowCloak};
+        UIOptionsFrameCheckButtons["SHOW_HELM"] =				{ index = 20, func = ShowingHelm , setFunc = ShowHelm };
+        UIOptionsFrameCheckButtons["SHOW_QUEST_FADING_TEXT"] =			{ index = 42, uvar = "QUEST_FADING_DISABLE", default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_BUFF_DURATION_TEXT"] =			{ index = 39, uvar = "SHOW_BUFF_DURATIONS", default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_PLAYER_NAMES"] =			{ index = 21, cvar = "UnitNamePlayer"};
+        UIOptionsFrameCheckButtons["SHOW_GUILD_NAMES"] =			{ index = 22, cvar = "UnitNamePlayerGuild"};
+        UIOptionsFrameCheckButtons["SHOW_PLAYER_TITLES"] =			{ index = 23, cvar = "UnitNamePlayerPVPTitle"};
+        UIOptionsFrameCheckButtons["SHOW_NPC_NAMES"] =				{ index = 30, cvar = "UnitNameNPC"};
+        UIOptionsFrameCheckButtons["SHOW_OWN_NAME"] =				{ index = 67, cvar = "UnitNameOwn"};
+        UIOptionsFrameCheckButtons["SHOW_PARTY_BACKGROUND_TEXT"] =		{ index = 43, uvar = "SHOW_PARTY_BACKGROUND"};
+        UIOptionsFrameCheckButtons["HIDE_OUTDOOR_WORLD_STATE_TEXT"] =		{ index = 62, uvar = "HIDE_OUTDOOR_WORLD_STATE", default = "0"};
+        UIOptionsFrameCheckButtons["AUTO_QUEST_WATCH_TEXT"] =			{ index = 66, uvar = "AUTO_QUEST_WATCH", default = "1"};
+
+        -- Camera Controls
+        UIOptionsFrameCheckButtons["FOLLOW_TERRAIN"] =				{ index = 24, cvar = "cameraTerrainTilt"};
+        UIOptionsFrameCheckButtons["HEAD_BOB"] =				{ index = 26, cvar = "cameraBobbing"};
+        UIOptionsFrameCheckButtons["WATER_COLLISION"] =				{ index = 27, cvar = "cameraWaterCollision"};
+        UIOptionsFrameCheckButtons["SMART_PIVOT"] =				{ index = 15, cvar = "cameraPivot" };
+        -- Help
+        UIOptionsFrameCheckButtons["SHOW_TUTORIALS"] =				{ index = 28};
+        UIOptionsFrameCheckButtons["SHOW_NEWBIE_TIPS_TEXT"] =			{ index = 29, uvar = "SHOW_NEWBIE_TIPS"};
+        UIOptionsFrameCheckButtons["SHOW_TIPOFTHEDAY_TEXT"] =			{ index = 44, cvar = "showGameTips"};
+
+        ------------------- Advanced Options -------------------
+        -- Chat
+        UIOptionsFrameCheckButtons["SIMPLE_CHAT_TEXT"] =			{ index = 7,  uvar = "SIMPLE_CHAT" , default = "1"};
+        UIOptionsFrameCheckButtons["CHAT_LOCKED_TEXT"] =			{ index = 8,  uvar = "CHAT_LOCKED" , default = "1"};
+        UIOptionsFrameCheckButtons["GUILDMEMBER_ALERT"] =			{ index = 13, cvar = "guildMemberNotify" };
+        UIOptionsFrameCheckButtons["REMOVE_CHAT_DELAY_TEXT"] =			{ index = 18, uvar = "REMOVE_CHAT_DELAY", default = "0"};
+        UIOptionsFrameCheckButtons["CHAT_BUBBLES_TEXT"] =			{ index = 37, cvar = "ChatBubbles"};
+        UIOptionsFrameCheckButtons["PARTY_CHAT_BUBBLES_TEXT"] =			{ index = 38, cvar = "ChatBubblesParty"};
+        UIOptionsFrameCheckButtons["SHOW_LOOT_SPAM"] =				{ index = 46, cvar = "showLootSpam"};
+        UIOptionsFrameCheckButtons["AUTO_JOIN_GUILD_CHANNEL"] =			{ index = 51};
+        UIOptionsFrameCheckButtons["DISABLE_SPAM_FILTER"] =			{ index = 68, cvar = "spamFilter"};
+
+        -- Action Bars
+        UIOptionsFrameCheckButtons["LOCK_ACTIONBAR_TEXT"] =			{ index = 32, uvar = "LOCK_ACTIONBAR", default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_MULTIBAR1_TEXT"] =			{ index = 33, func = MultiBar1_IsVisible, setFunc = Multibar_EmptyFunc};
+        UIOptionsFrameCheckButtons["SHOW_MULTIBAR2_TEXT"] =			{ index = 34, func = MultiBar2_IsVisible, setFunc = Multibar_EmptyFunc};
+        UIOptionsFrameCheckButtons["SHOW_MULTIBAR3_TEXT"] =			{ index = 35, func = MultiBar3_IsVisible, setFunc = Multibar_EmptyFunc};
+        UIOptionsFrameCheckButtons["SHOW_MULTIBAR4_TEXT"] =			{ index = 36, func = MultiBar4_IsVisible, setFunc = Multibar_EmptyFunc};
+        UIOptionsFrameCheckButtons["ALWAYS_SHOW_MULTIBARS_TEXT"] =		{ index = 40, func = MultibarGrid_IsVisible, setFunc = Multibar_EmptyFunc};
+
+        -- Raid & Party Options
+        UIOptionsFrameCheckButtons["HIDE_PARTY_INTERFACE_TEXT"] =		{ index = 47, uvar = "HIDE_PARTY_INTERFACE" , default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_DISPELLABLE_DEBUFFS_TEXT"] =		{ index = 48, uvar = "SHOW_DISPELLABLE_DEBUFFS" , default = "1"};
+        UIOptionsFrameCheckButtons["SHOW_CASTABLE_BUFFS_TEXT"] =		{ index = 49, uvar = "SHOW_CASTABLE_BUFFS" , default = "1"};
+        UIOptionsFrameCheckButtons["SHOW_TARGET_OF_TARGET_TEXT"] =		{ index = 50, uvar = "SHOW_TARGET_OF_TARGET" , default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_PARTY_PETS_TEXT"] =			{ index = 41, uvar = "SHOW_PARTY_PETS", default = "1"};
+
+        -- Combat Text
+        UIOptionsFrameCheckButtons["SHOW_COMBAT_TEXT_TEXT"] =			{ index = 52, uvar = "SHOW_COMBAT_TEXT" , default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_LOW_HEALTH_MANA_TEXT"] =	{ index = 53, uvar = "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA" , default = "1"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_AURAS_TEXT"] =		{ index = 54, uvar = "COMBAT_TEXT_SHOW_AURAS" , default = "1"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_AURA_FADE_TEXT"] =		{ index = 55, uvar = "COMBAT_TEXT_SHOW_AURA_FADE" , default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_COMBAT_STATE_TEXT"] =	{ index = 56, uvar = "COMBAT_TEXT_SHOW_COMBAT_STATE" , default = "1"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_DODGE_PARRY_MISS_TEXT"] =	{ index = 57, uvar = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_RESISTANCES_TEXT"] =	{ index = 58, uvar = "COMBAT_TEXT_SHOW_RESISTANCES", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_REPUTATION_TEXT"] =	{ index = 60, uvar = "COMBAT_TEXT_SHOW_REPUTATION", default = "0"};
+        UIOptionsFrameCheckButtons["SHOW_DAMAGE_TEXT"] =			{ index = 19, cvar = "CombatDamage"};
+        UIOptionsFrameCheckButtons["LOG_PERIODIC_EFFECTS"] =			{ index = 11, cvar = "CombatLogPeriodicSpells" };
+        UIOptionsFrameCheckButtons["SHOW_PET_MELEE_DAMAGE"] =			{ index = 9,  cvar = "PetMeleeDamage" };
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_REACTIVES_TEXT"] =		{ index = 63, uvar = "COMBAT_TEXT_SHOW_REACTIVES", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_FRIENDLY_NAMES_TEXT"] =	{ index = 64, uvar = "COMBAT_TEXT_SHOW_FRIENDLY_NAMES", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_COMBO_POINTS_TEXT"] =	{ index = 65, uvar = "COMBAT_TEXT_SHOW_COMBO_POINTS", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_MANA_TEXT"] =		{ index = 59, uvar = "COMBAT_TEXT_SHOW_MANA", default = "0"};
+        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_HONOR_GAINED_TEXT"] =	{ index = 69, uvar = "COMBAT_TEXT_SHOW_HONOR_GAINED", default = "1"};
+
         -- ── SHOW_BUFF_DURATIONS: the buff bar's timer switch (decision 1139) ──────────────────
         --
         -- The reference declares this in `UIOptionsFrame.lua` (l.21/104), whose `default` is
@@ -787,8 +892,8 @@
             -- four bar rows are `func` rows over the server's own PLAYER_FIELD_BYTES byte 2 (no
             -- local store exists to save), while Always Show ActionBars is a `uvar` row — the
             -- engine binding takes exactly four arguments and silently drops the fifth the
-            -- reference passes it, so that switch has no server side at all. MultiBars.xml's
-            -- header carries the byte-level evidence.
+            -- reference passes it, so that switch has no server side at all. Decision 1500 and
+            -- wow-re action-bar-toggles.md carry the byte-level evidence.
             ActionBars = {
                 "RowMultiBar1", "RowMultiBar2", "RowMultiBar3", "RowMultiBar4",
                 "RowAlwaysShowMultibars", "RowLockActionBar",
@@ -864,7 +969,14 @@
         function OptionsRow_Set(row, value)
             if row.uvar then
                 setglobal(row.uvar, value)
-                if row.applyFunc then row.applyFunc() end
+                -- `applyFunc` is a global's NAME: the rows are read at this file's load, which since
+                -- 1938 sits at the reference's slot — before every file an apply lives in — so the
+                -- function is looked up when the row is applied, not when it is declared. A name
+                -- with no global behind it (a page harness without that definer) applies nothing,
+                -- which is what a nil capture always did.
+                local apply = row.applyFunc
+                if type(apply) == "string" then apply = getglobal(apply) end
+                if apply then apply() end
                 return
             end
             -- An API row hands the setter the row's own "1"/"0" STRING, which is what 1.12 does
@@ -925,14 +1037,27 @@
         -- no particular order (they are independent by construction — each one re-derives one
         -- feature's state from one global). A row whose defining file was not loaded has a nil
         -- applyFunc and is skipped, which is what keeps a partial test harness honest.
+        -- The multibar grid switch's load arm — stock UIOptionsFrame.lua l.218-220 verbatim.
+        function OptionsFrame_MultibarGrid_Load()
+            if ( ALWAYS_SHOW_MULTIBARS == "1" or ALWAYS_SHOW_MULTIBARS == 1 ) then
+                MultiActionBar_ShowAllGrids()
+            end
+        end
+
         function OptionsFrame_ApplySavedSettings()
             local ran = {}
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
                 for _, rkey in ipairs(rows) do
                     local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
-                    local apply = row and row.applyFunc
-                    if apply and not ran[apply] then
-                        ran[apply] = 1
+                    -- `applyFunc` is a NAME (see OptionsPage_Apply): resolved here, when the
+                    -- definer has long since loaded; a name with nothing behind it is skipped. A
+                    -- row whose LOAD-time side effect differs from its click's names it as
+                    -- `loadFunc` (the multibar grid switch, below).
+                    local name = row and (row.loadFunc or row.applyFunc)
+                    local apply = name
+                    if type(name) == "string" then apply = getglobal(name) end
+                    if apply and not ran[name] then
+                        ran[name] = 1
                         apply()
                     end
                 end
@@ -1299,8 +1424,8 @@
             if key == "ActionBars" then
                 -- 1.12's own rule for this pair, verbatim in effect (UIOptionsFrame.lua l.722-726):
                 -- Show Right ActionBar 2 is dead while Show Right ActionBar is unticked, because
-                -- MultiBarLeft does not appear without MultiBarRight under it (MultiBars.xml's
-                -- conjunction). It is the only cross-row dependency on this page — the two bottom
+                -- MultiBarLeft does not appear without MultiBarRight under it (stock
+                -- MultiActionBar_Update's conjunction). It is the only cross-row dependency on this page — the two bottom
                 -- bars, the grid switch and the lock are all independent.
                 OptionsRow_SetEnabled(OptionsFrameContainerBodyActionBarsRowMultiBar4,
                     SHOW_MULTI_ACTIONBAR_3)
@@ -2639,7 +2764,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_COMBAT_TEXT",
                                                     "Enable Floating Combat Text", "OPTION_TOOLTIP_SHOW_COMBAT_TEXT")
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The scroll mode. 1.12's own dropdown, values and all
@@ -2659,7 +2784,7 @@
                                                     { text = "Arc", value = "3" },
                                                 })
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLowHealthMana" inherits="OptionsCheckboxRowTemplate">
@@ -2672,7 +2797,7 @@
                                                     "Show Low Mana and Health",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_LOW_HEALTH_MANA", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAuras" inherits="OptionsCheckboxRowTemplate">
@@ -2684,7 +2809,7 @@
                                                 OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURAS",
                                                     "Show Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURAS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAuraFade" inherits="OptionsCheckboxRowTemplate">
@@ -2696,7 +2821,7 @@
                                                 OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURA_FADE",
                                                     "Show Fading Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURA_FADE", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowCombatState" inherits="OptionsCheckboxRowTemplate">
@@ -2709,7 +2834,7 @@
                                                     "Show Combat State",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBAT_STATE", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowDodgeParryMiss" inherits="OptionsCheckboxRowTemplate">
@@ -2722,7 +2847,7 @@
                                                     "Show Dodge/Parries/Misses",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowResistances" inherits="OptionsCheckboxRowTemplate">
@@ -2735,7 +2860,7 @@
                                                     "Show Damage Reduction",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_RESISTANCES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowReputation" inherits="OptionsCheckboxRowTemplate">
@@ -2748,7 +2873,7 @@
                                                     "Show Reputation",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REPUTATION", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowReactives" inherits="OptionsCheckboxRowTemplate">
@@ -2761,7 +2886,7 @@
                                                     "Show Reactive Spells and Abilities",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REACTIVES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowFriendlyNames" inherits="OptionsCheckboxRowTemplate">
@@ -2774,7 +2899,7 @@
                                                     "Show Friendly Healer Names",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_FRIENDLY_NAMES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Combo Points carries the reference's SECOND gate: greyed
@@ -2790,7 +2915,7 @@
                                                     "Show Combo Points",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBO_POINTS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowEnergyGains" inherits="OptionsCheckboxRowTemplate">
@@ -2803,7 +2928,7 @@
                                                     "Show Energy Gains",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_MANA", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowHonorGained" inherits="OptionsCheckboxRowTemplate">
@@ -2816,7 +2941,7 @@
                                                     "Show Honor Gained",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_HONOR_GAINED", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
@@ -2841,11 +2966,11 @@
                                      four arguments and silently DROPS the fifth that the reference
                                      passes it (`cmp esi,4` at 0x4e770e), so that switch has no
                                      server store to write and the reference RegisterForSave's it
-                                     locally too (UIOptionsFrame.lua l.106-107). MultiBars.xml's
-                                     header carries the whole byte-level finding.
+                                     locally too (UIOptionsFrame.lua l.106-107). Decision 1500 and
+                                     wow-re action-bar-toggles.md carry the whole byte-level finding.
 
                                      The getters and setters are written here as closures rather
-                                     than captured from MultiBars.xml by name, deliberately: a row's
+                                     than captured from the bar file by name, deliberately: a row's
                                      OnLoad captures a function VALUE, so a named import would make
                                      this page depend on load ORDER — and a harness (or a manifest
                                      reordering) that loaded the window without the bars would give
@@ -2874,7 +2999,15 @@
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self,
                                                     function() return SHOW_MULTI_ACTIONBAR_1 end,
-                                                    function(value) BenillaMultiBar_SetShown(1, value) end,
+                                                    function(value)
+                                                        local on
+                                                        if value and value ~= "0" and value ~= 0 then on = 1 end
+                                                        SHOW_MULTI_ACTIONBAR_1 = on
+                                                        MultiActionBar_Update()
+                                                        SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2,
+                                                            SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)
+                                                        UIParent_ManageFramePositions()
+                                                    end,
                                                     "0", "Show Bottom Left ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR1")
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2886,7 +3019,15 @@
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self,
                                                     function() return SHOW_MULTI_ACTIONBAR_2 end,
-                                                    function(value) BenillaMultiBar_SetShown(2, value) end,
+                                                    function(value)
+                                                        local on
+                                                        if value and value ~= "0" and value ~= 0 then on = 1 end
+                                                        SHOW_MULTI_ACTIONBAR_2 = on
+                                                        MultiActionBar_Update()
+                                                        SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2,
+                                                            SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)
+                                                        UIParent_ManageFramePositions()
+                                                    end,
                                                     "0", "Show Bottom Right ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR2")
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2898,7 +3039,15 @@
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self,
                                                     function() return SHOW_MULTI_ACTIONBAR_3 end,
-                                                    function(value) BenillaMultiBar_SetShown(3, value) end,
+                                                    function(value)
+                                                        local on
+                                                        if value and value ~= "0" and value ~= 0 then on = 1 end
+                                                        SHOW_MULTI_ACTIONBAR_3 = on
+                                                        MultiActionBar_Update()
+                                                        SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2,
+                                                            SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)
+                                                        UIParent_ManageFramePositions()
+                                                    end,
                                                     "0", "Show Right ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR3")
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2919,7 +3068,15 @@
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self,
                                                     function() return SHOW_MULTI_ACTIONBAR_4 end,
-                                                    function(value) BenillaMultiBar_SetShown(4, value) end,
+                                                    function(value)
+                                                        local on
+                                                        if value and value ~= "0" and value ~= 0 then on = 1 end
+                                                        SHOW_MULTI_ACTIONBAR_4 = on
+                                                        MultiActionBar_Update()
+                                                        SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2,
+                                                            SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)
+                                                        UIParent_ManageFramePositions()
+                                                    end,
                                                     "0", "Show Right ActionBar 2", "OPTION_TOOLTIP_SHOW_MULTIBAR4", 1)
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2931,7 +3088,14 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "ALWAYS_SHOW_MULTIBARS",
                                                     "Always Show ActionBars", "OPTION_TOOLTIP_ALWAYS_SHOW_MULTIBARS")
-                                                self.applyFunc = MultiActionBar_UpdateGridVisibility
+                                                -- Two arms, as the reference has them: a CLICK runs
+                                                -- MultiActionBar_UpdateGridVisibility (UIOptionsFrame.xml:683);
+                                                -- the LOAD arm only ever SHOWS (UIOptionsFrame.lua:218-220),
+                                                -- because every hide is a counted decrement on each well
+                                                -- (ActionButton_HideGrid) and a load-time hide against wells
+                                                -- nobody opened would push the count negative.
+                                                self.applyFunc = "MultiActionBar_UpdateGridVisibility"
+                                                self.loadFunc = "OptionsFrame_MultibarGrid_Load"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLockActionBar" inherits="OptionsCheckboxRowTemplate">
@@ -3013,7 +3177,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_TARGET_OF_TARGET",
                                                     "Show Target of Target", "OPTION_TOOLTIP_SHOW_TARGET_OF_TARGET")
-                                                self.applyFunc = TargetofTarget_Update
+                                                self.applyFunc = "TargetofTarget_Update" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The label is ours: the reference declares a Label
@@ -3039,7 +3203,7 @@
                                                     { text = "Party or Raid", value = "4", tip = "OPTION_TOOLTIP_TARGETOFTARGET4" },
                                                     { text = "Always", value = "5", tip = "OPTION_TOOLTIP_TARGETOFTARGET5" },
                                                 })
-                                                self.applyFunc = TargetofTarget_Update
+                                                self.applyFunc = "TargetofTarget_Update" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The two equipment-display toggles (decision 1472,
@@ -3094,7 +3258,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_BUFF_DURATIONS",
                                                     "Buff Durations", "OPTION_TOOLTIP_SHOW_BUFF_DURATION")
-                                                self.applyFunc = BuffButtons_UpdatePositions
+                                                self.applyFunc = "BuffButtons_UpdatePositions" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAutoQuestWatch" inherits="OptionsCheckboxRowTemplate">
@@ -3180,7 +3344,7 @@
                                                 OptionsGlobalRow_OnLoad(self, "REMOVE_CHAT_DELAY",
                                                     "Remove Chat Hover Delay",
                                                     "OPTION_TOOLTIP_REMOVE_CHAT_DELAY")
-                                                self.applyFunc = ChatFrame_ApplyMouseOverDelay
+                                                self.applyFunc = "ChatFrame_ApplyMouseOverDelay" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowChatBubbles" inherits="OptionsCheckboxRowTemplate">

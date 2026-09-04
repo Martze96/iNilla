@@ -257,6 +257,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             item_guid,
             spell_id,
         }],
+        ServerPacket::ItemTime { item_guid, seconds } => {
+            vec![SessionEvent::ItemTime { item_guid, seconds }]
+        }
         ServerPacket::ItemEnchantTime {
             item_guid,
             slot,
@@ -640,8 +643,12 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]
         }
+        ServerPacket::MoveTimeSkipped { guid, lag_ms } => {
+            vec![SessionEvent::MoveTimeSkipped { guid, lag_ms }]
+        }
         ServerPacket::MonsterMove {
             guid,
+            transport,
             start,
             spline_id,
             path,
@@ -652,6 +659,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             run_mode,
         } => vec![SessionEvent::MonsterMove {
             guid,
+            transport,
             start: v3(start),
             spline_id,
             path: path.into_iter().map(v3).collect(),

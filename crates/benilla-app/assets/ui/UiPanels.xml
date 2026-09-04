@@ -24,6 +24,11 @@
         its comment names the reference row it stands in for.
     -->
     <Script><![CDATA[
+        -- The placeholder icon for an item/spell whose texture has not arrived yet (Craft, Quest,
+        -- QuestLog, Trainer and TradeSkill read it). Was ActionBar.xml's; that file went stock with
+        -- 1938 and this kit is the constant's home now — a benilla name, so nothing stock reads it.
+        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
         -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard,
         -- Battlefield, WorldStateScore, Minigame) join as their windows land (audited

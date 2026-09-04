@@ -22,6 +22,7 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,

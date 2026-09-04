@@ -207,7 +207,9 @@ pub use skill_lines::{
     load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
 };
 mod spell_focus;
+mod spell_mechanic;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
+pub use spell_mechanic::{load_spell_mechanic_catalog, SpellMechanicCatalog};
 mod talents;
 pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
 mod spell_visual;

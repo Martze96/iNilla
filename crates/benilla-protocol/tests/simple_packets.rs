@@ -229,18 +229,20 @@ fn set_faction_standing_parses_and_decodes() {
 /// opcode numbers.
 #[test]
 fn unknown_opcode_decodes_to_packet_dropped() {
-    // 0x0319 = MSG_MOVE_TIME_SKIPPED — assigned in 1.12.1 but deliberately unparsed by benilla.
-    let packet = messages::parse_server(0x0319, &hx("0102030405")).unwrap();
-    assert!(matches!(packet, ServerPacket::Other { opcode: 0x0319 }));
+    // 0x0324 = SMSG_PET_ACTION_SOUND — assigned in 1.12.1 but deliberately unparsed by benilla.
+    // (The sentinel used to be 0x0319 `MSG_MOVE_TIME_SKIPPED`, which decision 1935 gave a parse
+    // arm: an observed mover's skipped time has to reach its relay chain or that unit hitches.)
+    let packet = messages::parse_server(0x0324, &hx("0102030405")).unwrap();
+    assert!(matches!(packet, ServerPacket::Other { opcode: 0x0324 }));
     match decode(packet).as_slice() {
         [SessionEvent::PacketDropped {
-            opcode: 0x0319,
+            opcode: 0x0324,
             unparseable: false,
         }] => {}
         other => panic!("expected one PacketDropped event, got {other:?}"),
     }
     // The generated name table: a known opcode resolves, an unassigned number doesn't.
-    assert_eq!(messages::opcode_name(0x0319), Some("MSG_MOVE_TIME_SKIPPED"));
+    assert_eq!(messages::opcode_name(0x0324), Some("SMSG_PET_ACTION_SOUND"));
     assert_eq!(
         messages::opcode_name(messages::opcode::SMSG_UPDATE_OBJECT),
         Some("SMSG_UPDATE_OBJECT")

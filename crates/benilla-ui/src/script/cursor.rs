@@ -321,6 +321,16 @@ pub(super) fn item_link_name(link: Option<&str>) -> String {
 /// item payload also un-locks its source slot; an already-empty cursor is not a transition (no
 /// event).
 pub(crate) fn clear_cursor(model: &mut Model) {
+    // **An armed gift wrap dies with any cancel** (decision 1934), and this is the FIRST thing
+    // the reference's `ClearCursor 0x495190` does — `0x5edf10` is its opening act and it is
+    // **ungated by either parameter**, including `ClearCursor(0)`, the flavour that deliberately
+    // keeps an ordinary held item's lock. So all 70 of its call sites cancel a wrap. The paper
+    // unlocks and the cursor mode goes back to the base.
+    if let Some(wrap) = model.pending_wrap.take() {
+        queue_lock_changed(model, wrap.bag, wrap.slot);
+        model.ui_cursor = None;
+        model.ui_cursor_dirty = true;
+    }
     match model.cursor.take() {
         Some(CursorPayload::Item(item)) => {
             queue_cursor_update(model);
@@ -741,6 +751,7 @@ mod tests {
         slots.insert(
             1,
             crate::script::container::ContainerSlot {
+                duration_ms: None,
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,

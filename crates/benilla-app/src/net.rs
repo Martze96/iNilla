@@ -770,6 +770,15 @@ pub(crate) enum ClientCommand {
         jump: Option<JumpInfo>,
         transport: Option<TransportPose>,
     },
+    /// Report that our mover's simulation advanced through `lag_ms` without integrating
+    /// (`CMSG_MOVE_TIME_SKIPPED`) — decision 1935. `guid` is the mover's own, the reference's
+    /// `0x600be0` gate being that it equals the active-mover globals. The server folds the number
+    /// into its copy of that mover's movement clock (`stime`/`ctime`), and — while it thinks we
+    /// have just boarded a transport — answers by re-sending the transport's create update.
+    MoveTimeSkipped {
+        guid: u64,
+        lag_ms: u32,
+    },
     /// Claim `guid` as our mover (`CMSG_SET_ACTIVE_MOVER`). Login sends it for our own body; a
     /// possession handoff re-sends it for the unit we were handed, because the server drops every
     /// `MSG_MOVE_*` for a mover it has not confirmed.
@@ -880,6 +889,21 @@ pub(crate) enum ClientCommand {
     OpenItem {
         bag_index: u8,
         slot: u8,
+    },
+    /// Wrap the item at `(item_bag, item_slot)` in the paper at `(gift_bag, gift_slot)`
+    /// (`CMSG_WRAP_ITEM`, the same bag addressing) — the completion of the local wrap cursor a
+    /// `ITEM_FLAG_WRAPPER` item's right-click armed. The **paper leads**, as the wire does.
+    ///
+    /// The client applies no eligibility filter of its own (decision 1934): an equipped item, a
+    /// bag, a soulbound or stackable or unique item, or an already-wrapped one all send and are
+    /// refused server-side with one of the six `ERR_CANT_WRAP_*` reasons, arriving here as an
+    /// `InventoryFailure` on the UI error line. Success is silent — field updates on the target
+    /// and one paper destroyed.
+    WrapItem {
+        gift_bag: u8,
+        gift_slot: u8,
+        item_bag: u8,
+        item_slot: u8,
     },
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, same bag addressing) — the drain's fork for an
     /// *equippable* click, mirroring the real client's equip-vs-use decision. Refusals come back

@@ -1075,8 +1075,7 @@ mod tests {
     /// do not ship under its own name usually has a counterpart of ours under a different one, and
     /// both would declare the same frames.
     ///
-    /// That half doubles as the map nothing else holds: `ActionBarFrame.xml` is our
-    /// `ActionBar.xml`, `FloatingChatFrame.xml` is our `ChatFrame.xml`,
+    /// That half doubles as the map nothing else holds: `FloatingChatFrame.xml` is our `ChatFrame.xml`,
     /// `MainMenuBarMicroButtons.xml` is our `MicroMenu.xml`, `StaticPopup.xml` is our
     /// `UiPanels.xml`. (The row this map used to lead with — `PlayerFrame.xml`/`TargetFrame.xml`/
     /// `PetFrame.xml` all being our one `UnitFrames.xml` — is retired: those four are the
@@ -2037,21 +2036,12 @@ mod tests {
                  flow works without it",
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
-            (
-                "PARTY_MEMBER_DISABLE",
-                "PartyMemberFrame.lua — the offline grey-out",
-            ),
-            ("PARTY_MEMBER_ENABLE", "PartyMemberFrame.lua"),
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
             (
                 "PLAYER_FLAGS_CHANGED",
                 "TargetFrame.lua — the AFK/DND badge",
-            ),
-            (
-                "PLAYER_REGEN_ENABLED",
-                "PlayerFrame.lua — and _DISABLED is unfired too, so the pair is whole",
             ),
             ("PLAYTIME_CHANGED", "PlayerFrame.lua"),
             ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
@@ -2080,47 +2070,59 @@ mod tests {
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
                     // Split so this file cannot match its own walker (see the sibling gate).
-                    const CALL: &str = concat!("fire_event", "(");
-                    let mut from = 0;
+                    // Two producer shapes: `UiScript::fire_event(` and its `&Lua` twin
+                    // `tick::fire_event_into(` (1924), which an engine verb fires from inside a
+                    // binding — `UpdateSpells` → SPELLS_CHANGED, `ChangeActionBarPage` →
+                    // ACTIONBAR_PAGE_CHANGED (1938).
+                    const CALLS: [&str; 2] =
+                        [concat!("fire_event", "("), concat!("fire_event_into", "(")];
                     let mut fires_indirectly = false;
-                    while let Some(i) = text[from..].find(CALL) {
-                        let at = from + i + CALL.len();
-                        from = at;
-                        let rest = text[at..].trim_start();
-                        if !rest.starts_with('"') {
-                            // `fire_event(event, args)` — the name reached the call through a
-                            // variable, so adjacency cannot see it. `ui_cast.rs` does exactly
-                            // this: a `match edge` yields `("SPELLCAST_INTERRUPTED", vec![])` and
-                            // one call site fires whatever it produced. Treated below.
-                            fires_indirectly = true;
-                        }
-                        if let Some(body) = rest.strip_prefix('"') {
-                            if let Some(end) = body.find('"') {
-                                fired.insert(body[..end].to_string());
+                    for call in CALLS {
+                        let mut from = 0;
+                        while let Some(i) = text[from..].find(call) {
+                            let at = from + i + call.len();
+                            from = at;
+                            let rest = text[at..].trim_start();
+                            let rest = rest.strip_prefix("lua,").map_or(rest, str::trim_start);
+                            if !rest.starts_with('"') {
+                                fires_indirectly = true;
+                            }
+                            if let Some(body) = rest.strip_prefix('"') {
+                                if let Some(end) = body.find('"') {
+                                    fired.insert(body[..end].to_string());
+                                }
                             }
                         }
                     }
                     if fires_indirectly {
-                        // The name reached `fire_event` through a variable. Rather than guess, we
-                        // match the SHAPE that produced it: `("EVENT_NAME", vec!` — a tuple whose
-                        // second element is the argument vector, which is how `ui_cast.rs`'s
-                        // `match edge` hands a name and its args to one shared call site.
-                        //
-                        // The first attempt at this counted EVERY SCREAMING_CASE literal in such a
-                        // file, and that swept up eighteen names off the UNPRODUCED list — a gate
-                        // made vacuous by its own conservatism, which is the failure mode this
-                        // file has now hit twice. The shape is the discipline: it admits the
-                        // literals that are actually being fired and nothing else.
+                        // An indirect fire names its event either as `"NAME", vec![…]` or as one
+                        // arm of an `if … { "A" } else { "B" }` chosen before the call — a literal
+                        // standing alone on its line (`ui_action/state.rs`'s START/STOP_AUTOREPEAT).
                         const SHAPE: &str = "\", vec!";
+                        let caps = |lit: &str| {
+                            !lit.is_empty()
+                                && lit.chars().all(|c| {
+                                    c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()
+                                })
+                        };
                         for (i, _) in text.match_indices(SHAPE) {
                             let before = &text[..i];
                             let Some(q) = before.rfind('"') else { continue };
                             let lit = &before[q + 1..];
-                            if !lit.is_empty()
-                                && lit.chars().all(|c| {
-                                    c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()
-                                })
-                            {
+                            if caps(lit) {
+                                fired.insert(lit.to_string());
+                            }
+                        }
+                        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+                        for (i, t) in lines.iter().enumerate() {
+                            let Some(lit) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"'))
+                            else {
+                                continue;
+                            };
+                            let arm = i > 0
+                                && lines[i - 1].ends_with('{')
+                                && lines.get(i + 1).is_some_and(|n| n.starts_with('}'));
+                            if arm && caps(lit) {
                                 fired.insert(lit.to_string());
                             }
                         }

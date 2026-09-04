@@ -917,6 +917,7 @@ fn a_flying_spline_is_fly_before_backward_and_speed() {
 fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
     use std::time::{Duration, Instant};
     let spline = |grounded| crate::net::Spline {
+        deck: None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
         start: Instant::now(),
         duration: Duration::from_secs(10),
@@ -958,6 +959,7 @@ fn the_granted_modes_fold_into_the_flags_word_on_every_leg_but_our_own() {
 
     // Creature leg on a path: the granted bit rides alongside the spline's own FORWARD.
     let spline = crate::net::Spline {
+        deck: None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
         start: Instant::now(),
         duration: Duration::from_secs(10),

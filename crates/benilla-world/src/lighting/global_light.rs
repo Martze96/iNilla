@@ -175,6 +175,28 @@ const POINT_PACK_RADIUS: f32 = 300.0;
 #[derive(Component)]
 pub struct LightRooms(pub(crate) crate::wmo_portal::WmoGroupVis);
 
+/// **An authored WoW point light source** — an M2 light, a WMO MOLT omni, a carried torch —
+/// as the packed light table reads it. This used to be Bevy's `PointLight`, kept purely as a
+/// data carrier: [`build_light_data`] was its only reader in the engine, every lit surface
+/// takes its lights from the shared table (0273/0285), and no shader here consumes Bevy's
+/// clustered lights at all. Bevy nonetheless ran its whole light lane over every one of them
+/// each frame — `assign_objects_to_clusters` (a `Vec` rebuilt per frame with a `RenderLayers`
+/// clone per light, even with the world camera's `ClusterConfig::None`), `extract_lights`,
+/// `prepare_lights`, the light visibility check — a city of lamps' worth of work for nothing,
+/// ~2 % of the alone frame on the crowd rig's sampled profile (decision 1945). The fields keep
+/// the `PointLight` numbers exactly (`intensity` in the same 4π-scaled units), so the packing
+/// below and every recipe are unchanged.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct WorldPointLight {
+    /// Linear RGB, hue preserved.
+    pub color: [f32; 3],
+    /// `4π × authored intensity` — the `PointLight` convention, so the packer's `/(4π)` reads
+    /// the authored product back.
+    pub intensity: f32,
+    /// The ≤3-nearest selection-candidacy radius (yd) — see `terrain_stream::point_light`.
+    pub range: f32,
+}
+
 /// Main-world resource holding the packed light for this frame; extracted into the render world where
 /// [`upload_light`] writes it. Rebuilt every frame by [`build_light_data`] (cheap — one std430 pack).
 #[derive(Resource, Clone, Copy, ExtractResource)]
@@ -271,7 +293,7 @@ fn build_light_data(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    lights_q: Query<(&PointLight, &GlobalTransform, Option<&LightRooms>)>,
+    lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
@@ -337,9 +359,9 @@ fn build_light_data(
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
-                let c = pl.color.to_linear();
+                let c = pl.color;
                 let s = pl.intensity / (4.0 * std::f32::consts::PI);
-                let rgb = commit_raw([c.red * s, c.green * s, c.blue * s]);
+                let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
                 (d2, p, pl.range, rgb)
             })
         })

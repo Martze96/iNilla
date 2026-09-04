@@ -60,6 +60,13 @@ pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
 pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
+/// `SMSG_MONSTER_MOVE_TRANSPORT` (VERIFIED vmangos `Opcodes_1_12_1.h`: 686) — the transport twin of
+/// [`SMSG_MONSTER_MOVE`]: the identical body with the **transport's packed guid inserted after the
+/// mover's**, and every coordinate in it a deck-local offset instead of a world position. Sent for a
+/// unit pathing *on* a transport — a pet following its owner aboard a boat, anything a player pulls
+/// onto a deck (`Movement::MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:146-154`). Body in
+/// [`super::monster_move::read_monster_move`]; decision 1936.
+pub const SMSG_MONSTER_MOVE_TRANSPORT: u16 = 0x02AE; // 686
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
 /// A faction became visible in the reputation pane (VERIFIED vmangos `Opcodes_1_12_1.h`: 291,
 /// sender `ReputationMgr::SendVisible`) — body one `u32` reputation-list slot. The server sets the
@@ -198,6 +205,30 @@ pub const SMSG_PET_CAST_FAILED: u16 = 0x0138; // 312
 /// and a trailing float the server `read_skip`s (VERIFIED vmangos `Opcodes_1_12_1.h`: 713;
 /// `MoveSplineDone::ReadFromWorldPacket`).
 pub const CMSG_MOVE_SPLINE_DONE: u16 = 0x02C9; // 713
+/// The client's report that its movement clock **skipped** — a stall, a long frame, a window that
+/// went to the background — carrying the mover and how many milliseconds went missing (VERIFIED
+/// vmangos `Opcodes_1_12_1.h`: 718). Body in [`super::client::move_time_skipped`].
+///
+/// vmangos adds the reported `lag` to the mover's `stime`/`ctime` so its own movement clock stays
+/// aligned with ours — **and hangs a 1.12-specific transport fix off it**: a player whose last
+/// movement packet was the *first* one carrying `MOVEFLAG_ONTRANSPORT` is flagged `JustBoarded`,
+/// and the next `CMSG_MOVE_TIME_SKIPPED` makes the server re-send that transport's out-of-range
+/// update followed by a fresh create (`HandleMoveTimeSkippedOpcode`,
+/// `Handlers/MovementHandler.cpp:989-1019`, comment *"fix an 1.12 client problem with
+/// transports"*). A client that never sends this never gets that refresh. Decision 1935.
+pub const CMSG_MOVE_TIME_SKIPPED: u16 = 0x02CE; // 718
+/// The **broadcast twin** of [`CMSG_MOVE_TIME_SKIPPED`] (VERIFIED vmangos `Opcodes_1_12_1.h`: 793):
+/// the server relays one mover's skip to everyone watching it, so their copies of that unit's
+/// movement clock move with it (`MovementHandler.cpp:1011-1017`, packed guid + the same `u32`).
+///
+/// **Not ignorable.** The reference registers a handler for it (`0x6035e0` → `0x603b40`) that reads
+/// a packed guid, resolves under `TYPEMASK_UNIT`, and adds the lag to `[CMovement+0xac]` — the
+/// observed unit's last-seen **wire** movement timestamp, the monotonic maximum the relay chain
+/// hangs off (`0x601560` → `0x61ab90`). That cell is benilla-app's relay-chain `last_wire_ms`
+/// (`net::motion::relay::RelayChain`, decision 0615, which models `+0xa8`/`+0xac` by name). Drop the packet and the chain's copy stays `lag` ms short of the sender's
+/// forever: the mover's next real packet then reads as a step `lag` too large and is scheduled
+/// that much late — a hitch on that unit, not a lost packet. Decision 1935.
+pub const MSG_MOVE_TIME_SKIPPED: u16 = 0x0319; // 793
 pub const SMSG_ATTACKSTART: u16 = 0x0143; // 323
 pub const SMSG_ATTACKSTOP: u16 = 0x0144; // 324
 pub const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A; // 330
@@ -227,6 +258,21 @@ pub const SMSG_ITEM_COOLDOWN: u16 = 0x00B0; // 176
 pub const SMSG_COOLDOWN_EVENT: u16 = 0x0135; // 309
 pub const SMSG_CLEAR_COOLDOWN: u16 = 0x01DE; // 478
 pub const SMSG_COOLDOWN_CHEAT: u16 = 0x01E1; // 481
+
+/// `SMSG_ITEM_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 490) — the
+/// remaining lifetime, in **seconds**, of one duration-limited item instance (a conjured stone, a
+/// holiday gift, a timed quest item). Shares its handler with
+/// [`SMSG_ITEM_ENCHANT_TIME_UPDATE`]: both read an 8-byte item guid first and then fork on the
+/// opcode (`0x5e4f69 sub eax,0x1ea ; je …` / `0x5e4f74 dec eax` — wow-re
+/// `ui/scratch/weapon-enchant-info.md` §7).
+///
+/// The item's own `ITEM_FIELD_DURATION` (wire field 15) carries the same number and is sent to the
+/// owner, but vmangos's writer says in as many words that it is not what the client displays —
+/// *"Though the client has the information in the item's data field, we have to send
+/// SMSG_ITEM_TIME_UPDATE to display the remaining time"* (`Item::SendTimeUpdate`,
+/// `Objects/Item.cpp:1094`). Same shape as the enchant countdown (decision 0920): a client-local
+/// deadline whose only feed is the packet. Body in [`super::items::read_item_time`]; decision 1933.
+pub const SMSG_ITEM_TIME_UPDATE: u16 = 0x01EA; // 490
 
 /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 491) — the **only** source
 /// of a temporary enchant's remaining time. The item's `ITEM_FIELD_ENCHANTMENT` duration field is
@@ -365,6 +411,17 @@ pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
 /// guid** (`HandleOpenItemOpcode` → `SendLoot(item, LOOT_CORPSE)`), so the loot window opens over
 /// a thing in your bag rather than a corpse in the world.
 pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
+/// Wrap an item in a piece of gift wrapping (VERIFIED vmangos `Opcodes_1_12_1.h`: 467). Body in
+/// [`super::items::wrap_item`]: `giftBag`, `giftSlot`, `itemBag`, `itemSlot` — the **paper first**,
+/// then the thing being wrapped.
+///
+/// The other half of the gift arc: [`CMSG_OPEN_ITEM`] above *unwraps* one, and this is how a gift
+/// gets made. Right-clicking a `ITEM_FLAG_WRAPPER` template whose instance is **not** already
+/// wrapped sends nothing at all — it arms a purely local wrap cursor (`0x5edea0`: the item lock
+/// `0x4953e0` @`0x5edeb5` + `CursorSetMode(2)`, disarmed by `0x5eded0` from inside `ClearCursor`;
+/// wow-re `ui/scratch/right-click-open.md`, use-dispatcher arm 2, VERIFIED) — and *this* opcode
+/// goes out when the armed cursor is then clicked on a target. Decision 1934.
+pub const CMSG_WRAP_ITEM: u16 = 0x01D3; // 467
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 177. Body in [`super::gameobj_use`] — a full guid, the
 /// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
 /// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.

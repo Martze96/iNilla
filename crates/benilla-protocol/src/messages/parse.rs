@@ -244,7 +244,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_COMPRESSED_MOVES => ServerPacket::CompressedMoves {
             packets: read_compressed_moves(&mut r)?,
         },
-        opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r)?,
+        opcode::MSG_MOVE_TIME_SKIPPED => {
+            let (guid, lag_ms) = movement::read_move_time_skipped(&mut r)?;
+            ServerPacket::MoveTimeSkipped { guid, lag_ms }
+        }
+        opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r, false)?,
+        opcode::SMSG_MONSTER_MOVE_TRANSPORT => monster_move::read_monster_move(&mut r, true)?,
         opcode::MSG_MOVE_TELEPORT_ACK => {
             let guid = read_packed_guid(&mut r)?;
             let counter = read_u32_le(&mut r)?;
@@ -574,6 +579,10 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 item_guid,
                 spell_id,
             }
+        }
+        opcode::SMSG_ITEM_TIME_UPDATE => {
+            let (item_guid, seconds) = items::read_item_time(&mut r)?;
+            ServerPacket::ItemTime { item_guid, seconds }
         }
         opcode::SMSG_ITEM_ENCHANT_TIME_UPDATE => {
             let (item_guid, slot, seconds) = items::read_item_enchant_time(&mut r)?;

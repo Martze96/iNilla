@@ -22,12 +22,14 @@
 //! NO_POWER).
 //!
 //! **The argument arms, and what is still approximate.** Filled: `0x5e` REQUIRES_SPELL_FOCUS and
-//! `0x5d` REQUIRES_AREA here (decision 1313 — `0x6e1f62`/`0x6e1fad`), and `0x78` TOTEMS / `0x5c`
+//! `0x5d` REQUIRES_AREA here (decision 1313 — `0x6e1f62`/`0x6e1fad`), plus `0x8d`
+//! PREVENTED_BY_MECHANIC (decision 1948 — `0x6e2190`, and the one arm whose word is produced
+//! locally rather than read off the wire), and `0x78` TOTEMS / `0x5c`
 //! REAGENTS / `0x19`–`0x1b` EQUIPPED_ITEM_CLASS\* in the drain, which owns them because their
 //! fills need the item caches and the query-then-redisplay cache-miss behavior ("Requires Mining
 //! Pick", decisions 0545 + 0552). Still stripped rather than filled — each needs a DBC we do not
-//! load yet: `0x56` ONLY_SHAPESHIFT (form-name list), `0x8d` PREVENTED_BY_MECHANIC
-//! (`SpellMechanic.dbc`), `0x90` MIN_SKILL (`SkillLine.dbc`), `0x31` NEED_EXOTIC_AMMO and `0x84`
+//! load yet: `0x56` ONLY_SHAPESHIFT (form-name list), `0x90` MIN_SKILL (`SkillLine.dbc`),
+//! `0x31` NEED_EXOTIC_AMMO and `0x84`
 //! PROSPECT_NEED_MORE. Stripping is a **deliberate divergence**, now byte-confirmed as one: on a
 //! bad id or an absent word the reference jumps to the default arm with the pointer still on the
 //! *unfilled* template, so it displays a literal `Requires %s` (wow-re §WIRE-ARGS C3 — the fill
@@ -36,7 +38,7 @@
 //! `0x0a`'s item-spell leg (`ERR_INVALID_ITEM_TARGET`) is unmodeled — the drain does not know
 //! item-ness.
 
-use benilla_formats::{AreaTableCatalog, SpellDisplay, SpellFocusCatalog};
+use benilla_formats::{AreaTableCatalog, SpellDisplay, SpellFocusCatalog, SpellMechanicCatalog};
 
 /// Wire reason → its `SPELL_FAILED_*` GlobalStrings key (the `0x6e23e0` table, byte-exact).
 pub(super) const CAST_FAIL_KEYS: [&str; 146] = [
@@ -220,6 +222,8 @@ pub(super) struct FailArgs<'a> {
     pub(super) focus: Option<&'a SpellFocusCatalog>,
     /// `AreaTable.dbc` (`0xc0e048`) — the `0x5d` arm's `AreaName`.
     pub(super) areas: Option<&'a AreaTableCatalog>,
+    /// `SpellMechanic.dbc` (`0xc0d7c4`) — the `0x8d` arm's mechanic name (decision 1948).
+    pub(super) mechanics: Option<&'a SpellMechanicCatalog>,
 }
 
 impl FailArgs<'_> {
@@ -247,6 +251,13 @@ impl FailArgs<'_> {
     /// in `Spell.dbc` holds it, so an absent word means an unfilled message.
     fn fill(&self, reason: u8, spell: Option<&SpellDisplay>) -> Option<String> {
         match reason {
+            // **`0x8d` PREVENTED_BY_MECHANIC** (`0x6e2190`) → `SpellMechanic.dbc` (`0xc0d7c4`),
+            // so "Can't do that while %s" reads "Can't do that while stunned". Unlike its two
+            // neighbours the word is not the wire's: this refusal is raised locally and the id
+            // comes from the crowd-control ladder's own exemption scan (decisions 1941/1948).
+            // A `0` or unknown id leaves the template to the strip fallback, which is also what
+            // the arm does when the scan named no mechanic at all.
+            0x8D => self.mechanics?.name(self.arg?).map(str::to_string),
             0x5D => self.areas?.name(self.arg?).map(str::to_string),
             0x5E => {
                 let id = self
@@ -634,11 +645,32 @@ mod tests {
         let focus =
             benilla_formats::load_spell_focus_catalog(&mut chain).expect("SpellFocusObject");
         let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+        let mechanics =
+            benilla_formats::load_spell_mechanic_catalog(&mut chain).expect("SpellMechanic");
         let args = |arg: u32| FailArgs {
             arg: Some(arg),
             focus: Some(&focus),
             areas: Some(&areas),
+            mechanics: Some(&mechanics),
         };
+        // **0x8d PREVENTED_BY_MECHANIC** (decision 1948) — the crowd-control ladder's renamed
+        // refusal, and the one argument arm whose word is produced locally rather than read off
+        // the wire. The names are lower-case adjectives in the shipped data, which is what makes
+        // them read as the tail of the sentence.
+        assert_eq!(
+            cast_fail_text(0x8D, None, args(12), &g).unwrap().text,
+            "Can't do that while stunned"
+        );
+        assert_eq!(
+            cast_fail_text(0x8D, None, args(5), &g).unwrap().text,
+            "Can't do that while fleeing"
+        );
+        // An unknown or absent mechanic strips to the bare stem rather than showing a raw `%s`.
+        assert!(!cast_fail_text(0x8D, None, args(999), &g)
+            .unwrap()
+            .text
+            .contains('%'));
+
         // 0x5e REQUIRES_SPELL_FOCUS: the Crown of the Earth phials' own refusal. Focus 12 is the
         // Starbreeze Village moonwell — using the Jade Phial at any *other* pool is the report.
         assert_eq!(

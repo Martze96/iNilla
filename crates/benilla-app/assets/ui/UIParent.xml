@@ -74,8 +74,8 @@
         XML anchor: every layout pass re-anchors it to a base offset plus per-bar deltas -
         either bottom multibar, the pet/stance bar, the reputation watch bar - fired from those
         bars' OnShow/OnHide (ref BonusActionBarFrame.xml:350-355 et al.) and applied once at
-        startup. The loader's post-load call (ui_script/mod.rs) is our startup seam; the stance
-        bar's OnShow/OnHide (StanceBar.xml) is the one live re-fire today.
+        startup. The loader's post-load call (ui_script/mod.rs) is our startup seam; the pet
+        bar's OnShow/OnHide and the options rows' setters (1938) are the live re-fires today.
 
         Departures, each named:
         - Lua 5.1 dialect (the 1.12 client ran 5.0): pairs() iteration, table.insert for
@@ -207,7 +207,7 @@
         -- `CMSG_SET_ACTIONBAR_TOGGLES` and waits for the field to come back (wow-re
         -- `system/ui/scratch/action-bar-toggles.md` §5: the setter's every store is into its own
         -- stack frame, and nothing in the binary fires on a change to that byte). So the live UI
-        -- state is the four Lua globals `MultiBars.xml` owns, and `GetActionBarToggles()` is read
+        -- state is the four Lua globals stock `MultiActionBars.lua` reads, and `GetActionBarToggles()` is read
         -- exactly ONCE, here, to seed them. Reading it again later would fight the optimistic
         -- value the options rows just set and lose a round trip's worth of clicks.
         --
@@ -810,6 +810,12 @@
             -- while the stance bar is up starts 20px past the last stance button. That case is
             -- rare but real — a possessed or charmed unit gives a pet bar to a class that also
             -- has forms.
+            -- Update shapeshift bar appearance — ref UIParent.lua l.1705-1732, the reference's own
+            -- arm of this pass: with the bottom-left bar up the stance bar loses its shelf (end
+            -- caps + middle strip) and its rings shrink to 50; otherwise the shelf shows (the
+            -- middle only past two forms) and the rings are 64. Stock BonusActionBarFrame.lua
+            -- carries a `ShapeshiftBar_UpdatePosition` with the same body that nothing calls; the
+            -- pass IS the caller. (Our StanceBar.xml did this through a listener until 1938.)
             local bottomLeftUp = MultiBarBottomLeft and MultiBarBottomLeft:IsShown()
             if ( SlidingActionBarTexture0 and SlidingActionBarTexture1 ) then
                 if ( bottomLeftUp ) then
@@ -818,6 +824,28 @@
                 else
                     SlidingActionBarTexture0:Show()
                     SlidingActionBarTexture1:Show()
+                end
+            end
+            if ( ShapeshiftBarFrame ) then
+                local numForms = GetNumShapeshiftForms and GetNumShapeshiftForms() or 0
+                if ( bottomLeftUp ) then
+                    ShapeshiftBarLeft:Hide()
+                    ShapeshiftBarRight:Hide()
+                    ShapeshiftBarMiddle:Hide()
+                    for i=1, numForms do
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetWidth(50)
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetHeight(50)
+                    end
+                else
+                    if ( numForms > 2 ) then
+                        ShapeshiftBarMiddle:Show()
+                    end
+                    ShapeshiftBarLeft:Show()
+                    ShapeshiftBarRight:Show()
+                    for i=1, numForms do
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetWidth(64)
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetHeight(64)
+                    end
                 end
             end
             if ( PetActionBarFrame ) then

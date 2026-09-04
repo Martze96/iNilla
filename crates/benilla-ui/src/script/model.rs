@@ -862,6 +862,18 @@ pub(crate) struct Model {
     /// stack) — the popup-confirmed destroy (decision 0216 §3), drained by the app into
     /// `CMSG_DESTROYITEM`.
     pub(crate) container_destroys: Vec<(i64, u32, u32)>,
+    /// **The armed gift wrap** — the `(bag, slot)` of a piece of wrapping paper whose right-click
+    /// took the reference's begin-wrap arm (`0x5edea0`: lock the paper, cursor mode 2, no packet).
+    /// `None` = nothing armed, which is nearly always. Decision 1934.
+    ///
+    /// Deliberately **not** a [`cursor::CursorPayload`]: the reference writes no payload global at
+    /// all here, only the displayed-cursor mode, so `CursorHasItem()` stays nil and none of the
+    /// thirteen stock `CursorHasItem()` gates open. Making it a payload would silently open every
+    /// one of them — the same trap decision 1677's mode-5 note names for the vendor cursor.
+    pub(crate) pending_wrap: Option<container::PendingWrap>,
+    /// `(giftBag, giftSlot, itemBag, itemSlot)` quads a completed wrap queued, drained by the app
+    /// into `CMSG_WRAP_ITEM`. The paper's pair leads, as the wire does.
+    pub(crate) container_wraps: Vec<(i64, u32, i64, u32)>,
     /// The Lua-set **displayed-cursor override** (`ShowContainerSellCursor`/`ShowMerchantSellCursor`/
     /// `ShowBuybackSellCursor`/`ShowInspectCursor` set it, `ResetCursor` clears it; [`container`] +
     /// [`merchant`]) — the single "displayed mode" the real client keeps at `0xbe2c2c`, restored to
@@ -1704,6 +1716,8 @@ impl Model {
             item_picks: Vec::new(),
             enchant_confirms: Vec::new(),
             container_destroys: Vec::new(),
+            pending_wrap: None,
+            container_wraps: Vec::new(),
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),

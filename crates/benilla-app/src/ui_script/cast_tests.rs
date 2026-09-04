@@ -412,6 +412,14 @@ fn managed_positions_track_the_bottom_bar_stack() {
     assert_eq!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
 
     // The stance bar shows (the warrior at login): the pet term, plus chat's both-flags extra.
+    // The pass's shapeshift-appearance arm (the reference's own, UIParent.lua:1705-1732 — in ours
+    // since 1938) touches the bar's three shelf textures by name, unguarded as the reference has
+    // it; a stand-in frame needs stand-in textures.
+    s.run(
+        "local t = { Show = function() end, Hide = function() end } \
+         ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
+    )
+    .unwrap();
     s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();

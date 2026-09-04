@@ -49,7 +49,7 @@ fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
 /// `UIParent.xml` comes with it because the `START_LOOT_ROLL` router lives there now — the
 /// reference's own slot for it — where our file used to carry a dedicated hidden driver frame.
 fn load_group_loot(s: &UiScript) {
-    load_xml(s, "UIParent.xml");
+    // `UIParent.xml` is loaded by `setup()` above — the stock main bar needs it first (1938).
     // `LootFrame.xml` brings the whole loot window, and its `GroupLootDropDown` calls
     // `UIDropDownMenu_Initialize` from its own OnLoad — the dropdown kit is on the chain too.
     load_xml(s, r"Interface\FrameXML\UIDropDownMenu.xml");
@@ -81,8 +81,14 @@ fn setup() -> UiScript {
     load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the in-flight icon fallback) —
-                                   // buff_tests.rs's own load-order precedent for this same global.
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml"); // BENILLA_FALLBACK_ICON (the in-flight icon fallback) —
+                                                                  // buff_tests.rs's own load-order precedent for this same global.
     s
 }
 
@@ -569,6 +575,14 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     assert_eq!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
 
     // The stance bar shows on top of them.
+    // The pass's shapeshift-appearance arm (the reference's own, UIParent.lua:1705-1732 — in ours
+    // since 1938) touches the bar's three shelf textures by name, unguarded as the reference has
+    // it; a stand-in frame needs stand-in textures.
+    s.run(
+        "local t = { Show = function() end, Hide = function() end } \
+         ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
+    )
+    .unwrap();
     s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();

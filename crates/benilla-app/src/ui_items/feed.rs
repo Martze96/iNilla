@@ -41,7 +41,7 @@ pub(crate) struct FeedMemory {
     /// what a charter slot's tooltip lines are built from. Lazy, so its arrival moves nothing else
     /// here (the same reason `names_generation` exists one line up).
     petition_records: gate::Watch,
-    /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
+    /// `Items::countdown_display_epoch` — one step per displayable countdown change (the slot
     /// views read second-floored countdowns), including the last elapse's collapsing push.
     enchant_deadlines: gate::Watch,
     /// The item guid **of the bag itself** in each of the ten bag slots — container ids 1..=10
@@ -565,6 +565,9 @@ fn resolve_slot(
     // (both live on `Items`): one `Option<ms>` per enchant slot.
     let enchant_ms: [Option<u64>; 7] =
         std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
+    // The item's own expiry countdown, read off the same deadline store and floored the same way
+    // — `SMSG_ITEM_TIME_UPDATE`'s only surface (decision 1933).
+    let duration_ms = items.duration_remaining_display_ms(guid);
     let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) =
         match items.object(guid) {
             Some(fields) => (
@@ -631,6 +634,7 @@ fn resolve_slot(
             flags,
             already_bound,
             enchants: enchant_lines,
+            duration_ms,
             ..Default::default()
         });
     };
@@ -678,6 +682,7 @@ fn resolve_slot(
         flags,
         already_bound,
         enchants: enchant_lines,
+        duration_ms,
         equip_slots: find_equip_slot(t.inventory_type, has_relic_slot),
         bar_placeable: t.placeable_on_action_bar(),
         cooldown: t.use_spell.and_then(|u| {
@@ -830,7 +835,7 @@ pub(crate) fn feed_containers(
     // that rebuilt every bag snapshot for the whole life of a ticking enchant.
     let deadlines_moved = memory
         .enchant_deadlines
-        .moved(items.enchant_display_epoch());
+        .moved(items.countdown_display_epoch());
     // Bound as `let`s (not a bare OR-chain) so the gate trace below can name each input.
     let sweep = cooldowns.sweep_pending(clock.anchor);
     let self_changed = !self_q.1.is_empty();

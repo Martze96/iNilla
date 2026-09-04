@@ -286,6 +286,7 @@ mod tests {
     fn doll_slots() -> crate::script::InventorySlots {
         let mut slots: crate::script::InventorySlots = Default::default();
         slots[1] = Some(InvSlotView {
+            duration_ms: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,
@@ -303,6 +304,7 @@ mod tests {
             enchants: Vec::new(),
         });
         slots[11] = Some(InvSlotView {
+            duration_ms: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,
@@ -320,6 +322,7 @@ mod tests {
             enchants: Vec::new(),
         });
         slots[19] = Some(InvSlotView {
+            duration_ms: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,
@@ -344,6 +347,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                duration_ms: None,
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,
@@ -487,6 +491,7 @@ mod tests {
         });
         // An equipped bag in Bag0Slot (id 20): its equip_slots is the four bag slots.
         slots[20] = Some(InvSlotView {
+            duration_ms: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,
@@ -526,6 +531,7 @@ mod tests {
         slots.insert(
             3,
             ContainerSlot {
+                duration_ms: None,
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,

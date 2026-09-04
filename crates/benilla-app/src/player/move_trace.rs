@@ -216,6 +216,20 @@ pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
     );
 }
 
+/// One `sett` line per `CMSG_MOVE_TIME_SKIPPED` we send (decision 1935) — how many milliseconds
+/// of movement simulation the hold ran through without integrating, and for which mover. It rides
+/// the settle's own tag because it reports the settle's own cost: a `skipped` far larger than the
+/// `sett` line beside it means the hold outlived the stream it was waiting for.
+pub(super) fn skipped_time(guid: u64, lag_ms: u32) {
+    if !trace::enabled() {
+        return;
+    }
+    trace::line(
+        "sett",
+        &format!("skipped {lag_ms:5} ms for mover {guid:#x}"),
+    );
+}
+
 /// How the post-teleport settle hold **ended** — the whole diagnosis of a fall-through report.
 ///
 /// `resident` means the destination's world arrived (scene spawned + collider queue quiet —

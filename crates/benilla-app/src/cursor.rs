@@ -227,7 +227,17 @@ fn drive_displayed_cursor(
             kind: CursorKind::Repair,
             unable: false,
         }
-    } else if targeting.active() {
+    } else if targeting.active()
+        || script
+            .as_ref()
+            .is_some_and(|s| s.gift_wrap_armed().is_some())
+    {
+        // An armed **gift wrap** parks the base at Cast(2) for the same reason a targeting spell
+        // does, and by the same act: `0x5edea0`'s three calls are `LockItem`, **`SetCursorBaseMode(2)`**
+        // and `CursorSetMode(2)` (decision 1934). Both cells, deliberately — the displayed one so the
+        // cursor changes at the click, the BASE one so it survives the pointer crossing the world,
+        // where the classifier would otherwise write its own verdict over it. Setting only the
+        // displayed mode would lose the wrap cursor the moment the mouse left the bag.
         WorldCursor {
             kind: CursorKind::Cast,
             unable: false,

@@ -750,7 +750,10 @@ fn interface_harness() -> UiScript {
             "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "ActionBar.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
             // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
             // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
             // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
@@ -811,7 +814,14 @@ fn actionbars_harness() -> UiScript {
             "UIParent.xml",
             "Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "ActionBar.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            "MoneyFrame.xml",
+            "GameTooltip.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
             // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
             // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
             // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
@@ -820,7 +830,15 @@ fn actionbars_harness() -> UiScript {
             r"Interface\FrameXML\UIPanelTemplates.xml",
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
-            "MultiBars.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "UiPanels.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "ScrollTemplates.xml",
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            "KeyBindingsPage.xml",
+            "OptionsFrame.xml",
+            "Interface\\FrameXML\\MultiActionBars.xml",
         ],
     );
     harness_on(s)
@@ -2695,7 +2713,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
-    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
     assert!(
         s.cursor_payload().is_none(),
@@ -2705,7 +2723,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     // Defaults walks it back to ActionBar.xml's own assignment, and the bar drags again.
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(s.eval::<String>("return LOCK_ACTIONBAR").unwrap(), "0");
-    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
     assert!(s.cursor_payload().is_some(), "unlocked again");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -2846,9 +2864,9 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     assert!(
         s.eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
-                 == TargetofTarget_Update \
+                 == \"TargetofTarget_Update\" \
              and OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
-                 == TargetofTarget_Update"
+                 == \"TargetofTarget_Update\""
         )
         .unwrap(),
         "both rows re-decide the frame when they are written"

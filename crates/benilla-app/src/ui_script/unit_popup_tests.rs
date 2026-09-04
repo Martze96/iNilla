@@ -483,7 +483,10 @@ fn load_pet_menu_frames(s: &UiScript) {
         "Interface\\FrameXML\\PetFrame.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "PetActionBar.xml",
     ] {
         load_xml(s, file);

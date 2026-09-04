@@ -711,7 +711,7 @@ pub fn run(build: BuildId) -> AppExit {
     // in shape — a guid-carrying question over an already-closed gossip menu.
     .add_plugins(UiTalentWipePlugin)
     // The stance/shapeshift bar feed (wow-re shapeshift-bar-api.md): builds the form list from
-    // PlayerActions.spells per the byte-verified admission/order, drives StanceBar.xml through
+    // PlayerActions.spells per the byte-verified admission/order, drives the stock shapeshift bar through
     // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
     // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
     .add_plugins(UiShapeshiftPlugin)

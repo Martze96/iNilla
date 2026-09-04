@@ -291,6 +291,34 @@ fn track_learned_abilities(
     }
 }
 
+/// `SpellMechanic.dbc` — the vocabulary that fills `SPELL_FAILED_PREVENTED_BY_MECHANIC`'s `%s`
+/// ([`benilla_formats::SpellMechanicCatalog`], decision 1948). Its one reader is the cast-failure
+/// resolver's `0x8d` arm.
+#[derive(Resource)]
+pub(crate) struct SpellMechanics {
+    pub(crate) catalog: benilla_formats::SpellMechanicCatalog,
+}
+
+fn load_spell_mechanics(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = benilla_assets::LockRecover::lock_recover(&*assets.chain);
+        benilla_formats::load_spell_mechanic_catalog(&mut chain)
+    };
+    match loaded {
+        Ok(catalog) => {
+            debug!("ui_action: {} spell-mechanic name(s)", catalog.len());
+            commands.insert_resource(SpellMechanics { catalog });
+        }
+        // Absent data is the strip fallback, not a failure: the refusal still appears, it just
+        // shows its bare stem instead of naming what is holding you.
+        Err(e) => warn!(
+            "ui_action: SpellMechanic.dbc failed to load — the crowd-control refusal drops the \
+             mechanic name: {e:#}"
+        ),
+    }
+}
+
 pub(crate) struct UiActionPlugin;
 
 impl Plugin for UiActionPlugin {
@@ -308,6 +336,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<targeting::SpellTargeting>()
             .init_resource::<targeting::EnchantConfirmItem>()
             .add_systems(Startup, load_spells.after(AssetSet::Open))
+            .add_systems(Startup, load_spell_mechanics.after(AssetSet::Open))
             .add_systems(
                 Update,
                 (

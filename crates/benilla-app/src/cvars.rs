@@ -525,7 +525,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Enhanced Tooltips (B230): 1.12's `UberTooltips`, the *Enhanced Tooltips* checkbox
     // (`UIOptionsFrame.lua:15`, `USE_UBERTOOLTIPS`). **No host knob** — its consumers are Lua, and
     // there are three: PetActionBar.xml forks the whole tooltip on it (a token's own text with the
-    // binding appended, vs the engine's pet-spell channel), ActionBar.xml and StanceBar.xml fork
+    // binding appended, vs the engine's pet-spell channel), the stock action and shapeshift buttons fork
     // their anchor. Registered "1" — byte-read, not behaviour-derived: WoW.exe `0x48fdd9`, default
     // string `0x82e748`, with the sibling rows `BlockTrades`→"0" and `UnitNameRenderMode`→"2"
     // confirming the layout. Those three Lua sites each carried the reference's fork in prose and

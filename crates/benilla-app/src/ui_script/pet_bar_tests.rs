@@ -19,7 +19,13 @@ fn load_pet_bar(s: &UiScript) {
         "UIParent.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
@@ -370,7 +376,13 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
         "UIParent.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
@@ -383,7 +395,14 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     ] {
         load_xml(&s, file);
     }
-    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
     if with_multibar {
         s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update()")
             .unwrap();
@@ -665,7 +684,12 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "GameTooltip.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the

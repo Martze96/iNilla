@@ -193,6 +193,14 @@ pub(super) fn drive_self_ride(
             let y = ride_z(
                 &player,
                 &points,
+                // **A deck path re-derives its Z exactly like any other** (decision 1936's
+                // correction). The tempting exemption — "there is no terrain under a boat" — is
+                // refuted: the transport guid appears in neither `0x616cb0`'s predicate nor
+                // `0x634040`'s dispatch, so a grounded deck spline takes the same fork, and the
+                // probe does not miss because it runs at the **composed world position** against
+                // a class mask that admits GameObject meshes. This system is in `WorldStage::Input`
+                // and `transport::compose_riders` in the stage before it, so the translation read
+                // here is already composed — nothing else is needed for the deck case.
                 spline.grounded,
                 transform.translation,
                 floor,
@@ -352,6 +360,7 @@ mod tests {
             .spawn((
                 Transform::default(),
                 Spline {
+                    deck: None,
                     points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
                     start: Instant::now(),
                     duration: Duration::from_secs(600), // far from ending during the test

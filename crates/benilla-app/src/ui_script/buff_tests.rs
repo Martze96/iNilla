@@ -40,15 +40,19 @@ fn harness() -> UiScript {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
-                                   // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
-                                   // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the
-                                   // row that drives it (OptionsFrame.xml), where it shipped "1" from 0255/1139 until 1804 put
-                                   // it back on the reference's "0". These tests are about the timer text and the geometry it
-                                   // buys, so the harness turns it on the way the Interface page's row does. Order matters: the
-                                   // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
-                                   // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
-                                   // out for the wrong one.
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
+                                                                  // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
+                                                                  // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the
+                                                                  // row that drives it (OptionsFrame.xml), where it shipped "1" from 0255/1139 until 1804 put
+                                                                  // it back on the reference's "0". These tests are about the timer text and the geometry it
+                                                                  // buys, so the harness turns it on the way the Interface page's row does. Order matters: the
+                                                                  // reference's `BuffFrame_OnLoad` calls `BuffButtons_UpdatePositions`, which seats the debuff
+                                                                  // row 20px differently depending on this value, so setting it afterwards leaves the bar laid
+                                                                  // out for the wrong one.
     s.run("SHOW_BUFF_DURATIONS = \"1\"").unwrap();
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
     // …and APPLIED, the way the app applies it (`manifest::apply_buff_durations`).

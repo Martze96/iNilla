@@ -202,7 +202,7 @@ pub(super) const LOOT_UI: &[&str] = &[
 ///   so `UnitFrame.xml` and `CombatFeedback.xml` come first — the reference's own toc order.
 ///   (This entry used to be our one `UnitFrames.xml`, and this note used to say "when they are
 ///   migrated, this becomes the stock pair". They are; it did.)
-/// * **`ActionBar.xml`** for `MainMenuExpBar` — the third bar of that prefix call — and for
+/// * **`Interface\FrameXML\MainMenuBar.xml`** for `MainMenuExpBar` — the third bar of that prefix call — and for
 ///   `ShowWatchedReputationBarText` / `HideWatchedReputationBarText`, which the window's
 ///   show/hide pair calls.
 /// * **`UIPanelTemplates.xml`** for `PanelTemplates_SetNumTabs`/`_SetTab`, the last two lines of
@@ -259,7 +259,9 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Interface\\FrameXML\\PartyFrameTemplates.xml",
     "Interface\\FrameXML\\PetFrame.xml",
     "Interface\\FrameXML\\ActionButtonTemplate.xml",
-    "ActionBar.xml",
+    "Interface\\FrameXML\\MainMenuBar.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
     "MicroMenu.xml",
     // The two page files these three need before the window can be OPENED, which is not the same
     // as before it can load: `CHARACTERFRAME_SUBFRAMES` lists all five pages by name and
@@ -315,7 +317,11 @@ pub(super) const BAG_UI: &[&str] = &[
     // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
     // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
     "Interface\\FrameXML\\ActionButtonTemplate.xml",
-    "ActionBar.xml",
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "Interface\\FrameXML\\MainMenuBar.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
     // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
     // l.137), because in the reference the keyring's existence moves the micro-button row.
     "MicroMenu.xml",

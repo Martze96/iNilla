@@ -140,7 +140,7 @@ pub(crate) fn cast_cc_refusal(
     charmed_by_other: bool,
     spell: Option<&SpellDisplay>,
     exempt: &mut impl FnMut(&[u32]) -> benilla_formats::CcExemption,
-) -> Option<u8> {
+) -> Option<(u8, Option<u32>)> {
     use crate::player::UNIT_FLAG_STUNNED;
     /// `UNIT_FIELD_FLAGS` bits 13/17/22/23 (vmangos `UnitDefines.h`).
     const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;
@@ -158,15 +158,17 @@ pub(crate) fn cast_cc_refusal(
     // immunity to whatever is blocking — the arm is SKIPPED and the cast proceeds. Otherwise the
     // refusal is `0x8d` "Can't do that while %s" when the scan named a mechanic, and the arm's own
     // reason when it did not (decision 1946).
-    let mut arm = |aura_types: &[u32], own_reason: u8| -> Option<u8> {
+    let mut arm = |aura_types: &[u32], own_reason: u8| -> Option<(u8, Option<u32>)> {
         let scan = exempt(aura_types);
         if scan.exempt {
             return None;
         }
         Some(if scan.mechanic != 0 {
-            REASON_PREVENTED_BY_MECHANIC
+            // The mechanic rides along as the message's `%s` — the one client-LOCAL refusal that
+            // carries an argument word (decision 1948).
+            (REASON_PREVENTED_BY_MECHANIC, Some(scan.mechanic))
         } else {
-            own_reason
+            (own_reason, None)
         })
     };
 
@@ -1209,9 +1211,14 @@ mod cc_refusal_tests {
         |_: &[u32]| benilla_formats::CcExemption::default()
     }
 
+    /// The reason alone, dropping the mechanic — most of these tests are about which arm fires.
+    fn reason_of(v: Option<(u8, Option<u32>)>) -> Option<u8> {
+        v.map(|(r, _)| r)
+    }
+
     /// A live caster, nobody else at the reins, no auras.
     fn cc(flags: u32, d: &SpellDisplay) -> Option<u8> {
-        cast_cc_refusal(flags, Some(100), false, Some(d), &mut no_auras())
+        cast_cc_refusal(flags, Some(100), false, Some(d), &mut no_auras()).map(|(r, _)| r)
     }
 
     /// **The arms are not symmetric** (decision 1904, widened by 1925): stun, fear, charm and
@@ -1234,7 +1241,13 @@ mod cc_refusal_tests {
         }
         // …and charm, which is not a flag at all but "somebody else holds the reins".
         assert_eq!(
-            cast_cc_refusal(0, Some(100), true, Some(&neither), &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                0,
+                Some(100),
+                true,
+                Some(&neither),
+                &mut no_auras()
+            )),
             Some(0x14)
         );
 
@@ -1250,11 +1263,23 @@ mod cc_refusal_tests {
         // Nothing up, nothing refused; and no record claims no prevention.
         assert_eq!(cc(0, &cast), None);
         assert_eq!(
-            cast_cc_refusal(SILENCED, Some(100), false, None, &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                SILENCED,
+                Some(100),
+                false,
+                None,
+                &mut no_auras()
+            )),
             None
         );
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, None, &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(100),
+                false,
+                None,
+                &mut no_auras()
+            )),
             Some(0x64),
             "the stun needs no record"
         );
@@ -1268,13 +1293,13 @@ mod cc_refusal_tests {
         let cast = spell(1);
         // Charm is arm 1: it beats a simultaneous stun.
         assert_eq!(
-            cast_cc_refusal(
+            reason_of(cast_cc_refusal(
                 STUNNED | SILENCED,
                 Some(100),
                 true,
                 Some(&cast),
                 &mut no_auras()
-            ),
+            )),
             Some(0x14)
         );
         // Stun is arm 2: it beats silence, pacify, fear and confuse.
@@ -1298,25 +1323,43 @@ mod cc_refusal_tests {
 
         // No aura of the arm's type: the arm's OWN reason, as everywhere else.
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 0)),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(100),
+                false,
+                Some(&cast),
+                &mut scan(false, 0)
+            )),
             Some(0x64)
         );
         // A blocking aura the cast does NOT counter: the refusal survives but is renamed to
         // `0x8d` "Can't do that while %s", the mechanic naming the aura.
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 12)),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(100),
+                false,
+                Some(&cast),
+                &mut scan(false, 12)
+            )),
             Some(0x8d)
         );
         // The cast grants immunity: the arm is SKIPPED and the cast goes out. This is the whole
         // point — Ice Block cast while stunned.
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(true, 0)),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(100),
+                false,
+                Some(&cast),
+                &mut scan(true, 0)
+            )),
             None
         );
         // …and skipping one arm does not skip the ladder: a silenced-and-stunned caster whose
         // spell counters only the stun still refuses on silence below it.
         assert_eq!(
-            cast_cc_refusal(
+            reason_of(cast_cc_refusal(
                 STUNNED | SILENCED,
                 Some(100),
                 false,
@@ -1328,8 +1371,35 @@ mod cc_refusal_tests {
                         mechanic: 0,
                     }
                 }
-            ),
+            )),
             Some(0x60)
+        );
+    }
+
+    /// **The mechanic rides out with the refusal** (decision 1948) — the half that turns
+    /// "Can't do that while %s" into a sentence. It is the ONE client-local refusal that carries
+    /// an argument word, and it is `None` for every arm that fell to its own reason.
+    #[test]
+    fn the_renamed_refusal_carries_the_mechanic_and_the_others_carry_nothing() {
+        let cast = spell(1);
+        let scan = |exempt: bool, mechanic: u32| {
+            move |_: &[u32]| benilla_formats::CcExemption { exempt, mechanic }
+        };
+
+        // Rejected by a blocking aura: reason `0x8d` AND the mechanic that names it.
+        assert_eq!(
+            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 12)),
+            Some((0x8d, Some(12)))
+        );
+        // No aura: the arm's own reason, and NO argument — the message has no `%s` to fill.
+        assert_eq!(
+            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 0)),
+            Some((0x64, None))
+        );
+        // Exempt: nothing at all.
+        assert_eq!(
+            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(true, 0)),
+            None
         );
     }
 
@@ -1339,21 +1409,45 @@ mod cc_refusal_tests {
     fn a_dead_caster_takes_no_crowd_control_refusal() {
         let cast = spell(1);
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(0), false, Some(&cast), &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(0),
+                false,
+                Some(&cast),
+                &mut no_auras()
+            )),
             None
         );
         assert_eq!(
-            cast_cc_refusal(0, Some(0), true, Some(&cast), &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                0,
+                Some(0),
+                true,
+                Some(&cast),
+                &mut no_auras()
+            )),
             None
         );
         // Alive again, and the arm is back.
         assert_eq!(
-            cast_cc_refusal(STUNNED, Some(1), false, Some(&cast), &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                Some(1),
+                false,
+                Some(&cast),
+                &mut no_auras()
+            )),
             Some(0x64)
         );
         // No health field at all is not death — the descriptor simply has not landed.
         assert_eq!(
-            cast_cc_refusal(STUNNED, None, false, Some(&cast), &mut no_auras()),
+            reason_of(cast_cc_refusal(
+                STUNNED,
+                None,
+                false,
+                Some(&cast),
+                &mut no_auras()
+            )),
             Some(0x64)
         );
     }

@@ -1509,7 +1509,7 @@ fn convert_entry(
             // A slice that runs PAST the texture is the reference's tiling idiom, not a crop:
             // `SetTexCoord(0, n, 0, 1)` on an n-slots-wide strip repeats the art n times — the
             // stance shelf's middle carries one slot per extra form exactly that way
-            // (`StanceBar.xml`, `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
+            // (stock `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
             // across the extra width instead. Clamp/repeat bake into the `Image`, so this picks
             // the tiled GPU image + cache entry, as the `Backdrop` arm's `tile` does below.
             let tiled = uv

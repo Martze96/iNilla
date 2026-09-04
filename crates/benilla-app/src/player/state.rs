@@ -853,6 +853,12 @@ pub(crate) struct Player {
     pub(crate) owes_worldport_ack: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,
+    /// **Milliseconds of movement simulation this client advanced through without integrating** —
+    /// the quantity `CMSG_MOVE_TIME_SKIPPED` reports (decision 1935). Accumulated while
+    /// [`Self::settling`] holds the mover (the world under us has not streamed in, so no step
+    /// runs), drained and sent by [`super::movement_net::stream_self_movement`] on the release
+    /// edge. Fractional because it accumulates a frame `dt` at a time; the wire takes whole ms.
+    pub(super) skipped_ms: f32,
     /// `Time::elapsed_secs` when the current airborne phase (jump or step-off) began, else `None` on the
     /// ground. Drives the wire `fall_time` (ms airborne) and detects the take-off / landing transitions
     /// that emit `MSG_MOVE_JUMP` / `MSG_MOVE_FALL_LAND` (decision 0053).

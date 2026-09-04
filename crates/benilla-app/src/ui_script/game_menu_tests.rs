@@ -667,7 +667,16 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
         &[
             "Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "ActionBar.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\Fonts.xml",
+            "UIParent.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            "MoneyFrame.xml",
+            "GameTooltip.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
         ],
         &["Interface\\FrameXML\\MerchantFrame.xml"],
     );
@@ -758,6 +767,7 @@ fn backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,

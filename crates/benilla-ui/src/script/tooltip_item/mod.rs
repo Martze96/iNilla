@@ -414,6 +414,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 // show. Left `false` deliberately — inventing a selector we have
                                 // not read would be the §4 trade, and there is nothing to gain.
                                 openable_source: false,
+                                duration_ms: s.duration_ms,
                             },
                         )
                     });
@@ -460,7 +461,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             show_or_hide_empty(lua, h);
             Ok(MultiValue::from_vec(vec![
                 Value::Integer(1),
-                Value::Nil,
+                // `hasCooldown` — **broader than its name**, and this is the one arm of it we can
+                // answer. The builder's Lua return is `[ebp-0x38]`, set by FOUR sites, only one of
+                // which is the cooldown line: LOCKED_WITH_ITEM, the temporary-enchant countdown,
+                // **the item's own duration line** (`0x52ce0d`), and ITEM_COOLDOWN_TIME. So a
+                // duration-bearing item answers truthy here with no cooldown of any kind, and an
+                // addon can see it (decision 1933's fold-back). The equipped-cooldown feed is
+                // still the INTERIM above; this is the half that now exists.
+                if inst.duration_ms.is_some() {
+                    Value::Boolean(true)
+                } else {
+                    Value::Nil
+                },
                 Value::Integer(0),
             ]))
         })?,
@@ -518,6 +530,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 // same clam mid-cooldown would show ITEM_COOLDOWN_TIME instead
                                 // (that line has no feed here yet — a separate, pre-existing gap).
                                 openable_source: !has_cd,
+                                duration_ms: s.duration_ms,
                             },
                         )
                     }
@@ -564,7 +577,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             show_or_hide_empty(lua, h);
             Ok(MultiValue::from_vec(vec![
-                Value::Boolean(has_cd),
+                // Not just the cooldown: the builder's return is set by four line sites, and the
+                // item's own duration line is one of them (see `SetInventoryItem`'s note above,
+                // decision 1933's fold-back).
+                Value::Boolean(has_cd || inst.duration_ms.is_some()),
                 Value::Integer(0),
             ]))
         })?,

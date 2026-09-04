@@ -75,6 +75,31 @@ pub(super) struct FeedMemory {
     macro_generation: u64,
 }
 
+/// The DBC name tables the cast-fail **argument arms** read (`FailArgs`), as one parameter — three
+/// `Option<Res<…>>` that are one concept and were pushing this system past Bevy's parameter arity
+/// (decision 1948). Each is `Option` for the same reason `FailArgs`' fields are: a client with no
+/// game data has none, and the arm then declines and the template strips.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct FailNameTables<'w> {
+    /// `SpellFocusObject.dbc` — the crafting book's catalog, for `0x5e`.
+    focus: Option<Res<'w, crate::ui_tradeskill::SpellFocus>>,
+    /// `AreaTable.dbc` — the map arc's, for `0x5d`.
+    areas: Option<Res<'w, crate::area::AreaTableRes>>,
+    /// `SpellMechanic.dbc` — for `0x8d`, the one arm whose word is produced locally.
+    mechanics: Option<Res<'w, super::SpellMechanics>>,
+}
+
+impl FailNameTables<'_> {
+    fn args(&self) -> cast_fail::FailArgs<'_> {
+        cast_fail::FailArgs {
+            arg: None,
+            focus: self.focus.as_deref().map(|f| &f.catalog),
+            areas: self.areas.as_deref().map(|a| &a.0),
+            mechanics: self.mechanics.as_deref().map(|m| &m.catalog),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn feed_actions(
     script: Option<NonSendMut<UiScript>>,
@@ -88,10 +113,7 @@ pub(super) fn feed_actions(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
-    // The two DBC name tables the cast-fail argument arms read (`FailArgs`): the crafting book's
-    // SpellFocusObject catalog and the map arc's AreaTable one, both already loaded.
-    spell_focus: Option<Res<crate::ui_tradeskill::SpellFocus>>,
-    areas: Option<Res<crate::area::AreaTableRes>>,
+    name_tables: FailNameTables,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
     // Where a displayed message lands: the chat window (the combat log's own record of a failed
@@ -122,11 +144,7 @@ pub(super) fn feed_actions(
     // things — "Not enough mana." on the screen, "You fail to cast Frostbolt: Not enough mana."
     // in the log.
     let mut fail_lines: Vec<crate::ui_chat::combat::PendingCombat> = Vec::new();
-    let fail_args = cast_fail::FailArgs {
-        arg: None,
-        focus: spell_focus.as_deref().map(|f| &f.catalog),
-        areas: areas.as_deref().map(|a| &a.0),
-    };
+    let fail_args = name_tables.args();
     let texts: Vec<cast_fail::CastFailLine> = cast_errors
         .0
         .drain(..)

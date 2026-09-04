@@ -41,7 +41,7 @@ pub use model::{
 mod adt;
 mod terrain;
 mod wdt;
-pub use adt::{chunk_to_mesh, AdtLoader, AdtTile, ChunkShading};
+pub use adt::{chunk_to_mesh, chunks_to_mesh, AdtLoader, AdtTile, ChunkShading};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};

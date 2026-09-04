@@ -68,7 +68,12 @@ fn load_tot() -> UiScript {
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "ActionBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");

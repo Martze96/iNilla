@@ -36,7 +36,13 @@ fn setup() -> UiScript {
         // happens. Ours never called it. MicroMenu needs the bar's button kit under it.
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "MicroMenu.xml",
         // `TicketStatusFrame_OnEvent` re-anchors TemporaryEnchantFrame before it arms the repoll
         // timer, so without BuffFrame the handler raises and `refreshTime` is never set. This is

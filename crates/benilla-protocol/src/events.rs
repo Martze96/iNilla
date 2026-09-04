@@ -346,8 +346,21 @@ pub enum SessionEvent {
     /// `[start, …waypoints…, endpoint]` — at constant (arc-length) speed over `duration_ms`. Every
     /// waypoint is carried, so a curved patrol reads as its real path, not a straight `start → endpoint`
     /// shortcut. A `Stop` / zero-duration / <2-point move clears the path (`path` empty).
+    /// `MSG_MOVE_TIME_SKIPPED` — an observed mover reported that its own client skipped `lag_ms`
+    /// of movement simulation. **Not a pose**: nothing about where the unit is has changed, only
+    /// how far its clock has run. The app advances that mover's relay-chain wire stamp by it, the
+    /// reference's `[CMovement+0xac] += lag` (`0x603b40` → `0x601560` → `0x61ab90`). Ignoring it
+    /// leaves our copy of the chain permanently short, so the mover's next real packet reads as a
+    /// step `lag` too large and is scheduled that much late. Decision 1935.
+    MoveTimeSkipped { guid: u64, lag_ms: u32 },
     MonsterMove {
         guid: u64,
+        /// `SMSG_MONSTER_MOVE_TRANSPORT` only: the transport whose frame `start` and every `path`
+        /// point are expressed in — deck-local offsets, composed through the transport's live pose
+        /// rather than read as world coordinates. `None` = the ordinary absolute path. A packet
+        /// naming a transport is also the *attach* signal: the unit rides that deck from here
+        /// (decision 1936).
+        transport: Option<u64>,
         start: [f32; 3],
         /// The server's per-move spline counter — echoed in `CMSG_MOVE_SPLINE_DONE` when this spline
         /// drives our own player (Charge/knockback/taxi); ignored for a creature's walk.
@@ -361,6 +374,8 @@ pub enum SessionEvent {
         duration_ms: u32,
         /// `true` ⇒ a 3-D flight path (keep the spline's Z); `false` ⇒ a ground walk whose Z the app
         /// re-derives from the terrain under the unit (see the renderer's creature ground-clamp).
+        /// The re-derive is world-space and so does not apply to a `transport` path: there is no
+        /// terrain under a deck, and the wire Z is already the deck-local height (decision 1936).
         flying: bool,
         /// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** forces
         /// `MOVEFLAG_WALK_MODE` on for the unit the spline moves (decision 1758).
@@ -777,6 +792,13 @@ pub enum SessionEvent {
     },
     /// Put an item instance on the client's fixed 30 s use cooldown (`SMSG_ITEM_COOLDOWN`).
     ItemCooldown { item_guid: u64, spell_id: u32 },
+    /// `SMSG_ITEM_TIME_UPDATE` — the seconds left on one duration-limited item instance (a
+    /// conjured stone, a holiday gift, a timed quest item). The item's own `ITEM_FIELD_DURATION`
+    /// carries the same number and is sent to the owner, but vmangos's writer says outright that
+    /// the field is not what the client displays from (`Item::SendTimeUpdate`,
+    /// `Objects/Item.cpp:1094`) — same shape as the enchant countdown (decision 0920).
+    /// `seconds == 0` = expired / no timer. Decision 1933.
+    ItemTime { item_guid: u64, seconds: u32 },
     /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — the seconds left on one item's TEMPORARY enchant, in the
     /// named enchant slot. The **only** feed for the tooltip's countdown: the item's own
     /// `ITEM_FIELD_ENCHANTMENT` duration field is never read for it (wow-re

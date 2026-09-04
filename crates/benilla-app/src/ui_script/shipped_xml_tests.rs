@@ -1280,7 +1280,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     // The sweep is only worth anything if there was something to hide in the first place.
     let before = names.iter().filter(|n| visible(&s, n)).count();
     assert!(
-        before > 50,
+        before > 20, // 50 until 1938 took the three bar files (and their visible frames) stock
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );
@@ -1350,7 +1350,7 @@ fn every_declared_parent_really_attaches() {
 
     let declared = shipped_frame_parents();
     assert!(
-        declared.len() > 60,
+        declared.len() > 30, // 67 before 1938 took the three bar files (25 of them) stock
         "only {} parent declarations found — the scan broke",
         declared.len()
     );

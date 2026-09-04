@@ -1063,6 +1063,15 @@ pub(super) fn control(
                 orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
             }
         });
+        // The skipped-time clock (decision 1935): a held frame is a frame of movement simulation
+        // we advanced through without integrating, and the mover we name is the one we are
+        // actually driving — a possessed unit while we hold its reins. Read out before the call
+        // takes `player` mutably.
+        let skip = movement_net::SkipClock {
+            dt,
+            held: player.settling,
+            mover: player.foreign_mover.or(self_guid),
+        };
         movement_net::stream_self_movement(
             &net.0 .0,
             &mut player,
@@ -1090,6 +1099,7 @@ pub(super) fn control(
             // byte is 0 → `0x615c80 je 0x616539`: no apply, and no ack).
             knockback.filter(|_| knocked),
             wire_transport,
+            skip,
         );
     } else {
         // Free fly (pre-connect or detached): aim from the look angles, move the camera directly

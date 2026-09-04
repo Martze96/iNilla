@@ -340,54 +340,104 @@ ConfirmSummon.xml
 # asks. The only entry in the registry that raises a money frame, so it needs MoneyFrame.xml (far
 # above, ahead of UiPanels.xml) as well as the StaticPopup engine itself.
 TalentWipeConfirm.xml
+# ── MEASUREMENT (1938): the options window at the reference's slot (FrameXML.toc l.21, before
+#    MainMenuBar l.34) with the four rows it inherits from. ──
+# The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
+# Slider scroll bar) + FauxScrollFrameTemplate + the reference's own FauxScrollFrame_*
+# API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
+# before its first customer (the trainer list) below.
+ScrollTemplates.xml
+
+# ══ THE PANEL TEMPLATE KIT — the reference's own, off the player's chain (1751, window 31) ══
+# TWO entries, because the reference splits this kit the way it splits every other: the `.lua`
+# carries the verbs and the `.xml` the templates. Listing the `.xml` alone brings none of the verbs
+# (`every_chain_xml_brings_its_own_lua` is a gate because that already bit twice).
+#
+# ONE swap, THREE of our files, which is why it had to move as a unit and why 1837 measured it
+# before anyone executed it:
+#   * `UIPanelTemplates.xml` — DELETED. Our 18 templates were a strict SUBSET of the reference's,
+#     zero benilla-only additions, so the template half is a pure gain.
+#   * the scroll half of `ScrollTemplates.xml` — `FauxScrollFrameTemplate`, `FauxScrollFrame_*`,
+#     `ScrollFrame_*` — now the chain's. What stays there is `BenillaScrollBarTemplate` and
+#     `BenillaScrollTroughTemplate`, which are ours and which six windows still inherit.
+#   * the `PanelTemplates_*` family out of `UiPanels.xml`.
+#
+# It could not be split: `ScrollTemplates.xml` sits ABOVE this entry, so the chain's
+# `FauxScrollFrameTemplate` lands after ours and wins (registration is last-in). There is no
+# ordering that takes the templates without also taking Faux.
+#
+# GAINED: `TabButtonTemplate`, and the whole `ScrollingEdit_*` family, which we had NOWHERE — that
+# is HelpFrame's named blocker, answered as a side effect. And it unblocks MacroFrame (1835).
+Interface\FrameXML\UIPanelTemplates.lua
+
+Interface\FrameXML\UIPanelTemplates.xml
+
+# The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
+# the templates + script of the Options window's Keybindings category, over the
+# engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12
+# GetBinding/SetBinding Lua API). Needs UiPanels (popup engine) and GameTooltip (the
+# character-specific checkbox's hover); MUST load before OptionsFrame.xml, whose
+# Keybindings body inherits these templates and calls this script at OnLoad.
+KeyBindingsPage.xml
+
+# The options window (the 0985 provenance split: 0950's era structure, 0978's
+# 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
+# cuts — bare fully-live sliders, no corner X; 0992's dropdown rows + the Nameplates
+# page): the era-shaped OptionsFrame the game menu's Options button opens. Needs
+# Fonts' objects, UiPanels' panel manager, and UIDropDownMenu's capsule template
+# (all far above); sits right before GameMenuFrame so the menu — which reaches it by
+# name at click time — stays the last, outermost layer.
+OptionsFrame.xml
+
+# ── The action-bar cluster, stock (1938): MainMenuBar.xml before Cooldown.xml as the reference's
+#    toc has it (l.34 → l.36); ActionBarFrame.xml + MultiActionBars.xml right after ActionButtonTemplate.xml
+#    (l.37-39); BonusActionBarFrame.xml — which also declares the shapeshift bar — after PetActionBar.xml
+#    (l.73-74). Replaces ActionBar.xml, MultiBars.xml and StanceBar.xml.
+Interface\FrameXML\MainMenuBar.xml
+
 # The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
-# consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
+# consumers (the action, multibar, bonus and shapeshift buttons; the bag slots).
 Cooldown.xml
 # ══ THE ACTION-BUTTON REGIONS — the reference's own, off the player's chain (1751) ══
 # `ActionButtonTemplate`: the REGIONS-ONLY half of the reference's two-level split — icon, count,
 # hotkey, name, border, flash, cooldown and normal texture. It declares NO scripts and calls
 # nothing, so it needs no `.lua` beside it. The handler half is `ActionBarButtonTemplate`, which
-# ActionBar.xml still declares and which inherits this; those handlers stay ours until
-# `ActionButton.lua`'s 21 verbs migrate (we have 10 of them, under the reference's own names).
+# ActionBarFrame.xml below declares over `ActionButton.lua` (stock since 1938).
 #
 # Ours was a transcription of this exact file — the eight `$parent*` child names match to the
 # letter — so the swap is a deletion.
 #
-# **It must come BEFORE ActionBar.xml.** A template is registered by name and the later line
-# wins, so seated below it our transcription would take the name straight back.
+# **It must come BEFORE ActionBarFrame.xml**, whose template inherits it by name at load.
 Interface\FrameXML\ActionButtonTemplate.xml
-ActionBar.xml
+Interface\FrameXML\ActionBarFrame.xml
 # The four OPTIONAL extra bars (bottom left/right 61-72 / 49-60, vertical right/left
-# 25-36 / 37-48), all shipping hidden until the player ticks their row (decision 1500):
-# pure XML/Lua over ActionBar.xml's shared button template + handler set. Loads right
-# after it, and the order is a REQUIREMENT, not tidiness: it inherits
-# BenillaActionButtonTemplate, anchors to ActionButton1, its buttons join the
-# BENILLA_ACTION_BUTTONS roster ActionBar.xml declares, its grid verbs call that file's
-# ActionButton_ShowGrid/_HideGrid, and its BENILLA_MULTIBARS table reads that file's
-# *_ACTIONBAR_PAGE constants at FILE SCOPE. UIParent.xml (far above) owns the manage pass
-# MultiActionBar_Update ends with, and the PLAYER_ENTERING_WORLD seed that fills the four
-# SHOW_MULTI_ACTIONBAR_* globals from the server's byte.
-MultiBars.xml
-# The stance/shapeshift bar: hidden until `crate::ui_shapeshift`'s feed pushes a
-# non-empty form list (a formless class never shows it). After Cooldown.xml
-# (CooldownFrame_SetTimer) + ActionBar.xml (BENILLA_FALLBACK_ICON, the MainMenuBar
-# anchor target).
-StanceBar.xml
+# 25-36 / 37-48), all shipping hidden until the player ticks their row (decision 1500) — the
+# reference's own file, right after ActionBarFrame.xml as its toc has it (l.38-39): it inherits
+# ActionBarButtonTemplate, anchors to ActionButton1, and calls ActionButton_ShowGrid/_HideGrid.
+# Its OnLoad writes five rows of `UIOptionsFrameCheckButtons`, which is why OptionsFrame.xml sits
+# ABOVE this cluster (1938). UIParent.xml (far above) carries the PLAYER_ENTERING_WORLD seed
+# that fills the four SHOW_MULTI_ACTIONBAR_* globals from the server's byte; the manage pass runs
+# from the options rows' setters, as the stock options window runs it on hide.
+Interface\FrameXML\MultiActionBars.xml
 # The pet action bar (decision 0982): hidden until `crate::ui_pet`'s feed reports a bar,
 # i.e. until the server sends `SMSG_PET_SPELLS` for a live pet or charm — so a class that
 # never has one never sees it. Right after the stance bar, whose row it shares (either
 # one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
-# (CooldownFrame_SetTimer), ActionBar.xml (the `MainMenuBar` anchor target),
+# (CooldownFrame_SetTimer), MainMenuBar.xml (the `MainMenuBar` anchor target),
 # GameTooltip.xml (its hover), Fonts.xml (NORMAL_FONT_COLOR_CODE, which wraps the binding
 # a token slot's tooltip appends) and UIParent.xml (GetBindingText, which renders it).
 # It is also the pet ARC's file, so decision 1066's three
 # right-click-menu dialogs (ABANDON_PET / RENAME_PET / PETRENAMECONFIRM) register here —
 # which adds UiPanels.xml to its dependency set, already far above.
 PetActionBar.xml
+# The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both, and the
+# reference's toc seats it right after PetActionBarFrame (l.73-74): the bonus buttons'
+# Up/Down call PetActionButtonUp/Down, which PetActionBar.xml above defines.
+Interface\FrameXML\BonusActionBarFrame.xml
 # The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
-# loads MainMenuBarMicroButtons right after MainMenuBar). After ActionBar.xml: it anchors
-# into MainMenuBarArtFrame by name and seats itself with that file's
-# BenillaActionBarArt_SeatAbove. It must come BEFORE the panels it toggles, because each of
+# loads MainMenuBarMicroButtons right after MainMenuBar). After MainMenuBar.xml: it anchors
+# into MainMenuBarArtFrame by name and seats itself above the art plate with its own
+# BenillaActionBarArt_SeatAbove (moved here from ActionBar.xml with 1938). It must come BEFORE the panels it toggles, because each of
 # their OnShow/OnHide calls the `UpdateMicroButtons` this file defines (the panel frames
 # themselves are read back through getglobal, so the reverse dependency is call-time).
 MicroMenu.xml
@@ -440,33 +490,6 @@ Interface\FrameXML\FadingFrame.xml
 # strings, which came from ours as `X = X or "…"` fallbacks and now come from the player's own
 # GlobalStrings.lua like every other string in this interface.
 Interface\FrameXML\ZoneText.xml
-# The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
-# Slider scroll bar) + FauxScrollFrameTemplate + the reference's own FauxScrollFrame_*
-# API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
-# before its first customer (the trainer list) below.
-ScrollTemplates.xml
-# ══ THE PANEL TEMPLATE KIT — the reference's own, off the player's chain (1751, window 31) ══
-# TWO entries, because the reference splits this kit the way it splits every other: the `.lua`
-# carries the verbs and the `.xml` the templates. Listing the `.xml` alone brings none of the verbs
-# (`every_chain_xml_brings_its_own_lua` is a gate because that already bit twice).
-#
-# ONE swap, THREE of our files, which is why it had to move as a unit and why 1837 measured it
-# before anyone executed it:
-#   * `UIPanelTemplates.xml` — DELETED. Our 18 templates were a strict SUBSET of the reference's,
-#     zero benilla-only additions, so the template half is a pure gain.
-#   * the scroll half of `ScrollTemplates.xml` — `FauxScrollFrameTemplate`, `FauxScrollFrame_*`,
-#     `ScrollFrame_*` — now the chain's. What stays there is `BenillaScrollBarTemplate` and
-#     `BenillaScrollTroughTemplate`, which are ours and which six windows still inherit.
-#   * the `PanelTemplates_*` family out of `UiPanels.xml`.
-#
-# It could not be split: `ScrollTemplates.xml` sits ABOVE this entry, so the chain's
-# `FauxScrollFrameTemplate` lands after ours and wins (registration is last-in). There is no
-# ordering that takes the templates without also taking Faux.
-#
-# GAINED: `TabButtonTemplate`, and the whole `ScrollingEdit_*` family, which we had NOWHERE — that
-# is HelpFrame's named blocker, answered as a side effect. And it unblocks MacroFrame (1835).
-Interface\FrameXML\UIPanelTemplates.lua
-Interface\FrameXML\UIPanelTemplates.xml
 # ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
 # The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
 # `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
@@ -498,7 +521,7 @@ OptionsFrameTemplates.xml
 #
 # THE SEAT IS A REQUIREMENT, not tidiness: the Okay/Cancel buttons
 # `inherits="GameMenuButtonTemplate"`, resolved at LOAD, and that template lives in
-# UIPanelTemplates.xml six lines up (it moved there from GameMenuFrame.xml — the reference's own
+# UIPanelTemplates.xml far above (it moved there from GameMenuFrame.xml — the reference's own
 # file for it — precisely because GameMenuFrame.xml is deliberately LAST, which is also why this
 # entry does not follow the reference's own position below it). Everything else it needs is far
 # above: Fonts' GameFontNormal trio, and UiPanels' ShowUIPanel/HideUIPanel plus its UISpecialFrames
@@ -641,7 +664,7 @@ Interface\FrameXML\ContainerFrame.xml
 # `UIPanelButtonTemplate`, and `PanelTemplates_SetNumTabs`, which `CharacterFrame_OnLoad` calls at
 # LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
 # `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /
-# `PlayerFrameManaBar`, named in that same OnLoad), ActionBar.xml (`MainMenuExpBar`, likewise),
+# `PlayerFrameManaBar`, named in that same OnLoad), MainMenuBar.xml (`MainMenuExpBar`, likewise),
 # MicroMenu.xml (`MicroButtonTooltipText`, the five tab hovers) and UIParent.xml
 # (`Model_OnLoad`/`_RotateLeft`/`_RotateRight`/`_OnUpdate` — the model pane's turntable, the
 # reference's own code living in our UIParent.lua counterpart).
@@ -669,7 +692,7 @@ Interface\FrameXML\PetPaperDollFrame.xml
 # THE POSITION IS THE REQUIREMENT: `inherits="PaperDollItemSlotButtonTemplate"` on the four bag
 # slots and `inherits="ItemButtonTemplate"` on the backpack are resolved at LOAD, and so is
 # `parent="MainMenuBarArtFrame"` — so this sits below the character-window block (above, which is
-# where stock `PaperDollFrame.xml` declares that template) and below ActionBar.xml (which declares
+# where stock `PaperDollFrame.xml` declares that template) and below MainMenuBar.xml (which declares
 # the art frame). It sat below a transcribed copy of the template in `ItemSlotButtonTemplates.xml`
 # until the character window migrated and made that copy redundant (decision 1810). Being BELOW the sourced ContainerFrame.xml is
 # legibility, not necessity, in either direction: every verb each file calls of the other resolves
@@ -679,8 +702,8 @@ Interface\FrameXML\PetPaperDollFrame.xml
 # than being edited into anything of Blizzard's: the item-push card (0887 — the reference's is a
 # `<Model>` playing an .mdx and this engine renders no FrameXML models, so ours samples that
 # model's own tracks and draws a quad), and the GlobalStrings fallbacks the install-less harnesses
-# need. The keyring's SHOW trigger moved the other way — into ActionBar.xml, our MainMenuBar.xml,
-# which is exactly where the reference keeps it (MainMenuBar.xml l.323-341).
+# need. The keyring's SHOW trigger moved the other way — into the main bar's file, which is exactly
+# where the reference keeps it (MainMenuBar.xml l.323-341; stock since 1938).
 Interface\FrameXML\MainMenuBarBagButtons.xml
 # The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
@@ -700,8 +723,7 @@ ContainerFrameAdapters.xml
 # template's first benilla consumer), OptionsFrameTemplates.xml (`OptionsCheckButtonTemplate`, two
 # of the three detail boxes), GameTooltip.xml (the column newbie tips) and Fonts.xml. One
 # dependency runs the other way and is worth naming: the WATCH BAR half of the reference's
-# ReputationFrame lives in ActionBar.xml (entry 94) beside the MainMenuBar frames it drives — that
-# file's own comment carries the justification — so `FACTION_BAR_COLORS` and
+# ReputationFrame is declared in this same stock file (since 1875's co-edit, below) — so `FACTION_BAR_COLORS` and
 # `ReputationWatchBar_Update` are already defined when this page paints a row or ticks the
 # "Show as Experience Bar" box.
 # ══ THE REPUTATION PANE — the reference's own, off the player's chain (1751, scoped by 1844) ══
@@ -712,7 +734,7 @@ ContainerFrameAdapters.xml
 #
 # THE CO-EDIT was compulsory. The reference declares the reputation WATCH BAR in this same file;
 # ours lived in `ActionBar.xml` behind a note defending the placement. Frame globals publish
-# NON-overwritingly and ActionBar.xml is manifest line 340 against this file's — so ours would have
+# NON-overwritingly and ActionBar.xml was manifest line 340 against this file's — so ours would have
 # kept the name and the chain's bar would have been built and unreachable, which is exactly what
 # `GroupLootFrame` did for months (1838). The bar, its update, its two text verbs,
 # `MAX_PLAYER_LEVEL` and `FACTION_BAR_COLORS` all went home with it (1875).
@@ -1053,21 +1075,6 @@ Interface\FrameXML\HelpFrame.xml
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.
 Interface\FrameXML\CinematicFrame.xml
-# The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
-# the templates + script of the Options window's Keybindings category, over the
-# engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12
-# GetBinding/SetBinding Lua API). Needs UiPanels (popup engine) and GameTooltip (the
-# character-specific checkbox's hover); MUST load before OptionsFrame.xml, whose
-# Keybindings body inherits these templates and calls this script at OnLoad.
-KeyBindingsPage.xml
-# The options window (the 0985 provenance split: 0950's era structure, 0978's
-# 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
-# cuts — bare fully-live sliders, no corner X; 0992's dropdown rows + the Nameplates
-# page): the era-shaped OptionsFrame the game menu's Options button opens. Needs
-# Fonts' objects, UiPanels' panel manager, and UIDropDownMenu's capsule template
-# (all far above); sits right before GameMenuFrame so the menu — which reaches it by
-# name at click time — stays the last, outermost layer.
-OptionsFrame.xml
 # The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
 # layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
 # + panel manager, MicroMenu's UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing

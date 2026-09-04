@@ -840,6 +840,7 @@ mod tests {
             ..default()
         };
         let path = |grounded: bool| Spline {
+            deck: None,
             points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
             start: std::time::Instant::now(),
             duration: std::time::Duration::from_secs(1),

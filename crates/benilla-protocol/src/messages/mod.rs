@@ -100,8 +100,8 @@ pub use client::{
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
     creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack, leave_channel,
     messagechat, messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack,
-    move_spline_done, movement, pet_name_query, ping, played_time, query_time, random_roll,
-    teleport_ack, text_emote,
+    move_spline_done, move_time_skipped, movement, pet_name_query, ping, played_time, query_time,
+    random_roll, teleport_ack, text_emote,
 };
 pub use combat_log::{
     DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
@@ -150,9 +150,9 @@ pub use instance::{
 };
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
-    split_item, swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry,
-    ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED,
-    ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
+    split_item, swap_inv_item, swap_item, use_item, wrap_item, ItemDamage, ItemInfo,
+    ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED,
+    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
     autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,

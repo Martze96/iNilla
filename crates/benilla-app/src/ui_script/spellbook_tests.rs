@@ -127,7 +127,13 @@ fn shipped_spellbook_drives_end_to_end() {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "ActionBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
     // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
     // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
@@ -203,6 +209,14 @@ fn shipped_spellbook_drives_end_to_end() {
     // (`cursor::bar::place_action`) a bar-to-bar drag uses: a plain click on an action button
     // routes through UseAction's checkCursor=1 fork to a place. Packs kind 0x00 (SPELL, decision
     // 0216 §1) with the spell id — `action_sets` is the app's own CMSG_SET_ACTION_BUTTON queue.
+    // An EMPTY main-bar slot is hidden under the reference (ActionButton.lua:69-70) until a held
+    // payload opens the grid: the engine derives ACTIONBAR_SHOWGRID from the cursor's edge and
+    // fires it on the next tick, as the app ticks between any two mouse events.
+    s.tick(0.016);
+    assert!(
+        s.eval::<bool>("return ActionButton1:IsVisible()").unwrap(),
+        "the held spell opened the empty well"
+    );
     let (ax, ay) = center(&s, "ActionButton1");
     s.mouse_button(ax, ay, "LeftButton", true);
     s.mouse_button(ax, ay, "LeftButton", false);
@@ -684,7 +698,12 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the

@@ -94,6 +94,7 @@ impl Plugin for TransportPlugin {
                     tick_transports,
                     republish_moved_collider_aabbs::<Collider>,
                     compose_riders,
+                    ground_deck_riders,
                 )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Net)
@@ -534,6 +535,78 @@ fn compose_riders(
         if let Some(mut rm) = motion {
             rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
             rm.orientation = yaw;
+        }
+    }
+}
+
+/// **Re-ground a deck-splined rider onto the deck it is walking on** (decision 1936's correction).
+///
+/// The tempting reading — "a transport spline's Z is authoritative, because there is no terrain
+/// under a boat" — is what benilla shipped for a few hours and what wow-re's carve refuted. The
+/// transport guid appears in **neither** `0x616cb0`'s predicate **nor** `0x634040`'s dispatch: a
+/// grounded `SMSG_MONSTER_MOVE_TRANSPORT` spline takes the *same* fork as a plain one,
+/// `0x616d03` zeroes its Z-delta and the WALK resolver `0x6367b0` re-derives Z off the world trace
+/// (`0x636e52`: `pos.z -= hitDistance`). The reason that does not drop the unit into the sea is
+/// that the query runs at the **composed world position**, and the class mask `0x6315f0` yields
+/// `0x100111` whose `0x100000` bit unconditionally admits GameObject meshes — a boat's `.wmo`
+/// being in the global map-object list precisely because it is a type-11/15 GameObject.
+///
+/// **So the deck's grounding is the ordinary grounding, moved one step later.** It cannot live in
+/// [`crate::net::ground_clamp_creatures`] with every other unit's, because that system runs inside
+/// `WorldStage::Net` — *before* [`compose_riders`] — where a deck rider's `Transform` is still
+/// last frame's composed pose and its fresh position exists only as a transport-local offset. Here
+/// the deck is at its this-frame pose, its collider AABB has just been republished
+/// ([`republish_moved_collider_aabbs`], decision 1663 — without which the probe would be pruned
+/// against the deck's previous-frame box) and the rider's world position is on the transform. One
+/// probe, at the reference's own moment.
+///
+/// The corrected Y is written to the `Transform` and not back into
+/// [`TransportRider::local_pos`], deliberately: [`compose_riders`] recomputes the world pose from
+/// the local one every frame, so a write-back would be re-derived away next frame anyway, and the
+/// correction is idempotent as it stands. [`crate::net::RemoteMotion`]'s canonical pose moves with
+/// it, as it does in `compose_riders`.
+///
+/// **A named gap.** The reference has a *third* regime this does not model: `0x616af0`'s anti-warp
+/// guard snaps `pos := base + sampledOffset` verbatim — wire Z included — and bypasses the
+/// re-ground entirely whenever the horizontal step exceeds 3 yd (`[0x80c5bc]` = 9.0, squared) or
+/// 60 yd/s. For a creature freshly placed on a deck that is the common *first* substep, so our
+/// first frame re-grounds where the reference would take the wire Z. It settles to the same place
+/// on the next frame either way.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
+fn ground_deck_riders(
+    world: benilla_world::collision::WorldCollision,
+    mut riders: Query<
+        (
+            &mut Transform,
+            Option<&mut crate::net::RemoteMotion>,
+            &crate::net::Spline,
+        ),
+        (With<TransportRider>, Without<Transport>),
+    >,
+) {
+    /// The probe's reach above and below the rider's seat — the creature clamp's own numbers
+    /// (`GROUND_CLAMP_UP`/`_DOWN`), for the same reason: enough to clear a slightly-high server Z
+    /// and to follow a step down, not enough to grab a deck one storey up.
+    const UP: f32 = 2.5;
+    const DOWN: f32 = 4.0;
+    for (mut transform, motion, spline) in &mut riders {
+        // Only a GROUNDED deck path. A flying one owns its altitude (the `0x200` bit is the same
+        // one that decides the point encoding and the resolver arm), and a world-frame spline is
+        // `ground_clamp_creatures`' business, not ours.
+        if spline.deck.is_none() || !spline.grounded {
+            continue;
+        }
+        let origin = transform.translation + Vec3::Y * UP;
+        let Some(hit) = world.ray_body(origin, Dir3::NEG_Y, UP + DOWN) else {
+            continue; // nothing under the rider — leave the composed pose alone
+        };
+        let y = origin.y - hit.distance;
+        if y == transform.translation.y {
+            continue;
+        }
+        transform.translation.y = y;
+        if let Some(mut rm) = motion {
+            rm.wow_pos = benilla_assets::coords::bevy_to_wow(transform.translation);
         }
     }
 }

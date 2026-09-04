@@ -135,8 +135,19 @@ pub enum ServerPacket {
     TriggerCinematic {
         cinematic_id: u32,
     },
+    /// `MSG_MOVE_TIME_SKIPPED` — an observed mover's own client skipped `lag_ms` of movement
+    /// simulation, so every watcher's copy of its wire clock must move with it (layout in
+    /// [`super::movement::read_move_time_skipped`]). Decision 1935.
+    MoveTimeSkipped {
+        guid: u64,
+        lag_ms: u32,
+    },
     MonsterMove {
         guid: u64,
+        /// `SMSG_MONSTER_MOVE_TRANSPORT` only: the transport whose frame `start` and every `path`
+        /// point are expressed in (deck-local offsets, not world coordinates). `None` = the plain
+        /// `SMSG_MONSTER_MOVE`, whose coordinates are absolute. Decision 1936.
+        transport: Option<u64>,
         start: Vector3d,
         /// The server's per-move spline counter — echoed back in `CMSG_MOVE_SPLINE_DONE` when the
         /// spline drives our own player (Charge/knockback/taxi); ignored for a creature's walk.
@@ -644,6 +655,12 @@ pub enum ServerPacket {
     ItemCooldown {
         item_guid: u64,
         spell_id: u32,
+    },
+    /// `SMSG_ITEM_TIME_UPDATE` — how long one duration-limited item instance has left, in
+    /// **seconds** (layout in [`super::items::read_item_time`]). Decision 1933.
+    ItemTime {
+        item_guid: u64,
+        seconds: u32,
     },
     /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — how long one item's TEMPORARY enchant has left (layout in
     /// [`super::items::read_item_enchant_time`]). The tooltip's countdown has no other source
@@ -1496,7 +1513,14 @@ impl ServerPacket {
             ServerPacket::CompressedMoves { .. } => "SMSG_COMPRESSED_MOVES".into(),
             ServerPacket::DestroyObject { .. } => "SMSG_DESTROY_OBJECT".into(),
             ServerPacket::TriggerCinematic { .. } => "SMSG_TRIGGER_CINEMATIC".into(),
-            ServerPacket::MonsterMove { .. } => "SMSG_MONSTER_MOVE".into(),
+            ServerPacket::MoveTimeSkipped { .. } => "MSG_MOVE_TIME_SKIPPED".into(),
+            ServerPacket::MonsterMove { transport, .. } => {
+                if transport.is_some() {
+                    "SMSG_MONSTER_MOVE_TRANSPORT".into()
+                } else {
+                    "SMSG_MONSTER_MOVE".into()
+                }
+            }
             ServerPacket::PlayerMove { opcode, .. } => format!("MSG_MOVE relay ({opcode:#06x})"),
             ServerPacket::Teleport { .. } => "MSG_MOVE_TELEPORT_ACK".into(),
             ServerPacket::NewWorld { .. } => "SMSG_NEW_WORLD".into(),
@@ -1572,6 +1596,7 @@ impl ServerPacket {
             ServerPacket::CancelAutoRepeat => "SMSG_CANCEL_AUTO_REPEAT".into(),
             ServerPacket::SpellCooldownList { .. } => "SMSG_SPELL_COOLDOWN".into(),
             ServerPacket::ItemCooldown { .. } => "SMSG_ITEM_COOLDOWN".into(),
+            ServerPacket::ItemTime { .. } => "SMSG_ITEM_TIME_UPDATE".into(),
             ServerPacket::ItemEnchantTime { .. } => "SMSG_ITEM_ENCHANT_TIME_UPDATE".into(),
             ServerPacket::CooldownEvent { .. } => "SMSG_COOLDOWN_EVENT".into(),
             ServerPacket::ClearCooldown { .. } => "SMSG_CLEAR_COOLDOWN".into(),

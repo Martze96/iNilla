@@ -55,6 +55,23 @@ impl WorldWriter {
         )
     }
 
+    /// Wrap an item in gift paper (`CMSG_WRAP_ITEM`, layout in [`messages::wrap_item`]) — the
+    /// completion of the local wrap cursor a `ITEM_FLAG_WRAPPER` item's right-click arms. The
+    /// paper's `(bag, slot)` leads, the target's follows. Success is silent (field updates on the
+    /// target, one paper destroyed); every refusal comes back as `SMSG_INVENTORY_CHANGE_FAILURE`.
+    pub fn wrap_item(
+        &mut self,
+        gift_bag: u8,
+        gift_slot: u8,
+        item_bag: u8,
+        item_slot: u8,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_WRAP_ITEM,
+            &messages::wrap_item(gift_bag, gift_slot, item_bag, item_slot),
+        )
+    }
+
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, layout in [`messages::auto_equip_item`]) — the
     /// server picks the destination slot. Success arrives as inventory-slot values deltas (and the
     /// visible-item change everyone renders); refusal as `SMSG_INVENTORY_CHANGE_FAILURE`.

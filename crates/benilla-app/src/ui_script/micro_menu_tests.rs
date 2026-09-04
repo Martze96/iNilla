@@ -25,7 +25,15 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "MicroMenu.xml",
     ]
     .into_iter()

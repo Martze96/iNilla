@@ -231,10 +231,20 @@ fn action_button_hover_takes_the_default_corner() {
     let mut s = harness(&[
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
     ]);
     s.register_cvars(crate::cvars::registered_pairs());
-    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
+    s.run("this = ActionButton3 ActionButton_SetTooltip()")
+        .unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let ok: bool = s
         .eval(
@@ -264,8 +274,25 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
     let mut s = harness(&[
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
-        "MultiBars.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "UiPanels.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
     ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_cvar_engine("UberTooltips", "0");
@@ -278,7 +305,8 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
         .unwrap()
     };
 
-    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
+    s.run("this = ActionButton3 ActionButton_SetTooltip()")
+        .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default == nil").unwrap(),
         "off: the main bar's plate is owner-anchored, not the default corner"
@@ -297,7 +325,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
     // All three members of the ref's LEFT set, by frame — membership is not gated on visibility,
     // and the two vertical bars are hidden until their option is ticked.
     for bar in ["MultiBarBottomRight", "MultiBarRight", "MultiBarLeft"] {
-        s.run(&format!("BenillaActionButton_OnEnter({bar}Button1)"))
+        s.run(&format!("this = {bar}Button1 ActionButton_SetTooltip()"))
             .unwrap();
         assert_eq!(
             seat(&s),
@@ -308,7 +336,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 
     // And the CVar back on restores the corner — the fork is a fork, not a one-way door.
     s.set_cvar_engine("UberTooltips", "1");
-    s.run("BenillaActionButton_OnEnter(MultiBarBottomRightButton1)")
+    s.run("this = MultiBarBottomRightButton1 ActionButton_SetTooltip()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
@@ -326,8 +354,18 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     let mut s = harness(&[
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
-        "StanceBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
     ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
@@ -341,7 +379,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     s.resolve();
 
-    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+    s.run("this = ShapeshiftButton1 ShapeshiftButton1:GetScript(\"OnEnter\")()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
@@ -349,7 +387,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
     );
 
     s.set_cvar_engine("UberTooltips", "0");
-    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+    s.run("this = ShapeshiftButton1 ShapeshiftButton1:GetScript(\"OnEnter\")()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
@@ -371,7 +409,16 @@ fn buff_hover_hangs_below_left_of_the_button() {
     let mut s = harness(&[
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "ActionBar.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "MoneyFrame.xml",
+        "GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\BuffFrame.xml",

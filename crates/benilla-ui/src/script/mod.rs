@@ -167,8 +167,8 @@ pub use char_stats::{
 pub use chat_send::ChatSend;
 pub use chat_window::ChatWindowLook;
 pub use container::{
-    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
-    RandomPropertyView, UiCursorMode,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
+    PetitionSlotView, RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{

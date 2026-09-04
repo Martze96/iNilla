@@ -320,6 +320,13 @@ pub(crate) struct Items {
     /// duration field, which the reference's tooltip never reads. Session state, so it clears with
     /// the objects (decision 0920).
     enchant_deadlines: HashMap<(u64, u32), std::time::Instant>,
+    /// The **item-lifetime deadlines**, keyed by item guid — a duration-limited instance's
+    /// remaining life (a conjured stone, a holiday gift, a timed quest item). Its only feed is
+    /// `SMSG_ITEM_TIME_UPDATE`; the instance's own `ITEM_FIELD_DURATION` carries the same number
+    /// and is sent to the owner, but vmangos's writer says in as many words that the field is not
+    /// what the client displays from (`Item::SendTimeUpdate`, `Objects/Item.cpp:1094`). Same shape
+    /// as [`Self::enchant_deadlines`] one field up, for the same reason (decision 1933).
+    duration_deadlines: HashMap<u64, std::time::Instant>,
 }
 
 impl Items {
@@ -353,6 +360,7 @@ impl Items {
             self.object_epoch = self.object_epoch.wrapping_add(1);
         }
         self.enchant_deadlines.retain(|&(g, _), _| g != guid);
+        self.duration_deadlines.remove(&guid);
     }
 
     /// The instance-side broadcast counter — see the [`Self::object_epoch`] field.
@@ -404,23 +412,27 @@ impl Items {
     }
 
     /// The counter a gated feed watches instead of holding its gate open per-frame: moves exactly
-    /// when some [`Self::enchant_remaining_display_ms`] can move. Each live deadline contributes
-    /// `floor(seconds left) + 1` — the `+1` makes the final `Some(0) → None` collapse (the tooltip
-    /// reverting to the plain enchant name) its own step, one frame after the deadline elapses.
+    /// when some displayable countdown can — [`Self::enchant_remaining_display_ms`] or
+    /// [`Self::duration_remaining_display_ms`], the two per-second timers a bag/equipment
+    /// snapshot renders. Each live deadline contributes `floor(seconds left) + 1` — the `+1`
+    /// makes the final `Some(0) → None` collapse (the tooltip reverting to the plain enchant
+    /// name, the duration line vanishing) its own step, one frame after the deadline elapses.
     /// Landings and removals move [`Self::object_epoch`] on their own. Empty — the overwhelmingly
-    /// common case — costs an empty iteration.
-    pub(crate) fn enchant_display_epoch(&self) -> u64 {
+    /// common case — costs two empty iterations.
+    pub(crate) fn countdown_display_epoch(&self) -> u64 {
         let now = std::time::Instant::now();
+        let step = |at: &std::time::Instant| {
+            let left = at.saturating_duration_since(now);
+            if left.is_zero() {
+                0
+            } else {
+                left.as_secs() + 1
+            }
+        };
         self.enchant_deadlines
             .values()
-            .map(|&at| {
-                let left = at.saturating_duration_since(now);
-                if left.is_zero() {
-                    0
-                } else {
-                    left.as_secs() + 1
-                }
-            })
+            .chain(self.duration_deadlines.values())
+            .map(step)
             .sum()
     }
 
@@ -440,6 +452,56 @@ impl Items {
             at.saturating_duration_since(std::time::Instant::now())
                 .as_millis() as u64,
         )
+    }
+
+    /// `SMSG_ITEM_TIME_UPDATE` landed: park the absolute deadline for that item instance's
+    /// remaining lifetime. Same store shape as the enchant path one field up
+    /// ([`Self::set_enchant_deadline`]) — byte-confirmed as such, not assumed (decision 1933's
+    /// fold-back).
+    ///
+    /// Three rules, each the reference's:
+    ///
+    /// - **A non-POSITIVE duration clears.** `0x5d9c0c` tests the wire value **signed** (`jle`),
+    ///   so `0` and anything with the top bit set both zero the cell rather than parking a
+    ///   68-year deadline. An expired countdown is an absent line, not a line reading `0`.
+    /// - **An item we do not hold is DROPPED — no queue, no retry.** `0x1EA`'s arm resolves the
+    ///   guid and returns on a miss. This is the load-bearing asymmetry with its sibling: the
+    ///   `0x1EB` enchant arm *does* enqueue an unresolved update and replays it when the item
+    ///   appears (`0x5ebd40` → `0x5ebde0`); this one does not. Following the sibling would also
+    ///   grow this map without bound for items that never arrive.
+    /// - The cell dies with the object, so a relog or a zone destroy loses it; the server re-sends
+    ///   for everything carried on world enter (`Player::SendItemDurations`).
+    pub(crate) fn set_item_duration(&mut self, guid: u64, seconds: u32) {
+        if !self.objects.contains_key(&guid) {
+            debug!("item duration: {guid:#x} names an item we do not hold — dropped");
+            return;
+        }
+        if seconds == 0 || seconds as i32 <= 0 {
+            if self.duration_deadlines.remove(&guid).is_some() {
+                self.object_epoch = self.object_epoch.wrapping_add(1);
+            }
+            return;
+        }
+        let at = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
+        self.duration_deadlines.insert(guid, at);
+        self.object_epoch = self.object_epoch.wrapping_add(1);
+        debug!("item duration: item {guid:#x} → {seconds}s");
+    }
+
+    /// Milliseconds left on an item instance's lifetime, or `None` when it carries no timer —
+    /// including an elapsed one. Recomputed on read from the parked deadline, never ticked (the
+    /// enchant path's `0x5d9d00` shape).
+    pub(crate) fn duration_remaining_ms(&self, guid: u64) -> Option<u64> {
+        let at = self.duration_deadlines.get(&guid)?;
+        let left = at.saturating_duration_since(std::time::Instant::now());
+        (!left.is_zero()).then_some(left.as_millis() as u64)
+    }
+
+    /// [`Self::duration_remaining_ms`] at **display granularity** — floored to the whole second,
+    /// for the same reason [`Self::enchant_remaining_display_ms`] is: a raw per-ms read makes
+    /// every snapshot differ every frame and fires the inventory feeds at frame rate.
+    pub(crate) fn duration_remaining_display_ms(&self, guid: u64) -> Option<u64> {
+        self.duration_remaining_ms(guid).map(|ms| ms - ms % 1000)
     }
 
     /// A tracked item object's merged descriptor fields.
@@ -787,12 +849,12 @@ mod tests {
     /// to the whole second, and clearing the deadline zeroes the epoch (the `Some(0) → None`
     /// collapse is the term's own last step).
     #[test]
-    fn the_enchant_display_epoch_steps_by_displayable_seconds() {
+    fn the_countdown_display_epoch_steps_by_displayable_seconds() {
         let mut items = Items::default();
-        assert_eq!(items.enchant_display_epoch(), 0, "no deadlines, no epoch");
+        assert_eq!(items.countdown_display_epoch(), 0, "no deadlines, no epoch");
 
         items.set_enchant_deadline(0x42, 1, 90);
-        let epoch = items.enchant_display_epoch();
+        let epoch = items.countdown_display_epoch();
         assert!(
             (90..=91).contains(&epoch),
             "a 90 s deadline contributes floor(secs)+1, got {epoch}"
@@ -803,11 +865,69 @@ mod tests {
 
         items.set_enchant_deadline(0x42, 1, 0);
         assert_eq!(
-            items.enchant_display_epoch(),
+            items.countdown_display_epoch(),
             0,
             "cleared deadline, term gone"
         );
         assert_eq!(items.enchant_remaining_display_ms(0x42, 1), None);
+    }
+
+    /// The item-lifetime store (decision 1933) — the enchant timer's shape, one key narrower:
+    /// `seconds == 0` stores ABSENCE, the read is second-floored, the deadline joins the shared
+    /// display epoch, and destroying the item takes its timer with it.
+    #[test]
+    fn an_item_duration_parks_a_deadline_and_dies_with_the_item() {
+        let mut items = Items::default();
+        assert_eq!(
+            items.duration_remaining_ms(0x42),
+            None,
+            "no timer by default"
+        );
+
+        items.insert_object(0x42, ObjectFields::default());
+        items.set_item_duration(0x42, 1800);
+        let shown = items.duration_remaining_display_ms(0x42).expect("parked");
+        assert_eq!(shown % 1000, 0, "the display read is second-floored");
+        assert!(shown <= 1_800_000);
+        let epoch = items.countdown_display_epoch();
+        assert!(
+            (1800..=1801).contains(&epoch),
+            "the lifetime deadline joins the same per-second epoch as the enchant one, got {epoch}"
+        );
+
+        // `0` is the wire's "no timer", never a zero-second timer — the same store the enchant
+        // path takes for the same reason (an expired countdown is an absent line).
+        items.set_item_duration(0x42, 0);
+        assert_eq!(items.duration_remaining_ms(0x42), None);
+        assert_eq!(items.countdown_display_epoch(), 0);
+
+        // A destroyed item takes its timer with it: the guid can be reissued by the server, and a
+        // stale deadline would print a countdown on whatever lands there next.
+        items.insert_object(0x99, ObjectFields::default());
+        items.set_item_duration(0x99, 600);
+        items.remove_object(0x99);
+        assert_eq!(items.duration_remaining_ms(0x99), None);
+
+        // **An item we do not hold is dropped outright** — no queue, no retry, and nothing
+        // parked. `0x1EA`'s arm resolves the guid and returns on a miss; its enchant sibling
+        // `0x1EB` is the one that enqueues and replays, and copying that here would grow the map
+        // without bound for guids that never arrive.
+        items.set_item_duration(0xdead, 600);
+        assert_eq!(items.duration_remaining_ms(0xdead), None);
+        assert_eq!(items.countdown_display_epoch(), 0);
+
+        // **A non-POSITIVE duration clears** — the reference's test is SIGNED (`0x5d9c0c jle`),
+        // so a wire value with the top bit set zeroes the cell instead of parking a 68-year
+        // deadline.
+        items.insert_object(0x7, ObjectFields::default());
+        items.set_item_duration(0x7, 600);
+        assert!(items.duration_remaining_ms(0x7).is_some());
+        items.set_item_duration(0x7, 0x8000_0000);
+        assert_eq!(
+            items.duration_remaining_ms(0x7),
+            None,
+            "a negative-as-signed duration clears, it does not park a far future"
+        );
     }
 
     /// The push half of the tooltip store: a landed template is marked fresh exactly once (the

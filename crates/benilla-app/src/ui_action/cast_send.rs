@@ -523,8 +523,15 @@ fn send_spell_cast(
                 .unwrap_or_default()
         },
     ) {
-        debug!("ui_action: cast {spell_id} refused locally — crowd control ({reason:#x})");
-        cast_errors.push_local(spell_id, reason);
+        let (reason, mechanic) = reason;
+        debug!(
+            "ui_action: cast {spell_id} refused locally — crowd control ({reason:#x}, \
+             mechanic {mechanic:?})"
+        );
+        match mechanic {
+            Some(m) => cast_errors.push_local_arg(spell_id, reason, m),
+            None => cast_errors.push_local(spell_id, reason),
+        }
         return;
     }
     // The client-side mounted gate (decision 0481; wow-re `mounted-action-gate.md` §5:

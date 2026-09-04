@@ -36,7 +36,8 @@
         - ONE refresh event. The app diffs the whole pushed bar and fires PET_BAR_UPDATE on any
           change, so the ref's PET_BAR_UPDATE / PET_BAR_UPDATE_COOLDOWN / UNIT_PET / the
           UNIT_FLAGS+UNIT_AURA pair it filters for arg1=="pet" collapse into one — the same
-          collapse StanceBar.xml makes, for the same reason.
+          collapse our stance bar made, for the same reason (the stock shapeshift bar,
+          BonusActionBarFrame.xml since 1938, registers the reference's six).
         - The drag is ONE verb. PickupPetAction serves shift-click, OnDragStart and OnReceiveDrag
           alike (decision 1010) — that is the reference's own shape, not a collapse of ours: the
           binding itself forks on whether the cursor is already carrying a pet payload, so there is

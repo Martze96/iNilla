@@ -31,7 +31,8 @@
 //! The refresh model is one diff-and-fire: the feed rebuilds the pushed list each frame
 //! (identity, active, castable, cooldown) and fires `UPDATE_SHAPESHIFT_FORMS` on any change — the
 //! real client's learn/unlearn edge (`0x5e9c20`/`0x5e9fe0`) plus its separate per-state repaint events
-//! collapse into one, which `StanceBar.xml` documents as its deliberate divergence. Cooldown
+//! collapse into one (our `StanceBar.xml` documented that as its deliberate divergence; since 1938 the
+//! stock shapeshift bar registers the reference's six events, and this one event drives them all). Cooldown
 //! remainders re-push only on a [`Cooldowns::generation`] change (`state.rs`'s own churn gate) —
 //! the engine extrapolates the sweep from the absolute start between pushes.
 

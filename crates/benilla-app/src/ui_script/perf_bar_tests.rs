@@ -17,7 +17,15 @@ fn harness(extra: &[&str]) -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "ActionBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     for f in extra {
         load_xml(&s, f);
     }
@@ -230,7 +238,7 @@ fn hovering_the_meter_shows_the_live_latency() {
         "the button over the meter takes the mouse"
     );
 
-    s.run("BenillaPerformanceBar_OnEnter(MainMenuBarPerformanceBarFrameButton)")
+    s.run("this = MainMenuBarPerformanceBarFrameButton MainMenuBarPerformanceBarFrameButton:GetScript(\"OnEnter\")()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -277,7 +285,7 @@ fn hovering_the_meter_shows_the_live_latency() {
         "the refresh rebuilds BOTH lines — a held-open plate never decays to one"
     );
 
-    s.run("BenillaPerformanceBar_OnLeave()").unwrap();
+    s.run("this = MainMenuBarPerformanceBarFrameButton MainMenuBarPerformanceBarFrameButton:GetScript(\"OnLeave\")()").unwrap();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "leaving hides the plate"

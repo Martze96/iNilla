@@ -42,6 +42,17 @@ pub(crate) struct Spline {
     /// gait is derived from [`Spline::speed`], the path's arc length over its duration, so its
     /// walk bit would select nothing.
     pub(crate) run_mode: bool,
+    /// **A deck path** (`SMSG_MONSTER_MOVE_TRANSPORT`): the transport guid whose frame every
+    /// point in `points` is expressed in. `None` — the overwhelmingly common case — is the plain
+    /// `SMSG_MONSTER_MOVE`, whose points are absolute world coordinates.
+    ///
+    /// A deck path is sampled into the rider's [`crate::transport::TransportRider`] local pose
+    /// rather than straight into the [`Transform`]; `compose_riders` then carries it through the
+    /// transport's live matrix, exactly as it already does for a rider whose pose came off a
+    /// `MSG_MOVE_*` relay. It is also exempt from [`ground_clamp_creatures`]: the re-ground is a
+    /// world-space terrain probe, there is no terrain under a deck, and the wire Z is already the
+    /// deck-local height (decision 1936).
+    pub(crate) deck: Option<u64>,
 }
 
 /// **A spline the server ended by decree**, carrying the id the acknowledgement owes (decision
@@ -234,6 +245,7 @@ fn catmull_rom(pts: &[[f32; 3]], i: usize, u: f32) -> ([f32; 3], [f32; 3]) {
 /// takes the Catmull-Rom family instead (the taxi/flight look — see [`Spline::sample`]'s INTERIM note).
 /// Returns `None` — "stationary, clear any path" — for a `Stop`, a zero duration, or a path with fewer
 /// than two points (nothing to travel along).
+#[allow(clippy::too_many_arguments)] // one argument per decoded wire field
 pub(in crate::net) fn monster_move_spline(
     path: Vec<[f32; 3]>,
     spline_id: u32,
@@ -241,6 +253,7 @@ pub(in crate::net) fn monster_move_spline(
     duration_ms: u32,
     flying: bool,
     run_mode: bool,
+    deck: Option<u64>,
 ) -> Option<Spline> {
     if stop || duration_ms == 0 || path.len() < 2 {
         return None;
@@ -250,8 +263,13 @@ pub(in crate::net) fn monster_move_spline(
         start: Instant::now(),
         duration: Duration::from_millis(u64::from(duration_ms)),
         id: spline_id,
+        // A deck path's Z is the deck-local height and nothing re-derives it, so `grounded` — the
+        // terrain-clamp opt-in — is meaningless there; `deck` is what the clamp actually skips on.
+        // The flag still rides along because the SAMPLER reads it too: `grounded` selects the
+        // linear follow, `!grounded` the Catmull-Rom flight family (decision 1936).
         grounded: !flying,
         run_mode,
+        deck,
     })
 }
 
@@ -286,6 +304,10 @@ pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
         id: spline.id,
         grounded: !spline.flying,
         run_mode: spline.run_mode,
+        // The create block's spline tail carries no transport of its own — a unit created on a
+        // deck takes its `TransportRider` from the same block's movement tail, and its ride is in
+        // world coordinates like any other create spline.
+        deck: None,
     })
 }
 
@@ -391,6 +413,12 @@ pub(in crate::net) fn sample_splines(
         // The rider's server identity, for the `spl` trace alone — `Option` because the sampler
         // must never gate on it (a spline entity with no guid still has to be flown).
         Option<&super::super::Guid>,
+        // A **deck path**'s destination: the sample is the rider's pose in the transport's frame,
+        // and `transport::compose_riders` — which runs after this stage — carries it out to the
+        // world. `Option` because only a `SMSG_MONSTER_MOVE_TRANSPORT` rider has one; a deck
+        // spline whose component is missing falls back to the world write below rather than
+        // freezing (decision 1936).
+        Option<&mut crate::transport::TransportRider>,
     )>,
     mut trace_next: Local<f32>,
     time: Res<Time>,
@@ -404,8 +432,30 @@ pub(in crate::net) fn sample_splines(
     if tick {
         *trace_next = time.elapsed_secs() + SPL_TRACE_SECS;
     }
-    for (entity, spline, mut t, swimming, guid) in &mut q {
+    for (entity, spline, mut t, swimming, guid, rider) in &mut q {
         let (wow_pos, facing, pitch) = spline.sample(now);
+        // **The deck fork.** A transport path's points are offsets in the named transport's frame,
+        // so the sample IS the rider's local pose; writing it to the `Transform` would place the
+        // unit a few yards from the world origin. `compose_riders` composes it through the deck's
+        // live matrix later this frame — the same route an observed rider's relayed pose takes.
+        if let Some(deck) = spline.deck {
+            // A deck sample lands on the rider or NOWHERE. Falling through to the world write
+            // below would put the body a few yards from the map origin, because that is what a
+            // transport-local offset reads as in world coordinates — so a rider component that is
+            // missing (the insert is deferred by one sync point) or that names a different
+            // transport freezes the unit for that frame instead. Freezing is recoverable; a body
+            // teleported to the middle of the map is what a bug report looks like.
+            if let Some(mut rider) = rider.filter(|r| r.transport_guid == deck) {
+                rider.local_pos = wow_pos;
+                if let Some(f) = facing {
+                    rider.local_orientation = f;
+                }
+            }
+            if now.saturating_duration_since(spline.start) >= spline.duration {
+                commands.entity(entity).remove::<Spline>();
+            }
+            continue;
+        }
         // What the transform held *coming in* — i.e. whatever the previous frame left there after
         // every other writer had its turn. Traced beside the fresh sample as `was=`: a rider whose
         // `was` is not last frame's sample is being stomped by another system, which no amount of
@@ -686,6 +736,10 @@ pub(in crate::net) fn ground_clamp_creatures(
         if spline.is_some_and(|s| !s.grounded) {
             skipped += 1;
             continue; // a flying path is authoritative on Z
+        }
+        if spline.is_some_and(|s| s.deck.is_some()) {
+            skipped += 1;
+            continue; // a deck path: no terrain under a boat, and the wire Z is deck-local (1936)
         }
         if swimming {
             skipped += 1;
@@ -1330,6 +1384,7 @@ mod tests {
     /// A spline `frac` of the way through its ride: 10 s duration, started `frac·10 s` ago.
     fn spline_at(points: Vec<[f32; 3]>, grounded: bool, frac: f32) -> (Spline, Instant) {
         let spline = Spline {
+            deck: None,
             points,
             start: Instant::now() - Duration::from_secs_f32(10.0 * frac),
             duration: Duration::from_secs(10),
@@ -1697,6 +1752,7 @@ mod server_moved_players {
     /// sends for a bot and for a charged/knocked-back/feared player alike.
     fn walking(app: &mut App, e: Entity) {
         app.world_mut().entity_mut(e).insert(Spline {
+            deck: None,
             points: vec![RIM_A, RIM_B],
             start: Instant::now(),
             duration: Duration::from_secs(4),
@@ -1781,6 +1837,7 @@ mod server_moved_players {
     fn a_flying_path_is_left_alone() {
         let (mut app, body) = hollow(EntityKind::Player);
         app.world_mut().entity_mut(body).insert(Spline {
+            deck: None,
             points: vec![RIM_A, RIM_B],
             start: Instant::now(),
             duration: Duration::from_secs(4),
