@@ -23,7 +23,7 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
         // The blip templates, which WorldMapFrame.xml instantiates with inherits=. Not

@@ -21,7 +21,7 @@ fn chat_frame() -> UiScript {
     // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -1002,7 +1002,7 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         r"Interface\FrameXML\UIMenu.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",

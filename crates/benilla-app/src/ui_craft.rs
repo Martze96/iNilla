@@ -285,6 +285,15 @@ fn feed_craft(
         return;
     }
     script.set_craft(fresh.clone());
+    // The reagent templates `GetCraftReagentItemLink` reads, pre-asked as the trade-skill feed
+    // pre-asks its own (1973).
+    if let Some(f) = &fresh {
+        script.ask_item_templates(
+            f.recipes
+                .iter()
+                .flat_map(|r| r.reagents.iter().map(|re| re.item)),
+        );
+    }
     match (&*last, &fresh) {
         (None, Some(f)) => {
             debug!("ui_craft: window opens — {} recipe(s)", f.recipes.len());

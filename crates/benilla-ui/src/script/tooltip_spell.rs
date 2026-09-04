@@ -339,7 +339,7 @@ fn set_reward_spell(
     }
 }
 
-fn set_spell_by_id(
+pub(super) fn set_spell_by_id(
     lua: &Lua,
     this: &Table,
     spell_id: u32,

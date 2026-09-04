@@ -1224,13 +1224,18 @@ mod tests {
         // Everything the manifest pulls OFF THE CHAIN, and every name each of those defines —
         // including the `.lua` a chain `.xml` sources, which is where most of them live.
         let toc = &super::super::addons::Addon::builtin().toc.files;
-        let pos: std::collections::HashMap<&String, usize> =
-            toc.iter().enumerate().map(|(i, f)| (f, i)).collect();
+        // Load order: a manifest entry at its line, a reached addon's file after everything.
+        let chain = gated_chain_entries();
+        let pos: std::collections::HashMap<&String, usize> = chain
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (f, toc.iter().position(|t| t == f).unwrap_or(toc.len() + k)))
+            .collect();
         let mut chain_home: std::collections::HashMap<String, (String, usize)> =
             std::collections::HashMap::new();
         let mut chain_frames: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &chain {
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
             let mut cands = vec![entry.clone()];
             if let Some(stem) = entry.strip_suffix(".xml") {
@@ -1453,6 +1458,19 @@ mod tests {
         seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
+        // The whole interface is the manifest AND every LoadOnDemand addon it reaches (1967):
+        // what `MacroFrame_SaveMacro` answers to is `Blizzard_MacroUI.lua`, loaded on the first
+        // `ShowMacroFrame`, and a call into it from ActionBarFrame.lua is answered exactly then.
+        for name in reached_addons() {
+            super::super::test_ui::seat_chain_addon(&mut s, &name);
+            s.run(&format!("UIParentLoadAddOn(\"{name}\")")).unwrap();
+            assert!(
+                s.eval::<bool>(&format!("return IsAddOnLoaded(\"{name}\") == 1"))
+                    .unwrap(),
+                "{name}: reached, seated, and did not load: {:?}",
+                s.errors()
+            );
+        }
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
                 "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
@@ -1471,16 +1489,6 @@ mod tests {
         // reads clean. Each belongs to whichever window's migration left it, and each is one
         // binding or one sourced file away.
         const KNOWN: &[(&str, &str, &str)] = &[
-            (
-                "ClassTrainerFrameTemplates.xml",
-                "ClassTrainerSkillButton_OnClick",
-                "defined by `Blizzard_TrainerUI`, which is a LoadOnDemand addon here as it is in \
-                 the reference (1957): it loads on the first trainer, through UIParent's \
-                 TRAINER_SHOW arm, and the skill-button template that carries this handler is \
-                 instantiated only by that addon, so no click can reach the name before its \
-                 definer exists. The reference is in exactly this state until its addon loads. \
-                 Permanent by design, not a gap to close.",
-            ),
             (
                 "ContainerFrame.xml",
                 "KeyRingButtonIDToInvSlotID",
@@ -1524,6 +1532,114 @@ mod tests {
                  instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
             (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyAnswerSubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyCommentSubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveyQuestion",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_GMSurveyUI.xml",
+                "GMSurveySubmit",
+                "one of the GM survey's four engine verbs, none built: the survey window opens on \
+                 GMSURVEY_DISPLAY, which the stock HelpFrame.lua registers and nothing fires — the \
+                 trigger is ticket status 3 on SMSG_GMTICKET_GETTICKET, which vmangos never sends \
+                 (1889; the producer gate carries the event). Gated since the addon became a reached \
+                 LoadOnDemand row (1967).",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "CreateMiniWorldMapArrowFrame",
+                "the world map's arrow-frame family (Create/Position/Show/UpdateWorldMapArrowFrames), engine verbs the reference's WorldMapFrame.lua also calls — unbuilt; ours draws the map's arrows app-side, and they land with the world map's own migration. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "GetBattlefieldFlagPosition",
+                "the battlefield minimap's flag-position getter (0x4ac230, structural row only; the position family is uncarved). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "GetBattlefieldMapIconScale",
+                "the battlefield minimap's icon-scale getter (uncarved; reads the queue slot's Map.dbc row). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "GetBattlefieldPosition",
+                "the battlefield minimap's player-position getter (wow-re `bindings.md` 0x4abf90, a structural row — the position family is outside 195cd099's carve). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "PositionMiniWorldMapArrowFrame",
+                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "ShowMiniWorldMapArrowFrame",
+                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "UpdateWorldMapArrowFrames",
+                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
+                "Blizzard_BattlefieldMinimap.xml",
+                "WorldMap_GetPOITextureCoords",
+                "a stock WorldMapFrame.lua function; our WorldMapFrame.xml is still ours and defines its own POI atlas walk, so the name arrives with the world map's migration. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
+                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
+                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
+                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
+                 its update would reach.",
+            ),
+            (
                 "StaticPopup.xml",
                 "ReplaceTradeEnchant",
                 "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
@@ -1531,9 +1647,8 @@ mod tests {
             ),
         ];
 
-        let toc = &super::super::addons::Addon::builtin().toc.files;
         let mut missing: Vec<(String, String)> = Vec::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &gated_chain_entries() {
             // `GlobalStrings.lua` is 4000 lines of `NAME = "…";` and nothing else — it calls no
             // global at all. What it DOES contain is every format specifier and every English
             // sentence in the interface, and this scanner's `name(` shape reads `%d (`, `%s (` and
@@ -1694,7 +1809,7 @@ mod tests {
             .collect();
 
         let mut orphans = Vec::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &gated_chain_entries() {
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
             let Some(stem) = leaf.strip_suffix(".xml") else {
                 continue;
@@ -1963,6 +2078,68 @@ mod tests {
     /// The chain for a path, `assets/ui` for a bare name — and an include resolves against the
     /// INCLUDING document's own directory in its own source's path space, which is the rule the
     /// loader follows (1186).
+    /// The reference's LoadOnDemand Blizzard addons this interface REACHES — every `Blizzard_*`
+    /// name a `UIParentLoadAddOn("…")` literal names in our own files or in a manifest chain
+    /// entry's sources (the reference's `*_LoadUI` loaders in UIParent.xml, the options window's
+    /// combat-text load). They have no manifest row, exactly as the reference's `FrameXML.toc`
+    /// has none, so this is how the gates know which addon files are part of the shipped
+    /// interface (1967). An addon nothing loads is an unbuilt window, not a migrated one.
+    fn reached_addons() -> Vec<String> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        let mut out: Vec<String> = Vec::new();
+        for entry in &super::super::addons::Addon::builtin().toc.files {
+            let texts = if super::is_chain_entry(entry) {
+                entry_sources(entry)
+            } else {
+                std::fs::read_to_string(dir.join(entry))
+                    .into_iter()
+                    .collect()
+            };
+            for text in texts {
+                let text = strip_comments(&text);
+                for (i, _) in text.match_indices("UIParentLoadAddOn(\"Blizzard_") {
+                    let rest = &text[i + "UIParentLoadAddOn(\"".len()..];
+                    if let Some(end) = rest.find('"') {
+                        let name = rest[..end].to_string();
+                        if !out.contains(&name) {
+                            out.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Every chain file the shipped interface loads, in load order: the manifest's chain entries,
+    /// then each reached addon's files (`Interface\AddOns\<name>\<file>`, the addon's own toc
+    /// order) — LoadOnDemand loads after everything. The set every gate over chain files walks
+    /// (1967); an addon an opener names that the chain does not carry is a finding, not a skip.
+    fn gated_chain_entries() -> Vec<String> {
+        let mut out: Vec<String> = super::super::addons::Addon::builtin()
+            .toc
+            .files
+            .iter()
+            .filter(|f| super::is_chain_entry(f))
+            .cloned()
+            .collect();
+        for name in reached_addons() {
+            let bytes =
+                super::read(&format!("Interface/AddOns/{name}/{name}.toc")).unwrap_or_else(|| {
+                    panic!("{name}: reached by UIParentLoadAddOn, not on the chain")
+                });
+            let toc = benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&bytes));
+            for file in &toc.files {
+                out.push(format!(
+                    "Interface\\AddOns\\{name}\\{}",
+                    file.replace('/', "\\")
+                ));
+            }
+        }
+        out
+    }
+
     fn entry_sources(entry: &str) -> Vec<String> {
         fn read_one(path: &str, chain: bool) -> Option<String> {
             if chain {
@@ -2306,10 +2483,9 @@ mod tests {
             }
         }
 
-        let toc = &super::super::addons::Addon::builtin().toc.files;
         let mut dead: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
-        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+        for entry in &gated_chain_entries() {
             for text in entry_sources(entry) {
                 let mut from = 0;
                 while let Some(i) = text[from..].find("RegisterEvent(") {

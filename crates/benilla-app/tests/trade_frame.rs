@@ -29,7 +29,7 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     // The stock slot updates go through ItemButtonTemplate.lua's SetItemButton* helpers (1966).
     r"Interface\FrameXML\ItemButtonTemplate.xml",
     "Interface\\FrameXML\\TradeFrame.xml",

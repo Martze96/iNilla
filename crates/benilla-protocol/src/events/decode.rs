@@ -784,6 +784,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::AreaSpiritHealerTime { healer, ms }]
         }
         ServerPacket::BattlefieldStatus(status) => vec![SessionEvent::BattlefieldStatus(status)],
+        ServerPacket::PvpLogData(data) => vec![SessionEvent::PvpLogData(data)],
         ServerPacket::MeetingStoneSetQueue { area, status } => {
             vec![SessionEvent::MeetingStoneSetQueue { area, status }]
         }

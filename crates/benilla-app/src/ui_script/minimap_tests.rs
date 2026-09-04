@@ -26,7 +26,7 @@ fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
     // half (the PVP tint slice, decision 0287) touches it from OnLoad on.
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
     // OnLoad seeds the +/- state from the live zoom. The CVar default is 3 — a middle level, so
@@ -91,7 +91,7 @@ fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
     let vis = |s: &UiScript| {
@@ -141,7 +141,7 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTime.xml");
     s
@@ -254,7 +254,7 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
     s.resolve();
 
@@ -300,7 +300,7 @@ fn get_ping_position_is_nil_until_there_is_a_ping() {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
     assert_eq!(

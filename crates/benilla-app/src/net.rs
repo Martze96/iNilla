@@ -1274,6 +1274,12 @@ pub(crate) enum ClientCommand {
         map_id: u32,
         accept: bool,
     },
+    /// `RequestBattlefieldScoreData()` — `MSG_PVP_LOG_DATA`, empty (decision 1972).
+    RequestBattlefieldScoreData,
+    /// `LeaveBattlefield()` — `CMSG_LEAVE_BATTLEFIELD`: the active slot's map (decision 1972).
+    LeaveBattlefield {
+        map_id: u32,
+    },
     /// `CancelMeetingStoneRequest()` — `CMSG 0x293`, empty.
     MeetingStoneLeave,
     /// `ConfirmPetUnlearn()` — `CMSG_PET_UNLEARN` with the latched trainer guid.
@@ -1567,6 +1573,8 @@ pub(crate) enum ClientCommand {
         receiver: String,
         subject: String,
         body: String,
+        /// The selected `Stationery.dbc` id (`CMSG_SEND_MAIL`'s sixth field, 1970).
+        stationery: u32,
         item_guid: u64,
         money: u32,
         cod: u32,

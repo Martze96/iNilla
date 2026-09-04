@@ -22,8 +22,6 @@
 
 use benilla_ui::script::{GuildState, ScriptValue, UiScript, UnitState};
 
-use super::test_ui::load_ui_strict as load_xml;
-
 /// The guild engine API, stood in for in Lua (see the module header).
 ///
 /// One mutable table, `BenillaGuildFixture`, is the whole model; every getter reads it and every
@@ -203,9 +201,7 @@ fn setup() -> UiScript {
             ..UnitState::default()
         }),
     );
-    for f in super::test_ui::SOCIAL_UI {
-        load_xml(&s, f);
-    }
+    super::test_ui::load_social_ui(&mut s);
     s
 }
 

@@ -60,7 +60,7 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
         "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
@@ -757,7 +757,7 @@ fn interface_harness() -> UiScript {
             // own backdrop reads `GameTooltip`'s TOOLTIP_DEFAULT_COLOR. `harness_on` loads two of
             // these again after these — re-running a UI file is what `/reload` does, and the
             // loader takes it.
-            "GameTooltip.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
             "Interface\\FrameXML\\UnitPopup.xml",
@@ -826,7 +826,7 @@ fn chat_harness() -> UiScript {
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\StaticPopup.xml",
             "UIParent.xml",
-            "GameTooltip.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
             "Interface\\FrameXML\\GlobalStrings.lua",
@@ -861,7 +861,7 @@ fn actionbars_harness() -> UiScript {
             "Interface\\FrameXML\\MainMenuBar.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
-            "GameTooltip.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
             // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
@@ -2109,6 +2109,10 @@ fn hover_label(s: &mut UiScript, frame: &str) {
 #[test]
 fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
     let mut s = harness_on(audio_harness());
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Checking this will prevent the deselection.\"")
         .unwrap();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();

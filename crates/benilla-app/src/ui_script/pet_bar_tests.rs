@@ -28,7 +28,7 @@ pub(super) fn load_pet_bar(s: &UiScript) {
         "Interface\\FrameXML\\MainMenuBar.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

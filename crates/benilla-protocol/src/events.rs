@@ -480,6 +480,9 @@ pub enum SessionEvent {
     /// One battleground queue slot's state (`SMSG_BATTLEFIELD_STATUS`), the client's three-slot
     /// queue that `AcceptBattlefieldPort` answers out of (decision 1963).
     BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// The battleground scoreboard (`MSG_PVP_LOG_DATA`), rows in wire order — the app resolves
+    /// the names, derives each row's team and pushes the sorted board (decision 1972).
+    PvpLogData(crate::messages::PvpLogData),
     /// The meeting-stone queue state (`SMSG 0x295`): the area queued for and a status byte
     /// (decision 1963).
     MeetingStoneSetQueue { area: u32, status: u8 },

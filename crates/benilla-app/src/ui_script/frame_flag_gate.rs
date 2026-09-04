@@ -185,13 +185,6 @@ const KNOWN: &[Known] = &[
     // the reference inherits `TextStatusBar` — true of our transcription, and no longer true of
     // anything. `TargetFrame.xml` is the reference's own now and its ToT bars inherit
     // `TextStatusBar` like every other unit bar. The gate found them itself, which is its job.
-    Known {
-        frame: "WorldStateAlwaysUpFrame",
-        flag: Flag::Mouse,
-        why:
-            "the reference's PvP objective banner has OnEnter/OnLeave for its tooltip. Wants that \
-              handler, not the flag.",
-    },
     // ── We take the mouse where the reference does not ─────────────────────────────────────────
     //
     // The merchant rows' divergence RETIRED (1751): our `MerchantFrame.xml` is gone and the
@@ -232,24 +225,13 @@ const KNOWN: &[Known] = &[
     // frame it was built to report (1751 §5: the drift instruments retire with the copies).
     // ── parent ─────────────────────────────────────────────────────────────────────────────────
     //
-    // Three, and each is a seat inside the SAME tree the reference seats it in — which is the
-    // question this flag exists to ask (decision 1757). A frame whose seat crosses the boundary
-    // between UIParent's tree and the top level is a defect, because `SetFullScreenFrame` hides
-    // `UIParent` and everything below it; a frame seated one rung along inside that tree is not.
-    Known {
-        frame: "SendMailBodyEditBox",
-        flag: Flag::Parent,
-        why: "the reference interposes SendMailScrollChildFrame between the pane and its content; \
-              our mail panes are the render approximation MailFrame.xml names at the site (flat \
-              art, no live scrollbar), so the body hangs off SendMailScrollFrame directly. Wants \
-              the real scroll child, not a re-seat.",
-    },
-    Known {
-        frame: "OpenMailInvoiceFrame",
-        flag: Flag::Parent,
-        why: "as SendMailBodyEditBox — OpenMailScrollChildFrame is the scroll child we do not \
-              build",
-    },
+    // Empty since 1970. The rows that lived here were seats inside the SAME tree the reference
+    // seats them in — the question this flag exists to ask (decision 1757): a frame whose seat
+    // crosses the boundary between UIParent's tree and the top level is a defect, because
+    // `SetFullScreenFrame` hides `UIParent` and everything below it; a frame seated one rung
+    // along inside that tree is not. The last two were our mail transcription's flat body panes,
+    // which hung their content off the scroll frame with no scroll child between; the mail
+    // window is the reference's own now, scroll children and all.
 ];
 
 /// The extracted reference FrameXML directory, or `None` when the install isn't there.
@@ -593,8 +575,11 @@ fn the_shipped_frames_carry_the_references_flags() {
         // 1948 retired our ChatFrame.xml, 1952 our SpellBookFrame.xml, 1953 our PetActionBar.xml,
         // 1956 our SkillFrame.xml, 1958 our UnitPopup.xml and 1959 our FriendsFrame.xml (their
         // frames are the reference's own now), which took the paired count from the low 400s to
-        // the high 150s; the floor guards the pairing, not the census.
-        compared > 120,
+        // the high 150s; 1966 (TradeFrame), 1968 (GameTooltip), 1969 (DressUpFrame) and 1970
+        // (MailFrame) to the high 80s. The floor guards the pairing, not the census — it comes
+        // down with every window that migrates, and reaches zero with the last file of ours
+        // that declares a reference-named frame.
+        compared > 60,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

@@ -9,15 +9,11 @@
 
 use benilla_ui::script::{FriendInfo, SocialRequest, SocialState, UiScript, WhoInfo};
 
-use super::test_ui::load_ui_strict as load_xml;
-
 /// The window's own manifest slice, in `load_default_ui` order.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for f in super::test_ui::SOCIAL_UI {
-        load_xml(&s, f);
-    }
+    super::test_ui::load_social_ui(&mut s);
     s
 }
 

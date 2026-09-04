@@ -24,7 +24,7 @@ fn harness(extra: &[&str]) -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     for f in extra {
@@ -231,6 +231,10 @@ fn get_net_stats_reports_the_pushed_latency() {
 fn hovering_the_meter_shows_the_live_latency() {
     let mut s = harness(&["UIParent.xml"]);
     s.set_latency_ms(Some(42));
+    // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
+    // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness
+    // without the options file says so itself, the way the reference's tooltip would read it.
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s.resolve();
 
     assert_eq!(

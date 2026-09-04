@@ -390,16 +390,13 @@ const BLIZZARD_ADDONS: [&str; 12] = [
 ];
 
 /// The Blizzard addons the chain carries as LoadOnDemand registry rows — the ones the reference
-/// reaches through `LoadAddOn` from `UIParentLoadAddOn` (1957). Two exclusions, both by shape:
-/// an addon `benilla.toc` lists with everything else (the eager trio the InspectUI header
-/// describes) already loaded and is not a row here; an addon whose toc is not LoadOnDemand
-/// would need the startup walk to read the chain, which it does not yet — that one stays with
-/// its own file until its window migrates.
+/// reaches through `LoadAddOn` from `UIParentLoadAddOn` (1957). `benilla.toc` lists none of them,
+/// like the reference's own `FrameXML.toc` (1967). One exclusion, by shape: an addon whose toc is
+/// not LoadOnDemand would need the startup walk to read the chain, which it does not yet — that
+/// one stays with its own file until its window migrates.
 fn chain_addons() -> Vec<Addon> {
-    let eager = super::manifest::chain_addons(&Addon::builtin().toc.files);
     BLIZZARD_ADDONS
         .iter()
-        .filter(|name| !eager.iter().any(|e| e.eq_ignore_ascii_case(name)))
         .filter_map(|name| {
             let bytes = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))?;
             let toc = Toc::parse(&benilla_ui::source::decode(&bytes));
@@ -982,8 +979,9 @@ impl Walk {
 #[cfg(test)]
 mod tests {
     /// The chain's Blizzard LoadOnDemand addons are registry rows (1957): every row is
-    /// LoadOnDemand and read off the chain, `Blizzard_TrainerUI` is among them, and an addon
-    /// the manifest lists eagerly is not a row twice.
+    /// LoadOnDemand and read off the chain, the eight windows the interface opens through them
+    /// are among the rows, and the manifest lists no addon at all — the reference's own
+    /// `FrameXML.toc` has none, every Blizzard addon loads on demand (1967).
     #[test]
     fn the_chain_carries_blizzards_load_on_demand_addons_as_registry_rows() {
         let _data = benilla_formats::wow_data_or_skip!();
@@ -1006,13 +1004,29 @@ mod tests {
                 a.name
             );
         }
-        let eager = super::super::manifest::chain_addons(&Addon::builtin().toc.files);
-        for e in &eager {
+        for name in [
+            "Blizzard_AuctionUI",
+            "Blizzard_CraftUI",
+            "Blizzard_InspectUI",
+            "Blizzard_MacroUI",
+            "Blizzard_RaidUI",
+            "Blizzard_TalentUI",
+            "Blizzard_TradeSkillUI",
+            "Blizzard_TrainerUI",
+        ] {
             assert!(
-                !rows.iter().any(|a| a.name.eq_ignore_ascii_case(e)),
-                "{e} is listed in benilla.toc and must not also be a row"
+                rows.iter().any(|a| a.name == name),
+                "{name} is a row the interface opens on demand"
             );
         }
+        assert!(
+            !Addon::builtin()
+                .toc
+                .files
+                .iter()
+                .any(|f| f.replace('/', "\\").starts_with("Interface\\AddOns\\")),
+            "benilla.toc lists a Blizzard addon eagerly; the reference loads every one on demand"
+        );
         // The glue's list is the player's folder alone.
         assert!(installed(None)
             .iter()

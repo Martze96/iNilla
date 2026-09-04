@@ -35,6 +35,12 @@
                 this:RegisterEvent("VARIABLES_LOADED")
                 this:RegisterEvent("TRAINER_SHOW")
                 this:RegisterEvent("TRAINER_CLOSED")
+                this:RegisterEvent("AUCTION_HOUSE_SHOW")
+                this:RegisterEvent("AUCTION_HOUSE_CLOSED")
+                this:RegisterEvent("TRADE_SKILL_SHOW")
+                this:RegisterEvent("TRADE_SKILL_CLOSE")
+                this:RegisterEvent("CRAFT_SHOW")
+                this:RegisterEvent("CRAFT_CLOSE")
                 this:RegisterEvent("GUILD_INVITE_REQUEST")
                 this:RegisterEvent("GUILD_INVITE_CANCEL")
                 this:RegisterEvent("MIRROR_TIMER_START")
@@ -335,17 +341,22 @@
             return loaded
         end
 
-        -- ref UIParent.lua:223, whose slot this is — immediately above `UIParent_OnEvent`, the
-        -- same neighbour it has there. It moved here from our own InspectFrame.xml when 1832
-        -- retired that file: the name belongs to UIParent in the reference, and the window it
-        -- opens is now the stock LoadOnDemand `Blizzard_InspectUI` off the player's chain.
-        --
-        -- The reference's body is `InspectFrame_LoadUI()` and then a guarded `InspectFrame_Show`.
-        -- We have no load-on-demand — benilla.toc loads that addon with everything else — so the
-        -- LoadUI call has nothing to do and is left out rather than stubbed (1203). The guard is
-        -- kept exactly as the reference writes it, and it is not decoration: it is what makes this
-        -- safe in the ~25 per-window harnesses that load UIParent.xml without the inspect window.
+        -- ref UIParent.lua l.170-172 and l.223-228, verbatim — the inspect window's loader and its
+        -- opener, immediately above `UIParent_OnEvent` as there. They moved here from our own
+        -- InspectFrame.xml when 1832 retired that file: the names belong to UIParent in the
+        -- reference. The window is the stock `Blizzard_InspectUI`, a LoadOnDemand registry row
+        -- off the player's chain (`ui_script::addons`, 1957) that `InspectFrame_LoadUI` loads on
+        -- the first call — the reference's own timing since 1967; from 1832 until then benilla.toc
+        -- listed the addon with everything else and the call was left out rather than stubbed
+        -- (1203). The guard is the reference's own, and it is not decoration: a harness that loads
+        -- UIParent.xml with no addon seated gets the reference's "failed to load" message from
+        -- `UIParentLoadAddOn` above and then, through this guard, nothing else.
+        function InspectFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_InspectUI");
+        end
+
         function InspectUnit(unit)
+            InspectFrame_LoadUI();
             if ( InspectFrame_Show ) then
                 InspectFrame_Show(unit);
             end
@@ -357,14 +368,19 @@
         -- addon, so deleting our window file would have taken the name with it.
         --
         -- The LEVEL GATE is the reference's, and it is real behaviour rather than a guard: below
-        -- level 10 the key and the micro button do nothing at all. `TalentFrame_LoadUI` is left
-        -- out (we load the addon eagerly, 1203 — build it or leave it out, never stub it); the
-        -- `TalentFrame_Toggle` guard is kept verbatim, and it is what lets the ~25 harnesses that
-        -- load UIParent.xml without the talent window do so safely.
+        -- level 10 the key and the micro button do nothing at all — the addon is not even loaded.
+        -- `TalentFrame_LoadUI` (ref l.185-187) loads the LoadOnDemand row the first time (1967;
+        -- until then benilla.toc listed the addon and the call was left out, 1203). The
+        -- `TalentFrame_Toggle` guard is verbatim too.
+        function TalentFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TalentUI");
+        end
+
         function ToggleTalentFrame()
             if ( UnitLevel("player") < 10 ) then
                 return;
             end
+            TalentFrame_LoadUI();
             if ( TalentFrame_Toggle ) then
                 TalentFrame_Toggle();
             end
@@ -387,14 +403,80 @@
             UIParentLoadAddOn("Blizzard_TrainerUI")
         end
 
+        -- ref UIParent.lua l.154-156, verbatim — the auction house's loader, reached from the
+        -- AUCTION_HOUSE_SHOW arm below; `Blizzard_AuctionUI` is a registry row off the chain (1971).
+        function AuctionFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_AuctionUI");
+        end
+
+        -- ref UIParent.lua l.158-160 and l.216-221, verbatim — the battlefield minimap's loader
+        -- and its toggle (the TOGGLEBATTLEFIELDMINIMAP binding); the stock WorldStateFrame.lua
+        -- calls the loader when a battleground's world states arrive (1972). The addon is a
+        -- registry row off the chain like the others; its pane is a `<Minimap>`-kind widget this
+        -- engine draws nothing into yet.
+        function BattlefieldMinimap_LoadUI()
+            UIParentLoadAddOn("Blizzard_BattlefieldMinimap");
+        end
+
+        function ToggleBattlefieldMinimap()
+            BattlefieldMinimap_LoadUI();
+            if ( BattlefieldMinimap_Toggle ) then
+                BattlefieldMinimap_Toggle();
+            end
+        end
+
+        -- ref UIParent.lua l.166-168 and l.190-192, verbatim — the crafting windows' loaders,
+        -- reached from the TRADE_SKILL_SHOW / CRAFT_SHOW arms below; `Blizzard_TradeSkillUI` and
+        -- `Blizzard_CraftUI` are registry rows off the chain (1973).
+        function CraftFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_CraftUI");
+        end
+
+        function TradeSkillFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TradeSkillUI");
+        end
+
+        -- ref UIParent.lua's own `BuildColoredListString`, verbatim — the "Requires: X, Y" line
+        -- both crafting addons build their tool/reagent lists with (a missing tool in red). It
+        -- lived as a guarded global in our TradeSkillFrame.xml until 1973 retired that file.
+        function BuildColoredListString(...)
+            if ( arg.n == 0 ) then
+                return nil;
+            end
+
+            -- Takes input where odd items are the text and even items determine whether the arg should be colored or not
+            local string;
+            if ( arg[2] ) then
+                string = arg[1];
+            else
+                string = RED_FONT_COLOR_CODE.. arg[1]..FONT_COLOR_CODE_CLOSE;
+            end
+            for i=3, arg.n, 2 do
+                if ( arg[i+1] ) then
+                    -- If meets the condition
+                    string = string..", "..arg[i];
+                else
+                    -- If doesn't meet the condition
+                    string = string..", "..RED_FONT_COLOR_CODE..arg[i]..FONT_COLOR_CODE_CLOSE;
+                end
+            end
+
+            return string;
+        end
+
         -- ref UIParent.lua's own `ShowMacroFrame`, moved here from our MacroFrame.xml when 1848
         -- retired that file — the third such squatter after `InspectUnit` (1832) and
         -- `ToggleTalentFrame` (1833), and by now the expected shape.
         --
-        -- `MacroFrame_LoadUI` is left out: the addon loads eagerly from benilla.toc, so there is
-        -- nothing for it to do, and 1203 says leave it out rather than stub it. The
+        -- `MacroFrame_LoadUI` (ref l.176-178) loads the LoadOnDemand row the first time (1967;
+        -- until then benilla.toc listed the addon and the call was left out, 1203). The
         -- `MacroFrame_Show` guard is the reference's own.
+        function MacroFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_MacroUI");
+        end
+
         function ShowMacroFrame()
+            MacroFrame_LoadUI();
             if ( MacroFrame_Show ) then
                 MacroFrame_Show();
             end
@@ -408,8 +490,9 @@
         -- `RAID_ROSTER_UPDATE` and again at `PLAYER_LOGIN` with a raid up (l.34, l.39), so its
         -- absence is a raise every time the roster moves. It is a FrameXML function, not an engine
         -- verb, and this file is our stand-in for `UIParent.lua` — the same relationship the three
-        -- above have. `UIParentLoadAddOn` is just above, and it no-ops on an addon that is
-        -- already loaded, which ours is: benilla.toc takes `Blizzard_RaidUI` eagerly (1874).
+        -- above have. `UIParentLoadAddOn` is just above; the addon is a LoadOnDemand registry
+        -- row (1957) that this loads on the first roster update — the reference's timing since
+        -- 1967 (1874 had listed it in benilla.toc, so this was a no-op on a loaded addon).
         function RaidFrame_LoadUI()
             UIParentLoadAddOn("Blizzard_RaidUI");
         end
@@ -447,6 +530,48 @@
                     ClassTrainerFrame_Hide()
                 end
                 return
+            end
+            -- The auction arms (ref UIParent.lua l.575-587), verbatim — the addon loads on the first
+            -- auctioneer and its own `AuctionFrame_Show` reads the hello the app applied (1971).
+            if ( event == "AUCTION_HOUSE_SHOW" ) then
+                AuctionFrame_LoadUI();
+                if ( AuctionFrame_Show ) then
+                    AuctionFrame_Show();
+                end
+                return;
+            end
+            if ( event == "AUCTION_HOUSE_CLOSED" ) then
+                if ( AuctionFrame_Hide ) then
+                    AuctionFrame_Hide();
+                end
+                return;
+            end
+            -- The trade skill and craft arms (ref UIParent.lua l.605-632), verbatim (1973).
+            if ( event == "TRADE_SKILL_SHOW" ) then
+                TradeSkillFrame_LoadUI();
+                if ( TradeSkillFrame_Show ) then
+                    TradeSkillFrame_Show();
+                end
+                return;
+            end
+            if ( event == "TRADE_SKILL_CLOSE" ) then
+                if ( TradeSkillFrame_Hide ) then
+                    TradeSkillFrame_Hide();
+                end
+                return;
+            end
+            if ( event == "CRAFT_SHOW" ) then
+                CraftFrame_LoadUI();
+                if ( CraftFrame_Show ) then
+                    CraftFrame_Show();
+                end
+                return;
+            end
+            if ( event == "CRAFT_CLOSE" ) then
+                if ( CraftFrame_Hide ) then
+                    CraftFrame_Hide();
+                end
+                return;
             end
             -- The guild invitation (ref UIParent.lua l.296-303, verbatim): the dialog rode a driver
             -- frame in our FriendsFrame.xml until that file became the reference's (1959).

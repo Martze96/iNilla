@@ -400,7 +400,11 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
             with_model(lua, &this, |m| {
                 m.unit = unit;
                 m.path = None;
-            })
+            })?;
+            // On the dressing room's pane the same call rebuilds the model from the unit — the
+            // reference's `0x5059a0` duplicates the live model, substitutions and all gone — which
+            // is app state here (`super::dressup`, 1969).
+            super::dressup::redress_if_dressup(lua, &this)
         })?,
     )?;
 
@@ -410,7 +414,10 @@ fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
     // own `DressUpFrame`/`PaperDollFrame` call it (3 sites) and addons that hook them will too.
     m.set(
         "RefreshUnit",
-        lua.create_function(|lua, this: Table| with_model(lua, &this, |_| ()))?,
+        lua.create_function(|lua, this: Table| {
+            with_model(lua, &this, |_| ())?;
+            super::dressup::redress_if_dressup(lua, &this) // the same worker as SetUnit's (§1)
+        })?,
     )?;
 
     // `SetRotation(rad)` — `0x84f1fc[2]` -> the Lua glue `0x505f00` -> the worker `0x505bb0`, whose

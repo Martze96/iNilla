@@ -144,16 +144,9 @@
         -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro
         -- during a corpse run is a real thing people do.
         UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }
-        -- The crafting window (decision 0437 phase 2, TradeSkillFrame.xml): NOT an NPC session (it
-        -- opens off your own cast, TradeSkillFrame.xml's own header comment) — the ref Lua's own
-        -- registration line (Blizzard_TradeSkillUI.lua:13) is `{ area = "left", pushable = 3 }`,
-        -- quoted verbatim.
-        UIPanelWindows["BenillaTradeSkillFrame"] = { area = "left", pushable = 3 }
-        -- The Enchanting window (decision 0437 phase 3, CraftFrame.xml): the ref Lua's own
-        -- registration line (`Blizzard_CraftUI.lua:24`), quoted verbatim — `pushable = 4`, NOT `3`
-        -- (grepped both ref files directly to confirm: `3` is TradeSkillFrame's own line-13 value,
-        -- a different window/depth — CraftFrame.xml's own header comment has the same note).
-        UIPanelWindows["BenillaCraftFrame"] = { area = "left", pushable = 4 }
+        -- The trade skill and craft windows register THEMSELVES: `Blizzard_TradeSkillUI.lua:13`
+        -- and `Blizzard_CraftUI.lua:24` write their own `UIPanelWindows` rows when the addon loads,
+        -- which since 1973 is the reference's own file on the first TRADE_SKILL_SHOW / CRAFT_SHOW.
         -- The game menu (decision 0674, GameMenuFrame.xml) — the ref's own registration line
         -- verbatim (`UIPanelWindows["GameMenuFrame"] = { area = "center", pushable = 0,
         -- whileDead = 1 }`, UIParent.lua l.15), and the FIRST **center**-area row benilla ships.

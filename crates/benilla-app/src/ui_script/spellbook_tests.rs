@@ -99,7 +99,7 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
         "Interface\\FrameXML\\MainMenuBar.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -139,7 +139,7 @@ fn shipped_spellbook_loads_clean() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // The reference's own file, off the chain, with the one adapter it needs from this engine.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
@@ -692,7 +692,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         "Interface\\FrameXML\\StaticPopup.xml",
         // `ShowMacroFrame` lives here since 1848.
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Cooldown.xml",
         // **ScrollTemplates BEFORE UIPanelTemplates, which is the manifest's own order.** Ours
         // still carries dead `FauxScrollFrame_*` copies that the chain overrides by loading after
@@ -719,7 +719,6 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
         // The reference's spellbook shows and hides the multibar grids (MultiActionBars.lua),
         // whose file wants the options window's uvars — the same tail `spellbook_ui` carries.
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -731,6 +730,11 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     ] {
         load_xml(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `MacroFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
+    s.run("MacroFrame_LoadUI()").unwrap();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
     // The file's own book plus a third Fire spell that is PASSIVE — book id 3, which the ref's

@@ -27,7 +27,9 @@ fn load_unit_frames(s: &UiScript) {
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(s, "GameTooltip.xml");
+    load_xml(s, "Interface\\FrameXML\\GameTooltip.xml");
+    // `FACTION_BAR_COLORS` for the stock `GameTooltip_UnitColor` — ReputationFrame.lua's (1968).
+    load_xml(s, r"Interface\FrameXML\ReputationFrame.lua");
     load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(s, "Interface\\FrameXML\\BasicControls.xml"); // `TEXT`, which UnitPopup.lua reads at file scope
     load_xml(s, "Interface\\FrameXML\\UnitPopup.xml");
@@ -1220,7 +1222,8 @@ fn the_party_art_paints_over_the_bars() {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\ReputationFrame.lua"); // FACTION_BAR_COLORS (1968)
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE and its
     // declarer is UIParent (ref UIParent.lua:65) since 1888.

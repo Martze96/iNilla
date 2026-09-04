@@ -234,6 +234,7 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
         "SCROLLFRAME" => FrameKind::ScrollFrame,
         "MODEL" => FrameKind::Model,
         "PLAYERMODEL" => FrameKind::PlayerModel,
+        "DRESSUPMODEL" => FrameKind::DressUpModel,
         "MESSAGEFRAME" => FrameKind::MessageFrame,
         "SCROLLINGMESSAGEFRAME" => FrameKind::ScrollingMessageFrame,
         "COLORSELECT" => FrameKind::ColorSelect,
@@ -396,6 +397,14 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
         // 3-entry map and on a miss tail-calls `CSimpleModel`'s `0x76f870`. Order is the miss
         // order — three names of its own, then all 23 of `Model`'s.
         Some(FrameKind::PlayerModel) => &[
+            super::modelframe::REG_PLAYERMODEL_METHODS,
+            super::modelframe::REG_MODEL_METHODS,
+        ],
+        // Three of its own, then PlayerModel's three, then Model's 23: `CGDressUpModelFrame`'s
+        // lookup probes `0x84f190` and misses into `CGCharacterModelBase`'s `0x506260`, which
+        // misses into `CSimpleModel`'s `0x76f870` (1969).
+        Some(FrameKind::DressUpModel) => &[
+            super::dressup::REG_DRESSUPMODEL_METHODS,
             super::modelframe::REG_PLAYERMODEL_METHODS,
             super::modelframe::REG_MODEL_METHODS,
         ],

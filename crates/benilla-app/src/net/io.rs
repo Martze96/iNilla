@@ -1071,6 +1071,10 @@ fn writer_loop(
                     ClientCommand::BattlefieldPort { map_id, accept } => {
                         w.battlefield_port(map_id, accept)
                     }
+                    ClientCommand::RequestBattlefieldScoreData => {
+                        w.request_battlefield_score_data()
+                    }
+                    ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
                     ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
                     ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
@@ -1162,15 +1166,16 @@ fn writer_loop(
                         receiver,
                         subject,
                         body,
+                        stationery,
                         item_guid,
                         money,
                         cod,
                     } => w.send_mail(
                         mailbox, &receiver, &subject, &body,
-                        // stationery/package: vmangos discards both — player mail is always
-                        // stored MAIL_STATIONERY_DEFAULT (41, decision 0544) regardless of what
-                        // rides the wire here.
-                        41, 0, item_guid, money, cod,
+                        // The stationery the player selected (1970) and package 0 — vmangos
+                        // discards both and stores MAIL_STATIONERY_DEFAULT (41, decision 0544),
+                        // but the wire carries what the client chose, as the reference's does.
+                        stationery, 0, item_guid, money, cod,
                     ),
                     ClientCommand::MailTakeMoney { mailbox, mail_id } => {
                         w.mail_take_money(mailbox, mail_id)

@@ -258,6 +258,7 @@ pub(super) fn apply_net_updates(
                         ResMut<crate::ui_dialog_verbs::AreaSpiritHealer>,
                         ResMut<crate::ui_dialog_verbs::BattlefieldQueue>,
                         ResMut<crate::ui_dialog_verbs::MeetingStone>,
+                        ResMut<crate::ui_battlefield_score::BattlefieldScoreboard>,
                     ),
                 ),
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
@@ -481,6 +482,7 @@ pub(super) fn apply_net_updates(
                         mut area_spirit,
                         mut battlefield_queue,
                         mut meeting_stone,
+                        mut battlefield_scoreboard,
                     ),
                 ),
                 mut poi_marker,
@@ -959,6 +961,7 @@ pub(super) fn apply_net_updates(
                 area_spirit.on_time(healer, ms, std::time::Instant::now());
             }
             SessionEvent::BattlefieldStatus(status) => battlefield_queue.apply(status),
+            SessionEvent::PvpLogData(data) => battlefield_scoreboard.apply(data),
             SessionEvent::MeetingStoneSetQueue { area, status } => {
                 meeting_stone.apply(area, status);
             }

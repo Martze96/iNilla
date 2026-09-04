@@ -379,18 +379,20 @@ fn shown_inspect_honor_page() -> UiScript {
         "Interface\\FrameXML\\StaticPopup.xml",
         // `InspectUnit`'s home since 1832.
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         // Before the inspect addon — its honor page inherits this file's row templates and calls
         // its two shared painters, and `inherits=` resolves at load (the manifest's own order).
         // The stock inspect slot buttons inherit this (1832).
         "Interface\\FrameXML\\ItemButtonTemplate.xml",
         "Interface\\FrameXML\\HonorFrame.xml",
-        "Interface\\AddOns\\Blizzard_InspectUI\\Blizzard_InspectUI.xml",
-        "Interface\\AddOns\\Blizzard_InspectUI\\InspectPaperDollFrame.xml",
-        "Interface\\AddOns\\Blizzard_InspectUI\\InspectHonorFrame.xml",
     ] {
         load_xml(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `InspectFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_InspectUI");
+    s.run("InspectFrame_LoadUI()").unwrap();
     s.set_unit("target", Some(alliance_player()));
     // The PLAYER snapshot is required even though this page is about somebody else, and the reason
     // is the reference's own asymmetry: `BenillaHonorPane_SetRank` passes the inspected token for

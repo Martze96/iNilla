@@ -32,7 +32,7 @@ fn harness() -> UiScript {
                                                     // does not, so a session without the tooltip loses the whole repaint.
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");

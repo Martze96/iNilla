@@ -996,6 +996,16 @@ pub const SMSG_BATTLEFIELD_STATUS: u16 = 0x02D4; // 724
 /// `AcceptBattlefieldPort(index, accept)`'s packet (§7): `u32 mapId` (the slot's Map.dbc row),
 /// `u8 accept` (decision 1963).
 pub const CMSG_BATTLEFIELD_PORT: u16 = 0x02D5; // 725
+/// The battleground scoreboard, both ways (wow-re `battlefield-verb-family.md` §4.3/§5.1, 1972):
+/// the client's `RequestBattlefieldScoreData` sends it EMPTY (throttled to 5000 ms client-side);
+/// the server's answer is `u8 ended`, `u8 winner` only when ended, `u32 count`, then per row
+/// `u64 guid, u32 rank, u32 killingBlows, u32 honorableKills, u32 deaths, u32 honorGained,
+/// u32 statCount, statCount × u32` (the client stores at most eight). Fires
+/// `UPDATE_BATTLEFIELD_SCORE` once every row's name resolves.
+pub const MSG_PVP_LOG_DATA: u16 = 0x02E0; // 736
+/// `LeaveBattlefield()`'s packet (§5.3, 1972): `u32 mapId` of the battleground the client is in,
+/// sent only once the scoreboard's "ended" byte has arrived.
+pub const CMSG_LEAVE_BATTLEFIELD: u16 = 0x02E1; // 737
 /// The area spirit healer query the client sends when it adopts a new healer (§6): `u64 guid`;
 /// answered by [`SMSG_AREA_SPIRIT_HEALER_TIME`] (decision 1963).
 pub const CMSG_AREA_SPIRIT_HEALER_QUERY: u16 = 0x02E2; // 738

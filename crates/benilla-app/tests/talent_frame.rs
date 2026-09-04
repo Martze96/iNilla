@@ -32,7 +32,7 @@ const FILES: &[&str] = &[
     "UiPanels.xml",
     // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
     "UIParent.xml",
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     // `UIPanelScrollFrameTemplate` — the stock scroll frame's whole substance: its `$parentScrollBar`
     // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template
     // is a loader WARNING, not an error, so without this the window still built — just with no

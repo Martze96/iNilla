@@ -816,6 +816,14 @@ pub(crate) struct Model {
     pub(crate) area_spirit_accepts: u32,
     /// `AcceptBattlefieldPort(index, accept)` calls: the 1-based slot and the normalised answer.
     pub(crate) battlefield_port_requests: Vec<(u8, bool)>,
+    /// The battleground scoreboard (1972): the pushed rows, the faction filter, the sorted order.
+    pub(crate) battlefield_board: super::battlefield_score::ScoreBoard,
+    /// `GetBattlefieldInstanceRunTime()`'s answer, pushed each frame by the app's clock.
+    pub(crate) battlefield_run_time_ms: u32,
+    /// `RequestBattlefieldScoreData()` calls since the last drain.
+    pub(crate) battlefield_score_requests: u32,
+    /// `LeaveBattlefield()` calls that passed the "ended" gate since the last drain.
+    pub(crate) battlefield_leave_requests: u32,
     /// `CancelMeetingStoneRequest()` calls since the last drain — the app gates on leadership.
     pub(crate) meeting_stone_cancels: u32,
 
@@ -1182,6 +1190,10 @@ pub(crate) struct Model {
     /// The Send tab's attached bag item (a cursor drop, decision 0216) — carried until the send
     /// fires; the app resolves its `(bag, slot)` to the wire item guid then.
     pub(crate) mail_send_item: Option<cursor::CursorItem>,
+    /// The usable stationery list the app pushes, in the picker's order (1970).
+    pub(crate) mail_stationeries: Vec<mail::StationeryView>,
+    /// `SelectStationery`'s stored `Stationery.dbc` id — 0 = none, which silences `SendMail`.
+    pub(crate) mail_stationery: u32,
     /// `HasNewMail()` — login-scoped (survives the mailbox window closing, unlike [`Self::mail`]
     /// above): the app's `MSG_QUERY_NEXT_MAIL_TIME`/`SMSG_RECEIVED_MAIL`-fed countdown reduced to
     /// one flag (decision 0544 P3, wow-re §5 `mail-interaction.md`). The reference minimap icon
@@ -1198,6 +1210,8 @@ pub(crate) struct Model {
     /// throttle, pushed separately from the snapshot because the Search button polls it every
     /// frame and it would otherwise churn the snapshot's diff.
     pub(crate) auction: Option<auction::AuctionState>,
+    /// The Browse tab's class tree, login-scoped (`set_auction_item_classes`, 1971).
+    pub(crate) auction_item_classes: Vec<auction::AuctionCategory>,
     pub(crate) auction_selected: [u32; 3],
     pub(crate) auction_can_query: bool,
     pub(crate) auction_query: Option<auction::AuctionQuery>,
@@ -1418,14 +1432,11 @@ pub(crate) struct Model {
     pub(crate) inspect_notifies: Vec<String>,
     /// `ClearInspectPlayer` was called — drained by the app, which drops its inspect target.
     pub(crate) inspect_clear: bool,
-    /// The inspect model pane's bake yaw — the last of the benilla-named pane scalars beside
-    /// [`Self::dressup_yaw`]. A migrated window's pane carries its own facing in `ModelState`
-    /// (`UiScript::model_pane_facing`, decision 1751); these two remain because their windows are
-    /// The dressing room's queued intents (decision 1060) — `BenillaDressUpModel_Dress/TryOn/Close`,
-    /// drained by the app in order (see [`super::dressup`] on why order matters).
+    /// The dressing room's queued intents (decision 1060) — the `DressUpModel` widget's
+    /// `SetUnit`/`Dress`/`Undress`/`TryOn`, drained by the app in order (see [`super::dressup`] on
+    /// why order matters). The pane's yaw is its own `ModelState` facing, like every migrated
+    /// window's (`UiScript::model_pane_facing`, 1751/1969).
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
-    /// The dressing-room pane's bake yaw, the fourth of those scalars.
-    pub(crate) dressup_yaw: f32,
     /// Unit token (lowercase) → what the app resolved about it this frame, for **every** token
     /// that named a **live unit object**, creature as readily as player — the input to both
     /// verified range predicates (`CanInspect`, `CheckInteractDistance`). An absent token is one
@@ -1781,6 +1792,10 @@ impl Model {
             area_spirit_secs: 0,
             area_spirit_accepts: 0,
             battlefield_port_requests: Vec::new(),
+            battlefield_board: Default::default(),
+            battlefield_run_time_ms: 0,
+            battlefield_score_requests: 0,
+            battlefield_leave_requests: 0,
             meeting_stone_cancels: 0,
             shapeshift_forms: Vec::new(),
             shapeshift_casts: Vec::new(),
@@ -1886,8 +1901,11 @@ impl Model {
             mail_send_money: 0,
             mail_send_cod: 0,
             mail_send_item: None,
+            mail_stationeries: Vec::new(),
+            mail_stationery: 0,
             has_new_mail: false,
             auction: None,
+            auction_item_classes: Vec::new(),
             auction_selected: [0; 3],
             auction_can_query: true,
             auction_query: None,
@@ -1985,7 +2003,6 @@ impl Model {
             inspect_notifies: Vec::new(),
             inspect_clear: false,
             dressup_intents: Vec::new(),
-            dressup_yaw: 0.0,
             unit_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),

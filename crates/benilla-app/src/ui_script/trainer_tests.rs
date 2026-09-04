@@ -56,7 +56,7 @@ fn trainer_script_base() -> UiScript {
         "Interface\\FrameXML\\MainMenuBar.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "ScrollTemplates.xml",

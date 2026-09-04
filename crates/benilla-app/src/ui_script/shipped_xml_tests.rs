@@ -32,7 +32,7 @@ fn every_shipped_ui_xml_parses() {
     assert!(
         // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751),
         // so the floor sits well under the count rather than one step above it (1956).
-        checked >= 20,
+        checked >= 15,
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -428,8 +428,10 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing — the shipped UI names hundreds of textures.
-    assert!(refs.len() >= 200, "only {} texture paths swept", refs.len());
+    // Never let the sweep pass by matching nothing — the shipped UI still names over a hundred
+    // textures (173 after 1971 retired the auction transcription, fewer again after 1973 the
+    // crafting pair; the count falls with every window that migrates, and the floor follows it).
+    assert!(refs.len() >= 80, "only {} texture paths swept", refs.len());
 
     // The shape half: a doubled separator is the Lua escaping written into XML, and it resolves to
     // nothing. Checked without the client so a data-less machine still catches this exact class.
@@ -622,9 +624,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing.
+    // Never let the sweep pass by matching nothing (19 after 1971; the floor follows the census
+    // down as windows migrate).
     assert!(
-        paths.len() >= 20,
+        paths.len() >= 10,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
@@ -729,9 +732,11 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing: 23 key-shaped values across six windows is the
-    // floor as of 0991, and a regex that stops matching is exactly how this guard would retire.
-    assert!(keys >= 23, "only {keys} key-shaped text= values swept");
+    // Never let the sweep pass by matching nothing: 23 key-shaped values across six windows was
+    // the floor as of 0991; ONE is left after 1971, and a regex that stops matching is exactly how
+    // this guard would retire — so the floor is one, and the guard retires with the last file of
+    // ours that writes a key-shaped `text=`.
+    assert!(keys >= 1, "only {keys} key-shaped text= values swept");
 }
 
 /// **No shipped script hands a GlobalStrings KEY to a text sink as if it were the string.**
@@ -840,7 +845,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
     // The same walk floor as above (1956).
-    assert!(swept >= 20, "only {swept} xml files swept — sweep broke");
+    assert!(swept >= 15, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
@@ -1438,8 +1443,8 @@ fn every_declared_parent_really_attaches() {
     let declared = shipped_frame_parents();
     assert!(
         // A sanity floor for the scan, not a census — the declarations retire with the files
-        // that carry them (1751); 67 before 1938, 30 after 1956.
-        declared.len() >= 15,
+        // that carry them (1751); 67 before 1938, 30 after 1956, 14 after 1970.
+        declared.len() >= 10,
         "only {} parent declarations found — the scan broke",
         declared.len()
     );
@@ -1576,6 +1581,9 @@ fn the_shipped_manifest_opens_the_macro_icon_picker() {
     s.resolve();
     let _ = s.errors();
 
+    // The window is a LoadOnDemand addon the app seats at setup (1957) and `ShowMacroFrame`
+    // loads through the reference's own `MacroFrame_LoadUI` (1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
     s.run("ShowMacroFrame()").unwrap();
     s.run("MacroButton1:Click()").unwrap();
     s.run("MacroEditButton:Click()").unwrap();

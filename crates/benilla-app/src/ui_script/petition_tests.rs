@@ -112,7 +112,7 @@ fn setup() -> UiScript {
     // `ChatFrameEditBox`, which the reference's own purchase button indexes on every click to
     // decide where focus goes after the name box closes — a nil there raises before the charter is
     // bought. Ours guarded it; the reference does not.
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrops
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // ChatFrame's seven dropdowns inherit its template
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");

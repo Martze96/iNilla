@@ -24,7 +24,7 @@ fn load_dropdown_kit(s: &UiScript) {
         "UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
     ] {
         load_xml(s, file);

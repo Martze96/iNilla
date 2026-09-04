@@ -178,31 +178,6 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
 /// per-entry rather than per-run so the manifest's order is the load order verbatim — the whole
 /// reason the list is a manifest and not two lists.
 ///
-/// Both stores answer `<Include>` / `<Script file=>` the same way: the loader resolves a reference
-/// against the *including document's own* directory in its source's path space (1186), which for a
-/// chain document means `Interface\FrameXML\ContainerFrame.xml`'s `<Script
-/// file="ContainerFrame.lua"/>` reaches `Interface\FrameXML\ContainerFrame.lua` without anything
-/// here knowing about it.
-/// The Blizzard addons the manifest lists off the chain (`Interface\AddOns\<Name>\…` rows), by
-/// name, in first-appearance order — the eager trio the InspectUI header describes, which the
-/// registry must not also carry as LoadOnDemand rows (`addons::chain_addons`, 1957).
-pub(crate) fn chain_addons(files: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for file in files {
-        let norm = file.replace('/', "\\");
-        let Some(rest) = norm.strip_prefix("Interface\\AddOns\\") else {
-            continue;
-        };
-        let Some((name, _)) = rest.split_once('\\') else {
-            continue;
-        };
-        if !out.iter().any(|n| n == name) {
-            out.push(name.to_string());
-        }
-    }
-    out
-}
-
 fn load_manifest(script: &UiScript, files: &[String]) -> Vec<String> {
     let builtin = Addon::builtin();
     let reference = reference_ui::addon(

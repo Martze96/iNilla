@@ -16,17 +16,13 @@ use benilla_ui::script::{
     UiScript,
 };
 
-use super::test_ui::load_ui_strict as load_xml;
-
 /// The window's slice of the manifest, in `load_default_ui` order. `UIParent.xml` is in it for
 /// two functions the pane really calls — `MouseIsOver` (the drag's hover sweep) and
 /// `SecondsToTime` (the lockout rows) — and for the `READY_CHECK` arm that opens the popup.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for f in super::test_ui::SOCIAL_UI {
-        load_xml(&s, f);
-    }
+    super::test_ui::load_social_ui(&mut s);
     s
 }
 

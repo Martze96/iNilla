@@ -26,7 +26,7 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "MinimapCluster.xml",
         // The reference's own file. This module carried a private disk-only `load_xml` until the
         // swap, which structurally could not name a chain entry — [`super::test_ui::load_ui`] is
@@ -403,7 +403,7 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "MinimapCluster.xml",
         "ScrollTemplates.xml",
         "Interface\\FrameXML\\DurabilityFrame.xml",

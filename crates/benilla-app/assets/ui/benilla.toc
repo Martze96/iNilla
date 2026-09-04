@@ -166,13 +166,22 @@ Interface\FrameXML\MoneyInputFrame.xml
 # reference them. The StaticPopup engine and every dialog it used to carry are the reference's
 # own file now, far below at the reference's own slot after UIPanelTemplates (decision 1960).
 UiPanels.xml
-# The tooltip: a hover window the bag/merchant/loot/unit frames drive. Loaded before them so
-# `GameTooltip` + its verbs exist when their OnEnter handlers fire (runtime, so order
-# is not strictly required — but it keeps the dependency legible). It also declares the two
-# virtual templates (GameTooltipTemplate, ShoppingTooltipTemplate), which IS an order
-# requirement: ItemRef.xml below expands one, and so do the 27 corpus addons that name
-# GameTooltipTemplate in an XML inherits=.
-GameTooltip.xml
+# ══ THE TOOLTIP — the reference's own, off the player's chain (1751; decision 1968) ══
+# GameTooltip.xml sources HealthBar.lua and GameTooltip.lua and <Include>s GameTooltipTemplate.xml:
+# the two virtual templates (GameTooltipTemplate, ShoppingTooltipTemplate — thirty declared line
+# pairs each, the status bar, the money row), the GameTooltip / ShoppingTooltip1 / ShoppingTooltip2
+# instances and SmallTextTooltip. The widget itself is this engine's (0274); every verb the file
+# calls was already bound. Its slot is the reference's own: FrameXML.toc l.13, after MoneyFrame
+# (l.9-10, `SmallMoneyFrameTemplate` resolves at load) and before the panel kit. The order
+# requirement the old header named still holds: ItemRef.xml below expands GameTooltipTemplate,
+# and so do the 27 corpus addons that name it in an XML inherits=.
+#
+# What our transcription carried that the reference does not, and where each went (1968): the
+# `$parentThicken` plate fill (a look deviation, retired — the plate is the reference's art);
+# `SHOW_NEWBIE_TIPS`'s default, which is UIOptionsFrame.lua's and sits in OptionsFrame.xml's uvar
+# block with its family; `FACTION_BAR_COLORS`' fallback table — the reference's is
+# ReputationFrame.lua's, on the chain below; `NUM_SHOPPING_TOOLTIPS` — PaperDollFrame.lua's.
+Interface\FrameXML\GameTooltip.xml
 # ══ THE DROPDOWN KIT — the reference's own, off the player's chain (1751) ══
 # UIDropDownMenuTemplate + the DropDownList frames + the whole `UIDropDownMenu_*` API — before its
 # first customers (the unit popups below, the world map's pickers, the trainer filter). The stock
@@ -559,11 +568,14 @@ Interface\FrameXML\CastingBarFrame.xml
 #   1.12 never reaches it — vmangos refuses to send that packet and substitutes a full START,
 #   saying so in `Player::SendMirrorTimers` — and `ui_mirror.rs`'s Pause edge carries the note.
 Interface\FrameXML\MirrorTimer.xml
-# The always-up world-state readout (decision 1586, report B190): the tower/flag/base counters an
-# outdoor-PvP zone or a battleground shows at top-centre, driven by the UPDATE_WORLD_STATES event
-# `crate::world_state_ui` fires. Needs Fonts (GameFontNormalSmall) and GameTooltip; sits beside the
-# mirror timers, which share its top-centre lane.
-WorldStateFrame.xml
+# ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
+# WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
+# counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,
+# and the battleground SCOREBOARD ours never had — `WorldStateScoreFrame`, over the score family
+# 1972 built (`MSG_PVP_LOG_DATA`, the eleven verbs, `UPDATE_BATTLEFIELD_SCORE`) and UIParent.xml's
+# `BattlefieldMinimap_LoadUI`. Needs Fonts, GameTooltip, the panel kit (its close button, tabs,
+# faux scroll frame) — all above; sits beside the mirror timers, which share its top-centre lane.
+Interface\FrameXML\WorldStateFrame.xml
 # ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
 # The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
 # `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
@@ -752,42 +764,34 @@ Interface\FrameXML\SkillFrame.xml
 # `HonorFrameTemplates.xml` is `<Include>`d by `HonorFrame.xml` and inherited by the LoadOnDemand
 # `Blizzard_InspectUI`, which loads later still.
 Interface\FrameXML\HonorFrame.xml
-# ══ THE INSPECT WINDOW — the reference's own, off the player's chain (1751, window 24) ══
-# Another player's paper doll (decision 0631), and the FIRST LoadOnDemand ADDON we take off the
-# chain rather than a FrameXML file. Everything below it in this manifest that names a
-# `Blizzard_*` addon follows the shape set here.
+# ══ THE LoadOnDemand ADDONS — Inspect, Talent, Macro, Raid: NO ROW HERE (1751; 1967) ══
+# `Blizzard_InspectUI`, `Blizzard_TalentUI`, `Blizzard_MacroUI` and `Blizzard_RaidUI` are not
+# listed, exactly as the reference's own `FrameXML.toc` lists no addon: each is `LoadOnDemand: 1`
+# on the player's chain — inside patch.MPQ; the loose `Interface\AddOns\Blizzard_*\` folders on
+# disk hold one `.pub` decoy each, which is what kept these four windows on transcriptions for
+# months — and `ui_script::addons` seats every such addon as a registry row (1957) that
+# `UIParentLoadAddOn` loads the first time its opener runs. The openers are the reference's own,
+# in UIParent.xml, its home for them: `InspectUnit` → `InspectFrame_LoadUI`, `ToggleTalentFrame`
+# → `TalentFrame_LoadUI`, `ShowMacroFrame` → `MacroFrame_LoadUI`, and the stock RaidFrame.lua's
+# `RaidFrame_LoadUI` on the first roster update. 1832, 1833, 1848 and 1874 took the four off the
+# chain but listed them here with everything else, and left the LoadUI calls out rather than
+# stub them (1203); 1967 gives them the reference's load timing and the calls back.
 #
-# **The addon is inside patch.MPQ, not the loose folder.** `Interface\AddOns\Blizzard_InspectUI\`
-# on disk holds one `Blizzard_InspectUI.pub` decoy and nothing else; the real four files sit in
-# the archive, which the chain mounts. Believing the decoy is what kept this window (and Macro,
-# Talent, Raid, Trainer) on a transcription for months.
-#
-# No LoadOnDemand: we list the addon's files here and they load with everything else. The
-# reference reaches them through `InspectUnit` → `InspectFrame_LoadUI`; ours keeps `InspectUnit`
-# (in UIParent.xml, the reference's own home for that name) and drops the LoadUI call.
-#
-# The addon's own toc order, which is load order — the `.xml` files pull their `.lua` siblings
-# through `<Script file=.../>` relative to the addon directory, exactly as a FrameXML file does.
-# Its toc lists a fourth entry, `Localization.lua`, which is omitted here because it holds no code
-# at all: the whole file is the comment `-- This file is executed at the end of addon load`.
-#
-# Dependencies are unchanged from the file this replaces: Fonts/UiPanels/GameTooltip, plus
-# `CharacterFrameTabButtonTemplate` from UiPanels.xml, plus ItemButtonTemplate.xml far above
-# (`InspectPaperDollItemSlotButtonTemplate` inherits it, resolved at LOAD). And the one that
-# binds hardest is the entry directly above: the honor page inherits HonorFrame.xml's five row
-# templates — the reference has the identical edge, which is why its own toc has the same order.
-#
-# What we GAIN by swapping: `InspectGuildText` and `InspectTitleText`, two FontStrings our
-# transcription never had.
-Interface\AddOns\Blizzard_InspectUI\Blizzard_InspectUI.xml
-Interface\AddOns\Blizzard_InspectUI\InspectPaperDollFrame.xml
-Interface\AddOns\Blizzard_InspectUI\InspectHonorFrame.xml
-# The dressing room (decision 1060): the ctrl-click item preview. Loaded right after the
-# windows whose slots feed it (the character window above, the bags before that) and before
-# everything else that ctrl-clicks into it — order is legibility only, since `DressUpItemLink`
-# is a global resolved at call time. Needs UiPanels (the panel manager, its left-slot row) and
-# Fonts; its booth pane needs nothing loaded at all.
-DressUpFrame.xml
+# What those headers recorded that still holds: the inspect honor page inherits HonorFrame.xml's
+# five row templates, the macro icon chooser inherits `ClassTrainerListScrollFrameTemplate`
+# (1862) — FrameXML files listed above, so resolved long before any addon loads, which is also
+# why the reference's own toc has the same order. The gates over chain files
+# (`ui_script::reference_ui`) walk these addons' files after the manifest's entries — a reached
+# addon is part of the shipped interface, row or no row.
+# ══ THE DRESSING ROOM — the reference's own, off the player's chain (1751; decision 1969) ══
+# DressUpFrame.xml + DressUpFrame.lua: the ctrl-click item preview (1060). Its `<DressUpModel>`
+# is a real widget kind now — PlayerModel's three verbs plus its own `TryOn`/`Dress`/`Undress`
+# (table 0x84f190), queued as intents the app composes the booth's look from — and its pane draws
+# the "dressup" booth by the reference's own name (`portrait::model_pane_booth`). The rotate
+# buttons and OnUpdate drive `Model_RotateLeft/Right/OnUpdate` from UIParent.xml above, and the
+# Close/Reset buttons inherit UIPanelCloseButton/UIPanelButtonTemplate from the panel kit above.
+# Slot as before: after the windows whose slots feed it; `DressUpItemLink` resolves at call time.
+Interface\FrameXML\DressUpFrame.xml
 # ══ THE SPELLBOOK — the reference's own, off the player's chain (1751; decision 1952) ══
 # SpellBookFrame.xml + SpellBookFrame.lua: the book, the twelve page buttons, the skill-line tabs,
 # the Spell/Pet toggle tabs. Its whole engine surface was already ours (1924's UpdateSpells, 1931's
@@ -800,23 +804,6 @@ Interface\FrameXML\SpellBookFrame.xml
 # <Model> (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla
 # draws is its own token texture (1383/1392/1393). BENILLA_ALLOW_OWN_UI=1.
 SpellBookAdapters.xml
-# ══ THE TALENT WINDOW — the reference's own, off the player's chain (1751, window 25) ══
-# The second LoadOnDemand addon (1832 was the first, and its header carries the mechanics).
-# `Blizzard_TalentUI` is FIVE files behind one manifest line: the `.xml` sources its own `.lua`
-# and `<Include>`s `Blizzard_TalentUITemplates.xml`, which is where the four templates every
-# talent button, branch, arrow and tab inherits actually live. Its toc's only other entry is the
-# empty `Localization.lua`.
-#
-# It needs NOTHING built — every engine verb the five files call was already registered, checked
-# name by name against our bindings. What it needs LOADED is UIPanelTemplates (its scroll frame
-# is `UIPanelScrollFrameTemplate`, its close and cancel buttons `UIPanelCloseButton` /
-# `UIPanelButtonTemplate`) and Fonts, both far above.
-#
-# `ToggleTalentFrame` moved to UIParent.xml, the reference's own home for it — see 1833.
-#
-# What we GAIN: `TalentFrameTab4` and `TalentFrameTab5`. The reference lays out five tab slots
-# where our transcription stopped at the three a 1.12 class actually has.
-Interface\AddOns\Blizzard_TalentUI\Blizzard_TalentUI.xml
 # ══ THE SOCIAL WINDOW — the reference's own, off the player's chain (1751; decision 1959) ══
 # FriendsFrame.xml + FriendsFrame.lua: the O-key window's four tabs — friends/ignore, who, the
 # guild roster with its control and info panes, and the raid tab whose pane is the stock
@@ -831,8 +818,10 @@ Interface\FrameXML\FriendsFrame.xml
 # a child cannot be declared before its parent — the reference splits it the same way and for the
 # same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
 #
-# TWO entries replace one of ours: the pane itself, and the LoadOnDemand half that carries the
-# group frames and the tear-off pullouts. 1839 measured the swap — 83 of our 84 frame names were
+# The pane is the entry here; the LoadOnDemand half that carries the group frames and the
+# tear-off pullouts, `Blizzard_RaidUI`, is a registry row that the stock RaidFrame.lua loads on
+# the first roster update (the addons header far above; 1967). 1839 measured the swap — 83 of our
+# 84 frame names were
 # already the reference's, 20 of our 22 Lua functions were, and NOTHING needed building. The one
 # name that was not is `BenillaRaidDropDown`, and the reference has no raid drop-down at all: it
 # reuses `FriendsDropDown`, which FriendsFrame.xml declares four manifest lines above.
@@ -840,7 +829,6 @@ Interface\FrameXML\FriendsFrame.xml
 # GAINED: `RaidPulloutFrameTemplate`, `RaidPulloutButtonTemplate`, `RaidBuffButtonTemplate` and the
 # fifteen `RaidPullout*` verbs — the tear-off group pullouts we never transcribed.
 Interface\FrameXML\RaidFrame.xml
-Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml
 # ══ THE GOSSIP WINDOW — the reference's own, off the player's chain (1751) ══════════════════
 # No engine verb, no widget method, no shadowed name — all three instruments clean. It was
 # deferred once on `GossipResize` reading `GetTextHeight()` in the same repaint that sets the
@@ -856,11 +844,18 @@ Interface\FrameXML\GossipFrame.xml
 # That is why the notes below say "grouping" rather than "reuses that file's helpers": the
 # windows still cluster here, but nothing depends on this file any more.
 Interface\FrameXML\MerchantFrame.xml
-# The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over
-# the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. Kept
-# beside MerchantFrame in the NPC-window cluster; its postage/enclosed/COD coin displays use
-# the BenillaMoney_* kit, which is defined in MoneyFrame.xml far above.
-MailFrame.xml
+# ══ THE MAIL WINDOW — the reference's own, off the player's chain (1751; decision 1970) ══
+# MailFrame.xml + MailFrame.lua: the inbox, the open letter (with the auction invoice pane and
+# the letter-copy button), the send tab with its stationery picker and recipient autocomplete,
+# over the Era mail API (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. What
+# the swap built: the stationery family (`GetNumStationeries`/`GetStationeryInfo`/
+# `SelectStationery`/`GetSelectedStationeryTexture`, wow-re `stationery-bindings.md`) and the two
+# events the stock file listens for that nothing fired — `MAIL_SEND_INFO_UPDATE` on an attachment
+# change and `CLOSE_INBOX_ITEM(index)` when a take empties a mail. Its templates are all on the
+# chain above: the panel kit, ItemButtonTemplate, MoneyFrame/MoneyInputFrame, UIRadioButtonTemplate
+# (UIPanelTemplates.xml), InvoiceTextFontNormal (Fonts.xml) and FriendsFrameTabTemplate
+# (FriendsFrame.xml, which the reference's own toc also seats before this, l.71 → l.86).
+Interface\FrameXML\MailFrame.xml
 # ══ THE TRADE WINDOW — the reference's own, off the player's chain (1751; decision 1966) ══
 # TradeFrame.xml + TradeFrame.lua: both columns' seven slots over the trade API
 # (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain, the recipient's
@@ -951,29 +946,23 @@ Interface\FrameXML\TaxiFrame.xml
 # either moves — `ui_stable.rs`, `names.rs` and `net/apply/npc.rs` all reach it by stock names
 # already, and `portrait`'s booth keys on `PetStableModel`, which both spell the same.
 Interface\FrameXML\PetStable.xml
-# The auction house (decision 1511): the three-tab doublewide window over the auction API
-# (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
-# windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
-# money displays are SmallMoneyFrameTemplate, and it registers the AUCTION_DEPOSIT money type
-# into that file's MoneyTypeInfo), after MerchantFrame (grouping only now — that file's global
-# chain's MoneyInputFrame_* for its four money inputs, 1882), after ScrollTemplates (four faux lists), after
-# UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton / InputBoxTemplate /
-# UICheckButtonTemplate), after UIDropDownMenu (the rarity capsule) and after UiPanels (the
-# panel manager's `doublewide` seat, `CharacterFrameTabButtonTemplate`, the PanelTemplates
-# tab kit and the StaticPopup engine its two confirmations register into) — all above.
-AuctionFrame.xml
-# The crafting window (decision 0437 phase 2): NOT an NPC session (opens off your own cast of
-# an effect-47 opener spell, TradeSkillFrame.xml's own header comment) — loaded right after
-# TrainerFrame per the same "player-state/profession window" grouping and because it depends
-# on nothing TrainerFrame doesn't already need (Fonts/UiPanels/GameTooltip/ScrollTemplates,
-# all loaded above).
-TradeSkillFrame.xml
-# The Enchanting window (decision 0437 phase 3): the exact twin of TradeSkillFrame above —
-# same "opens off your own cast, not an NPC session" shape (CraftFrame.xml's own header
-# comment) — loaded right after it so `BuildColoredListString` (a guarded GLOBAL
-# TradeSkillFrame.xml defines) already exists when CraftFrame.xml reuses it without
-# redefining (CraftFrame.xml's own header comment, deviation 2).
-CraftFrame.xml
+# ══ THE AUCTION HOUSE — `Blizzard_AuctionUI`, a LoadOnDemand addon: NO ROW HERE (1751; 1971) ══
+# The three-tab doublewide window is the reference's own addon off the player's chain, seated as a
+# registry row (1957) and loaded on the first AUCTION_HOUSE_SHOW through UIParent.xml's own
+# `AuctionFrame_LoadUI` arm (ref UIParent.lua l.154-156, l.575-587), exactly like the trainer,
+# inspect, talent, macro and raid addons above. Its engine surface was already whole (decision
+# 1511's auction API); what it needed loaded is on the chain above: the panel kit, MoneyFrame /
+# MoneyInputFrame, UIDropDownMenu, and the dressing-room pane it embeds — `<DressUpModel
+# name="AuctionDressUpModel">`, the 1969 widget kind, drawing the same booth as the dressing room.
+# ══ THE CRAFTING WINDOWS — `Blizzard_TradeSkillUI` and `Blizzard_CraftUI`, LoadOnDemand: NO ROW HERE (1751; 1973) ══
+# The trade skill window (Blacksmithing, Tailoring, … and Poisons) and the craft window (Enchanting,
+# Beast Training) are the reference's own addons off the player's chain, registry rows (1957) loaded
+# on the first TRADE_SKILL_SHOW / CRAFT_SHOW through UIParent.xml's `TradeSkillFrame_LoadUI` /
+# `CraftFrame_LoadUI` arms (ref UIParent.lua l.166-168, l.190-192, l.605-632). Both inherit the
+# ClassTrainerFrameTemplates.xml kit far above and register their own panel rows. What 1973 built:
+# the four item-link verbs (`GetTradeSkillItemLink`, `GetTradeSkillReagentItemLink`,
+# `GetCraftItemLink` — the `|Henchant:` link — and `GetCraftReagentItemLink`, wow-re
+# `tradeskill-craft-item-links.md`) and `SetHyperlink`'s enchant leg. 0437's transcriptions are gone.
 # ══ THE LOOT WINDOW — the reference's own, off the player's chain (1751) ════════════════════
 # It never needed an engine VERB. It needed a widget TYPE: `<LootButton>` is a real registered
 # `CreateFrame` type (decision 1799), and registering it as a plain Button would have loaded the
@@ -1041,8 +1030,8 @@ Interface\FrameXML\QuestTimerFrame.xml
 Interface\FrameXML\ChatFrame.xml
 Interface\FrameXML\FloatingChatFrame.xml
 # ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
-# The fourth LoadOnDemand addon (1832's header carries the mechanics). ONE manifest line: its toc
-# lists `Blizzard_MacroUI.xml`, which sources its own `.lua`, plus the empty `Localization.lua`.
+# A LoadOnDemand addon with no row here since 1967 (the addons header far above); what stays in
+# this slot is the FrameXML file it needs loaded first.
 #
 # Nothing to build. 1835 recorded `SaveMacros` as a missing engine verb and it is not one — the
 # only occurrence in the reference's own file is COMMENTED OUT (`--SaveMacros();` in
@@ -1063,9 +1052,9 @@ Interface\FrameXML\FloatingChatFrame.xml
 # `FauxScrollFrame_GetOffset` (`return frame.offset`, no `or 0` — our deleted copy had that
 # fallback and was hiding this) handed `MacroPopupFrame_Update` a nil to multiply. Clicking
 # "Change Name/Icon" raised. The reference's own `FrameXML.toc` loads this at its line 92, well
-# before any addon; ours takes it here, immediately above its one consumer. Decision 1862.
+# before any addon; ours takes it here — its one consumer, `Blizzard_MacroUI`, is a LoadOnDemand
+# row now (1967) and loads after everything. Decision 1862.
 Interface\FrameXML\ClassTrainerFrameTemplates.xml
-Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml
 # The script error log (decision 1495): the window `/errors` opens — the list B293's two
 # reporters asked for, which the reference's one-message-at-a-time ScriptErrors modal cannot
 # be. Ours entirely (1.12 has no counterpart), reading the retained log on the model rather

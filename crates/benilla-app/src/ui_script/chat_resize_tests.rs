@@ -22,7 +22,7 @@ fn chat_ui() -> UiScript {
         r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

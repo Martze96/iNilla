@@ -162,7 +162,7 @@ pub(super) fn refresh_hud_snapshot(
 /// right, the action bar the bottom, the chat dock the bottom left).
 ///
 /// **Asked of the frame, not recomputed from its numbers.** Its row pitch and anchor live in
-/// `assets/ui/WorldStateFrame.xml`; mirroring them here would be two copies to keep in step, so
+/// the stock `WorldStateFrame.xml` (1972); mirroring them here would be two copies to keep in step, so
 /// this reads the resolved edge the layout actually produced (`GetBottom`, y-up). One tiny chunk
 /// at 4 Hz, only while the HUD is drawing — the same shape as [`crate::hover_log`]'s tooltip
 /// probe.
@@ -181,12 +181,25 @@ pub(super) fn refresh_hud_snapshot(
 /// (~47 µs on a 200-frame tree — `layout_methods::settle`'s own measurement), four times a second.
 /// Every other frame it is a chunk load and a table lookup.
 pub(crate) fn top_centre_claimed(script: &UiScript, win_h: f32) -> f32 {
+    // The stock `WorldStateAlwaysUpFrame` is a permanently shown container (1972); what the
+    // readout actually occupies is its ROWS — `AlwaysUpFrame<n>`, built on demand and hidden when
+    // the scope admits nothing — so the claim is the lowest shown row's bottom, or nothing.
     const CHUNK: &str = r#"
         local f = WorldStateAlwaysUpFrame
         if not (f and f:IsVisible()) then return -1 end
-        local bottom, screen = f:GetBottom(), GetScreenHeight()
-        if not bottom or not screen or screen <= 0 then return -1 end
-        return (screen - bottom) / screen
+        local lowest, i = nil, 1
+        while true do
+            local r = getglobal("AlwaysUpFrame" .. i)
+            if not r then break end
+            if r:IsShown() then
+                local b = r:GetBottom()
+                if b and (not lowest or b < lowest) then lowest = b end
+            end
+            i = i + 1
+        end
+        local screen = GetScreenHeight()
+        if not lowest or not screen or screen <= 0 then return -1 end
+        return (screen - lowest) / screen
     "#;
     let frac: f32 = script.eval::<f64>(CHUNK).unwrap_or(-1.0) as f32;
     if !(0.0..=1.0).contains(&frac) {
@@ -349,10 +362,12 @@ mod tests {
             claimed > 8.0,
             "two rows reach past the pill's own seat, so the pill must move: {claimed}"
         );
-        // The frame's own geometry, read back the way the probe reads it: the container's top offset
-        // plus one row per pushed row. Asserted against the XML rather than restated as constants.
+        // The frame's own geometry, read back the way the probe reads it: the second (lowest)
+        // row's resolved bottom. Asserted against the stock XML rather than restated as constants.
         let expected: f32 = s
-            .eval::<f64>("return (20 + WORLD_STATE_ROW_HEIGHT * 2 + 15) / GetScreenHeight()")
+            .eval::<f64>(
+                "return (GetScreenHeight() - AlwaysUpFrame2:GetBottom()) / GetScreenHeight()",
+            )
             .expect("the frame's own numbers") as f32
             * SCREEN_H;
         assert!(

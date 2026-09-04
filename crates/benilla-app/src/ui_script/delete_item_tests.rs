@@ -68,7 +68,7 @@ fn setup() -> UiScript {
     // The stock DELETE_GOOD_ITEM's OnHide hands focus back to `ChatFrameEditBox` (1960).
     load_xml(&s, r"Interface\FrameXML\UIMenu.xml");
     load_xml(&s, r"Interface\FrameXML\ChatFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     load_xml(&s, r"Interface\FrameXML\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, r"Interface\FrameXML\FloatingChatFrame.xml"); // declares ChatFrameEditBox

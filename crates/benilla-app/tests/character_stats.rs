@@ -50,7 +50,7 @@ const FILES: &[&str] = &[
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     // `CooldownFrameTemplate` and `CooldownFrame_SetTimer`. Not scenery: every one of the 20 slot
     // buttons runs `PaperDollItemSlotButton_Update` from its own OnLoad, which calls
     // `CooldownFrame_SetTimer` on `$parentCooldown` unconditionally (`PaperDollFrame.lua:692`) —

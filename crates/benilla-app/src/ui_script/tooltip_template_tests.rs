@@ -46,7 +46,7 @@ fn harness() -> UiScript {
         "UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
     ] {
         load_xml(&s, f);
     }
@@ -193,11 +193,12 @@ fn an_addon_tooltip_from_the_template_gets_the_plate() {
             .any(|p| p.eq_ignore_ascii_case(r"Interface\Tooltips\UI-Tooltip-Border")),
         "…and its border: {drawn:?}"
     );
-    // The Thicken deviation rides the template too — it is the shared plate, not one window's.
+    // The template's children resolve against the CALLER's name — the status bar the reference's
+    // template declares (`$parentStatusBar`), which TipBuddy anchors to by that global.
     assert!(
-        s.eval::<bool>(r#"return getglobal("MyTipThicken") ~= nil"#)
+        s.eval::<bool>(r#"return getglobal("MyTipStatusBar") ~= nil"#)
             .unwrap(),
-        "$parentThicken resolves against the CALLER's name"
+        "$parentStatusBar resolves against the CALLER's name"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -288,9 +289,9 @@ fn createframe_with_the_template_is_the_same_tooltip() {
         "Equip: Improves your chance to hit by 1%."
     );
     assert!(
-        s.eval::<bool>(r#"return getglobal("BetterCharacterStatsTooltipThicken") ~= nil"#)
+        s.eval::<bool>(r#"return getglobal("BetterCharacterStatsTooltipStatusBar") ~= nil"#)
             .unwrap(),
-        "the plate came through CreateFrame's fourth argument too"
+        "the template's children came through CreateFrame's fourth argument too"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

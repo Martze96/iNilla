@@ -82,7 +82,7 @@ fn setup() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // PASS/NEED/GREED + item hovers
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
@@ -563,7 +563,7 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // `TOOLTIP_DEFAULT_COLOR`, which the chain's dropdown backdrops read in their OnLoad — the
     // dropdown kit rides in with the loot window now (1838), so this bespoke setup needs it too.
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_group_loot(&s);
 
     let bottom = |s: &UiScript| s.eval::<f64>("return GroupLootFrame1:GetBottom()").unwrap();
@@ -618,7 +618,7 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     let mut s = setup();
     load_group_loot(&s);
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
-    load_xml(&s, "DressUpFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\DressUpFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");

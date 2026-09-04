@@ -120,6 +120,7 @@ mod ui_action;
 mod ui_auction;
 mod ui_aura;
 mod ui_bank;
+mod ui_battlefield_score;
 mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;
@@ -209,6 +210,7 @@ use ui_action::UiActionPlugin;
 use ui_auction::UiAuctionPlugin;
 use ui_aura::UiAuraPlugin;
 use ui_bank::UiBankPlugin;
+use ui_battlefield_score::BattlefieldScorePlugin;
 use ui_binder::UiBinderPlugin;
 use ui_cast::UiCastPlugin;
 use ui_char::UiCharPlugin;
@@ -641,6 +643,7 @@ pub fn run(build: BuildId) -> AppExit {
     // The dialog engine's own verbs (decision 1963): the pet trainer's question, the instance
     // boot clock, the area spirit healer, the battleground queue, the meeting stone.
     .add_plugins(UiDialogVerbsPlugin)
+    .add_plugins(BattlefieldScorePlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.

@@ -1069,6 +1069,24 @@ const TABLE: &[Spec] = &[
         None,
         None
     ),
+    // The battleground scoreboard and the battlefield minimap — the Interface block's last two
+    // (Bindings.xml l.630-635), both Lua-bodied: `ToggleWorldStateScoreFrame` is the stock
+    // WorldStateFrame.lua's since 1972 and `ToggleBattlefieldMinimap` UIParent.xml's (ref
+    // UIParent.lua l.216-221). Defaults byte-real from `WTF\DefaultBindings.wtf`.
+    spec!(
+        "TOGGLEWORLDSTATESCORES",
+        INTERFACE,
+        Kind::Edge("ToggleWorldStateScoreFrame()"),
+        Some("SHIFT-SPACE"),
+        None
+    ),
+    spec!(
+        "TOGGLEBATTLEFIELDMINIMAP",
+        INTERFACE,
+        Kind::Edge("ToggleBattlefieldMinimap()"),
+        Some("SHIFT-M"),
+        None
+    ),
     // ── Miscellaneous (BINDING_HEADER_MISC) ─────────────────────────────────────────────
     spec!(
         "MINIMAPZOOMIN",
@@ -1829,16 +1847,6 @@ pub(crate) static ABSENT: &[Absent] = &[
     ),
     // ── Action bar ──────────────────────────────────────────────────────────────────────
     // ── Interface ───────────────────────────────────────────────────────────────────────
-    absent!(
-        "TOGGLEWORLDSTATESCORES",
-        ["ToggleWorldStateScoreFrame"],
-        "no battlegrounds"
-    ),
-    absent!(
-        "TOGGLEBATTLEFIELDMINIMAP",
-        ["ToggleBattlefieldMinimap"],
-        "no battlegrounds"
-    ),
     // ── Misc ────────────────────────────────────────────────────────────────────────────
     absent!(
         "TOGGLEFPS",

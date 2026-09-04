@@ -97,7 +97,7 @@ fn harness_with(player: &str) -> UiScript {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "UIParent.xml", // `ShowMacroFrame` lives here now
         // **ScrollTemplates BEFORE UIPanelTemplates, the manifest's own order.** Ours still
         // carries dead `FauxScrollFrame_*` copies the chain overrides by loading after (1846's
@@ -109,10 +109,14 @@ fn harness_with(player: &str) -> UiScript {
         // `ClassTrainerListScrollFrameTemplate` — the icon chooser's scroll frame inherits it.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
-        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
     ] {
         super::test_ui::load_ui(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `MacroFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
+    s.run("MacroFrame_LoadUI()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // The icon chooser's list is the app's push; three entries is enough to index into.
     s.set_macro_icons(vec![

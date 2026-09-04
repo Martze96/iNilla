@@ -24,7 +24,7 @@ fn shipped_action_bar_drives_end_to_end() {
     super::test_ui::load_ui(&s, "UIParent.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    super::test_ui::load_ui(&s, "GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml")
         + super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml")
@@ -190,7 +190,7 @@ fn load_action_bar(s: &UiScript) {
     super::test_ui::load_ui(s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.xml");
-    super::test_ui::load_ui(s, "GameTooltip.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\GameTooltip.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionBarFrame.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
 
@@ -1359,7 +1359,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         "Interface\\FrameXML\\MainMenuBar.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
@@ -1528,7 +1528,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    super::test_ui::load_ui(&s, "GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
 
@@ -1750,7 +1750,7 @@ fn bonus_bar_turnaround_continues_from_position() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    super::test_ui::load_ui(&s, "GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
 
@@ -1832,7 +1832,7 @@ fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    super::test_ui::load_ui(&s, "GameTooltip.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
 

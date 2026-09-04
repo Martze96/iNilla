@@ -24,10 +24,19 @@ fn harness(extra: &[&str]) -> UiScript {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    // `FACTION_BAR_COLORS`, which the stock `GameTooltip_UnitColor` indexes on every unit hover:
+    // the reference defines it at ReputationFrame.lua's file scope (1968).
+    load_xml(&s, r"Interface\FrameXML\ReputationFrame.lua");
     for f in extra {
         load_xml(&s, f);
     }
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — every test here reads its rect, so the fixed-width font is
+    // that engine. And 1.12 ships detailed tips ON (`SHOW_NEWBIE_TIPS = "1"`, UIOptionsFrame_Init's;
+    // ours in OptionsFrame.xml's uvar block) — a harness without the options file says so itself.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s
 }
 

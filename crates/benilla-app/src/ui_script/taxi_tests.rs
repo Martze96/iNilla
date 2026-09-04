@@ -22,7 +22,7 @@ fn taxi_script() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // BenillaErrorsFrame_AddMessage — DrawOneHopLines' refusal
                                                             // Three the reference's own TaxiFrame leans on that our transcription did not:
                                                             //   · GlobalStrings — `ERR_TAXINOPATHS` is a GlobalString, and `AddMessage(nil)` draws an

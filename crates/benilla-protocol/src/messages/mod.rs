@@ -84,7 +84,9 @@ pub use auction::{
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };
-pub use battlefield::{battlefield_port, BattlefieldStatus};
+pub use battlefield::{
+    battlefield_port, leave_battlefield, BattlefieldStatus, PvpLogData, PvpLogRow,
+};
 pub use binder::{binder_activate, PlayerBound};
 pub use channel::{channel_notice, ChannelNoticeTail, ChannelNotify};
 pub use chat::{

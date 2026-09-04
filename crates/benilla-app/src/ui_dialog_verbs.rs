@@ -135,16 +135,58 @@ impl AreaSpiritHealer {
 pub(crate) struct BattlefieldQueue {
     slots: [Option<BattlefieldStatus>; 3],
     changed: bool,
+    /// The slot the player is IN (`[0x8457cc]`, the status-3 arm), and the instance's clocks
+    /// (`[0xb6ebb8]`/`[0xb6ebbc]`, §4.2): the run-time stamp `now − Δ₂` and the expiration
+    /// `now + Δ₁`. Any other status for that slot resets both (1972).
+    active: Option<(usize, u32)>,
+    run_started: Option<Instant>,
+    /// The status-3 arm rebuilds the scoreboard and fires `UPDATE_BATTLEFIELD_SCORE` before
+    /// `UPDATE_BATTLEFIELD_STATUS` (§4.2's ordering) — the score feed reads this first.
+    score_dirty: bool,
 }
 
 impl BattlefieldQueue {
     /// `SMSG_BATTLEFIELD_STATUS`: an out-of-range slot aborts the handler; a zero map clears.
     pub(crate) fn apply(&mut self, status: BattlefieldStatus) {
-        let Some(slot) = self.slots.get_mut(status.slot as usize) else {
+        let index = status.slot as usize;
+        let Some(slot) = self.slots.get_mut(index) else {
             return;
         };
+        match status.in_progress {
+            Some((_, elapsed_ms)) if status.map_id != 0 => {
+                self.active = Some((index, status.map_id));
+                self.run_started =
+                    Some(Instant::now() - std::time::Duration::from_millis(u64::from(elapsed_ms)));
+                self.score_dirty = true;
+            }
+            _ => {
+                if self.active.is_some_and(|(i, _)| i == index) {
+                    self.active = None;
+                    self.run_started = None;
+                }
+            }
+        }
         *slot = (status.map_id != 0).then_some(status);
         self.changed = true;
+    }
+
+    /// The map of the battleground the player is in — `LeaveBattlefield`'s payload; `None` = 0.
+    pub(crate) fn active_map(&self) -> Option<u32> {
+        self.active.map(|(_, map)| map)
+    }
+
+    /// `GetBattlefieldInstanceRunTime()`: ms since the status-3 stamp, 0 with none.
+    pub(crate) fn run_time_ms(&self, now: Instant) -> u32 {
+        self.run_started.map_or(0, |t| {
+            now.saturating_duration_since(t)
+                .as_millis()
+                .min(u128::from(u32::MAX)) as u32
+        })
+    }
+
+    /// The status-3 arm's scoreboard rebuild, once per arrival.
+    pub(crate) fn take_score_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.score_dirty)
     }
 
     /// The map id `AcceptBattlefieldPort` sends for a 1-based slot, if the slot holds a queue.
@@ -173,7 +215,7 @@ impl MeetingStone {
     }
 }
 
-fn feed_dialog_verbs(
+pub(crate) fn feed_dialog_verbs(
     script: Option<NonSendMut<UiScript>>,
     mut pet: ResMut<PetUnlearnState>,
     mut boot: ResMut<InstanceBoot>,
@@ -416,6 +458,7 @@ mod tests {
             status: 2,
             time_ms: Some(0),
             in_progress: None,
+            queued: None,
         };
         q.apply(status(1, 489));
         q.apply(status(5, 30));

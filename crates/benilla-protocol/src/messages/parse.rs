@@ -404,6 +404,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_BATTLEFIELD_STATUS => {
             ServerPacket::BattlefieldStatus(battlefield::read_battlefield_status(&mut r)?)
         }
+        opcode::MSG_PVP_LOG_DATA => {
+            ServerPacket::PvpLogData(battlefield::read_pvp_log_data(&mut r)?)
+        }
         opcode::SMSG_MEETINGSTONE_SETQUEUE => {
             let q = meeting_stone::read_meeting_stone_set_queue(&mut r)?;
             ServerPacket::MeetingStoneSetQueue {

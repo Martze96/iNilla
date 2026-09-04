@@ -29,7 +29,7 @@ fn load_popup_frames(s: &UiScript) {
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIMenu.xml",
         "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -494,7 +494,7 @@ fn load_pet_menu_frames(s: &UiScript) {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, read at file scope below
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIMenu.xml",
         "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",

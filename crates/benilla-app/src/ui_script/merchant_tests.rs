@@ -565,6 +565,10 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
 fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for f in super::test_ui::MERCHANT_UI {
         load_xml(&s, f);
     }
@@ -1138,7 +1142,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
     for file in [
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
         "Interface\\FrameXML\\MerchantFrame.xml",
-        "DressUpFrame.xml",
+        "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",

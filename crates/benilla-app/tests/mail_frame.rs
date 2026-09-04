@@ -27,8 +27,13 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
-    "GameTooltip.xml",
-    "MailFrame.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
+    r"Interface\FrameXML\ItemButtonTemplate.xml", // the send tab's attachment slot inherits it
+    // The stock tabs inherit `FriendsFrameTabTemplate`, and `inherits=` resolves at load — so the
+    // social window and the kit it needs come first, as the reference's toc has them (1970).
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
+    "Interface\\FrameXML\\FriendsFrame.xml",
+    "Interface\\FrameXML\\MailFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -415,7 +420,8 @@ fn closing_a_taken_husk_deletes_it() {
     );
 }
 
-/// The expiry text pluralizes like the reference (GetText("DAYS_ABBR"): "Day"/"Days").
+/// The expiry text pluralizes like the reference (`GetText("DAYS_ABBR", nil, n)`: "Day"/"Days") —
+/// and carries the reference's own trailing space before the colour close (MailFrame.lua l.144).
 #[test]
 fn expiry_text_pluralizes_days() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -431,12 +437,12 @@ fn expiry_text_pluralizes_days() {
     assert_eq!(
         s.eval::<String>("return MailItem1ExpireTime:GetText()")
             .unwrap(),
-        "|cff20ff2029 Days|r"
+        "|cff20ff2029 Days |r"
     );
     assert_eq!(
         s.eval::<String>("return MailItem2ExpireTime:GetText()")
             .unwrap(),
-        "|cff20ff201 Day|r"
+        "|cff20ff201 Day |r"
     );
     assert!(s.take_errors().is_empty());
 }
@@ -516,7 +522,8 @@ fn money_button_hover_shows_the_amount_tooltip() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     s.run("MailItem1Button:Click()").unwrap();
 
-    s.run("BenillaOpenMailMoneyButton_OnEnter(OpenMailMoneyButton)")
+    // The hover is the button's own inline handler (stock MailFrame.xml), reading `this`.
+    s.run("this = OpenMailMoneyButton OpenMailMoneyButton:GetScript(\"OnEnter\")()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip:IsShown()").unwrap(),

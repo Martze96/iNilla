@@ -152,7 +152,7 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml",
-    "GameTooltip.xml", // app load order: tooltip before merchant
+    "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
 ];
 
 pub(super) const LOOT_UI: &[&str] = &[
@@ -167,7 +167,7 @@ pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
-    "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
+    "Interface\\FrameXML\\GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
     // `UnitPopup.xml` reads ITEM_QUALITY_COLORS at FILE SCOPE for its three loot-threshold rows,
     // exactly as the reference's own UnitPopup.lua:47-49 does — so its declarer has to precede it.
@@ -243,7 +243,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     r"Interface\FrameXML\MoneyFrame.xml",
     "UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
     "UiPanels.xml", // CharacterFrameTabButtonTemplate, UIPanelWindows, Show/HideUIPanel
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -301,9 +301,9 @@ pub(super) const CHARACTER_UI: &[&str] = &[
 /// The social window's slice of the manifest (1959): everything the reference's
 /// `FriendsFrame.xml` + `RaidFrame.xml` reach at load or on show — `TEXT` and `GetText`, the
 /// bar chain under `UpdateMicroButtons`, the chat window whose edit box `FriendsFrame_SendMessage`
-/// opens, the unit menu, the party frames `RaidFrame_OnLoad` reconciles, and the raid tab's
-/// LoadOnDemand addon — in the manifest's own order. Shared by the friends, guild and raid
-/// harnesses.
+/// opens, the unit menu, the party frames `RaidFrame_OnLoad` reconciles — in the manifest's own
+/// order; the raid tab's LoadOnDemand addon follows through [`load_social_ui`]. Shared by the
+/// friends, guild and raid harnesses.
 pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
@@ -317,7 +317,7 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\MainMenuBar.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     "Interface\\FrameXML\\ActionBarFrame.xml",
     "Interface\\FrameXML\\BonusActionBarFrame.xml",
     "ScrollTemplates.xml",
@@ -342,8 +342,18 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\PartyFrame.xml",
     "Interface\\FrameXML\\FriendsFrame.xml",
     "Interface\\FrameXML\\RaidFrame.xml",
-    "Interface\\AddOns\\Blizzard_RaidUI\\Blizzard_RaidUI.xml",
 ];
+
+/// Load [`SOCIAL_UI`], then the raid tab's LoadOnDemand addon the way the app reaches it: seated
+/// off the chain as a registry row (1957) and loaded by the reference's own `RaidFrame_LoadUI`
+/// (UIParent.xml; 1967). Needs client data — the caller has checked with `wow_data_or_skip!`.
+pub(super) fn load_social_ui(s: &mut UiScript) {
+    for f in SOCIAL_UI {
+        load_ui_strict(s, f);
+    }
+    seat_chain_addon(s, "Blizzard_RaidUI");
+    s.run("RaidFrame_LoadUI()").unwrap();
+}
 
 pub(super) const BAG_UI: &[&str] = &[
     // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
@@ -370,7 +380,7 @@ pub(super) const BAG_UI: &[&str] = &[
     r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
-    "GameTooltip.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
     "Cooldown.xml",
     // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
     // six buttons fall back to UIParent and sit at a level no production run ever puts them at.

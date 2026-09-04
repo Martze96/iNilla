@@ -19,7 +19,7 @@ fn exp_bar_harness() -> UiScript {
         "UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Cooldown.xml",
@@ -39,6 +39,10 @@ fn exp_bar_harness() -> UiScript {
     ] {
         super::test_ui::load_ui(&s, file);
     }
+    // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
+    // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness
+    // without the options file says so itself, the way the reference's tooltip would read it.
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s
 }
 

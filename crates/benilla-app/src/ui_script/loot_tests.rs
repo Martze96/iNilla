@@ -609,7 +609,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     for file in [
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
         "Interface\\FrameXML\\LootFrame.xml",
-        "DressUpFrame.xml",
+        "Interface\\FrameXML\\DressUpFrame.xml",
         "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",

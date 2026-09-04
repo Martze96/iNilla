@@ -445,6 +445,14 @@ fn feed_trade_skill(
         return;
     }
     script.set_trade_skill(fresh.clone());
+    // The client has every product's and reagent's template cached by the time its list shows,
+    // and `GetTradeSkillItemLink`/`GetTradeSkillReagentItemLink` never query — so the feed asks
+    // for the templates the store lacks when the list lands, and the verbs read the answers (1973).
+    if let Some(f) = &fresh {
+        script.ask_item_templates(f.recipes.iter().flat_map(|r| {
+            std::iter::once(r.product_item).chain(r.reagents.iter().map(|re| re.item))
+        }));
+    }
     match (&*last, &fresh) {
         (None, Some(f)) => {
             debug!(

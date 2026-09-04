@@ -130,10 +130,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             FrameKind::Slider => &["Slider", "Frame", "Region"],
             FrameKind::ScrollFrame => &["ScrollFrame", "Frame", "Region"],
             FrameKind::Model => &["Model", "Frame", "Region"],
-            // 4 deep, and the ONLY frame chain in the roster that is: `PlayerModel` derives from
-            // `Model`, and `DressUpModel`/`TabardModel` (unbuilt) derive from it in turn, for a
-            // maximum depth of 5 (wow-re `ui/scratch/widget-type-identity.md` §6).
+            // 4 deep: `PlayerModel` derives from `Model`, and `DressUpModel` (1969) and
+            // `TabardModel` (unbuilt) derive from it in turn, for the roster's maximum depth of 5
+            // (wow-re `ui/scratch/widget-type-identity.md` §6).
             FrameKind::PlayerModel => &["PlayerModel", "Model", "Frame", "Region"],
+            FrameKind::DressUpModel => &["DressUpModel", "PlayerModel", "Model", "Frame", "Region"],
             FrameKind::MessageFrame => &["MessageFrame", "Frame", "Region"],
             FrameKind::ScrollingMessageFrame => &["ScrollingMessageFrame", "Frame", "Region"],
             FrameKind::ColorSelect => &["ColorSelect", "Frame", "Region"],

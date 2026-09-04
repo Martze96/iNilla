@@ -200,7 +200,7 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
     load_xml(&s, "KeyBindingsPage.xml");

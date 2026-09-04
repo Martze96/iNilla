@@ -185,12 +185,12 @@
             return button.label
         end
 
-        -- ref MainMenuBarMicroButton's OnEnter (l.13), verbatim bar the owner shift:
-        --     BenillaTooltip_AddNewbieTipFor(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText)
+        -- ref MainMenuBarMicroButton's OnEnter (l.13), verbatim — the reference's helper reads
+        -- the firing frame off `this`, which is `button` here (the XML hands it `self`):
+        --     GameTooltip_AddNewbieTip(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText);
         function BenillaMicroButton_OnEnter(button)
             if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
-            BenillaTooltip_AddNewbieTipFor(button, BenillaMicroButton_TooltipText(button), 1.0, 1.0, 1.0,
-                button.newbieText)
+            GameTooltip_AddNewbieTip(BenillaMicroButton_TooltipText(button), 1.0, 1.0, 1.0, button.newbieText)
         end
 
         -- Is a panel up? `getglobal` because every panel this asks about loads AFTER this file —

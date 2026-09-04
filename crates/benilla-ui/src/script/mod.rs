@@ -43,6 +43,7 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod battlefield_score;
 mod bind_confirm;
 mod binder;
 mod binding_abi;
@@ -161,6 +162,7 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, ZoneChannelRow};
@@ -205,7 +207,7 @@ pub use layout_cache::{FrameLayout, LayoutPoint};
 pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
+pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
@@ -608,6 +610,7 @@ impl UiScript {
         macros::install(&lua)?;
         talent::install(&lua)?;
         dialog_verbs::install(&lua)?;
+        battlefield_score::install(&lua)?;
         shapeshift::install(&lua)?;
         pet::install(&lua)?;
         gossip::install(&lua)?;
@@ -1035,6 +1038,18 @@ impl UiScript {
     /// holds the `OnLoad` `Function` directly (to fire it bottom-up) rather than through the registry:
     /// this keeps the convention in one home instead of duplicating it. Errors are returned so the
     /// caller routes them (the loader records them in its own report).
+    /// Whether the frame with this global name is effectively visible — shown, with every ancestor
+    /// shown (`IsVisible()`'s answer, read host-side). `false` for a name no live frame carries.
+    /// The read side of a window for a host that keeps state per window: the dressing-room feed
+    /// empties its booth when `DressUpFrame` hides, and the stock file has no hook of ours in its
+    /// OnHide to say so (1969). A linear scan, like [`Self::model_pane`], for the same reason.
+    pub fn frame_visible(&self, name: &str) -> bool {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+    }
+
     /// Resolve every frame's rect: sync each frame's effective scale from the arena into its layout
     /// input, run the [`crate::layout`] graph (screen root as the external base), and cache the
     /// resolved rects. `GetWidth`/`GetHeight`/`extract` read this cache.
@@ -1403,6 +1418,7 @@ impl UiScript {
                 crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
                 crate::widget::FrameKind::Model => "Model",
                 crate::widget::FrameKind::PlayerModel => "PlayerModel",
+                crate::widget::FrameKind::DressUpModel => "DressUpModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",

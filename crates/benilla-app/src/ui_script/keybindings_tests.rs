@@ -54,7 +54,7 @@ pub(crate) fn harness() -> UiScript {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         "UIParent.xml",

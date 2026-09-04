@@ -98,7 +98,7 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua", // `TEXT`, which StaticPopup.lua and UnitPopup.lua read at file scope
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "Interface\\FrameXML\\UnitPopup.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
@@ -111,10 +111,14 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
         r"Interface\FrameXML\RaidFrame.xml",
-        r"Interface\AddOns\Blizzard_RaidUI\Blizzard_RaidUI.xml",
     ] {
         load_xml(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `RaidFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_RaidUI");
+    s.run("RaidFrame_LoadUI()").unwrap();
     s.resolve();
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
 

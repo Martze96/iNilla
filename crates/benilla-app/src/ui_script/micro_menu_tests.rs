@@ -32,7 +32,7 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "Interface\\FrameXML\\MainMenuBar.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         "MicroMenu.xml",
@@ -258,6 +258,10 @@ fn the_talent_button_appears_at_level_ten_and_the_row_closes_up_below_it() {
 fn every_micro_button_hovers_with_its_reference_explanation() {
     let mut s = harness_with(&["UIParent.xml"]);
     set_player_level(&mut s, 10);
+    // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
+    // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness
+    // without the options file says so itself, the way the reference's tooltip would read it.
+    s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
     s.resolve();
 
     for (button, newbie) in [
@@ -270,7 +274,8 @@ fn every_micro_button_hovers_with_its_reference_explanation() {
         ("MainMenuMicroButton", "NEWBIE_TOOLTIP_MAINMENU"),
         ("HelpMicroButton", "NEWBIE_TOOLTIP_HELP"),
     ] {
-        s.run(&format!("BenillaMicroButton_OnEnter({button})"))
+        // A hover is a handler: the reference's helper reads the firing frame off `this`.
+        s.run(&format!("this = {button} BenillaMicroButton_OnEnter(this)"))
             .unwrap();
         assert_eq!(
             s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),

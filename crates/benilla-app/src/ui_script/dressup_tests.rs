@@ -40,13 +40,15 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemRef.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
-    "DressUpFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\ChatFrame.xml",
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
+    // The reference's own room (1969): its Close/Reset buttons inherit the panel kit's templates,
+    // which resolve at load — so after it, as the manifest has it.
+    "Interface\\FrameXML\\DressUpFrame.xml",
     "UiPanels.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
@@ -69,7 +71,7 @@ fn load_room(s: &UiScript) {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Cooldown.xml",
     ] {
         load_xml(s, file);
@@ -114,7 +116,6 @@ fn shown_paper_doll() -> UiScript {
         super::test_ui::load_ui_strict(&s, file);
     }
     for file in [
-        "DressUpFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\UIMenu.xml",
@@ -122,6 +123,8 @@ fn shown_paper_doll() -> UiScript {
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
+        // The reference's room (1969), after the panel kit its buttons inherit from.
+        "Interface\\FrameXML\\DressUpFrame.xml",
         "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
@@ -416,9 +419,9 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     let _ = s.take_dressup_intents();
     s.resolve();
 
-    // The pane's OnLoad seeded the ref's default facing.
+    // The pane's OnLoad (`Model_OnLoad`) seeded the ref's default facing on the widget itself.
     assert!(
-        (s.dressup_yaw() - 0.61).abs() < 1e-6,
+        (s.model_pane_facing("DressUpModel") - 0.61).abs() < 1e-6,
         "ref UIParent.lua:1422"
     );
 
@@ -431,29 +434,28 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     );
 
     // One tap of rotate-left: OnClick on press AND release, −0.03 each.
-    let before = s.dressup_yaw();
+    let before = s.model_pane_facing("DressUpModel");
     let (x, y) = s
         .eval::<(f32, f32)>(
-            "return (DressUpModelFrameRotateLeftButton:GetLeft() \
-                     + DressUpModelFrameRotateLeftButton:GetRight()) / 2, \
-                    (DressUpModelFrameRotateLeftButton:GetTop() \
-                     + DressUpModelFrameRotateLeftButton:GetBottom()) / 2",
+            "return (DressUpModelRotateLeftButton:GetLeft() \
+                     + DressUpModelRotateLeftButton:GetRight()) / 2, \
+                    (DressUpModelRotateLeftButton:GetTop() \
+                     + DressUpModelRotateLeftButton:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     assert!(
-        (s.dressup_yaw() - (before - 0.06)).abs() < 1e-5,
+        (s.model_pane_facing("DressUpModel") - (before - 0.06)).abs() < 1e-5,
         "a tap fires OnClick twice: {} → {}",
         before,
-        s.dressup_yaw()
+        s.model_pane_facing("DressUpModel")
     );
 
     s.run("HideUIPanel(DressUpFrame)").unwrap();
-    assert_eq!(
-        s.take_dressup_intents(),
-        vec![DressUpIntent::Close],
-        "closing the window empties the booth"
-    );
+    // Closing the window is what empties the booth, and the app reads it off the frame — the
+    // stock file's OnHide plays its sound and queues nothing (1969).
+    assert!(!s.frame_visible("DressUpFrame"), "the room is hidden");
+    assert!(s.take_dressup_intents().is_empty());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

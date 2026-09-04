@@ -216,6 +216,18 @@
         -- load — compares against the string, so on a fresh 1.12 install the row paints unchecked
         -- and the auto-watch is dead until the box is clicked; the string ships the advertised
         -- default as the real one. A recorded deviation (1804's rule), not a quiet one.
+        -- "Show Detailed Tooltips" — ref UIOptionsFrame.lua l.100-101, inside UIOptionsFrame_Init.
+        -- A FrameXML uvar, not a CVar, and 1.12 ships it ON: the explanatory second line IS the
+        -- default reference tooltip, not an opt-in (0661). It lived in our GameTooltip.xml until
+        -- the tooltip went stock (1968); the reference keeps it here, with the Interface page.
+        SHOW_NEWBIE_TIPS = "1"
+        RegisterForSave("SHOW_NEWBIE_TIPS")
+        -- "Hide World PvP Objectives" — ref UIOptionsFrame.lua's `HIDE_OUTDOOR_WORLD_STATE = "0"`,
+        -- the gate the stock WorldStateAlwaysUpFrame_Update opens the outdoor readout on
+        -- (`== "0" or instanceType == "pvp"`). Here since that frame went stock (1972); a nil
+        -- reads as hidden, which is how the tower counters would vanish outdoors.
+        HIDE_OUTDOOR_WORLD_STATE = "0"
+        RegisterForSave("HIDE_OUTDOOR_WORLD_STATE")
         QUEST_FADING_DISABLE = "0"
         RegisterForSave("QUEST_FADING_DISABLE")
         AUTO_QUEST_WATCH = "1"

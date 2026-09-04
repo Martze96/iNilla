@@ -314,6 +314,8 @@ pub enum ServerPacket {
     },
     /// `SMSG_BATTLEFIELD_STATUS` — one of the three queue slots (decision 1963).
     BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// `MSG_PVP_LOG_DATA` inbound — the battleground scoreboard (decision 1972).
+    PvpLogData(crate::messages::PvpLogData),
     /// `SMSG 0x295` — the meeting-stone queue state (decision 1963).
     MeetingStoneSetQueue {
         area: u32,
@@ -1569,6 +1571,7 @@ impl ServerPacket {
             ServerPacket::RaidGroupOnly { .. } => "SMSG_RAID_GROUP_ONLY".into(),
             ServerPacket::AreaSpiritHealerTime { .. } => "SMSG_AREA_SPIRIT_HEALER_TIME".into(),
             ServerPacket::BattlefieldStatus(_) => "SMSG_BATTLEFIELD_STATUS".into(),
+            ServerPacket::PvpLogData(_) => "MSG_PVP_LOG_DATA".into(),
             ServerPacket::MeetingStoneSetQueue { .. } => "SMSG_MEETINGSTONE_SETQUEUE".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
