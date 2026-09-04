@@ -645,6 +645,29 @@ pub fn equip_blits<'a>(
     plan
 }
 
+/// The **ArmLower** layer — the tile whose occupancy gates the shirt's sleeve geoset (below).
+const LAYER_ARM_LOWER: usize = 1;
+
+/// Whether anything **other than the shirt** dresses the forearm — the byte-true gate on the geoset
+/// dispatch's B3 arm (`0x4775bd`, the six dwords `cc+0x26c..cc+0x280` = cells 1..6 of the ArmLower
+/// equip row; the shirt's own default cell is 0, which the loop skips).
+///
+/// The shirt carries a sleeve geoset (802/803, the cuff flare) that must not survive under a
+/// garment painting the same skin: a chest with sleeve art, a bracer, or a glove takes the tile and
+/// the cuff underneath it is dropped. Reading the *grid* rather than "is a chest equipped" is what
+/// makes both directions right — 533 of the 637 shipped chest displays leave `ArmLowerTexture`
+/// empty (the cuff survives them), while 566 of 570 wrist displays fill it (the cuff goes).
+///
+/// Off [`equip_blits`], so the promotion rules stay in one place: a sleeved chest and a
+/// glove-geoset glove are lifted to cells 5 and 6, still inside the tested range. The guild emblem
+/// is passed as `None` because it only ever writes layers 3 and 4 ([`EMBLEM_LAYERS`]) — this row
+/// reads the same either way.
+pub fn forearm_dressed(equipment: &[Option<&ItemDisplay>; 8]) -> bool {
+    equip_blits(equipment, None)
+        .iter()
+        .any(|b| b.layer == LAYER_ARM_LOWER && (1..=6).contains(&b.column))
+}
+
 /// The atlas rect layer `layer`'s equipment contributions composite into — `(x, y, w, h)` in pixels
 /// of the 256² body atlas (the RF-0062 bbox table). Out of range past layer 7.
 pub fn equip_tile(layer: usize) -> Option<(u32, u32, u32, u32)> {

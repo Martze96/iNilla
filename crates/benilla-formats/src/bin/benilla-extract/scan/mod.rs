@@ -35,7 +35,9 @@ pub use material::{alphascan, blendscan, envmapscan, texmodescan, uvslotscan, uv
 pub use particles::{
     cellscan, fxordercensus, partcensus, partscan, partslotscan, ribbonscan, shardcensus,
 };
-pub use sequence::{fxlifescan, goanimscan, idleslotscan, seqclockscan, soundeventscan};
+pub use sequence::{
+    fxlifescan, goanimscan, goslotscan, idleslotscan, seqclockscan, soundeventscan,
+};
 pub use skeleton::{attachscan, bonescan};
 pub use world::{doodadscan, placescan, skyboxscan, wmodoodads};
 

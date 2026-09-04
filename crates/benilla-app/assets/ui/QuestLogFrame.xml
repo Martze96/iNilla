@@ -330,6 +330,7 @@
             -- trailing arguments stay off.)
             local listScroll = getglobal("QuestLogListScrollFrame")
             FauxScrollFrame_Update(listScroll, numEntries, QUESTS_DISPLAYED, QUESTLOG_QUEST_HEIGHT)
+            BenillaScrollTrough_Follow("QuestLogListScrollFrame")
             local questLogOffset = FauxScrollFrame_GetOffset(listScroll)
 
             local selection = GetQuestLogSelection()
@@ -1148,7 +1149,6 @@
             -- The faux kit's owner hook (ScrollTemplates.xml l.37): a bar drag or arrow click sets
             -- the frame's offset and then calls this to repaint the rows. SkillFrame.xml wires its
             -- own the same way.
-            getglobal("QuestLogListScrollFrame").updateFunc = BenillaQuestLogList_Update
         end
 
         function BenillaQuestLogFrame_OnEvent(frame)

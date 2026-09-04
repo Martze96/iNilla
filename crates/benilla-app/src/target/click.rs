@@ -1174,7 +1174,7 @@ pub(crate) enum ServiceArm {
 /// The reference re-reads the flags field for a redundant `bits 9 AND 10` block before the plain
 /// bit-9 test; it routes to the same handler bit 9 alone reaches, so it is dead in effect and is
 /// not transcribed (recording it would be a distinction with no outcome).
-fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> {
+pub(crate) fn service_arm(npc_flags: u32, quest_status: Option<u32>) -> Option<ServiceArm> {
     use cursor_mode::npc_flags as f;
     let bit = |m: u32| npc_flags & m != 0;
     Some(if bit(f::GOSSIP) {
@@ -1237,7 +1237,7 @@ pub(crate) enum ServiceAction {
 /// vmangos still puts a usable menu on screen; sending the faithful opcode into a reply we drop
 /// would trade a working affordance for a wire detail nobody can see. Each retires the moment its
 /// window exists — that is the condition, written down (decision 1861).
-fn service_action(arm: ServiceArm, guid: u64, ghost: bool) -> ServiceAction {
+pub(crate) fn service_action(arm: ServiceArm, guid: u64, ghost: bool) -> ServiceAction {
     match arm {
         ServiceArm::Gossip => ServiceAction::Send(ClientCommand::GossipHello { guid }),
         ServiceArm::Questgiver => ServiceAction::Send(ClientCommand::QuestgiverHello { npc: guid }),

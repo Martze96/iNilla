@@ -327,6 +327,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_BINDER").is_ok() {
                 app.add_plugins(crate::capture::ProbeBinderPlugin);
             }
+            // The NPC-service ladder live probe: `WOW_PROBE_SERVICE=1` walks four real NPCs, one per
+            // interesting `UNIT_NPC_FLAGS` shape, and reports the arm the shipped ladder takes and the
+            // window that actually opened — decision 1861's end-to-end instrument, and the standing
+            // answer to "does right-clicking a trainer open the trainer window or a gossip menu?"
+            // (see `capture::ProbeServicePlugin`).
+            if std::env::var("WOW_PROBE_SERVICE").is_ok() {
+                app.add_plugins(crate::capture::ProbeServicePlugin);
+            }
             // The GM trouble-ticket live probe: `WOW_PROBE_GMTICKET=1` drives the whole five-opcode
             // ticket wire through the live VM's own bindings — queue status, clean slate, file, edit,
             // abandon — and prints the row the server must have stored so the operator can check the

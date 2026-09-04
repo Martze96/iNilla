@@ -1442,3 +1442,60 @@ pub(super) fn shipped_frame_names() -> Vec<String> {
     names.dedup();
     names
 }
+
+/// **The icon picker opens, against the SHIPPED manifest.** Not a harness list — the manifest, the
+/// way the client loads it.
+///
+/// The distinction is the whole point. `macro_tests` stands this window up from its own file list
+/// and passed throughout, because a harness names the dependencies it needs; the manifest had not
+/// listed `ClassTrainerFrameTemplates.xml`, so in the client `MacroPopupScrollFrame` inherited a
+/// template nothing had loaded, came up bare, and `MacroPopupFrame_Update` multiplied a nil offset
+/// (decision 1862). A window is only as loaded as the manifest says.
+#[test]
+fn the_shipped_manifest_opens_the_macro_icon_picker() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefive".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    // One macro, so the edit path has something selected — the director's own flow was a saved
+    // macro and the "Change Name/Icon" button beside it.
+    s.set_macros(benilla_ui::script::MacroState {
+        account: vec![benilla_ui::script::MacroView {
+            name: "die".into(),
+            texture: Some(r"Interface\Icons\Ability_Ambush".into()),
+            body: ".die".into(),
+            ..Default::default()
+        }],
+        character: Vec::new(),
+    });
+    s.set_macro_icons(vec![
+        r"Interface\Icons\Ability_Ambush".into(),
+        r"Interface\Icons\Ability_Backstab".into(),
+    ]);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    let _ = s.errors();
+
+    s.run("ShowMacroFrame()").unwrap();
+    s.run("MacroButton1:Click()").unwrap();
+    s.run("MacroEditButton:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "opening the icon picker off the shipped manifest must not raise: {:?}",
+        s.errors()
+    );
+    assert!(
+        s.eval::<bool>("return MacroPopupFrame:IsShown() and true or false")
+            .unwrap(),
+        "the picker is up"
+    );
+}

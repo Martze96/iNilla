@@ -103,6 +103,7 @@ mod probe_mail;
 mod probe_melee;
 mod probe_partner;
 mod probe_rig;
+mod probe_service;
 mod probe_taxi;
 mod probes;
 mod scenarios;
@@ -128,6 +129,7 @@ pub(crate) use probe_mail::ProbeMailPlugin;
 pub(crate) use probe_melee::ProbeMeleePlugin;
 pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::ProbeRigPlugin;
+pub(crate) use probe_service::ProbeServicePlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,

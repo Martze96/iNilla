@@ -1,9 +1,9 @@
 //! Route M2 animation event tags (`crate::creature_anim::AnimSoundEvent`) to audio — the
 //! anim-driven trigger surface (decision 0070 slice 3).
 //!
-//! Routed here: `$SND`/`$DSO` (one-shot kit `data` at the model), `$DSL`/`$DSE` (a placed
-//! doodad's ambient loop — **registered into, and released from, the emitter pool**
-//! [`super::doodad_pool`], which owns everything about how it sounds),
+//! Routed here: `$SND`/`$DSO` (one-shot kit `data` at the model), `$DSL`/`$DSE` (an ambient loop
+//! — **registered into, and released from, the emitter pool** [`super::emitter_pool`], which owns
+//! everything about how it sounds; the two dispatchers' arms differ and both are modelled below),
 //! `$CSD` — the **character emote clips' embedded voice** (HumanMale EmoteLaugh 70 carries
 //! `$CSD 6923` = the SoundEntries kit literally named `HumanMaleEmoteLaugh`; Cry 77 → 6921,
 //! Chicken 78 → 6919, Applaud 80 → 4× `ClapSounds` 6576 — probe-verified on the real 5875 M2 +
@@ -39,7 +39,7 @@ use crate::net::ObjectStore;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
-use super::doodad_pool::DoodadEmitterPool;
+use super::emitter_pool::AmbientEmitterPool;
 use super::emote::EmoteSounds;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
@@ -51,6 +51,10 @@ pub(super) fn route_anim_events(
     // whose local Transform is not a world position (0441 fold-back).
     transforms: Query<&GlobalTransform, Without<Camera3d>>,
     units: Query<(Option<&ObjectStore>, Option<&CastHold>)>,
+    // Which dispatcher this entity's events arrive on. A family-A GameObject carries
+    // [`crate::go_anim::GoAnim`] — the same population the reference registers `0x5f3e20` for —
+    // and that dispatcher's DS-family arms differ from the placed-M2 handler `0x6951e0`'s.
+    go_lane: Query<(), With<crate::go_anim::GoAnim>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     emotes: Option<Res<EmoteSounds>>,
@@ -68,7 +72,7 @@ pub(super) fn route_anim_events(
     // real bug and silence would hide it.
     mut complained: Local<std::collections::HashSet<u32>>,
     // The ambient emitter pool — `$DSL`/`$DSE`'s whole destination.
-    mut pool: ResMut<DoodadEmitterPool>,
+    mut pool: ResMut<AmbientEmitterPool>,
 ) {
     if events.is_empty() {
         return;
@@ -127,16 +131,34 @@ pub(super) fn route_anim_events(
             // registration (`0x462000`) — which is why there is no wrap retrigger, and why
             // `NightElfStreetLampLoop` (4.000 s of sample on a 3.333 s sequence) is not chopped
             // every cycle. Whether anything is audible, from where, and how many at once are the
-            // pool pump's questions, not this scanner's: see [`super::doodad_pool`].
+            // pool pump's questions, not this scanner's: see [`super::emitter_pool`].
             b"$DSL" if ev.data != 0 => {
                 if let Ok(t) = transforms.get(ev.entity) {
-                    super::doodad_pool::register(
-                        &mut pool,
-                        ev.entity,
-                        ev.data,
-                        t.translation(),
-                        listener,
-                    );
+                    // **The two lanes' `$DSL` arms differ, and only here** (wow-re
+                    // `doodad-sound-emitters.md` §13). The placed-M2 handler `0x6951e0` compares
+                    // the id and swaps; the GameObject dispatcher's arm `0x5f3fe5` does **not
+                    // compare it at all** — a live handle is only repositioned, whatever id the
+                    // marker names. Onyxia's lava trap is the case that makes it observable:
+                    // `ONYZIASLAIRLAVATRAP.M2` (208 spawns in the lair) authors `$DSL(8681)` on
+                    // its chained Stand variation and `$DSL(8682)` on Custom0, so on the
+                    // GameObject lane the Custom0 hum never displaces the Stand one.
+                    if go_lane.contains(ev.entity) {
+                        super::emitter_pool::register_keeping_first(
+                            &mut pool,
+                            ev.entity,
+                            ev.data,
+                            t.translation(),
+                            listener,
+                        );
+                    } else {
+                        super::emitter_pool::register(
+                            &mut pool,
+                            ev.entity,
+                            ev.data,
+                            t.translation(),
+                            listener,
+                        );
+                    }
                 }
             }
             // `$DSE` — the doodad sound **STOP** token (`0x45534424`), VERIFIED in the same note:
@@ -146,7 +168,16 @@ pub(super) fn route_anim_events(
             // the Undercity and Thunder Bluff lifts, the zeppelin), where the loop is authored to
             // run for one leg of the animation and stop. Releasing a record is not stopping a
             // sound: the id keeps sounding while any *other* doodad still names it.
-            b"$DSE" => super::doodad_pool::release(&mut pool, ev.entity),
+            // …and `$DSE` has **no arm on the GameObject dispatcher at all** — the token falls to
+            // `0x5f4004 ret`. Seven shipped GO display models author one anyway (the Maraudon
+            // corrupted plants on their Destroy clip, the Blackrock door mechanism on Closed, the
+            // Maraudon teleporter on Open); on that lane what actually drops the registration is
+            // the state-machine dispatch those very clips are armed BY
+            // ([`crate::go_anim::GoStateDispatch`]), so honouring the authored intent and
+            // honouring the bytes agree — but only one of them is the mechanism.
+            b"$DSE" if !go_lane.contains(ev.entity) => {
+                super::emitter_pool::release(&mut pool, ev.entity);
+            }
             b"$SND" | b"$DSO" | b"$CSD" if ev.data != 0 => {
                 ring(&mut kits, &mut out, ev.data, ev.entity, &mut complained);
             }

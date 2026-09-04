@@ -2219,9 +2219,14 @@
                                  `ClassTrainerFrameTemplates.xml:111` both open the
                                  same way. Decision 1846. -->
                             ScrollFrame_OnLoad()
-                            this.updateFunc = FriendsList_Update
                         </OnLoad></Scripts>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(FRIENDS_FRAME_FRIEND_HEIGHT, FriendsList_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameFriendsScrollFrame, arg1)</OnMouseWheel>
@@ -2341,9 +2346,14 @@
                                  `ClassTrainerFrameTemplates.xml:111` both open the
                                  same way. Decision 1846. -->
                             ScrollFrame_OnLoad()
-                            this.updateFunc = IgnoreList_Update
                         </OnLoad></Scripts>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(FRIENDS_FRAME_IGNORE_HEIGHT, IgnoreList_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                 </Frames>
                 <Scripts>
                     <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameIgnoreScrollFrame, arg1)</OnMouseWheel>
@@ -2489,9 +2499,14 @@
                                  `ClassTrainerFrameTemplates.xml:111` both open the
                                  same way. Decision 1846. -->
                             ScrollFrame_OnLoad()
-                            this.updateFunc = WhoList_Update
                         </OnLoad></Scripts>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(FRIENDS_FRAME_WHO_HEIGHT, WhoList_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                 </Frames>
                 <Scripts>
                     <!-- SetWhoToUI decides where the NEXT answer goes: this frame, or the chat
@@ -2759,9 +2774,14 @@
                                  `ClassTrainerFrameTemplates.xml:111` both open the
                                  same way. Decision 1846. -->
                             ScrollFrame_OnLoad()
-                            this.updateFunc = GuildStatus_Update
                         </OnLoad></Scripts>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(FRIENDS_FRAME_GUILD_HEIGHT, GuildStatus_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
 
                     <!-- The page button that flips the two views. Its LEFT anchor is re-set by
                          `GuildStatus_Update` to 284 or 307 depending on whether the scroll bar is

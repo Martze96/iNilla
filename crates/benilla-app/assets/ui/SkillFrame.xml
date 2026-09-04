@@ -333,10 +333,20 @@
         -- `UnitCharacterPoints("player")`/`SkillFrame.UpdatedSkillPoints` read, l.437-440, whose
         -- result nothing downstream ever consumes even in the ref itself, is dropped — the
         -- TradeSkillFrame.xml "ref's own dead code is dropped" precedent).
+        -- The scroll frame's `<OnVerticalScroll>` is its own chunk and cannot see this file's
+        -- `local SKILLFRAME_SKILL_HEIGHT`, so the pitch is handed over here rather than written as
+        -- a literal in the XML (1868; the trainer paid for this lesson first, in 1860).
+        function BenillaSkillList_OnVerticalScroll()
+            FauxScrollFrame_OnVerticalScroll(SKILLFRAME_SKILL_HEIGHT, BenillaSkillFrame_Update)
+        end
+
         function BenillaSkillFrame_Update()
             local numRows = GetNumSkillLines()
             local scrollFrame = getglobal("SkillListScrollFrame")
             FauxScrollFrame_Update(scrollFrame, numRows, SKILLS_TO_DISPLAY, SKILLFRAME_SKILL_HEIGHT)
+            -- Our trough follows the bar the reference's `_Update` just decided about; nothing in
+            -- its kit shows one, because the reference has no trough at all (1860).
+            BenillaScrollTrough_Follow("SkillListScrollFrame")
             local offset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local highlight = getglobal("SkillHighlight")
@@ -468,7 +478,6 @@
         function SkillFrame_OnLoad()
             local frame = this
             frame:RegisterEvent("SKILL_LINES_CHANGED")
-            getglobal("SkillListScrollFrame").updateFunc = BenillaSkillFrame_Update
         end
 
         function SkillFrame_OnShow()
@@ -711,11 +720,19 @@
             <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
                  12-row span (SKILLS_TO_DISPLAY × 18px pitch), TrainerFrame.xml's own
-                 same-TOPLEFT-as-row1 convention. updateFunc set in SkillFrame_OnLoad. -->
+                 same-TOPLEFT-as-row1 convention. Its `<OnVerticalScroll>` re-binds the rows (1868). -->
             <ScrollFrame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="216"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-79"/></Offset></Anchor></Anchors>
-            </ScrollFrame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here: the bar's
+                         OnValueChanged calls `SetVerticalScroll`, which lands in this handler.
+                         Our transcription used a `frame.updateFunc` field instead, which the
+                         reference does not have — without this the bar moves and the list does
+                         not follow (1860). -->
+                    <OnVerticalScroll>BenillaSkillList_OnVerticalScroll()</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- ═══ THE DETAIL PANE ═══ ref SkillFrame.xml l.513-747, transcribed as the ref
                  declares it (header: the FLAT-layout claim this file used to carry is retracted,

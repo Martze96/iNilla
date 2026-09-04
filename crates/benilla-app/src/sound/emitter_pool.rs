@@ -1,10 +1,20 @@
-//! The **placed-doodad ambient emitter pool** — the reference's registration table at `0xb06dd8`
-//! and its per-frame pump `0x461990` (wow-re `sound/scratch/doodad-sound-emitters.md`, §7/§8/§17).
+//! The **ambient emitter pool** — the reference's registration table at `0xb06dd8` and its
+//! per-frame pump `0x461990` (wow-re `sound/scratch/doodad-sound-emitters.md`, §7/§8/§17).
+//!
+//! **Two tenants share it, because the reference's one pool has two registrars** (decision 1867).
+//! A *placed doodad* registers through its `$DSL` marker (`0x6951e0`, handle in
+//! `[CMapDoodadDef+0x168]`); a *GameObject* registers through **both** its own `$DSL` arm
+//! (`0x5f3fe5`) and the display-slot sound player `0x5f4010`'s **loop lane** — the branch
+//! `SoundEntries` flag `0x200` selects — with the handle in `[handler+0x18]`, one per object. All
+//! of them call the same `0x461d80`/`0x461f80`/`0x462000` register/release/reposition family, so a
+//! campfire GameObject's `CampFireLargeLoop` and a placed brazier's share an entry and a channel
+//! exactly as two lamps do. The registrars differ only in how they treat a *second* id arriving on
+//! a live handle — see [`register`] and [`register_keeping_first`].
 //!
 //! B345's fix gave every world-placed doodad a clock and routed its `$DSL` key to audio, which is
 //! what made a lamp hum at all. It played that hum the obvious way — one channel per doodad, tagged
 //! to the doodad — and that is **not the shape the reference has**. The client does not voice
-//! doodads; it voices **sound ids**, and a doodad is only a *position* it can put one at:
+//! doodads; it voices **sound ids**, and an emitter is only a *position* it can put one at:
 //!
 //! - `$DSL` registers the doodad's position as one **record** inside the pool entry that holds its
 //!   SoundEntries id (`0x461d80`, handle `((entry+1) << 16) | record` kept in
@@ -39,7 +49,7 @@
 //! **Deliberate divergences**, both documented at their site: a failed kit is flagged in place
 //! rather than by negating the entry's id, and a channel the frame pump culls past the kit's own
 //! `DistanceCutoff` is stopped rather than left running at zero gain. Neither changes what is
-//! audible; see the notes on [`Entry::failed`] and [`pump_doodad_emitters`].
+//! audible; see the notes on [`Entry::failed`] and [`pump_emitters`].
 
 use std::collections::HashSet;
 
@@ -76,9 +86,10 @@ const FADE_SECS: f32 = 3.0;
 struct PoolEmitter;
 
 /// One registered emitter: the reference's `[entry + 12·rec]` position, with presence in the list
-/// standing in for its `[+0xC00+rec]` active byte.
+/// standing in for its `[+0xC00+rec]` active byte. `owner` is the entity holding the registration
+/// — a placed doodad's anim host, or a GameObject.
 struct Record {
-    doodad: Entity,
+    owner: Entity,
     pos: Vec3,
 }
 
@@ -134,10 +145,13 @@ struct Fading {
 
 /// The pool itself.
 #[derive(Resource)]
-pub(super) struct DoodadEmitterPool {
+pub(super) struct AmbientEmitterPool {
     entries: [Entry; POOL_ENTRIES],
-    /// Which entry each doodad is registered in — the reference's per-doodad handle
-    /// `[CMapDoodadDef+0x168]`, minus the record half (a record *is* its doodad here).
+    /// Which entry each owner is registered in — the reference's per-owner handle
+    /// (`[CMapDoodadDef+0x168]` for a placed doodad, `[handler+0x18]` for a GameObject), minus the
+    /// record half (a record *is* its owner here). One handle per owner is the reason a
+    /// GameObject's `$DSL` and its looping display slot contend for the same registration, exactly
+    /// as they do in the reference.
     handles: EntityHashMap<usize>,
     fading: Vec<Fading>,
     /// Kit ids already warned about. A `$DSL` re-fires every animation cycle, so an unresolvable
@@ -151,7 +165,7 @@ pub(super) struct DoodadEmitterPool {
     last_census: Vec<(u32, bool)>,
 }
 
-impl Default for DoodadEmitterPool {
+impl Default for AmbientEmitterPool {
     fn default() -> Self {
         Self {
             entries: std::array::from_fn(|_| Entry::default()),
@@ -163,9 +177,11 @@ impl Default for DoodadEmitterPool {
     }
 }
 
-impl DoodadEmitterPool {
-    /// `$DSL`'s registration step — `0x69521d`'s compare followed by `0x462000` (reposition) or
-    /// `0x461f80`+`0x461d80` (re-register).
+impl AmbientEmitterPool {
+    /// The **compare-and-swap** registrar — the placed-doodad `$DSL` arm (`0x69521d`'s compare
+    /// followed by `0x462000` reposition or `0x461f80`+`0x461d80` re-register), and, observably,
+    /// the display-slot loop lane's arm too (`0x5f4083`: same id returns without even
+    /// repositioning, which for a fixed emitter is the same thing).
     ///
     /// Crossing the marker again with the **same** id only moves the record; that is the whole
     /// reason there is no wrap retrigger, and why `NightElfStreetLampLoop` (4.000 s of sample on a
@@ -173,19 +189,16 @@ impl DoodadEmitterPool {
     /// registration and takes a new one, which is what makes `bellows.m2`'s `$DSL` pair —
     /// `BellowOut` at t=0.000, `BellowIN` at t=1.100 on one looping 2 s sequence — *alternate*
     /// through one slot instead of droning together.
-    fn register(&mut self, doodad: Entity, id: u32, pos: Vec3, listener: Vec3) {
-        if let Some(&e) = self.handles.get(&doodad) {
+    ///
+    /// The GameObject `$DSL` arm is the one that does **not** compare — see
+    /// [`register_keeping_first`].
+    fn register(&mut self, owner: Entity, id: u32, pos: Vec3, listener: Vec3) {
+        if let Some(&e) = self.handles.get(&owner) {
             if self.entries[e].id == id {
-                if let Some(r) = self.entries[e]
-                    .records
-                    .iter_mut()
-                    .find(|r| r.doodad == doodad)
-                {
-                    r.pos = pos;
-                }
+                self.reposition(e, owner, pos);
                 return;
             }
-            self.release(doodad);
+            self.release(owner);
         }
         // `0x461e60`: the entry already holding this id, else the first free one.
         let Some(e) = self
@@ -213,26 +226,60 @@ impl DoodadEmitterPool {
                 return;
             };
             let gone = self.entries[e].records.remove(victim);
-            self.handles.remove(&gone.doodad);
+            self.handles.remove(&gone.owner);
         }
-        self.entries[e].records.push(Record { doodad, pos });
-        self.handles.insert(doodad, e);
+        self.entries[e].records.push(Record { owner, pos });
+        self.handles.insert(owner, e);
     }
 
-    /// `0x461f80` → `0x461d20` — release `doodad`'s record. When it was the entry's **last**, the
+    /// The **GameObject** lane's `$DSL` arm (`0x5f3fe5`): register when the object holds no
+    /// registration at all, else only *reposition* the one it holds. **It never compares the id,
+    /// so it never swaps** — the one place the two registrars actually differ (wow-re
+    /// `doodad-sound-emitters.md` §13, which corrects the GO note's own table).
+    ///
+    /// It is not a curiosity: Onyxia's lava trap (`ONYZIASLAIRLAVATRAP.M2`, 208 spawns in the
+    /// lair) and Stratholme's spore trap author **two** ids — `$DSL(8681)` on the chained Stand
+    /// variation and `$DSL(8682)` on Custom0 — so on the compare-and-swap arm the Custom0 hum
+    /// would displace the Stand one, and on this arm it never plays at all. What clears the handle
+    /// on this lane is not a second marker but the state-machine dispatch
+    /// ([`super::gameobject`]'s release) or the object's despawn; there is no `$DSE` arm on the
+    /// GameObject dispatcher at all.
+    fn register_keeping_first(&mut self, owner: Entity, id: u32, pos: Vec3, listener: Vec3) {
+        if let Some(&e) = self.handles.get(&owner) {
+            self.reposition(e, owner, pos);
+            return;
+        }
+        self.register(owner, id, pos, listener);
+    }
+
+    /// `0x462000` — move `owner`'s record inside entry `e`, leaving the entry's id and channel
+    /// alone. The reference writes the position only when it actually changed; ours writes it
+    /// unconditionally, which is the same value.
+    fn reposition(&mut self, e: usize, owner: Entity, pos: Vec3) {
+        if let Some(r) = self.entries[e]
+            .records
+            .iter_mut()
+            .find(|r| r.owner == owner)
+        {
+            r.pos = pos;
+        }
+    }
+
+    /// `0x461f80` → `0x461d20` — release `owner`'s record. When it was the entry's **last**, the
     /// id is cleared and the channel starts its 3.0 s fade as an orphan.
     ///
-    /// Reached from `$DSE` (the authored stop token — the elevator and machinery family, where the
-    /// loop runs for one leg of the animation) and from the host's despawn (the doodad's own
-    /// teardown, §9). There is deliberately **no** map-change reset: the reference has none either
-    /// (`0x461a20`'s only caller is the process-shutdown chain), and a streamed-out tile releases
-    /// its doodads one by one, which is the same thing done honestly.
-    fn release(&mut self, doodad: Entity) {
-        let Some(e) = self.handles.remove(&doodad) else {
+    /// Reached from a placed doodad's `$DSE` (the authored stop token — the elevator and machinery
+    /// family, where the loop runs for one leg of the animation), from a GameObject's state-machine
+    /// dispatch (`0x5f3cc8 call 0x5f40c0`, [`super::gameobject`]) and from the host's despawn (the
+    /// owner's own teardown, §9). There is deliberately **no** map-change reset: the reference has
+    /// none either (`0x461a20`'s only caller is the process-shutdown chain), and a streamed-out
+    /// tile releases its doodads one by one, which is the same thing done honestly.
+    fn release(&mut self, owner: Entity) {
+        let Some(e) = self.handles.remove(&owner) else {
             return;
         };
         let entry = &mut self.entries[e];
-        entry.records.retain(|r| r.doodad != doodad);
+        entry.records.retain(|r| r.owner != owner);
         if !entry.records.is_empty() {
             return;
         }
@@ -290,8 +337,8 @@ fn admitted(entries: &[Entry]) -> Vec<usize> {
 /// The pump (`0x461990`): fade the orphans, mark unresolvable kits, then service the admitted
 /// entries — start a channel where there is none, and otherwise only *move* the one there is.
 #[allow(clippy::too_many_arguments)] // the standard sound-driver param set
-fn pump_doodad_emitters(
-    mut pool: ResMut<DoodadEmitterPool>,
+fn pump_emitters(
+    mut pool: ResMut<AmbientEmitterPool>,
     mut emitters: Query<&mut Transform, With<PoolEmitter>>,
     time: Res<Time>,
     kits: Option<ResMut<SoundKits>>,
@@ -459,7 +506,7 @@ fn pump_doodad_emitters(
             })
             .collect();
         debug!(
-            "doodad pool: admitted [{}] — {} sounding, {entitled} entitled entr{}, {} withheld by \
+            "emitter pool: admitted [{}] — {} sounding, {entitled} entitled entr{}, {} withheld by \
              the cap, {} fading",
             named.join(", "),
             census.iter().filter(|(_, live)| *live).count(),
@@ -471,49 +518,68 @@ fn pump_doodad_emitters(
     }
 }
 
-/// Register `doodad`'s emitter for kit `id` at `pos` — `$DSL`'s handler, called from
-/// [`super::anim_events`].
+/// Register `owner`'s emitter for kit `id` at `pos` — the **compare-and-swap** arm: a placed
+/// doodad's `$DSL` (`0x6951e0`) and a GameObject's looping display slot (`0x5f4010`), both called
+/// from their own routers.
 pub(super) fn register(
-    pool: &mut DoodadEmitterPool,
-    doodad: Entity,
+    pool: &mut AmbientEmitterPool,
+    owner: Entity,
     id: u32,
     pos: Vec3,
     listener: Vec3,
 ) {
-    pool.register(doodad, id, pos, listener);
+    pool.register(owner, id, pos, listener);
 }
 
-/// Release `doodad`'s emitter — `$DSE`'s handler.
-pub(super) fn release(pool: &mut DoodadEmitterPool, doodad: Entity) {
-    pool.release(doodad);
+/// Register `owner`'s emitter, **keeping whatever id it already holds** — a GameObject's `$DSL`
+/// arm (`0x5f3fe5`), which never compares the id. See
+/// [`AmbientEmitterPool::register_keeping_first`].
+pub(super) fn register_keeping_first(
+    pool: &mut AmbientEmitterPool,
+    owner: Entity,
+    id: u32,
+    pos: Vec3,
+    listener: Vec3,
+) {
+    pool.register_keeping_first(owner, id, pos, listener);
 }
 
-/// Release the emitters of doodads whose host has gone (`0x7133a0`'s teardown leg, §9).
+/// Release `owner`'s emitter — a placed doodad's `$DSE`, and a GameObject's state-machine
+/// dispatch (`0x5f40c0`).
+pub(super) fn release(pool: &mut AmbientEmitterPool, owner: Entity) {
+    pool.release(owner);
+}
+
+/// Release the emitters of owners that have gone — a placed doodad's host (`0x7133a0`'s teardown
+/// leg, §9) or a GameObject (whose registration lives on the type handler that goes with it).
 ///
-/// This replaces B345's channel-scoped reaper. A doodad no longer *owns* a channel, so stopping
+/// This replaces B345's channel-scoped reaper. An owner no longer *owns* a channel, so stopping
 /// "its" channel is the wrong verb: what a despawn retires is one **record**, and the sound only
 /// stops when the last emitter of that id in the world is gone. Streaming out one of thirty lamps
 /// must not silence the other twenty-nine.
-fn release_doodad_emitters_on_despawn(
-    mut gone: RemovedComponents<benilla_world::doodad_anim::DoodadAnimHost>,
-    mut pool: ResMut<DoodadEmitterPool>,
+fn release_emitters_on_despawn(
+    mut doodads: RemovedComponents<benilla_world::doodad_anim::DoodadAnimHost>,
+    mut gos: RemovedComponents<crate::go_anim::GoAnim>,
+    mut pool: ResMut<AmbientEmitterPool>,
 ) {
-    for entity in gone.read() {
+    for entity in doodads.read().chain(gos.read()) {
         pool.release(entity);
     }
 }
 
 pub(super) fn plugin(app: &mut App) {
-    app.init_resource::<DoodadEmitterPool>().add_systems(
+    app.init_resource::<AmbientEmitterPool>().add_systems(
         Update,
         (
-            // Registration (`$DSL`/`$DSE` in `anim_events`) and the despawn release both write the
-            // pool; the pump reads it and starts channels; the frame pump then applies this
+            // Registration (`$DSL`/`$DSE` in `anim_events`, the display-slot loop lane in
+            // `gameobject`) and the despawn release both write the pool; the pump reads it and
+            // starts channels; the frame pump then applies this
             // frame's positions and gains. Ordered explicitly rather than left to the scheduler,
             // because an arbitrary order costs a frame of latency on a stop.
-            release_doodad_emitters_on_despawn.before(pump_doodad_emitters),
-            pump_doodad_emitters
+            release_emitters_on_despawn.before(pump_emitters),
+            pump_emitters
                 .after(super::anim_events::route_anim_events)
+                .after(super::gameobject::go_display_sounds)
                 .before(kit::pump_channels),
         )
             .in_set(WorldStage::Present),
@@ -532,13 +598,13 @@ mod tests {
             .collect()
     }
 
-    fn pool_with(entries: &[(u32, usize)]) -> DoodadEmitterPool {
-        let mut pool = DoodadEmitterPool::default();
+    fn pool_with(entries: &[(u32, usize)]) -> AmbientEmitterPool {
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(entries.len() as u32 * 2);
         for (i, (id, records)) in entries.iter().enumerate() {
             for r in 0..*records {
                 pool.entries[i].records.push(Record {
-                    doodad: ds[r % ds.len()],
+                    owner: ds[r % ds.len()],
                     pos: Vec3::ZERO,
                 });
             }
@@ -551,7 +617,7 @@ mod tests {
     /// pump run one channel for the lot.
     #[test]
     fn every_doodad_naming_one_kit_shares_a_single_entry() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(30);
         for (i, d) in ds.iter().enumerate() {
             pool.register(*d, 3378, Vec3::new(i as f32, 0.0, 0.0), Vec3::ZERO);
@@ -572,7 +638,7 @@ mod tests {
     /// `0x461cf6` discards a candidate that is not *strictly* closer.
     #[test]
     fn a_tie_for_nearest_keeps_the_first_record() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(2);
         pool.register(ds[0], 7, Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO);
         pool.register(ds[1], 7, Vec3::new(0.0, 0.0, -5.0), Vec3::ZERO);
@@ -583,7 +649,7 @@ mod tests {
     /// record and never releases. This is the no-wrap-retrigger property, in the data.
     #[test]
     fn re_firing_the_same_id_only_moves_the_record() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let d = doodads(1)[0];
         pool.register(d, 3378, Vec3::ZERO, Vec3::ZERO);
         pool.register(d, 3378, Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO);
@@ -591,11 +657,44 @@ mod tests {
         assert_eq!(pool.entries[0].records[0].pos, Vec3::new(1.0, 2.0, 3.0));
     }
 
+    /// **The GameObject lane never swaps** (`0x5f3fe5`, no id compare) — the one place the two
+    /// registrars differ. Onyxia's lava trap authors `$DSL(8681)` on its Stand variation and
+    /// `$DSL(8682)` on Custom0; on this arm the second never displaces the first, and what
+    /// eventually clears the handle is the state dispatch, not another marker.
+    #[test]
+    fn the_gameobject_arm_keeps_the_id_it_first_registered() {
+        let mut pool = AmbientEmitterPool::default();
+        let go = doodads(1)[0];
+        pool.register_keeping_first(go, 8681, Vec3::ZERO, Vec3::ZERO);
+        pool.register_keeping_first(go, 8682, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO);
+        assert_eq!(pool.entries.iter().filter(|e| e.id != 0).count(), 1);
+        assert_eq!(pool.entries[0].id, 8681, "8682 must not displace it");
+        // …and the second marker still MOVED the record — `0x462000` runs on both legs.
+        assert_eq!(pool.entries[0].records[0].pos, Vec3::new(1.0, 0.0, 0.0));
+        // The release is what frees it, and then the next marker takes the entry it names.
+        pool.release(go);
+        pool.register_keeping_first(go, 8682, Vec3::ZERO, Vec3::ZERO);
+        assert_eq!(pool.entries[0].id, 8682);
+    }
+
+    /// The two lanes share one handle per owner, so a GameObject's looping display slot and its
+    /// own `$DSL` contend for it exactly as `[handler+0x18]` does — and the compare-and-swap arm
+    /// the display slot uses does displace.
+    #[test]
+    fn the_display_slot_lane_shares_the_owners_one_handle() {
+        let mut pool = AmbientEmitterPool::default();
+        let go = doodads(1)[0];
+        pool.register_keeping_first(go, 3880, Vec3::ZERO, Vec3::ZERO); // its `$DSL`
+        pool.register(go, 4694, Vec3::ZERO, Vec3::ZERO); // a looping display slot
+        assert_eq!(pool.entries.iter().filter(|e| e.id != 0).count(), 1);
+        assert_eq!(pool.entries[0].id, 4694);
+    }
+
     /// `bellows.m2`: two `$DSL` keys on one looping sequence alternate through the doodad's single
     /// handle, rather than droning together.
     #[test]
     fn a_different_id_moves_the_doodads_one_registration() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let d = doodads(1)[0];
         pool.register(d, 1000, Vec3::ZERO, Vec3::ZERO);
         pool.register(d, 2000, Vec3::ZERO, Vec3::ZERO);
@@ -606,7 +705,7 @@ mod tests {
     /// Releasing the last record frees the entry (`0x461d20`) so another id can claim it.
     #[test]
     fn the_last_release_frees_the_entry() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(2);
         pool.register(ds[0], 42, Vec3::ZERO, Vec3::ZERO);
         pool.register(ds[1], 42, Vec3::ZERO, Vec3::ZERO);
@@ -621,7 +720,7 @@ mod tests {
     /// an incumbent. `$DSL` re-fires every cycle, so it takes an entry the moment one frees.
     #[test]
     fn a_thirty_third_distinct_id_is_untracked_until_an_entry_frees() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(POOL_ENTRIES as u32 + 1);
         for (i, d) in ds.iter().enumerate() {
             pool.register(*d, 100 + i as u32, Vec3::ZERO, Vec3::ZERO);
@@ -639,7 +738,7 @@ mod tests {
     /// farthest: the FIRST record farther than the incoming one goes.
     #[test]
     fn the_two_hundred_and_fifty_seventh_record_evicts_the_first_farther_one() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(RECORDS_PER_ENTRY as u32 + 1);
         // Records 0..255 at x = 255 down to 0: record 0 is the farthest, record 255 the nearest.
         for (i, d) in ds.iter().take(RECORDS_PER_ENTRY).enumerate() {
@@ -667,7 +766,7 @@ mod tests {
     /// …and one farther than every incumbent is REJECTED, not swapped in.
     #[test]
     fn a_record_farther_than_all_of_them_is_rejected() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(RECORDS_PER_ENTRY as u32 + 1);
         for d in ds.iter().take(RECORDS_PER_ENTRY) {
             pool.register(*d, 9, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO);
@@ -698,7 +797,7 @@ mod tests {
     /// stays silent behind four claimed earlier and far away.
     #[test]
     fn distance_never_promotes_a_fifth_entry_over_an_earlier_one() {
-        let mut pool = DoodadEmitterPool::default();
+        let mut pool = AmbientEmitterPool::default();
         let ds = doodads(5);
         for (i, d) in ds.iter().enumerate().take(4) {
             pool.register(*d, 100 + i as u32, Vec3::new(400.0, 0.0, 0.0), Vec3::ZERO);

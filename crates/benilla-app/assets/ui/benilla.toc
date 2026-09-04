@@ -951,6 +951,17 @@ ChatFrame.xml
 # panel kit on the chain that shadow is gone, so this window went from blocked to a plain swap.
 #
 # `ShowMacroFrame` moved to UIParent.xml, the reference's own home for it — see 1848.
+#
+# **`ClassTrainerFrameTemplates.xml` is not optional, and this header used to name the dependency
+# without listing the file.** `MacroPopupScrollFrame` — the icon chooser's list — inherits its
+# `ClassTrainerListScrollFrameTemplate`, and a missing template is a loader WARNING, not an error
+# (1833): the frame is still built, just BARE, with no scroll bar and no `<OnLoad>`. So
+# `ScrollFrame_OnLoad` never ran, `this.offset` was never seeded, and the reference's
+# `FauxScrollFrame_GetOffset` (`return frame.offset`, no `or 0` — our deleted copy had that
+# fallback and was hiding this) handed `MacroPopupFrame_Update` a nil to multiply. Clicking
+# "Change Name/Icon" raised. The reference's own `FrameXML.toc` loads this at its line 92, well
+# before any addon; ours takes it here, immediately above its one consumer. Decision 1862.
+Interface\FrameXML\ClassTrainerFrameTemplates.xml
 Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml
 # The script error log (decision 1495): the window `/errors` opens — the list B293's two
 # reporters asked for, which the reference's one-message-at-a-time ScriptErrors modal cannot

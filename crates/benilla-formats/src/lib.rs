@@ -29,9 +29,9 @@ mod install;
 pub use install::{candidates, wow_data};
 mod characters;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,
-    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer, EquipBlit,
-    EquipGeosets, GuildEmblem, StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer,
+    EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;
 mod cinematics;
@@ -163,6 +163,8 @@ mod environmental_damage;
 pub use environmental_damage::{load_environmental_damage, EnvironmentalDamageTable};
 mod footsteps;
 pub use footsteps::{load_footprint_textures, load_footstep_catalog, FootstepCatalog};
+mod death_thud;
+pub use death_thud::{load_death_thud_catalog, DeathThudCatalog};
 mod sound_entries;
 pub use sound_entries::{load_sound_kit_catalog, sound_kit_flags, SoundKit, SoundKitCatalog};
 mod sound_provider;

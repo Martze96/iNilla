@@ -660,7 +660,7 @@ pub(super) fn attach_entity_visuals(
             // display's CreatureDisplayInfoExtra (decision 0041). Both then drive the same geoset filter
             // + skin/hair materials below; a beast NPC / GameObject has no look and is unaffected.
             let look = resolve_char_look(net, dm, entity, &stores);
-            // The worn geoset selectors (decision 0074, the B1–B8 branches): a player's from the
+            // The worn geoset selectors (decisions 0074/1864, the B1–B8 branches): a player's from the
             // resolved equipment display rows; an NPC / naked default otherwise.
             // (The helm's hide-mask row pair, RF-0083: hair/facial/ears tuck under it. For a
             // character-model NPC the helm id is its CreatureDisplayInfoExtra head column.)

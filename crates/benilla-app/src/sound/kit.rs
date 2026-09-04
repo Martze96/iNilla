@@ -500,7 +500,7 @@ pub(super) struct PlayExtras {
     /// [`SAME_KIT_MAX`]. Those are the **one-shot lane's** gate (`0x458f40` lifting `SoundEntries`
     /// bit 0x20 into the FMOD flags word, consumed by `0x7a66a0`), and a caller that already
     /// guarantees one channel per kit by construction must not be held to it a second time. The
-    /// ambient emitter pool ([`super::doodad_pool`]) is that caller: it dedupes **structurally**,
+    /// ambient emitter pool ([`super::emitter_pool`]) is that caller: it dedupes **structurally**,
     /// one entry per SoundEntries id (wow-re `doodad-sound-emitters.md` §15), and its opens go
     /// through `0x7a5680` → `0x7a54d0`, which never reaches that gate at all.
     ///

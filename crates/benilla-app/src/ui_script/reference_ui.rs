@@ -1499,6 +1499,16 @@ mod tests {
                  why nothing has hit it — the wrapper answers first for our own rows.",
             ),
             (
+                "ClassTrainerFrameTemplates.xml",
+                "ClassTrainerSkillButton_OnClick",
+                "defined by `Blizzard_TrainerUI`, a LoadOnDemand addon we do not load yet. The \
+                 file is on the manifest for ONE of its templates — the icon chooser's \
+                 `ClassTrainerListScrollFrameTemplate` (1862) — and the skill-button template that \
+                 carries this handler is never instantiated, so no click can reach it. The \
+                 reference is in the same state until its trainer addon loads on demand. It \
+                 resolves when that window migrates.",
+            ),
+            (
                 "DurabilityFrame.xml",
                 "UpdateInventoryAlertStatus",
                 "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
@@ -1811,6 +1821,220 @@ mod tests {
             shadowed.is_empty(),
             "dead copies — declared by one of ours, then overwritten by a later chain entry:\n  {}",
             shadowed.join("\n  ")
+        );
+    }
+
+    /// **A frame that inherits a template the manifest never loads is a WARNING, and warnings are
+    /// invisible.** The frame is still built — bare. It gets none of the template's regions, none
+    /// of its children, and none of its `<Scripts>`, so whatever that `<OnLoad>` was going to
+    /// initialise silently stays nil.
+    ///
+    /// This shipped. `Blizzard_MacroUI.xml`'s `MacroPopupScrollFrame` inherits FrameXML's
+    /// `ClassTrainerListScrollFrameTemplate`; the manifest's own header for that window NAMES that
+    /// dependency and then never lists the file declaring it. So the icon picker's scroll frame
+    /// came up with no `<OnLoad>`, `ScrollFrame_OnLoad` never ran, `this.offset` was never seeded,
+    /// and the reference's `FauxScrollFrame_GetOffset` — `return frame.offset`, with no `or 0`
+    /// fallback of the kind our deleted copy had — handed `MacroPopupFrame_Update` a nil to
+    /// multiply. Clicking "Change Name/Icon" raised. Decision 1862.
+    ///
+    /// Static rather than a load probe: it needs no VM, no client state and no player, so it
+    /// answers for every entry including the ones a running load would never reach.
+    #[test]
+    fn every_template_the_manifest_inherits_is_declared_by_the_manifest() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+
+        let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for entry in toc.iter() {
+            // **`<Include>` counts.** The reference's own `FrameXML.toc` lists only two of its
+            // `*Templates.xml` files; the rest are pulled in by the window that needs them
+            // (`HonorFrame.xml` -> `HonorFrameTemplates.xml`, and so on), and the loader follows
+            // that against the including document's own directory (1186). A walk that reads only
+            // the manifest's own lines reports thirteen templates missing that are not — which is
+            // exactly what the first run of this gate did.
+            let mut text = String::new();
+            for src in entry_sources(entry) {
+                text.push_str(&src);
+                text.push('\n');
+            }
+            if text.is_empty() {
+                continue;
+            }
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                if tag.contains("virtual=\"true\"") {
+                    if let Some(n) = tag_attr(tag, "name") {
+                        declared.insert(n);
+                    }
+                }
+                if let Some(list) = tag_attr(tag, "inherits") {
+                    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        wanted.push((name.to_string(), entry.clone()));
+                    }
+                }
+            }
+        }
+
+        let mut missing: Vec<String> = wanted
+            .into_iter()
+            .filter(|(n, _)| !declared.contains(n))
+            .map(|(n, e)| format!("{n}  (inherited in {e})"))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "the manifest inherits templates it never loads — the frames are built BARE, with no \
+             scripts, and nothing errors:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// One `name="…"`-style attribute out of a raw tag, matched only at a token boundary.
+    fn tag_attr(tag: &str, key: &str) -> Option<String> {
+        let pat = format!("{key}=\"");
+        let mut from = 0;
+        while let Some(i) = tag[from..].find(&pat) {
+            let at = from + i;
+            let boundary = at == 0
+                || tag[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_whitespace());
+            let rest = &tag[at + pat.len()..];
+            if boundary {
+                return rest.find('"').map(|j| rest[..j].to_string());
+            }
+            from = at + pat.len();
+        }
+        None
+    }
+
+    /// A manifest entry's source text and everything it `<Include>`s, transitively.
+    ///
+    /// The chain for a path, `assets/ui` for a bare name — and an include resolves against the
+    /// INCLUDING document's own directory in its own source's path space, which is the rule the
+    /// loader follows (1186).
+    fn entry_sources(entry: &str) -> Vec<String> {
+        fn read_one(path: &str, chain: bool) -> Option<String> {
+            if chain {
+                let bytes = super::read(&path.replace('\\', "/"))?;
+                return Some(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/ui")
+                    .join(path),
+            )
+            .ok()
+        }
+        let chain = super::is_chain_entry(entry);
+        let dir = {
+            let p = entry.replace('\\', "/");
+            p.rsplit_once('/').map(|(d, _)| d.to_string())
+        };
+        let mut out = Vec::new();
+        let mut queue = vec![entry.to_string()];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(path) = queue.pop() {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Some(text) = read_one(&path, chain) else {
+                continue;
+            };
+            for chunk in text.split('<').skip(1) {
+                let Some(end) = chunk.find('>') else { continue };
+                let tag = &chunk[..end];
+                if !tag.trim_start().starts_with("Include") {
+                    continue;
+                }
+                if let Some(file) = tag_attr(tag, "file") {
+                    let next = match &dir {
+                        Some(d) => format!("{d}/{}", file.replace('\\', "/")),
+                        None => file.replace('\\', "/"),
+                    };
+                    queue.push(next);
+                }
+            }
+            out.push(text);
+        }
+        out
+    }
+
+    /// **Every faux list must declare its own `<OnVerticalScroll>`, and no file may still write
+    /// `frame.updateFunc`.**
+    ///
+    /// `FauxScrollFrame_OnVerticalScroll` is the ONLY thing that writes `frame.offset`, and it runs
+    /// from a handler the OWNER declares — the reference has no `updateFunc` field, which is what
+    /// our retired kit used. A window that inherits `FauxScrollFrameTemplate` without that handler
+    /// loads clean, shows its bar, moves its thumb, and never scrolls its list. Nothing errors.
+    ///
+    /// A gate rather than a test per window, because what makes it silent is structural: a list
+    /// only scrolls when something drives it, and most window tests never do. Decision 1868.
+    #[test]
+    fn every_faux_scroll_frame_declares_its_own_on_vertical_scroll() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        let mut unwired: Vec<String> = Vec::new();
+        let mut stale: Vec<String> = Vec::new();
+        for file in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "xml") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+
+            for line in text.lines() {
+                let code = line.trim_start();
+                if code.starts_with("--") || code.starts_with("<!--") {
+                    continue;
+                }
+                if code.contains(".updateFunc") && code.contains('=') && !code.contains("==") {
+                    stale.push(format!("{name}: {}", code.trim()));
+                }
+            }
+
+            // Each `<ScrollFrame … inherits="…FauxScrollFrameTemplate">` up to its close.
+            let mut from = 0;
+            while let Some(i) = text[from..].find("<ScrollFrame ") {
+                let start = from + i;
+                let Some(gt) = text[start..].find('>') else {
+                    break;
+                };
+                let tag = &text[start..start + gt];
+                from = start + gt;
+                if !tag.contains("FauxScrollFrameTemplate") {
+                    continue;
+                }
+                // A VIRTUAL template is not a list. `BenillaAuctionScrollTemplate` is the auction
+                // window's shared shape and legitimately carries no handler: its four instances
+                // each repaint a different pane, so each declares its own. What must be wired is
+                // the instance.
+                if tag.contains("virtual=\"true\"") {
+                    continue;
+                }
+                let Some(end) = text[start..].find("</ScrollFrame>") else {
+                    continue;
+                };
+                let body = &text[start..start + end];
+                if !body.contains("OnVerticalScroll") {
+                    let who = tag_attr(tag, "name").unwrap_or_else(|| "?".into());
+                    unwired.push(format!("{name}: {who}"));
+                }
+            }
+        }
+        assert!(
+            unwired.is_empty(),
+            "a faux list with no <OnVerticalScroll> — its bar moves and the list never follows:\n  {}",
+            unwired.join("\n  ")
+        );
+        assert!(
+            stale.is_empty(),
+            "`frame.updateFunc` is our retired kit's field; the reference has none:\n  {}",
+            stale.join("\n  ")
         );
     }
 }

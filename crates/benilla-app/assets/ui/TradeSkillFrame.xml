@@ -411,6 +411,12 @@
         -- ── The list page (ref TradeSkillFrame_Update, l.75-178 — the header/expand-icon tail,
         -- l.118-127, is restored below at the row loop; the CollapseAll Enable/Disable (l.86/94) and
         -- the tail texture logic (l.155-178) are restored too, deviation 1 closed this session) ──────
+        -- `<OnVerticalScroll>` is its own chunk and cannot see this file's
+        -- `local TRADE_SKILL_HEIGHT`, so the pitch is handed over here (1868).
+        function BenillaTradeSkillList_OnVerticalScroll()
+            FauxScrollFrame_OnVerticalScroll(TRADE_SKILL_HEIGHT, BenillaTradeSkillFrame_Update)
+        end
+
         function BenillaTradeSkillFrame_Update()
             local numTradeSkills = GetNumTradeSkills()
             if numTradeSkills == 0 then
@@ -422,6 +428,7 @@
 
             local scrollFrame = getglobal("BenillaTradeSkillListScrollFrame")
             FauxScrollFrame_Update(scrollFrame, numTradeSkills, TRADE_SKILLS_DISPLAYED, TRADE_SKILL_HEIGHT)
+            BenillaScrollTrough_Follow("BenillaTradeSkillListScrollFrame")
             local skillOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
             -- The FRAME is what shows/hides/positions (ref l.99/142-143); its texture is only ever
@@ -757,8 +764,6 @@
             frame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
 
             local scrollFrame = getglobal("BenillaTradeSkillListScrollFrame")
-            scrollFrame.updateFunc = BenillaTradeSkillFrame_Update
-
             -- The EditBox:SetNumber engine-gap shim (this file's header comment, deviation 7): patched
             -- onto this ONE instance so every call site above reads exactly like the reference.
             local box = getglobal("BenillaTradeSkillInputBox")
@@ -1171,7 +1176,13 @@
             <ScrollFrame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
-            </ScrollFrame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                         `updateFunc` field does not exist, so without this the bar moves and
+                         the list does not follow (1868). -->
+                    <OnVerticalScroll>BenillaTradeSkillList_OnVerticalScroll()</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- The detail product icon (ref TradeSkillSkillIcon, l.539-591): a 37×37 button over a
                  64×64 UI-EmptySlot ring (TrainerFrame.xml's own BenillaTrainerSkillIcon shape) at the

@@ -231,10 +231,6 @@
             BuyoutPrice.onValueChanged = AuctionsFrameAuctions_ValidateAuction
             StartPriceGold:SetMaxLetters(6)
             -- Each faux list repaints through its own tab's Update.
-            BrowseScrollFrame.updateFunc = AuctionFrameBrowse_Update
-            BrowseFilterScrollFrame.updateFunc = AuctionFrameFilters_Update
-            BidScrollFrame.updateFunc = AuctionFrameBid_Update
-            AuctionsScrollFrame.updateFunc = AuctionFrameAuctions_Update
         end
 
         function AuctionFrame_OnShow()
@@ -783,6 +779,7 @@
                 end
             end
             FauxScrollFrame_Update(BrowseFilterScrollFrame, total, BENILLA_FILTER_ROWS, BENILLA_FILTER_ROW_HEIGHT)
+            BenillaScrollTrough_Follow("BrowseFilterScrollFrame")
         end
 
         -- Clicking a filter row NEVER queries — it only moves the selection, which the next Search
@@ -940,6 +937,7 @@
 
             local rows = auctionPagerUpdate("Browse", AuctionFrameBrowse.page, numBatch, total, lastSlotEmpty)
             FauxScrollFrame_Update(BrowseScrollFrame, rows, BENILLA_BROWSE_ROWS, BENILLA_AUCTION_ROW_HEIGHT)
+            BenillaScrollTrough_Follow("BrowseScrollFrame")
         end
 
         -- The two Browse turners re-SEARCH rather than scroll: the next 50 rows live on the server
@@ -2056,7 +2054,13 @@
                     <ScrollFrame name="BrowseFilterScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="160" y="305"/></Size>
                         <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPLEFT"><Offset><AbsDimension x="158" y="-105"/></Offset></Anchor></Anchors>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_FILTER_ROW_HEIGHT, AuctionFrameFilters_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
 
                     <Button name="BrowseQualitySort" inherits="AuctionSortButtonTemplate" text="RARITY">
                         <Size><AbsDimension x="214" y="19"/></Size>
@@ -2097,7 +2101,13 @@
                     <ScrollFrame name="BrowseScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="465" y="306"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="39" y="-105"/></Offset></Anchor></Anchors>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_AUCTION_ROW_HEIGHT, AuctionFrameBrowse_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                     <Button name="BrowsePrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="BrowseButton8" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BrowsePageButton_OnClick(-1)</OnClick></Scripts>
@@ -2267,7 +2277,13 @@
                     <ScrollFrame name="BidScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="625" y="335"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-74"/></Offset></Anchor></Anchors>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_AUCTION_ROW_HEIGHT, AuctionFrameBid_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                     <Button name="BidPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="BidButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BidPageButton_OnClick(-1)</OnClick></Scripts>
@@ -2384,7 +2400,13 @@
                     <ScrollFrame name="AuctionsScrollFrame" inherits="BenillaAuctionScrollTemplate">
                         <Size><AbsDimension x="435" y="339"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-72"/></Offset></Anchor></Anchors>
-                    </ScrollFrame>
+                                            <Scripts>
+                            <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                                 `updateFunc` field does not exist, so without this the bar moves and
+                                 the list does not follow (1868). -->
+                            <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_AUCTION_ROW_HEIGHT, AuctionFrameAuctions_Update)</OnVerticalScroll>
+                        </Scripts>
+</ScrollFrame>
                     <Button name="AuctionsPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
                         <Anchors><Anchor point="LEFT" relativeTo="AuctionsButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>AuctionsPageButton_OnClick(-1)</OnClick></Scripts>

@@ -23,6 +23,7 @@ mod m2dump;
 mod scan;
 mod shakecensus;
 mod spellvis;
+mod thudcensus;
 
 /// Read WoW 1.12.1 asset archives (MPQ).
 #[derive(Parser)]
@@ -137,6 +138,13 @@ enum Command {
     /// shakes no screen"), and the check that fields 11/12 really are `CameraShakes` keys — every
     /// live value must land on a real row.
     Shakecensus,
+    /// Census the **death thud** — the body-fall sound a corpse makes on landing (`$DTH` →
+    /// `0x6236e0`, the sibling of the camera shake above). Two halves: the `DeathThudLookups.dbc`
+    /// matrix in full (`SizeClass × TerrainTypeSoundID` → the named land/water `SoundEntries`
+    /// kits), and the population sweep of which creature M2s key a `$DTH` at all, with the size
+    /// class their displays resolve to. The scope instrument for "a big corpse hits the ground
+    /// silently": it separates authored silence (an empty water column) from a real gap.
+    Thudcensus,
     /// Census the `SpellVisualKit` **CharProc** columns (a kit's effect on the BODY — its alpha,
     /// its tint): which proc types the shipped table carries, which lifecycle stage reaches each
     /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
@@ -322,6 +330,16 @@ enum Command {
     /// Also counts the models whose pose depends on the §2c remap (benilla plays nothing there today,
     /// i.e. bind pose) and the ones reaching a rate-0 freeze leg.
     Goanimscan,
+    /// Census the **GameObject display sound slots** (`GameObjectDisplayInfo.Sound[0..9]`) against
+    /// the only thing that can reach them. Exactly one function in the reference reads those
+    /// columns (`0x5f4010`) and it is called only from the GO M2 anim-event dispatcher
+    /// (`0x5f3e20`): `$GO0..5` -> slots 0..5, `$GC0..3` -> slots 6..9 (wow-re
+    /// `go-display-sound-events.md` §1/§3). So a filled column is audible only when the display's
+    /// own model authors the matching event tag AND that tag sits on a sequence the GameObject
+    /// animation arm can actually play. Reports, per slot: columns filled, of those how many are
+    /// tagged, how many of those are on an armable sequence, and how many name a LOOPING (0x200)
+    /// kit — the flag that selects `0x5f4010`'s emitter-pool lane over its one-shot lane.
+    Goslotscan,
     /// Sweep every `.m2` (optionally under a path prefix) and census the models whose batch
     /// visibility is PER SEQUENCE — geometry the reference draws in one animation and skips in
     /// another (the verified `A <= 0` alpha cull). The population instrument for "a single-sequence
@@ -487,8 +505,8 @@ enum Command {
         prefix: Option<String>,
     },
     /// Sweep every `.m2` and census the **animation-driven sound emitters**: the models whose
-    /// sequences carry a `$DSL` (doodad sound loop) / `$DSO` (doodad sound one-shot) / `$SND`
-    /// (generic one-shot) marker, the `SoundEntries` kit each names with its 3D parameters, and —
+    /// sequences carry a `$DSL` (doodad sound loop) / `$DSE` (its release token) / `$DSO` (doodad
+    /// sound one-shot) / `$SND` (generic one-shot) marker, the `SoundEntries` kit each names with its 3D parameters, and —
     /// the column this exists for — whether the carrying sequence is REST-posed, i.e. one the
     /// render content gate (decision 0130) never builds a rig for. A placed lamp's hum is a single
     /// `$DSL` on a sequence that keys no bone at all, so the whole class is unreachable through an
@@ -852,6 +870,7 @@ fn main() -> Result<()> {
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
         Command::Fxlifescan { prefix } => scan::fxlifescan(&mut chain, prefix.as_deref())?,
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
+        Command::Goslotscan => scan::goslotscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partslotscan { prefix } => scan::partslotscan(&mut chain, prefix.as_deref())?,
@@ -928,6 +947,7 @@ fn main() -> Result<()> {
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
         Command::Chaincensus => chaincensus::run(&mut chain)?,
         Command::Shakecensus => shakecensus::shakecensus(&mut chain)?,
+        Command::Thudcensus => thudcensus::thudcensus(&mut chain)?,
         Command::Charprocs => charprocs::run(&mut chain)?,
     }
 

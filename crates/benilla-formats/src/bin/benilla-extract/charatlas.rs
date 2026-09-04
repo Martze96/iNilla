@@ -24,8 +24,8 @@
 
 use anyhow::{Context, Result};
 use benilla_formats::{
-    equip_blits, equip_tile, load_item_display_catalog, BlitSource, Chain, CharSections,
-    CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
+    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, BlitSource, Chain,
+    CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
 };
 
 /// The ten atlas tiles by group, for the per-tile report — the five head/left-column ones included,
@@ -242,10 +242,10 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             eq.bodyslots[i] = Some(d.geoset_groups);
         }
     }
-    let mut ids =
-        geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
-    ids.sort_unstable();
-    ids.dedup();
+    // B3's gate is the ArmLower tile's occupancy — read off the same plan printed above (1864).
+    eq.forearm_dressed = forearm_dressed(&equipment);
+    // Sorted + deduplicated at the source (`visible_geosets`).
+    let ids = geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
     println!("\nvisible geosets: {ids:?}");
 
     if let Some(path) = out {

@@ -322,6 +322,13 @@ impl Creatures {
         self.catalog.death_thud_shake(display_id)
     }
 
+    /// A display's **audible size class** (`0 Small`..`4 Colossal`) — the axis the body-fall
+    /// sample is picked on (`crate::sound::death_thud`). The display's own column overrides the
+    /// model's; see [`benilla_formats::CreatureCatalog::size_class`].
+    pub(crate) fn size_class(&self, display_id: u32) -> Option<u32> {
+        self.catalog.size_class(display_id)
+    }
+
     /// A display's **spawned-creature render scale** — see
     /// [`benilla_formats::CreatureCatalog::model_scale`] for why almost nothing reads it and why
     /// the glue screens' pet must. `None` for an unknown display.

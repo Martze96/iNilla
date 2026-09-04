@@ -190,10 +190,15 @@ pub(super) fn resolve_worn_equip(
     }
 }
 
-/// The worn geoset selectors for a set of equipment display ids (decision 0074's B1–B8 branches +
-/// the cloak group + the helm's RF-0083 hide-mask row pair): each non-zero display resolves its
-/// ItemDisplayInfo row's geoset columns. One helper for the world attach path and the glue-preview
+/// The worn geoset selectors for a set of equipment display ids (decisions 0074/1864's B1–B8
+/// branches + the cloak group + the helm's RF-0083 hide-mask row pair): each non-zero display
+/// resolves its ItemDisplayInfo row's geoset columns, and B3's forearm gate comes off the same
+/// composite plan the atlas blits. One helper for the world attach path and the glue-preview
 /// builder — the selection law can't fork (decision 0465).
+///
+/// [`EquipGeosets::tabard_preview`](benilla_formats::EquipGeosets::tabard_preview) (B6) is left
+/// `false` here: its only setter in the reference is the guild registrar's tabard designer, a
+/// window benilla has not migrated yet (decision 1864).
 pub(in crate::entities) fn equip_geosets(
     displays: Option<&super::super::ItemDisplays>,
     bodyslots: &[u32; 8],
@@ -202,11 +207,16 @@ pub(in crate::entities) fn equip_geosets(
 ) -> benilla_formats::EquipGeosets {
     let mut eg = benilla_formats::EquipGeosets::default();
     if let Some(d) = displays {
+        let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
         for (i, id) in bodyslots.iter().enumerate() {
             if *id != 0 {
-                eg.bodyslots[i] = d.catalog.get(*id).map(|row| row.geoset_groups);
+                worn[i] = d.catalog.get(*id);
+                eg.bodyslots[i] = worn[i].map(|row| row.geoset_groups);
             }
         }
+        // B3's gate is the ArmLower tile's own occupancy, not "is a chest equipped" — the same
+        // plan the composite blits (decision 1864).
+        eg.forearm_dressed = benilla_formats::forearm_dressed(&worn);
         if cloak != 0 {
             eg.cloak = d.catalog.get(cloak).map(|row| row.geoset_groups[0]);
         }

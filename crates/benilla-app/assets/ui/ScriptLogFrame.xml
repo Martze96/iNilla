@@ -90,6 +90,7 @@
 
             local scrollFrame = getglobal("BenillaScriptLogListScrollFrame")
             FauxScrollFrame_Update(scrollFrame, shown, BENILLA_SCRIPTLOG_ROWS, BENILLA_SCRIPTLOG_ROW_HEIGHT)
+            BenillaScrollTrough_Follow("BenillaScriptLogListScrollFrame")
             local offset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local selectedRow = nil
@@ -172,7 +173,6 @@
         end
 
         function BenillaScriptLogFrame_OnLoad(self)
-            getglobal("BenillaScriptLogListScrollFrame").updateFunc = BenillaScriptLog_Update
             -- The ring's icon, through the portrait verb rather than left at its `file=` — see the
             -- texture's own note. MailFrame.xml's open-letter icon is the same fix.
             SetPortraitToTexture("BenillaScriptLogFramePortrait",
@@ -312,7 +312,13 @@
             <ScrollFrame name="BenillaScriptLogListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="208"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
-            </ScrollFrame>
+                            <Scripts>
+                    <!-- The reference's kit writes `frame.offset` ONLY from here; its
+                         `updateFunc` field does not exist, so without this the bar moves and
+                         the list does not follow (1868). -->
+                    <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_SCRIPTLOG_ROW_HEIGHT, BenillaScriptLog_Update)</OnVerticalScroll>
+                </Scripts>
+</ScrollFrame>
 
             <!-- The detail pane: the REAL scroll kit, because a message carries its `stack
                  traceback:` tail and is genuinely variable-height. GossipFrame's greeting pane is

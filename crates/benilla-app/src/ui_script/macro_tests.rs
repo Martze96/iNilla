@@ -672,3 +672,37 @@ fn the_tab_highlight_is_exactly_its_tab() {
         no_errors(&s, "tab highlight");
     }
 }
+
+/// Clicking "Change Name/Icon" opens the icon picker.
+///
+/// **This harness cannot catch the defect that made it raise in-game**, and that is worth saying
+/// out loud: a harness lists its own dependencies, so it had
+/// `ClassTrainerFrameTemplates.xml` while the shipped manifest did not. The window worked here and
+/// was broken in the client. What catches THAT is
+/// `every_template_the_manifest_inherits_is_declared_by_the_manifest`, plus the end-to-end drive in
+/// `shipped_xml_tests`. Decision 1862.
+///
+/// The raise it reproduced:
+///
+/// ```text
+/// Blizzard_MacroUI.lua:233: attempt to perform arithmetic on local 'macroPopupOffset' (a nil value)
+///   MacroPopupFrame_Update  <-  MacroPopupFrame_OnShow  <-  MacroEditButton_OnClick
+/// ```
+#[test]
+fn the_icon_picker_opens_without_raising() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    select_first(&s);
+    let _ = s.errors();
+    s.run("MacroEditButton:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "opening the icon picker must not raise: {:?}",
+        s.errors()
+    );
+    assert!(
+        s.eval::<bool>("return MacroPopupFrame:IsShown() and true or false")
+            .unwrap(),
+        "the picker is up"
+    );
+}
