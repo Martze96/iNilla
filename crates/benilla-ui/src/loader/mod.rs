@@ -850,6 +850,8 @@ impl Loader<'_> {
         self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
         // 5a · <Backdrop> plate (rf24 LoadXML `0x77e6c0`): the tiled bg + 8-piece border.
         self.apply_backdrop(el, wrapper, dbg_name);
+        // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
+        self.apply_title_region(el, wrapper, self_name, dbg_name);
         // 5b · per-kind LoadXML extras (RF-28's typed tables) — StatusBar + Button/CheckButton;
         //      the EditBox flags/caps (RF-0082). Every one of these gates on the element's own tag,
         //      which is why `apply_template` builds its synthetic node with the kind CreateFrame was

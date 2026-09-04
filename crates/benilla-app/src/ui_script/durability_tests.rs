@@ -27,7 +27,9 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
-        "MinimapCluster.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\BattlefieldFrame.xml",
+        "Interface\\FrameXML\\Minimap.xml",
         // The reference's own file. This module carried a private disk-only `load_xml` until the
         // swap, which structurally could not name a chain entry — [`super::test_ui::load_ui`] is
         // the one reader that speaks both stores, and it is why that helper exists.
@@ -404,7 +406,9 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
         "Interface\\FrameXML\\StaticPopup.xml",
         "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
-        "MinimapCluster.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\BattlefieldFrame.xml",
+        "Interface\\FrameXML\\Minimap.xml",
         "ScrollTemplates.xml",
         "Interface\\FrameXML\\DurabilityFrame.xml",
         "Interface\\FrameXML\\BasicControls.xml",

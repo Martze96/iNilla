@@ -316,11 +316,28 @@ pub enum ServerPacket {
     BattlefieldStatus(crate::messages::BattlefieldStatus),
     /// `MSG_PVP_LOG_DATA` inbound — the battleground scoreboard (decision 1972).
     PvpLogData(crate::messages::PvpLogData),
+    /// `SMSG_BATTLEFIELD_LIST` — the battleground instance list (decision 1974).
+    BattlefieldList(crate::messages::BattlefieldList),
+    /// `MSG_BATTLEGROUND_PLAYER_POSITIONS` inbound — the teammates and the flag carrier (1980).
+    BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// `SMSG_GROUP_JOINED_BATTLEGROUND` — a group join's verdict (decision 1974).
+    GroupJoinedBattleground {
+        result: u32,
+    },
+    /// `SMSG_BATTLEGROUND_PLAYER_JOINED` / `_LEFT` — one guid each (decision 1974).
+    BattlegroundPlayer {
+        guid: u64,
+        joined: bool,
+    },
     /// `SMSG 0x295` — the meeting-stone queue state (decision 1963).
     MeetingStoneSetQueue {
         area: u32,
         status: u8,
     },
+    /// `SMSG 0x297/0x298/0x299/0x2BB` — the meeting stone's display-only replies (decision 1974).
+    MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// `SMSG_TUTORIAL_FLAGS` — the account's tutorial bank (decision 1976).
+    TutorialFlags(crate::messages::TutorialFlags),
     /// `SMSG_SUMMON_REQUEST` — someone is *asking* to pull us to them (decision 1747): a
     /// warlock's ritual, a meeting stone, a GM. The twin of [`Self::BinderConfirm`] in shape —
     /// nothing moves until `CMSG_SUMMON_RESPONSE` goes back — and its opposite in teardown:
@@ -1572,7 +1589,29 @@ impl ServerPacket {
             ServerPacket::AreaSpiritHealerTime { .. } => "SMSG_AREA_SPIRIT_HEALER_TIME".into(),
             ServerPacket::BattlefieldStatus(_) => "SMSG_BATTLEFIELD_STATUS".into(),
             ServerPacket::PvpLogData(_) => "MSG_PVP_LOG_DATA".into(),
+            ServerPacket::BattlefieldList(_) => "SMSG_BATTLEFIELD_LIST".into(),
+            ServerPacket::BattlefieldPositions(_) => "MSG_BATTLEGROUND_PLAYER_POSITIONS".into(),
+            ServerPacket::GroupJoinedBattleground { .. } => "SMSG_GROUP_JOINED_BATTLEGROUND".into(),
+            ServerPacket::BattlegroundPlayer { joined: true, .. } => {
+                "SMSG_BATTLEGROUND_PLAYER_JOINED".into()
+            }
+            ServerPacket::BattlegroundPlayer { joined: false, .. } => {
+                "SMSG_BATTLEGROUND_PLAYER_LEFT".into()
+            }
             ServerPacket::MeetingStoneSetQueue { .. } => "SMSG_MEETINGSTONE_SETQUEUE".into(),
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::Success) => {
+                "SMSG_MEETINGSTONE_SUCCESS".into()
+            }
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::InProgress) => {
+                "SMSG_MEETINGSTONE_IN_PROGRESS".into()
+            }
+            ServerPacket::MeetingStoneNotice(
+                crate::messages::MeetingStoneNotice::MemberAdded { .. },
+            ) => "SMSG_MEETINGSTONE_MEMBER_ADDED".into(),
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::JoinFailed {
+                ..
+            }) => "SMSG_MEETINGSTONE_JOIN_FAILED".into(),
+            ServerPacket::TutorialFlags(_) => "SMSG_TUTORIAL_FLAGS".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),

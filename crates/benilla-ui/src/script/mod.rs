@@ -43,11 +43,15 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod battlefield_positions;
+mod battlefield_queue;
 mod battlefield_score;
 mod bind_confirm;
 mod binder;
 mod binding_abi;
 mod dialog_verbs;
+mod tutorial;
+mod worldmap_arrow;
 // The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
 mod camera_view;
@@ -84,6 +88,7 @@ mod gossip;
 mod guild;
 mod handler_prof;
 mod screenshot;
+mod tabard;
 pub use handler_prof::HandlerRow;
 mod inspect;
 mod item_stats;
@@ -162,6 +167,8 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
+pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
@@ -199,6 +206,7 @@ pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
+pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
 
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
@@ -611,6 +619,10 @@ impl UiScript {
         talent::install(&lua)?;
         dialog_verbs::install(&lua)?;
         battlefield_score::install(&lua)?;
+        battlefield_queue::install(&lua)?;
+        battlefield_positions::install(&lua)?;
+        tutorial::install(&lua)?;
+        worldmap_arrow::install(&lua)?;
         shapeshift::install(&lua)?;
         pet::install(&lua)?;
         gossip::install(&lua)?;
@@ -625,6 +637,7 @@ impl UiScript {
         trade::install(&lua)?;
         inspect::install(&lua)?;
         dressup::install(&lua)?;
+        tabard::install(&lua)?;
         tradeskill::install(&lua)?;
         craft::install(&lua)?;
         reputation::install(&lua)?;
@@ -853,7 +866,7 @@ impl UiScript {
     ///
     /// One field, not one per widget: there is exactly one ping (decision 1596), and the old
     /// per-widget push walked the whole ~3k-frame arena every frame a ping was live.
-    pub fn set_minimap_ping(&mut self, ping: Option<(f32, f32)>) {
+    pub fn set_minimap_ping(&mut self, ping: (f32, f32)) {
         self.model_mut().minimap_ping = ping;
     }
 
@@ -1048,6 +1061,20 @@ impl UiScript {
             .arena
             .iter_frames()
             .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+    }
+
+    /// The effective alpha of the frame with this global name while it is effectively visible,
+    /// `None` when it is hidden or no live frame carries the name. The read side of a frame whose
+    /// pixels a host draws for the engine: the stock `MiniMapPing` is a `<Model>` this engine
+    /// renders nothing for, so the app's ping sprite follows the frame's own show/hide and alpha
+    /// — the lifetime the reference's `Minimap.lua` owns — instead of keeping a clock of its own
+    /// (1974). A linear scan, like [`Self::frame_visible`].
+    pub fn frame_effective_alpha(&self, name: &str) -> Option<f32> {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+            .map(|(_, f)| f.effective_alpha)
     }
 
     /// Resolve every frame's rect: sync each frame's effective scale from the arena into its layout
@@ -1419,6 +1446,7 @@ impl UiScript {
                 crate::widget::FrameKind::Model => "Model",
                 crate::widget::FrameKind::PlayerModel => "PlayerModel",
                 crate::widget::FrameKind::DressUpModel => "DressUpModel",
+                crate::widget::FrameKind::TabardModel => "TabardModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",

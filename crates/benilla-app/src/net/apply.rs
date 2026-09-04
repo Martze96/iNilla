@@ -259,6 +259,9 @@ pub(super) fn apply_net_updates(
                         ResMut<crate::ui_dialog_verbs::BattlefieldQueue>,
                         ResMut<crate::ui_dialog_verbs::MeetingStone>,
                         ResMut<crate::ui_battlefield_score::BattlefieldScoreboard>,
+                        ResMut<crate::ui_battlefield::Battlefield>,
+                        ResMut<crate::tutorial::Tutorials>,
+                        ResMut<crate::ui_battlefield_positions::BattlefieldPositions>,
                     ),
                 ),
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
@@ -483,6 +486,9 @@ pub(super) fn apply_net_updates(
                         mut battlefield_queue,
                         mut meeting_stone,
                         mut battlefield_scoreboard,
+                        mut battlefield,
+                        mut tutorials,
+                        mut battlefield_positions,
                     ),
                 ),
                 mut poi_marker,
@@ -571,10 +577,12 @@ pub(super) fn apply_net_updates(
                 self_guid: guid,
                 name,
                 billing_time_rested,
+                tutorial_flags,
             } => session::connected(
                 guid,
                 name,
                 billing_time_rested,
+                tutorial_flags,
                 &mut self_guid,
                 &mut status,
                 &mut names,
@@ -962,9 +970,17 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::BattlefieldStatus(status) => battlefield_queue.apply(status),
             SessionEvent::PvpLogData(data) => battlefield_scoreboard.apply(data),
+            SessionEvent::BattlefieldList(list) => battlefield.apply_list(list),
+            SessionEvent::GroupJoinedBattleground { result } => battlefield.apply_verdict(result),
+            SessionEvent::BattlegroundPlayer { guid, joined } => {
+                battlefield.apply_player(guid, joined);
+            }
             SessionEvent::MeetingStoneSetQueue { area, status } => {
                 meeting_stone.apply(area, status);
             }
+            SessionEvent::MeetingStoneNotice(notice) => meeting_stone.apply_notice(notice),
+            SessionEvent::TutorialFlags(bytes) => tutorials.apply_flags(&bytes),
+            SessionEvent::BattlefieldPositions(packet) => battlefield_positions.apply(packet),
             SessionEvent::PlayerBound { binder: npc, area } => {
                 debug!("net: bound to area {area} by {npc:#x}");
                 crate::ui_binder::apply::bound(
@@ -1221,7 +1237,7 @@ pub(super) fn apply_net_updates(
             // between people who are grouped, and a ping from another map would be dropped by the
             // renderer's own map test anyway.
             SessionEvent::MinimapPing { guid, x, y } => {
-                ping.seat((x, y), current_map.as_ref().map_or(0, |m| m.0), guid);
+                ping.seat((x, y), guid);
             }
             SessionEvent::ReadyCheckAnswer { .. } => {}
             // ── The duel family (decision 0633): the session mirror + the two DisplayError
@@ -1398,7 +1414,9 @@ pub(super) fn apply_net_updates(
             SessionEvent::LootReleaseResponse { guid } => {
                 loot_release_response(guid, &mut loot, &mut loot_latch)
             }
-            SessionEvent::ItemPushResult(p) => item_push_result(p, &self_guid, &mut loot),
+            SessionEvent::ItemPushResult(p) => {
+                item_push_result(p, &self_guid, &mut loot, &mut tutorials)
+            }
             // ── The group-loot roll family (decision 0591) — the GroupLootFrame feed ───────────
             SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut loot_rolls),
             SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),

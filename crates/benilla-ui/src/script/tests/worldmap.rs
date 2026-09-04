@@ -163,6 +163,7 @@ fn worldmap_current_zone_and_player_feed() {
         1.5,
         None,
         vec![Some((0.1, 0.2)), None],
+        Vec::new(),
     );
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(
@@ -192,7 +193,7 @@ fn worldmap_current_zone_and_player_feed() {
     }
 
     // No feed → the world sheet (never an error).
-    s.set_world_map_feed(None, None, 0.0, None, Vec::new());
+    s.set_world_map_feed(None, None, 0.0, None, Vec::new(), Vec::new());
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(s.eval::<i64>("return GetCurrentMapContinent()").unwrap(), 0);
 }

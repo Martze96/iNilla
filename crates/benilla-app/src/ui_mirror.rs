@@ -114,6 +114,7 @@ fn feed_mirror_timers(
     script: Option<NonSendMut<UiScript>>,
     mut feed: ResMut<MirrorTimerFeed>,
     spells: Option<Res<Spells>>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         // No VM (a capture/headless run): drop the edges rather than let them pile up unbounded.
@@ -135,6 +136,26 @@ fn feed_mirror_timers(
         let Some(kind) = MirrorTimerKind::from_wire(raw) else {
             continue;
         };
+        // The handler's two tutorial arms (`0x5e7ab0` type 0, `0x5e7acd` type 1; 1976).
+        if matches!(edge, MirrorTimerEdge::Start(_)) {
+            match kind {
+                MirrorTimerKind::Fatigue => {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::FATIGUE,
+                        ));
+                    }
+                }
+                MirrorTimerKind::Breath => {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::BREATH,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         let name = ScriptValue::Str(script_name(kind).into());
         let (event, args): (&str, Vec<ScriptValue>) = match edge {
             MirrorTimerEdge::Start(start) => (

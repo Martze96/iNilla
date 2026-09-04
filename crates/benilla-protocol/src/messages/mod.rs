@@ -65,6 +65,7 @@ mod summon;
 mod taxi;
 mod trade;
 mod trainer;
+mod tutorial;
 mod update_object;
 mod vendor;
 mod world_state;
@@ -85,7 +86,9 @@ pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };
 pub use battlefield::{
-    battlefield_port, leave_battlefield, BattlefieldStatus, PvpLogData, PvpLogRow,
+    battlefield_join, battlefield_list, battlefield_port, battlemaster_join, leave_battlefield,
+    BattlefieldList, BattlefieldPosition, BattlefieldPositions, BattlefieldStatus, PvpLogData,
+    PvpLogRow, BATTLEFIELD_POSITIONS_MAX,
 };
 pub use binder::{binder_activate, PlayerBound};
 pub use channel::{channel_notice, ChannelNoticeTail, ChannelNotify};
@@ -169,7 +172,7 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
-pub use meeting_stone::{meeting_stone_leave, MeetingStoneSetQueue};
+pub use meeting_stone::{meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue};
 pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
@@ -245,6 +248,7 @@ pub use trade::{
     TRADE_SLOT_TRADED_COUNT,
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
+pub use tutorial::{tutorial_flag, TutorialFlags};
 pub use update_object::{
     quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState, Object, ObjectFields,
     ObjectType, OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,

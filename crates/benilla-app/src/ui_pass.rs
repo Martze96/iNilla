@@ -542,6 +542,15 @@ pub(crate) fn project_overlay(
 /// The accept REGION: exactly the viewport, **inclusive**. `[0xb4b2bc]` is the WorldFrame, and its
 /// region rect is mirrored ÷G44/÷G48 into the compare fields (`0x483970`), so the aspect factors
 /// cancel exactly and the test is against the raw screen box.
+/// `WOW_PROBE_UI_ONE_TEX=1` — a PRICING lever, never a look: the run split ignores texture
+/// identity, so runs break on state flags alone and every run draws with its first quad's
+/// texture. What it measures is the draw-count ceiling a UI texture atlas would reach (the
+/// module doc's "standard fix"), before that atlas is built.
+fn one_texture_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_PROBE_UI_ONE_TEX").is_some())
+}
+
 fn accepts(p: Vec2, viewport: Vec2) -> bool {
     (0.0..=viewport.x).contains(&p.x) && (0.0..=viewport.y).contains(&p.y)
 }
@@ -1197,7 +1206,7 @@ fn rebuild_ui_mesh(
         };
         let texture = q.texture.clone().unwrap_or_else(|| white.0.clone());
         let same_run = runs.last().is_some_and(|r| {
-            r.texture == texture
+            (r.texture == texture || one_texture_probe())
                 && r.additive == q.additive
                 && r.circular == q.circular
                 && r.desaturated == q.desaturated

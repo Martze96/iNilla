@@ -115,6 +115,15 @@ pub enum QuadContent {
         /// The pane's global frame name (`$parent`-expanded), or `None` for an anonymous
         /// `CreateFrame("Model")` — pfUI's autocast shine is the corpus example of the latter.
         name: Option<String>,
+        /// The `SetModel` path the pane holds (`None` for a unit pane or an empty one). Decision
+        /// 1980: the world-map arrow is an anonymous `Model` child whose file is the minimap arrow
+        /// (`crate::script::ARROW_MODEL`) — the one path the app draws as a sprite, so the seam
+        /// carries it with the facing and the pane's `SetModelScale`.
+        model: Option<String>,
+        /// `SetFacing`'s radians (0 default).
+        facing: f32,
+        /// `SetModelScale`'s factor (1 default).
+        model_scale: f32,
     },
     /// A `Texture` region: a BLP path *or* a solid/vertex color (or both — a tinted texture).
     Texture {

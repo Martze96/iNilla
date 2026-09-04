@@ -16,18 +16,17 @@
 //! CSimpleFrame 0x778590
 //! └─ CSimpleModel          0x76f870   table 0x878948 (23)   <Model>          ← built here
 //!    └─ CGCharacterModelBase 0x506260  table 0x84f1fc (3)   <PlayerModel>    ← built here
-//!       ├─ DressUpModelFrame 0x5050d0  table 0x84f190 (3)   <DressUpModel>   ← not built
-//!       └─ TabardModel       0x503bd0  table 0x84ee40 (10)  <TabardModel>    ← not built
+//!       ├─ DressUpModelFrame 0x5050d0  table 0x84f190 (3)   <DressUpModel>   ← `dressup` (1969)
+//!       └─ TabardModel       0x503bd0  table 0x84ee40 (10)  <TabardModel>    ← `tabard` (1977)
 //! ```
 //!
 //! Our `__index` dispatcher already walks a *slice* of registry keys per kind, so the chain is
 //! `&[REG_PLAYERMODEL_METHODS, REG_MODEL_METHODS]` and neither table duplicates the other. The
 //! direction is derived → base **only**: a plain `<Model>` does not acquire `SetUnit`.
 //!
-//! `DressUpModel` (`Undress`/`Dress`/`TryOn`) and `TabardModel` (10 tabard verbs) are deliberately
-//! **not built**: zero callers in the corpus, and our dress-up window already models the intents
-//! host-side (`super::dressup`), so wiring them is a design change to that subsystem rather than a
-//! missing verb. Named, not stubbed (decision 1134 §4).
+//! `DressUpModel` (`Undress`/`Dress`/`TryOn`) is `super::dressup` (1969) and `TabardModel` (the ten
+//! tabard verbs) `super::tabard` (1977) — each built the day its stock window came onto the chain,
+//! as 1134 §4 said they would be.
 //!
 //! ## Why this surface, in this order
 //!
@@ -93,7 +92,11 @@ pub(super) const REG_PLAYERMODEL_METHODS: &str = "__benilla_playermodel_methods"
 /// Run `f` over a frame's Model state under one short write borrow. Errors if `this` is not a live
 /// Model (unreachable through the kind dispatcher, but the method table is a plain Lua value — a
 /// caller can fish it out and misapply it).
-fn with_model<T>(lua: &Lua, this: &Table, f: impl FnOnce(&mut ModelState) -> T) -> mlua::Result<T> {
+pub(super) fn with_model<T>(
+    lua: &Lua,
+    this: &Table,
+    f: impl FnOnce(&mut ModelState) -> T,
+) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let frame = model

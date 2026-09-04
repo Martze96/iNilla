@@ -131,8 +131,11 @@ impl UiScript {
                         // [`QuadContent::ModelPane`]). Both widget kinds share `KindState::Model`
                         // because the client's `CGCharacterModelBase` extends `CSimpleModel`, and
                         // both draw the same way here.
-                        Some(crate::widget::KindState::Model(_)) => QuadContent::ModelPane {
+                        Some(crate::widget::KindState::Model(m)) => QuadContent::ModelPane {
                             name: frame.and_then(|f| f.name.clone()),
+                            model: m.path.clone(),
+                            facing: m.facing,
+                            model_scale: m.scale,
                         },
                         _ => QuadContent::Frame,
                     };

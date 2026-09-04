@@ -785,9 +785,19 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::BattlefieldStatus(status) => vec![SessionEvent::BattlefieldStatus(status)],
         ServerPacket::PvpLogData(data) => vec![SessionEvent::PvpLogData(data)],
+        ServerPacket::BattlefieldList(list) => vec![SessionEvent::BattlefieldList(list)],
+        ServerPacket::BattlefieldPositions(p) => vec![SessionEvent::BattlefieldPositions(p)],
+        ServerPacket::GroupJoinedBattleground { result } => {
+            vec![SessionEvent::GroupJoinedBattleground { result }]
+        }
+        ServerPacket::BattlegroundPlayer { guid, joined } => {
+            vec![SessionEvent::BattlegroundPlayer { guid, joined }]
+        }
         ServerPacket::MeetingStoneSetQueue { area, status } => {
             vec![SessionEvent::MeetingStoneSetQueue { area, status }]
         }
+        ServerPacket::MeetingStoneNotice(notice) => vec![SessionEvent::MeetingStoneNotice(notice)],
+        ServerPacket::TutorialFlags(flags) => vec![SessionEvent::TutorialFlags(flags.bytes)],
         ServerPacket::PlayerBound { binder, area } => {
             vec![SessionEvent::PlayerBound { binder, area }]
         }

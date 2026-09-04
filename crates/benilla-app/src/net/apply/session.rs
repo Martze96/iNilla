@@ -101,10 +101,12 @@ pub(super) fn cinematic_triggered(
 
 /// We are in the world (the IO thread's first in-world event): record our guid, flip the status,
 /// and seed the name cache with our own name.
+#[allow(clippy::too_many_arguments)] // the login's whole hand-off
 pub(super) fn connected(
     guid: u64,
     name: String,
     billing_time_rested: u32,
+    tutorial_flags: Option<Vec<u8>>,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,
     names: &mut NameCache,
@@ -118,6 +120,7 @@ pub(super) fn connected(
     names.insert_player(guid, name, None);
     entered_world.write(EnteredWorldMessage {
         billing_time_rested,
+        tutorial_flags,
     });
 }
 

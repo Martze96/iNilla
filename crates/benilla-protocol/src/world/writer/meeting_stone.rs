@@ -15,4 +15,10 @@ impl WorldWriter {
             &messages::meeting_stone_leave(),
         )
     }
+
+    /// Ask for the meeting-stone status (`CMSG 0x296`, empty) — the enter-world query the
+    /// reference sends once per world session (decision 1974).
+    pub fn meeting_stone_status_query(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_MEETINGSTONE_STATUS_QUERY, &[])
+    }
 }

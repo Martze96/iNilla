@@ -1309,6 +1309,76 @@ mod loader_tests {
         );
     }
 
+    /// `<TitleRegion setAllPoints="true"/>` builds the frame's drag handle over its whole rect —
+    /// the stock `TutorialFrame.xml`'s (1976): a press inside it moves the frame with the cursor,
+    /// exactly as `frame:CreateTitleRegion():SetAllPoints()` from Lua does
+    /// (`script::tests::movable::a_title_region_drag_swallows_the_press_and_ends_on_release`);
+    /// the same frame without the element does not move.
+    #[test]
+    fn title_region_element_builds_the_drag_handle_over_the_frame() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Tut" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+                    <TitleRegion setAllPoints="true"/>
+                </Frame>
+                <Frame name="Plain" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="400" y="100"/></Offset></Anchor></Anchors>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let left = |s: &mut UiScript, f: &str| {
+            s.resolve();
+            s.eval::<f64>(&format!("return {f}:GetLeft()")).unwrap()
+        };
+        assert_eq!(left(&mut s, "Tut"), 100.0);
+        s.mouse_button(150.0, 150.0, "LeftButton", true);
+        s.mouse_move(250.0, 150.0);
+        assert_eq!(
+            left(&mut s, "Tut"),
+            200.0,
+            "the element's title region drags the frame"
+        );
+        s.mouse_button(250.0, 150.0, "LeftButton", false);
+
+        assert_eq!(left(&mut s, "Plain"), 400.0);
+        s.mouse_button(450.0, 150.0, "LeftButton", true);
+        s.mouse_move(550.0, 150.0);
+        assert_eq!(left(&mut s, "Plain"), 400.0, "no element, no handle");
+        s.mouse_button(550.0, 150.0, "LeftButton", false);
+    }
+
+    #[test]
+    fn a_loader_built_title_region_emits_no_quad() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Tut" enableMouse="true">
+                    <Size><AbsDimension x="200" y="80"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+                    <TitleRegion setAllPoints="true"/>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+        let quads = s.extract();
+        assert!(
+            quads
+                .iter()
+                .all(|q| matches!(q.target, crate::order::ZTarget::Frame(_))),
+            "a title region is a hit rectangle, never a quad: {quads:#?}"
+        );
+    }
+
     /// `<HitRectInsets>` reaches SetHitRectInsets, and the inset band stops capturing the mouse
     /// while the frame's own geometry is untouched — the ref micro-button shape (a 29x58 frame whose
     /// art fills only the lower ~40, `top="18"`).

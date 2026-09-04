@@ -203,6 +203,9 @@ pub enum SessionEvent {
         /// Rides the connect event because that is the only moment it ever arrives: the reference
         /// keeps it in a process-lifetime global written once by the auth parser.
         billing_time_rested: u32,
+        /// The tutorial bank, when `SMSG_TUTORIAL_FLAGS` landed during the login handshake
+        /// (decision 1976); `None` when it will arrive in the world stream instead.
+        tutorial_flags: Option<Vec<u8>>,
     },
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
@@ -483,9 +486,27 @@ pub enum SessionEvent {
     /// The battleground scoreboard (`MSG_PVP_LOG_DATA`), rows in wire order — the app resolves
     /// the names, derives each row's team and pushes the sorted board (decision 1972).
     PvpLogData(crate::messages::PvpLogData),
+    /// The battleground instance list (`SMSG_BATTLEFIELD_LIST`): the battlemaster, the map, the
+    /// bracket and the instance ids — fires `BATTLEFIELDS_SHOW` (decision 1974).
+    BattlefieldList(crate::messages::BattlefieldList),
+    /// The battleground teammates' positions and the flag carrier
+    /// (`MSG_BATTLEGROUND_PLAYER_POSITIONS`), raw world floats (decision 1980).
+    BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// A group join's verdict (`SMSG_GROUP_JOINED_BATTLEGROUND`): `0xFFFFFFFE` deserters, a map id
+    /// joined, anything else the generic failure — three message lines, no state (decision 1974).
+    GroupJoinedBattleground { result: u32 },
+    /// A player joined or left the battleground (`SMSG_BATTLEGROUND_PLAYER_JOINED` / `_LEFT`):
+    /// printed once the name cache resolves the guid (decision 1974).
+    BattlegroundPlayer { guid: u64, joined: bool },
     /// The meeting-stone queue state (`SMSG 0x295`): the area queued for and a status byte
     /// (decision 1963).
     MeetingStoneSetQueue { area: u32, status: u8 },
+    /// One of the meeting stone's four display-only replies (`0x297/0x298/0x299/0x2BB`): a chat
+    /// line each, no state, no event (decision 1974).
+    MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// The account's tutorial bank (`SMSG_TUTORIAL_FLAGS`): the raw bytes, both of the client's
+    /// banks copied from them (decision 1976).
+    TutorialFlags(Vec<u8>),
     /// The bind took (`SMSG_PLAYERBOUND`): `area` is the AreaTable id we are now bound in, the
     /// same one [`Self::BindPoint`] carries in the packet beside it.
     PlayerBound { binder: u64, area: u32 },

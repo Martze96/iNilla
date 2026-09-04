@@ -1,4 +1,4 @@
-//! The shipped `MinimapCluster.xml` driven engine-only: the +/- zoom buttons must re-sync their
+//! The stock `Minimap.xml` (1974) driven engine-only: the +/- zoom buttons must re-sync their
 //! enabled state when the active zoom index switches (stepping inside/outside a WMO flips to the
 //! other, independent level). Regression guard for the director-caught stale-button bug (2026-07-09):
 //! `ZoomIn` greyed from an outdoor max-zoom stayed greyed indoors at the middle default level.
@@ -27,7 +27,11 @@ fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
 
     // OnLoad seeds the +/- state from the live zoom. The CVar default is 3 — a middle level, so
     // BOTH buttons start enabled (the old hardcoded `MinimapZoomOut:Disable()` assumed zoom 0).
@@ -92,7 +96,11 @@ fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
 
     let vis = |s: &UiScript| {
         s.eval::<bool>("return MiniMapTrackingFrame:IsVisible()")
@@ -142,7 +150,11 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTime.xml");
     s
 }
@@ -255,7 +267,11 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
     s.resolve();
 
     let cx = s
@@ -269,14 +285,16 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
     // Nothing is parked until somebody clicks.
     assert_eq!(s.take_minimap_ping_request(), None);
 
-    // A click 20 UI units right and 12 up of the centre — inside the 70-unit disc.
+    // A click 20 UI units right and 12 up of the centre — inside the 70-unit disc. The stock
+    // `Minimap_OnClick` adds its `CURSOR_OFFSET_X/Y` (−7, −9) to the cursor before subtracting
+    // the centre, so what it parks is the click less that offset.
     s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", true);
     s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", false);
     let (dx, dy) = s
         .take_minimap_ping_request()
         .expect("OnMouseUp → Minimap_OnClick → PingLocation");
-    assert!((dx - 20.0).abs() < 0.01, "x right of centre: {dx}");
-    assert!((dy - 12.0).abs() < 0.01, "y UP from centre: {dy}");
+    assert!((dx - 13.0).abs() < 0.01, "x right of centre, less 7: {dx}");
+    assert!((dy - 3.0).abs() < 0.01, "y UP from centre, less 9: {dy}");
     // Draining is a drain: the app must not see the same click twice.
     assert_eq!(s.take_minimap_ping_request(), None);
 
@@ -286,11 +304,12 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
     assert_eq!(s.take_minimap_ping_request(), None, "off-widget is no ping");
 }
 
-/// `Minimap:GetPingPosition()` answers **nil** with no ping, and the live pair once the app
-/// publishes one — never `(0, 0)` for "there isn't one", which a caller cannot tell from a ping
-/// under its own feet.
+/// `Minimap:GetPingPosition()` answers **two numbers always** (the reference recomputes them
+/// from statics nothing clears — wow-re `minimap-ping-law.md`), and the stock
+/// `Minimap_OnUpdate` leans on exactly that: while its 5 s timer runs it multiplies the answer
+/// with no nil test. The pair is the app's last publish, `(0, 0)` before any.
 #[test]
-fn get_ping_position_is_nil_until_there_is_a_ping() {
+fn get_ping_position_answers_two_numbers_always() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -301,14 +320,23 @@ fn get_ping_position_is_nil_until_there_is_a_ping() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
 
     assert_eq!(
-        s.eval::<Option<f32>>("return (Minimap:GetPingPosition())")
+        s.eval::<i64>("return select('#', Minimap:GetPingPosition())")
             .unwrap(),
-        None
+        2
     );
-    s.set_minimap_ping(Some((0.25, -0.125)));
+    assert_eq!(
+        s.eval::<f32>("return (Minimap:GetPingPosition())").unwrap(),
+        0.0,
+        "before any ping: a number, not nil"
+    );
+    s.set_minimap_ping((0.25, -0.125));
     let x = s
         .eval::<f32>("local x = Minimap:GetPingPosition(); return x")
         .unwrap();
@@ -319,10 +347,106 @@ fn get_ping_position_is_nil_until_there_is_a_ping() {
         (x - 0.25).abs() < 1e-6 && (y + 0.125).abs() < 1e-6,
         "{x} {y}"
     );
-    s.set_minimap_ping(None);
-    assert_eq!(
-        s.eval::<Option<f32>>("return (Minimap:GetPingPosition())")
-            .unwrap(),
-        None
+
+    // The stock lifetime, end to end: MINIMAP_PING shows the model frame and starts the 5 s
+    // timer; OnUpdate re-seats it from GetPingPosition every frame; past 5 s it "fades" and
+    // hides. The app's sprite follows this frame (`minimap/ping.rs`).
+    assert!(
+        !s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap(),
+        "hidden until a ping"
     );
+    s.fire_event(
+        "MINIMAP_PING",
+        vec![
+            benilla_ui::script::ScriptValue::Str("player".into()),
+            benilla_ui::script::ScriptValue::Number(0.25),
+            benilla_ui::script::ScriptValue::Number(-0.125),
+        ],
+    );
+    assert!(s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap());
+    s.tick(1.0);
+    assert!(
+        s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap(),
+        "held at 1 s"
+    );
+    let cx = s
+        .eval::<f32>(
+            "local x = MiniMapPing:GetCenter(); local mx = Minimap:GetCenter(); return x - mx",
+        )
+        .unwrap();
+    assert!(
+        (cx - 0.25 * 140.0).abs() < 0.5,
+        "re-seated at the normalized offset times the width: {cx}"
+    );
+    s.tick(4.2);
+    s.tick(0.6);
+    assert!(
+        !s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap(),
+        "5 s hold + 0.5 s fade, then hidden"
+    );
+}
+
+/// The meeting-stone icon (stock `Minimap.xml`, 1974): hidden until `IsInMeetingStoneQueue()`
+/// answers across `MEETINGSTONE_CHANGED`, its hover the cached status text, hidden again when
+/// the queue empties — and a click raises the leave-queue question.
+#[test]
+fn the_meeting_stone_icon_follows_the_queue_across_meetingstone_changed() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Localization.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "UiPanels.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\BattlefieldFrame.xml",
+        "Interface\\FrameXML\\Minimap.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s.resolve();
+    let vis = |s: &UiScript| {
+        s.eval::<bool>("return MiniMapMeetingStoneFrame:IsVisible()")
+            .unwrap()
+    };
+    assert!(!vis(&s), "hidden at load");
+
+    s.set_meeting_stone(1519, Some("Looking for more for Stormwind City".into()));
+    s.fire_event("MEETINGSTONE_CHANGED", vec![]);
+    assert!(vis(&s), "a queued area shows the icon");
+    s.run("this = MiniMapMeetingStoneFrame; MiniMapMeetingStoneFrame:GetScript('OnEnter')()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Looking for more for Stormwind City"
+    );
+    s.run("MiniMapMeetingStoneFrame:Click()").unwrap();
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "a click asks CONFIRM_LEAVE_QUEUE"
+    );
+    s.run("StaticPopup1Button1:Click()").unwrap();
+    assert_eq!(
+        s.take_meeting_stone_cancels(),
+        1,
+        "Accept is CancelMeetingStoneRequest()"
+    );
+
+    s.set_meeting_stone(0, Some("Looking for more for Unknown".into()));
+    s.fire_event("MEETINGSTONE_CHANGED", vec![]);
+    assert!(!vis(&s), "area 0 hides it again");
 }

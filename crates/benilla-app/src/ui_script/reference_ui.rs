@@ -1568,78 +1568,6 @@ mod tests {
                  LoadOnDemand row (1967).",
             ),
             (
-                "Blizzard_BattlefieldMinimap.xml",
-                "CreateMiniWorldMapArrowFrame",
-                "the world map's arrow-frame family (Create/Position/Show/UpdateWorldMapArrowFrames), engine verbs the reference's WorldMapFrame.lua also calls — unbuilt; ours draws the map's arrows app-side, and they land with the world map's own migration. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "GetBattlefieldFlagPosition",
-                "the battlefield minimap's flag-position getter (0x4ac230, structural row only; the position family is uncarved). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "GetBattlefieldMapIconScale",
-                "the battlefield minimap's icon-scale getter (uncarved; reads the queue slot's Map.dbc row). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "GetBattlefieldPosition",
-                "the battlefield minimap's player-position getter (wow-re `bindings.md` 0x4abf90, a structural row — the position family is outside 195cd099's carve). The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "PositionMiniWorldMapArrowFrame",
-                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "ShowMiniWorldMapArrowFrame",
-                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "UpdateWorldMapArrowFrames",
-                "as CreateMiniWorldMapArrowFrame — the arrow-frame family. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
-                "Blizzard_BattlefieldMinimap.xml",
-                "WorldMap_GetPOITextureCoords",
-                "a stock WorldMapFrame.lua function; our WorldMapFrame.xml is still ours and defines its own POI atlas walk, so the name arrives with the world map's migration. The addon is a reached LoadOnDemand row since 1972 (UIParent.xml's \
-                 BattlefieldMinimap_LoadUI, which the stock WorldStateFrame.lua calls on a \
-                 battleground's world states); its pane is a <Minimap>-kind widget this engine \
-                 draws nothing into yet, so the addon loads, paints nothing, and these are the verbs \
-                 its update would reach.",
-            ),
-            (
                 "StaticPopup.xml",
                 "ReplaceTradeEnchant",
                 "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
@@ -2324,6 +2252,12 @@ mod tests {
         // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
         const UNPRODUCED: &[(&str, &str)] = &[
             ("BAG_OPEN", "ContainerFrame.lua"),
+            (
+                "CLOSE_WORLD_MAP",
+                "WorldMapFrame.lua — the engine-side close the reference fires when the map is \
+                 shut from outside its own frame; benilla closes the map through the frame's own \
+                 hide path only (1980)",
+            ),
             ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
             (
                 "GMSURVEY_DISPLAY",

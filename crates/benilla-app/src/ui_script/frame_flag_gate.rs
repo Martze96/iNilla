@@ -192,12 +192,9 @@ const KNOWN: &[Known] = &[
     // entries here — twelve `MerchantItem<N>` plus `MerchantBuyBackItem` — saying ours took the
     // mouse on the row itself where the reference splits each row into an inert container plus a
     // `$parentItemButton`. That is exactly what this gate exists to notice going away.
-    Known {
-        frame: "WorldMapFrame",
-        flag: Flag::Mouse,
-        why: "our map body takes the mouse so a click on it cannot reach the world behind a \
-              FULLSCREEN_DIALOG window; the reference relies on WorldMapButton alone",
-    },
+    // The `WorldMapFrame` mouse entry RETIRED (1980): it said our map body took the mouse where
+    // the reference relies on `WorldMapButton` alone — true of our transcription, and the map is
+    // the reference's own file now.
     // ── The faux scroll panes: a different WIDGET KIND, not a missing flag ─────────────────────
     //
     // The reference declares each of these `<ScrollFrame …inherits="FauxScrollFrameTemplate">` and
@@ -576,10 +573,11 @@ fn the_shipped_frames_carry_the_references_flags() {
         // 1956 our SkillFrame.xml, 1958 our UnitPopup.xml and 1959 our FriendsFrame.xml (their
         // frames are the reference's own now), which took the paired count from the low 400s to
         // the high 150s; 1966 (TradeFrame), 1968 (GameTooltip), 1969 (DressUpFrame) and 1970
-        // (MailFrame) to the high 80s. The floor guards the pairing, not the census — it comes
-        // down with every window that migrates, and reaches zero with the last file of ours
-        // that declares a reference-named frame.
-        compared > 60,
+        // (MailFrame) to the high 80s, and 1980 (WorldMapFrame, whose 50-odd blip frames were
+        // most of what was left) to the high teens. The floor guards the pairing, not the
+        // census — it comes down with every window that migrates, and reaches zero with the
+        // last file of ours that declares a reference-named frame.
+        compared > 10,
         "only {compared} frames compared — the pairing broke, and the sweep guards nothing"
     );
     assert!(

@@ -1,4 +1,4 @@
-use mlua::Table;
+use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
 
@@ -118,6 +118,33 @@ impl Loader<'_> {
     /// processes each child in turn, so an instance's own `<Size>` overwrites its template's. (Taking
     /// only `.next()` here silently pinned every templated frame to the TEMPLATE's size; caught on
     /// the quest log's Abandon button — 125×21 in the instance XML, 80×22 on screen.)
+    /// `<TitleRegion setAllPoints="true"/>` (or one with its own `<Size>`/`<Anchors>`): the
+    /// frame's drag handle, built through the same `CreateTitleRegion` the Lua API exposes — so
+    /// the element and a later `frame:CreateTitleRegion()` name ONE object (the verb is
+    /// idempotent; wow-re `widget-api-batch-benilla.md` Q6) — then laid out like any region.
+    /// The stock `TutorialFrame.xml` declares one over its whole plate (1976).
+    pub(super) fn apply_title_region(
+        &mut self,
+        el: &Element,
+        wrapper: &Table,
+        self_name: &str,
+        dbg: &str,
+    ) {
+        let Some(tr) = children_named(el, "TitleRegion").next() else {
+            return;
+        };
+        let region: Table = match wrapper.call_method("CreateTitleRegion", ()) {
+            Ok(r) => r,
+            Err(e) => {
+                self.report
+                    .errors
+                    .push(format!("{dbg}: CreateTitleRegion: {e}"));
+                return;
+            }
+        };
+        self.apply_region_layout(tr, &region, self_name, dbg);
+    }
+
     pub(super) fn apply_size(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
         for size in children_named(el, "Size") {
             let (x, y) = abs_dim(size);

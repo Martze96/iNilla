@@ -220,7 +220,12 @@ fn is_our_push(p: &ItemPushResult, self_guid: &SelfGuid) -> bool {
 /// self check being the only thing that can stop a push here. The reference's
 /// `CGGameUI::OnItemPush 0x491a60` emits both from this one packet: it returns early only on a guid
 /// mismatch, and tests `showInChat` further down, after the `ITEM_PUSH` fire.
-pub(super) fn item_push_result(p: ItemPushResult, self_guid: &SelfGuid, loot: &mut LootState) {
+pub(super) fn item_push_result(
+    p: ItemPushResult,
+    self_guid: &SelfGuid,
+    loot: &mut LootState,
+    tutorials: &mut crate::tutorial::Tutorials,
+) {
     // Solo loot never gets a MONEY_NOTIFY from this server (vmangos comments it out;
     // the purse rides the ordinary COINAGE field flush) — so this push line is the
     // one reliable "it landed" signal, surfaced as the "You receive loot/item" line.
@@ -231,6 +236,8 @@ pub(super) fn item_push_result(p: ItemPushResult, self_guid: &SelfGuid, loot: &m
     if !is_our_push(&p, self_guid) {
         return;
     }
+    // The item-received handler's tutorial sites (1976): resolved on the tutorial feed.
+    tutorials.item_received(p.item_entry, p.bag_slot, p.item_slot);
     loot.push_receive(&p);
 }
 
@@ -470,7 +477,12 @@ mod tests {
         // animates — it only loses its chat line, downstream in `drain_receives`.
         assert!(is_our_push(&push(ME, false), &me));
         let mut loot = LootState::default();
-        item_push_result(push(ME, false), &me, &mut loot);
+        item_push_result(
+            push(ME, false),
+            &me,
+            &mut loot,
+            &mut crate::tutorial::Tutorials::default(),
+        );
         assert_eq!(loot.pending_receive_count(), 1);
     }
 }

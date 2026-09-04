@@ -97,6 +97,7 @@ mod summon;
 mod taxi;
 mod trade;
 mod trainer;
+mod tutorial;
 mod vendor;
 
 /// Write half of a split [`WorldSession`](super::WorldSession) — owns a cloned socket + the encrypter. Used to send our own

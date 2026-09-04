@@ -308,6 +308,7 @@ pub(super) fn drain_social(
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     areas: Option<Res<AreaTableRes>>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -323,6 +324,12 @@ pub(super) fn drain_social(
                 let _ = commands.0.send(ClientCommand::FriendListRequest);
             }
             SocialRequest::AddFriend(name) => {
+                // `0x5ae67c`: Friends acknowledged right before the send (1976).
+                if let Some(t) = tutorials.as_mut() {
+                    t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                        id: crate::tutorial::id::FRIENDS,
+                    });
+                }
                 let _ = commands.0.send(ClientCommand::AddFriend { name });
             }
             SocialRequest::SetLookingForGroup { slots, comment } => {

@@ -589,12 +589,14 @@ fn run(
     session.set_active_mover(guid)?;
 
     let billing_time_rested = session.billing_time_rested();
+    let tutorial_flags = session.take_tutorial_flags();
     let (mut reader, writer) = session.into_split()?;
     if events_tx
         .send(SessionEvent::Connected {
             self_guid: guid,
             name,
             billing_time_rested,
+            tutorial_flags,
         })
         .is_err()
     {
@@ -1076,6 +1078,26 @@ fn writer_loop(
                     }
                     ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
                     ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
+                    ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
+                    ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),
+                    ClientCommand::TutorialClear => w.tutorial_clear(),
+                    ClientCommand::TutorialReset => w.tutorial_reset(),
+                    ClientCommand::BattlefieldList { map_id } => w.battlefield_list(map_id),
+                    ClientCommand::RequestBattlefieldPositions => {
+                        w.request_battlefield_positions()
+                    }
+                    ClientCommand::BattlemasterJoin {
+                        battlemaster,
+                        map_id,
+                        instance_id,
+                        as_group,
+                    } => w.battlemaster_join(battlemaster, map_id, instance_id, as_group),
+                    ClientCommand::BattlefieldJoin {
+                        map_id,
+                        instance_id,
+                        as_group,
+                    } => w.battlefield_join(map_id, instance_id, as_group),
+                    ClientCommand::BattlefieldStatusRequest => w.battlefield_status(),
                     ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
                     ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),

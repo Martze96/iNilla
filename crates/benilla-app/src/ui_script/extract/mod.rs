@@ -1328,8 +1328,51 @@ fn convert_entry(
         //
         // A pane with no name, or one no window claims, draws nothing (`SetModel` panes included:
         // this engine holds their scene and renders no M2 into it). Nothing is stubbed white.
-        QuadContent::ModelPane { name } => {
+        QuadContent::ModelPane {
+            name,
+            model,
+            facing,
+            model_scale: _,
+        } => {
             use crate::portrait::PortraitSource;
+            // The world-map arrow (decision 1980): the stock `WorldMapFrame.lua` /
+            // `Blizzard_BattlefieldMinimap.lua` create an anonymous `Model` child, `SetModel` it to
+            // the minimap arrow, and steer it with `SetFacing`/`SetPosition` every update. benilla
+            // draws that one file as the minimap's own arrow sprite — the same art the minimap
+            // ring draws (`crate::minimap::blips`), turned the same way (`-facing`: the M2's yaw
+            // is CCW-positive, the screen's is CW), filling the pane the engine sized to the
+            // reference's 33.6 px footprint times the arrow's `SetModelScale`. No 3D pane needs
+            // to exist for a two-triangle arrow.
+            if model.as_deref() == Some(benilla_ui::script::ARROW_MODEL) {
+                use crate::minimap::blips::{
+                    PLAYER_ARROW_OFFSET_PX, PLAYER_ARROW_QUAD_PX, PLAYER_ARROW_TEXTURE,
+                };
+                let Some(handle) = assets
+                    .as_mut()
+                    .and_then(|a| a.sprite_texture(PLAYER_ARROW_TEXTURE, images))
+                else {
+                    return;
+                };
+                // The M2's single quad sits off its origin by an authored offset that turns with
+                // the facing — the minimap's arrow applies the same one at its 33.6 px basis, and
+                // the pane the engine sized (`worldmap_arrow.rs`: the footprint times the
+                // `SetModelScale`) scales it here. `model_scale` is already in the rect.
+                let rotation = -facing;
+                let (sin, cos) = rotation.sin_cos();
+                let off = PLAYER_ARROW_OFFSET_PX * (rect.width() / PLAYER_ARROW_QUAD_PX);
+                let off = Vec2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
+                let rect = Rect::from_center_size(rect.center() + off, rect.size());
+                out.push(UiQuad {
+                    rect,
+                    z_key: eq.z,
+                    texture: Some(handle),
+                    color: [1.0, 1.0, 1.0, eq.alpha],
+                    rotation,
+                    clip,
+                    ..default()
+                });
+                return;
+            }
             let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
                 return;
             };

@@ -833,6 +833,7 @@ pub(super) fn drain_party(
     mut names: ResMut<NameCache>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -859,6 +860,11 @@ pub(super) fn drain_party(
                 let _ = commands.0.send(ClientCommand::GroupLeave);
             }
             PartyRequest::InviteName(name) => {
+                if let Some(t) = tutorials.as_mut() {
+                    t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                        id: crate::tutorial::id::GROUPING,
+                    });
+                }
                 let _ = commands.0.send(ClientCommand::GroupInvite { name });
             }
             PartyRequest::InviteUnit(token) => {
@@ -873,6 +879,11 @@ pub(super) fn drain_party(
                     member_for_token(&group, &token).map(|m| m.name.clone())
                 };
                 if let Some(name) = name {
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                            id: crate::tutorial::id::GROUPING,
+                        });
+                    }
                     let _ = commands.0.send(ClientCommand::GroupInvite { name });
                 }
             }

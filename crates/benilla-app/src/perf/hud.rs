@@ -231,11 +231,19 @@ pub(super) fn pill_quads(
         !matches!(&*cache, Some(c) if c.snap_at == hud.snap_at && c.win_w == win_w && c.top == top);
     if stale {
         let cpu = hud.snap.cpu.mean();
+        let main = hud.snap.main.mean();
         let fps = hud.snap.fps();
-        // One string, the dim run via markup: "59 fps  8.5 ms" — fps dim, cost in full text.
-        let text = match cpu {
-            Some(cpu) => format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {cpu:.1} ms"),
-            None => format!("{Q_DIM_MARKUP}-- ms"),
+        // One string, the dim runs via markup: "59 fps  7.0 ms  17.3 cpu" — fps dim, the MAIN
+        // thread's ms in full text (the part of the frame the player feels), and the process-wide
+        // sum dim at the end (every thread, the number a CPU % agrees with — decision 1954: a
+        // raid read 17 on it at a solid 60 with the main thread at 7, and the sum was taken for
+        // a frame time by everyone who looked at it).
+        let text = match (main, cpu) {
+            (Some(main), Some(cpu)) => {
+                format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {main:.1} ms  {Q_DIM_MARKUP}{cpu:.1} cpu|r")
+            }
+            (None, Some(cpu)) => format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {cpu:.1} cpu"),
+            _ => format!("{Q_DIM_MARKUP}-- ms"),
         };
         let center = Vec2::new(win_w * 0.5, 0.0); // measured first, then shifted under PILL_TOP
         let mut e = atlas.lock();

@@ -141,7 +141,7 @@ pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod maps;
-pub use maps::{load_map_catalog, MapCatalog};
+pub use maps::{load_map_catalog, MapBattlegroundColumns, MapCatalog};
 mod anim_data;
 pub use anim_data::{load_anim_data_catalog, AnimDataCatalog, AnimEntry};
 mod quest_headers;

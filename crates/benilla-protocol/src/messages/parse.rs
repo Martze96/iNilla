@@ -15,7 +15,7 @@ use super::{
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
     progression, pvp, quest, social, spellbook, spells, stable, summon, taxi, trade, trainer,
-    update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode,
+    tutorial, update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode,
     ServerPacket, SpeedKind, SplineMode,
 };
 
@@ -407,12 +407,44 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::MSG_PVP_LOG_DATA => {
             ServerPacket::PvpLogData(battlefield::read_pvp_log_data(&mut r)?)
         }
+        opcode::SMSG_BATTLEFIELD_LIST => {
+            ServerPacket::BattlefieldList(battlefield::read_battlefield_list(&mut r)?)
+        }
+        opcode::MSG_BATTLEGROUND_PLAYER_POSITIONS => {
+            ServerPacket::BattlefieldPositions(battlefield::read_battlefield_positions(&mut r)?)
+        }
+        opcode::SMSG_GROUP_JOINED_BATTLEGROUND => ServerPacket::GroupJoinedBattleground {
+            result: crate::wire::read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_BATTLEGROUND_PLAYER_JOINED => ServerPacket::BattlegroundPlayer {
+            guid: crate::wire::read_u64_le(&mut r)?,
+            joined: true,
+        },
+        opcode::SMSG_BATTLEGROUND_PLAYER_LEFT => ServerPacket::BattlegroundPlayer {
+            guid: crate::wire::read_u64_le(&mut r)?,
+            joined: false,
+        },
         opcode::SMSG_MEETINGSTONE_SETQUEUE => {
             let q = meeting_stone::read_meeting_stone_set_queue(&mut r)?;
             ServerPacket::MeetingStoneSetQueue {
                 area: q.area,
                 status: q.status,
             }
+        }
+        opcode::SMSG_MEETINGSTONE_SUCCESS => {
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::Success)
+        }
+        opcode::SMSG_MEETINGSTONE_IN_PROGRESS => {
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::InProgress)
+        }
+        opcode::SMSG_MEETINGSTONE_MEMBER_ADDED => ServerPacket::MeetingStoneNotice(
+            meeting_stone::read_meeting_stone_member_added(&mut r)?,
+        ),
+        opcode::SMSG_MEETINGSTONE_JOIN_FAILED => {
+            ServerPacket::MeetingStoneNotice(meeting_stone::read_meeting_stone_join_failed(&mut r)?)
+        }
+        opcode::SMSG_TUTORIAL_FLAGS => {
+            ServerPacket::TutorialFlags(tutorial::read_tutorial_flags(&mut r)?)
         }
         opcode::SMSG_PLAYERBOUND => {
             let bound = binder::read_player_bound(&mut r)?;

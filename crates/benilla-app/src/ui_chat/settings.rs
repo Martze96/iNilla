@@ -569,7 +569,17 @@ pub(super) fn plugin(app: &mut App) {
             Update,
             (load_chat_looks, watch_chat_looks)
                 .chain()
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .run_if(in_state(crate::char_select::ClientState::InWorld))
+                // …and never before the in-game UI exists (1348's law, the unit feed's own
+                // words): the restore fires `UPDATE_CHAT_WINDOWS` once and latches a per-VM
+                // memo, and the VM that is live between the world-entry edge and the deferred
+                // entry load is the SAME object the load then fills — so a restore made in
+                // that window reaches no chat frame and its memo blocks the one that would.
+                // Every plate texture stayed at the XML's white, alpha 1 (director report,
+                // 2026-09-04).
+                .run_if(bevy::ecs::schedule::common_conditions::not(
+                    crate::ui_script::ingame_ui_pending,
+                )),
         )
         .add_systems(
             Update,

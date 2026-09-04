@@ -131,10 +131,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             FrameKind::ScrollFrame => &["ScrollFrame", "Frame", "Region"],
             FrameKind::Model => &["Model", "Frame", "Region"],
             // 4 deep: `PlayerModel` derives from `Model`, and `DressUpModel` (1969) and
-            // `TabardModel` (unbuilt) derive from it in turn, for the roster's maximum depth of 5
+            // `TabardModel` (1977) derive from it in turn, for the roster's maximum depth of 5
             // (wow-re `ui/scratch/widget-type-identity.md` §6).
             FrameKind::PlayerModel => &["PlayerModel", "Model", "Frame", "Region"],
             FrameKind::DressUpModel => &["DressUpModel", "PlayerModel", "Model", "Frame", "Region"],
+            FrameKind::TabardModel => &["TabardModel", "PlayerModel", "Model", "Frame", "Region"],
             FrameKind::MessageFrame => &["MessageFrame", "Frame", "Region"],
             FrameKind::ScrollingMessageFrame => &["ScrollingMessageFrame", "Frame", "Region"],
             FrameKind::ColorSelect => &["ColorSelect", "Frame", "Region"],

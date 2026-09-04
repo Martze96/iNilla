@@ -105,7 +105,7 @@ fn resolve_board(
     Some(rows)
 }
 
-fn feed_battlefield_score(
+pub(crate) fn feed_battlefield_score(
     script: Option<NonSendMut<UiScript>>,
     board: Res<BattlefieldScoreboard>,
     mut queue: ResMut<BattlefieldQueue>,

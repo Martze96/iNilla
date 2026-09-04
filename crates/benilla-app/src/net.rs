@@ -1282,6 +1282,40 @@ pub(crate) enum ClientCommand {
     },
     /// `CancelMeetingStoneRequest()` — `CMSG 0x293`, empty.
     MeetingStoneLeave,
+    /// The enter-world meeting-stone status query — `CMSG 0x296`, empty (decision 1974).
+    MeetingStoneStatusQuery,
+    // ── The tutorial system (decision 1976) ──
+    /// `FlagTutorial` / an auto-acknowledge site — `CMSG_TUTORIAL_FLAG`, the 0-based id.
+    TutorialFlag {
+        id: u32,
+    },
+    /// `ClearTutorials()` — `CMSG_TUTORIAL_CLEAR`, empty.
+    TutorialClear,
+    /// `ResetTutorials()` — `CMSG_TUTORIAL_RESET`, empty.
+    TutorialReset,
+    // ── The battleground list window (decision 1974) ──
+    /// `ShowBattlefieldList(index)` — `CMSG_BATTLEFIELD_LIST`: the queued slot's map.
+    BattlefieldList {
+        map_id: u32,
+    },
+    /// `JoinBattlefield` when the list came from a battlemaster — `CMSG_BATTLEMASTER_JOIN`.
+    BattlemasterJoin {
+        battlemaster: u64,
+        map_id: u32,
+        instance_id: u32,
+        as_group: bool,
+    },
+    /// `RequestBattlefieldPositions()` — `MSG_BATTLEGROUND_PLAYER_POSITIONS` outbound (empty;
+    /// decision 1980), throttled app-side to the reference's 5000 ms.
+    RequestBattlefieldPositions,
+    /// `JoinBattlefield` when the list arrived without one — `CMSG_BATTLEFIELD_JOIN`.
+    BattlefieldJoin {
+        map_id: u32,
+        instance_id: u32,
+        as_group: bool,
+    },
+    /// The world-enter status request — `CMSG_BATTLEFIELD_STATUS`, empty.
+    BattlefieldStatusRequest,
     /// `ConfirmPetUnlearn()` — `CMSG_PET_UNLEARN` with the latched trainer guid.
     PetUnlearn {
         trainer: u64,
@@ -2291,6 +2325,9 @@ pub(crate) struct EnteredWorldMessage {
     /// admitted the session — pushed into the script here because this is the only moment it ever
     /// arrives (decision 1820).
     pub(crate) billing_time_rested: u32,
+    /// The tutorial bank, if `SMSG_TUTORIAL_FLAGS` landed during the login handshake (1976);
+    /// otherwise it arrives in the world stream.
+    pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
 
 /// The server asked us to play a cinematic (`SMSG_TRIGGER_CINEMATIC`) — a `CinematicSequences.dbc`

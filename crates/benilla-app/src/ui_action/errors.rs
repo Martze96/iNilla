@@ -192,6 +192,12 @@ pub(crate) struct Shown {
 }
 
 impl Shown {
+    /// The resolved text — what the surface will show.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
     /// A **catalog** message, named by its GlobalStrings key — the reference's `DisplayError(id)`,
     /// which is nearly every line benilla shows. One lookup answers both "where does it go" and
     /// "what does it sound like".
@@ -229,6 +235,17 @@ impl Shown {
 /// four of them had grown their own copy (decision 1821).
 pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> {
     let text = script.lua().globals().get::<String>(key).ok()?;
+    (!text.is_empty()).then(|| Shown::keyed(key, text))
+}
+
+/// [`keyed_line`] for a `%s`-shaped string: each argument fills the next `%s`, in order — the
+/// reference's `format`-with-pushed-arguments face of the same catalog rows (the battleground
+/// join verdict's map name, the joined-or-left player's name, 1974).
+pub(crate) fn keyed_line_s(script: &UiScript, key: &'static str, args: &[&str]) -> Option<Shown> {
+    let mut text = script.lua().globals().get::<String>(key).ok()?;
+    for arg in args {
+        text = text.replacen("%s", arg, 1);
+    }
     (!text.is_empty()).then(|| Shown::keyed(key, text))
 }
 

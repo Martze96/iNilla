@@ -29,14 +29,23 @@
 //!   offsets the byte-verified relay `0x4ee330` hands Lua (`(−dy·k, dx·k)`, `k = 1/(2·radius)` —
 //!   wow-re `party-group-wire.md` §TU-D). `Minimap:GetPingPosition()` reads the live value back.
 //!
-//! ## Lifetime
+//! ## Lifetime — the stock `Minimap.lua`'s, not ours (1974)
 //!
-//! 5 s hold, then the reference's 0.5 s "fade" — see [`PING_ALPHA_IS_A_POP`]. A map change drops
-//! it (the point is not here any more). **Nothing else clears it**, and in particular *not*
-//! proximity: the first version applied the client's 10-yd `d² < 100` auto-clear to the party
-//! ping, and that clear belongs to the **`SMSG_GOSSIP_POI` marker** — a different feature in a
-//! different slot (wow-re `party-group-wire.md` §TU-D corrects it explicitly; `MSG_MINIMAP_PING`
-//! has no C-side storage at all). Walking to your own ping used to delete it mid-hold.
+//! The reference splits the ping in two: the engine stores the world point in a pair of statics
+//! **nothing ever clears** (wow-re `minimap-ping-law.md` §3 — six instructions touch those cells
+//! and the only zeroing is a CRT initializer), and FrameXML owns everything visible — the
+//! `MiniMapPing` `<Model>` it shows on `MINIMAP_PING`, re-seats every frame from
+//! `GetPingPosition()`, holds 5 s (`MINIMAPPING_TIMER`), "fades" 0.5 s through a `SetAlpha(255·t)`
+//! that clamps to full until the last ~2 ms, and hides. Since 1751's swap that file runs here
+//! verbatim, and this engine's `<Model>` draws no pixels — so the sprite below is **that frame's
+//! renderer**: it draws while `MiniMapPing` is effectively visible, at its effective alpha, and
+//! keeps no clock of its own. The world point is likewise never cleared: `GetPingPosition()`
+//! answers two numbers always, which the stock `Minimap_OnUpdate` multiplies without a nil test.
+//!
+//! What is *not* a lifetime: proximity. The first version applied the client's 10-yd
+//! `d² < 100` auto-clear to the party ping, and that clear belongs to the **`SMSG_GOSSIP_POI`
+//! marker** — a different feature in a different slot (wow-re `party-group-wire.md` §TU-D
+//! corrects it explicitly). Walking to your own ping used to delete it mid-hold.
 
 use bevy::prelude::*;
 
@@ -48,20 +57,12 @@ use crate::net::{ClientCommand, Guid, NetCommands, SelfPlayer};
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuads};
 
-/// How long the ping holds at full strength — the reference's `MINIMAPPING_TIMER`.
-const PING_HOLD: f32 = 5.0;
-/// The tail after the hold — the reference's `MINIMAPPING_FADE_TIMER`.
-const PING_FADE: f32 = 0.5;
-
-/// **The reference's ping does not fade; it pops** — now byte-confirmed, not inferred from the Lua
-/// (wow-re `minimap-ping-law.md`). `Minimap_OnUpdate` writes `SetAlpha(255 * (t / 0.5))`, and
-/// `Frame:SetAlpha` (`0x774e90`) **clamps to [0,1]** before scaling to a 0–255 byte — so the
-/// nominal half-second ramp is at full alpha for 498 of its 500 ms and the whole visible fall is
-/// ~12 % of one frame at 60 fps. The real client holds bright for ~5 s and vanishes.
-///
-/// Reproduced as the clamp rather than as a constant 1.0, so the mechanism stays visible and the
-/// `false` branch is a real alternative (a smooth fade, which wow-re notes will visibly diverge).
-const PING_ALPHA_IS_A_POP: bool = true;
+/// The stock frame whose pixels this module draws: `Minimap.xml`'s `<Model name="MiniMapPing">`.
+/// Its show/hide and alpha ARE the ping's lifetime (module doc). The reference's "fade" pops
+/// rather than fades — `Minimap_OnUpdate` writes `SetAlpha(255 · t/0.5)` and `Frame:SetAlpha`
+/// (`0x774e90`) clamps to [0,1] first, so the frame reads full alpha for 498 of the 500 ms — and
+/// that arrives here through the frame's effective alpha, with no constant of ours to keep it.
+pub(super) const PING_FRAME: &str = "MiniMapPing";
 
 /// **The marker, byte-measured** (wow-re `system/ui/scratch/minimap-ping-law.md` §10, VERIFIED).
 ///
@@ -165,27 +166,27 @@ pub(super) struct PingArt {
     pub(super) ping4: Option<Handle<Image>>,
 }
 
-/// The live ping. One at a time — the reference keeps no list either.
+/// The stored ping — the reference's two statics. One, never cleared: the reference keeps no
+/// list, and no map tag either (a worldport mid-ping re-projects the old point against the new
+/// map's player position, which the stock Lua's disc test then hides — reproduced as is).
 struct LivePing {
     /// **The pin**: the WoW `(x, y)` this ping marks. The only stored position; the screen seat is
     /// re-derived from it every frame.
     world: (f32, f32),
-    /// The map it was placed on. A map change drops the ping rather than re-projecting a point
-    /// that does not exist here.
-    map: u32,
-    /// Seconds since it was seated.
-    age: f32,
     /// The pinger's guid, `0` = ourselves — resolved to the `MINIMAP_PING` event's unit token, and
     /// the test for "this is ours, put it on the wire".
     sender: u64,
 }
 
 /// The engine-owned ping state (decision 1596). Seated by a click (drained in the renderer, with
-/// that frame's geometry) or by a group member's `MSG_MINIMAP_PING`; aged, announced and expired
-/// by [`drive_minimap_ping`].
+/// that frame's geometry) or by a group member's `MSG_MINIMAP_PING`; announced by
+/// [`drive_minimap_ping`]; shown for exactly as long as the stock `MiniMapPing` frame is.
 #[derive(Resource, Default)]
 pub(crate) struct MinimapPing {
     live: Option<LivePing>,
+    /// [`PING_FRAME`]'s effective alpha while it is effectively visible, as the renderer last read
+    /// it — `None` hidden. The model clock below runs only while this is `Some`.
+    shown: Option<f32>,
     /// The model's own clock, in **milliseconds, accumulated only while a ping is shown** — which
     /// is the reference's behaviour rather than a simplification of it. `SetSequence(0)` runs once
     /// in the ref's `OnLoad` and stores an *anchor*; the sampler free-runs from it, and a Model
@@ -202,33 +203,9 @@ impl MinimapPing {
     /// Seat a ping at a world point. Re-pinging replaces: the reference tolerates the same, and a
     /// group echo of our own click lands on the spot we already drew (`Minimap_SetPing` twice on
     /// one spot just restarts the timer).
-    pub(crate) fn seat(&mut self, world: (f32, f32), map: u32, sender: u64) {
-        self.live = Some(LivePing {
-            world,
-            map,
-            age: 0.0,
-            sender,
-        });
+    pub(crate) fn seat(&mut self, world: (f32, f32), sender: u64) {
+        self.live = Some(LivePing { world, sender });
         self.fresh = true;
-    }
-
-    /// The ping's alpha at its current age, or `None` once it is over.
-    fn alpha(&self) -> Option<f32> {
-        let age = self.live.as_ref()?.age;
-        if age <= PING_HOLD {
-            return Some(1.0);
-        }
-        let tail = (PING_HOLD + PING_FADE - age) / PING_FADE;
-        if tail <= 0.0 {
-            None
-        } else if PING_ALPHA_IS_A_POP {
-            // The reference's `255 * tail`, clamped by SetAlpha's own 0..1 — full until the last
-            // ~2 ms. Written as the clamp rather than as a constant 1.0 so the mechanism is
-            // visible and the `false` branch is a real alternative, not a rewrite.
-            Some((255.0 * tail).min(1.0))
-        } else {
-            Some(tail)
-        }
     }
 }
 
@@ -254,8 +231,10 @@ fn click_to_world(ctx: &BlipCtx, ui: (f32, f32), seam: f32) -> Option<(f32, f32)
     Some((ctx.wx + up_yd, ctx.wy - right_yd))
 }
 
-/// Seat this frame's `Minimap:PingLocation` click and draw the live ping — both inside the
+/// Seat this frame's `Minimap:PingLocation` click and draw the ping — both inside the
 /// renderer, against the geometry the player actually clicked on and the map actually drew at.
+/// `shown` is the stock [`PING_FRAME`]'s effective alpha this frame (`None` = hidden), read
+/// beside the click: the frame is the ping's lifetime (module doc), so nothing draws without it.
 ///
 /// The seat happens here rather than in a system of its own precisely so there is no window in
 /// which a click is held against a *stale* view scale: the first version parked the click for a
@@ -266,15 +245,16 @@ pub(super) fn emit_ping(
     ctx: &BlipCtx,
     ping: &mut MinimapPing,
     click: Option<(f32, f32)>,
-    map: u32,
+    shown: Option<f32>,
     art: &PingArt,
     quads: &mut UiQuads,
 ) {
     if let Some(world) = click.and_then(|c| click_to_world(ctx, c, ctx.seam)) {
-        ping.seat(world, map, 0);
+        ping.seat(world, 0);
     }
 
-    let Some(alpha) = ping.alpha() else { return };
+    ping.shown = shown;
+    let Some(alpha) = shown else { return };
     let Some(live) = ping.live.as_ref() else {
         return;
     };
@@ -282,7 +262,8 @@ pub(super) fn emit_ping(
 
     // The reference's Lua hides the marker outside the disc and keeps the ping alive
     // (`Minimap_SetPing`'s else-branch is `MiniMapPing:Hide()`, not a clear) — so walking back
-    // into range brings it back for the rest of its 5 s.
+    // into range brings it back for the rest of its 5 s. The stock file makes that test itself
+    // and hides the frame; this one is the same test in yards, for the frame it cannot see.
     let d = (px - ctx.wx).hypot(py - ctx.wy);
     if d >= ctx.radius_yd {
         return;
@@ -329,7 +310,7 @@ pub(super) fn emit_ping(
     );
 }
 
-/// Age the ping, announce a fresh one, and expire it — everything that is *not* geometry.
+/// Announce a fresh ping and republish the position — everything that is *not* geometry.
 ///
 /// Runs before the script tick so the `MINIMAP_PING` event and the position behind
 /// `Minimap:GetPingPosition()` land in the same tick, and so an addon's handler sees a ping that
@@ -340,46 +321,21 @@ pub(super) fn drive_minimap_ping(
     mut ping: ResMut<MinimapPing>,
     time: Res<Time>,
     player: Res<Player>,
-    map: Option<Res<benilla_world::world_map::CurrentMap>>,
     widget: Res<super::MinimapWidget>,
     inside: Res<super::MinimapInside>,
     group: Res<crate::ui_party::GroupState>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
 ) {
-    // Ageing and expiry run before the VM guard: a ping seated with no UI up (the wire can land
-    // one across a world-enter) must still run out, rather than waiting to start its five seconds
-    // whenever a VM next appears.
-    if let Some(live) = ping.live.as_mut() {
-        live.age += time.delta_secs();
-        // The model clock runs only while a ping is up — see `shown_ms`. (The reference stops it
-        // on `Hide()`, which also covers the off-disc case; we keep it running there, a difference
-        // of a few tenths of a phase on a marker nobody can see.)
+    // The model clock runs only while the frame is shown — see `shown_ms`. (The reference's
+    // `Hide()` covers the off-disc case too; ours keeps running there, a difference of a few
+    // tenths of a phase on a marker nobody can see.)
+    if ping.shown.is_some() {
         ping.shown_ms += time.delta_secs() * 1000.0;
-    }
-    // A map change drops it — a DELIBERATE divergence, now that the law is known. wow-re
-    // `minimap-ping-law.md` §3 is categorical: **nothing** engine-side ever clears the reference's
-    // ping (six instructions touch those cells; the only zeroing is a CRT static initializer before
-    // `WinMain`), so a real 1.12 client that teleports mid-ping keeps drawing a marker at a world
-    // point that is now somewhere else entirely. That is a consequence of storing the ping in a
-    // never-cleared global, not a behaviour anyone chose, and the 5 s timer hides it in practice.
-    // We drop it instead: same observable in every case a player can produce, minus the stale
-    // marker after a worldport.
-    if let (Some(live), Some(map)) = (ping.live.as_ref(), map.as_ref()) {
-        if live.map != map.0 {
-            ping.live = None;
-        }
-    }
-    if ping.alpha().is_none() {
-        ping.live = None;
-    }
-    if ping.live.is_none() {
-        ping.fresh = false;
     }
 
     let Some(mut script) = script else { return };
     let Some(live) = ping.live.as_ref() else {
-        script.set_minimap_ping(None);
         return;
     };
 
@@ -402,7 +358,7 @@ pub(super) fn drive_minimap_ping(
     );
     let k = 1.0 / (2.0 * radius);
     let norm = ((wow[1] - live.world.1) * k, (live.world.0 - wow[0]) * k);
-    script.set_minimap_ping(Some(norm));
+    script.set_minimap_ping(norm);
 
     if !std::mem::take(&mut ping.fresh) {
         return;
@@ -523,7 +479,7 @@ mod tests {
     fn the_marker_tracks_the_world_as_the_player_walks() {
         let mut c = ctx();
         let mut ping = MinimapPing::default();
-        ping.seat((30.0, 0.0), 0, 0); // 30 yd north of the player
+        ping.seat((30.0, 0.0), 0); // 30 yd north of the player
         let live = ping.live.as_ref().unwrap();
         let before = c.offset([live.world.0, live.world.1, 0.0]);
         assert!(before.y < 0.0, "north draws UP the screen: {before:?}");
@@ -542,29 +498,43 @@ mod tests {
     /// storage to clear at all. Standing on your own ping must not delete it.
     #[test]
     fn reaching_the_ping_does_not_clear_it() {
+        let mut c = ctx();
         let mut ping = MinimapPing::default();
-        ping.seat((1.0, 1.0), 0, 0);
-        assert!(ping.alpha().is_some());
-        // Age it well inside the hold, standing right on top of the point.
-        ping.live.as_mut().unwrap().age = 2.0;
-        assert_eq!(ping.alpha(), Some(1.0), "a reached ping still holds");
+        let mut quads = UiQuads::default();
+        ping.seat((1.0, 1.0), 0);
+        // Walk onto the point: it still draws.
+        c.wx = 1.0;
+        c.wy = 1.0;
+        emit_ping(&c, &mut ping, None, Some(1.0), &art(), &mut quads);
+        assert!(!quads.overlays.is_empty(), "a reached ping still draws");
     }
 
-    /// The hold, then the reference's clamped tail, then gone.
+    /// **The lifetime is the stock frame's** (1974): the sprite draws while `MiniMapPing` is
+    /// shown, at the frame's alpha, and nothing here ages it. The model clock advances only
+    /// while the frame is shown.
     #[test]
-    fn the_ping_holds_five_seconds_and_pops() {
+    fn the_marker_draws_only_while_the_stock_frame_is_shown() {
+        let c = ctx();
         let mut ping = MinimapPing::default();
-        ping.seat((0.0, 0.0), 0, 0);
-        for (age, want) in [(0.0, Some(1.0)), (4.9, Some(1.0)), (5.4, Some(1.0))] {
-            ping.live.as_mut().unwrap().age = age;
-            assert_eq!(ping.alpha(), want, "at {age}s");
-        }
-        // The last ~2 ms is the only part of the "fade" that is below full.
-        ping.live.as_mut().unwrap().age = PING_HOLD + PING_FADE - 0.0005;
-        let a = ping.alpha().expect("still alive");
-        assert!(a > 0.0 && a < 1.0, "the pop's one dim frame: {a}");
-        ping.live.as_mut().unwrap().age = PING_HOLD + PING_FADE;
-        assert_eq!(ping.alpha(), None, "over");
+        let mut quads = UiQuads::default();
+        ping.seat((0.0, 0.0), 0);
+        emit_ping(&c, &mut ping, None, None, &art(), &mut quads);
+        assert!(quads.overlays.is_empty(), "hidden frame: nothing drawn");
+        assert!(ping.shown.is_none());
+        emit_ping(&c, &mut ping, None, Some(0.5), &art(), &mut quads);
+        assert!(!quads.overlays.is_empty(), "shown frame: drawn");
+        assert!(
+            quads
+                .overlays
+                .iter()
+                .all(|q| (q.color[3] - 0.5).abs() < 1e-6 || q.color[3] == 0.0),
+            "at the frame's alpha (the ring is transparent at phase 0)"
+        );
+        assert_eq!(ping.shown, Some(0.5));
+        assert!(
+            ping.live.is_some(),
+            "the world point outlives the frame's show"
+        );
     }
 
     fn art() -> PingArt {
@@ -588,11 +558,18 @@ mod tests {
         let art = art();
 
         // No ping: nothing drawn.
-        emit_ping(&c, &mut ping, None, 0, &art, &mut quads);
+        emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
         assert!(quads.overlays.is_empty());
 
         // A click 30 UI units up (north) at seam 1 seats a ping 30/px_per_yd yards north.
-        emit_ping(&c, &mut ping, Some((0.0, 30.0)), 0, &art, &mut quads);
+        emit_ping(
+            &c,
+            &mut ping,
+            Some((0.0, 30.0)),
+            Some(1.0),
+            &art,
+            &mut quads,
+        );
         assert_eq!(
             quads.overlays.len(),
             2,
@@ -618,9 +595,9 @@ mod tests {
         quads.overlays.clear();
         let mut far = ctx();
         far.wx = -200.0;
-        emit_ping(&far, &mut ping, None, 0, &art, &mut quads);
+        emit_ping(&far, &mut ping, None, Some(1.0), &art, &mut quads);
         assert!(quads.overlays.is_empty(), "off the disc: hidden");
-        emit_ping(&c, &mut ping, None, 0, &art, &mut quads);
+        emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
         assert_eq!(quads.overlays.len(), 2, "back in range: visible again");
     }
 
@@ -635,10 +612,10 @@ mod tests {
         let art = art();
         let ring_at = |ms: f32| {
             let mut ping = MinimapPing::default();
-            ping.seat((0.0, 0.0), 0, 0);
+            ping.seat((0.0, 0.0), 0);
             ping.shown_ms = ms;
             let mut quads = UiQuads::default();
-            emit_ping(&c, &mut ping, None, 0, &art, &mut quads);
+            emit_ping(&c, &mut ping, None, Some(1.0), &art, &mut quads);
             // The ring is the third layer whenever it is visible at all.
             quads
                 .overlays
@@ -701,9 +678,9 @@ mod tests {
     #[test]
     fn a_second_ping_resumes_the_animation_rather_than_restarting_it() {
         let mut ping = MinimapPing::default();
-        ping.seat((0.0, 0.0), 0, 0);
+        ping.seat((0.0, 0.0), 0);
         ping.shown_ms = 1234.0;
-        ping.seat((10.0, 10.0), 0, 0);
+        ping.seat((10.0, 10.0), 0);
         assert!(
             (ping.shown_ms - 1234.0).abs() < f32::EPSILON,
             "the clock is the model's, not the ping's"

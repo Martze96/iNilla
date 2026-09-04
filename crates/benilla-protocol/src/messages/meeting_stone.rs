@@ -25,3 +25,29 @@ pub(super) fn read_meeting_stone_set_queue(r: &mut impl Read) -> io::Result<Meet
 pub fn meeting_stone_leave() -> Vec<u8> {
     Vec::new()
 }
+
+/// The four display-only replies one handler serves (`0x4ca3c0`, dispatched on the opcode; wow-re
+/// `meeting-stone-status.md` §9, 1974). None touches the queue state, none fires an event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeetingStoneNotice {
+    /// `0x297`, empty.
+    Success,
+    /// `0x298`, empty.
+    InProgress,
+    /// `0x299`, `u64 guid` — the line waits for the name cache.
+    MemberAdded { guid: u64 },
+    /// `0x2BB`, `u8 code`.
+    JoinFailed { code: u8 },
+}
+
+/// Parse `0x299`'s guid.
+pub(super) fn read_meeting_stone_member_added(r: &mut impl Read) -> io::Result<MeetingStoneNotice> {
+    Ok(MeetingStoneNotice::MemberAdded {
+        guid: crate::wire::read_u64_le(r)?,
+    })
+}
+
+/// Parse `0x2BB`'s code byte.
+pub(super) fn read_meeting_stone_join_failed(r: &mut impl Read) -> io::Result<MeetingStoneNotice> {
+    Ok(MeetingStoneNotice::JoinFailed { code: read_u8(r)? })
+}

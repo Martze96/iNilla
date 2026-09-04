@@ -468,7 +468,7 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
     let pane = quads
         .iter()
         .find(|q| {
-            matches!(&q.content, QuadContent::ModelPane { name: Some(n) } if n == "PetModelFrame")
+            matches!(&q.content, QuadContent::ModelPane { name: Some(n), .. } if n == "PetModelFrame")
         })
         .expect("the pet model pane is in the render list");
     let pane_rect = pane.rect.expect("…with a resolved rect");

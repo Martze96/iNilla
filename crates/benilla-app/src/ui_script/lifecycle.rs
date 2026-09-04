@@ -151,10 +151,30 @@ fn ui_wanted(world: &World) -> bool {
 #[derive(Resource, Default)]
 pub(crate) struct PendingEntryUiLoad;
 
-/// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
-/// see [`PendingEntryUiLoad`].
-pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
-    commands.insert_resource(PendingEntryUiLoad);
+/// **The boot VM, parked for the deferral window** (decision 1978). Between the world-entry edge
+/// and the deferred entry load there is no VM in the world at all: the boot VM waits here, out of
+/// every feed's reach, and the load takes it back. Every feed takes the VM as an `Option` and
+/// already returns on `None` — the glue phase's shape — so a feed keyed on a per-VM memo cannot
+/// push into a VM that has no interface yet and then hold the real push back (the chat plate
+/// that stayed white, and 1348's whole class). `ingame_ui_pending` stays for the feeds that
+/// name it; with the VM parked it is belt and braces.
+pub(crate) struct ParkedBootVm(UiScript);
+
+/// `OnEnter(InWorld)`: arm the deferred entry load and park the boot VM. The load itself runs a
+/// few frames later — see [`PendingEntryUiLoad`] and [`ParkedBootVm`].
+pub(crate) fn arm_entry_ui_load(world: &mut World) {
+    world.insert_resource(PendingEntryUiLoad);
+    if let Some(vm) = world.remove_non_send_resource::<UiScript>() {
+        world.insert_non_send_resource(ParkedBootVm(vm));
+    }
+}
+
+/// The parked boot VM back into the world, if one is parked — the session end and the
+/// left-before-the-load arm both want the VM where the tail expects it.
+fn unpark_boot_vm(world: &mut World) {
+    if let Some(ParkedBootVm(vm)) = world.remove_non_send_resource::<ParkedBootVm>() {
+        world.insert_non_send_resource(vm);
+    }
 }
 
 /// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
@@ -200,6 +220,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     if !in_world {
         // Left the world before the load ran — nothing to build a UI for.
         world.remove_resource::<PendingEntryUiLoad>();
+        unpark_boot_vm(world);
         return;
     }
     let covering = world
@@ -245,6 +266,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
 /// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    // The VM the entry edge parked (1978); the live slot is the fallback for a caller that did
+    // not go through the arm.
+    unpark_boot_vm(world);
     if !ui_wanted(world) {
         return;
     }
@@ -449,6 +473,9 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// Exclusive rather than a `NonSendMut` system because it both drops and installs a `NonSend`, and
 /// because the shutdown writes must be ordered against each other — see [`shutdown_ui_state`].
 pub(crate) fn end_ui_session(world: &mut World) {
+    // A VM still parked (the load never ran) goes back into the world first, so the tail below
+    // runs against the same slot it always did (1978).
+    unpark_boot_vm(world);
     // An armed-but-unrun entry load ([`PendingEntryUiLoad`]) means this session never built an
     // in-game UI: there are no globals to save and no addon state to write, and running the
     // shutdown tail against the boot VM would overwrite the real files with that emptiness.
@@ -700,4 +727,33 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The entry edge parks the boot VM (1978): between the arm and the load there is no VM in
+    /// the world for any feed to push into, and the session end puts a never-loaded one back.
+    #[test]
+    fn the_entry_edge_parks_the_boot_vm_and_the_session_end_returns_it() {
+        let mut world = World::new();
+        let boot = UiScript::new().unwrap();
+        let session = boot.session();
+        world.insert_non_send_resource(boot);
+        arm_entry_ui_load(&mut world);
+        assert!(
+            world.get_non_send_resource::<UiScript>().is_none(),
+            "no VM in the deferral window"
+        );
+        assert!(world.get_resource::<PendingEntryUiLoad>().is_some());
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_some());
+        // Left the world before the load ran: the VM comes back, untouched.
+        unpark_boot_vm(&mut world);
+        let vm = world
+            .get_non_send_resource::<UiScript>()
+            .expect("the parked VM is back");
+        assert_eq!(vm.session(), session, "the same VM, no session moved");
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+    }
 }

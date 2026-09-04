@@ -668,6 +668,7 @@ fn drain_quest(
     commands: Res<NetCommands>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -735,6 +736,12 @@ fn drain_quest(
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverAccept { npc, quest });
+                    // `AcceptQuest`'s tail (`0x5013df`): the Quest Log tutorial (1976).
+                    if let Some(t) = tutorials.as_mut() {
+                        t.write(crate::tutorial::TutorialEvent::trigger(
+                            crate::tutorial::id::QUEST_LOG,
+                        ));
+                    }
                     // `Script::AcceptQuest` (`0x501380`) closes the window on the CLICK, not on any
                     // answer: send `0x189` (`0x5eac10`), then `0x501130(0,0)` — the same clear the
                     // refusal handlers call, firing `QUEST_FINISHED`. Ours used to leave the panel

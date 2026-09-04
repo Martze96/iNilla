@@ -116,10 +116,13 @@ mod sound;
 mod target;
 mod textinput;
 mod transport;
+mod tutorial;
 mod ui_action;
 mod ui_auction;
 mod ui_aura;
 mod ui_bank;
+mod ui_battlefield;
+mod ui_battlefield_positions;
 mod ui_battlefield_score;
 mod ui_bind_confirm;
 mod ui_binder;
@@ -206,10 +209,13 @@ use sound::SoundPlugin;
 use target::TargetPlugin;
 use textinput::TextInputPlugin;
 use transport::TransportPlugin;
+use tutorial::TutorialPlugin;
 use ui_action::UiActionPlugin;
 use ui_auction::UiAuctionPlugin;
 use ui_aura::UiAuraPlugin;
 use ui_bank::UiBankPlugin;
+use ui_battlefield::BattlefieldPlugin;
+use ui_battlefield_positions::BattlefieldPositionsPlugin;
 use ui_battlefield_score::BattlefieldScorePlugin;
 use ui_binder::UiBinderPlugin;
 use ui_cast::UiCastPlugin;
@@ -644,6 +650,9 @@ pub fn run(build: BuildId) -> AppExit {
     // boot clock, the area spirit healer, the battleground queue, the meeting stone.
     .add_plugins(UiDialogVerbsPlugin)
     .add_plugins(BattlefieldScorePlugin)
+    .add_plugins(BattlefieldPlugin)
+    .add_plugins(BattlefieldPositionsPlugin)
+    .add_plugins(TutorialPlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.

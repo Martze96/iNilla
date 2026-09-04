@@ -71,6 +71,9 @@ pub(super) fn control(
         // A knockback the server aimed at our mover (decision 1702) — `wire_in` latches it, the
         // take-off site below flies it, and the movement stream acks it with the post-launch pose.
         MessageReader<crate::net::KnockBackMessage>,
+        // The tutorial system's world-input sites (1976): Movement acknowledged + the 10 s
+        // Targeting popup on a movement input, Cameras acknowledged on a mouse-look.
+        crate::tutorial::InputHooks,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -483,6 +486,13 @@ pub(super) fn control(
             turn_right,
             ..
         } = axes;
+        // The world-input tutorial sites (1976): a movement input, a mouse-look.
+        if fwd_axis != 0 || side_axis != 0 {
+            net.13.moved();
+        }
+        if mouselook {
+            net.13.mouselooked();
+        }
         // **The mover's own** six speeds, read once here for the whole frame — the turn below and
         // the run/backpedal selection further down. All six live on the driven unit's `CMovement`
         // and nothing in the reference's applied-input path ever reads *our* speeds when the mover

@@ -70,6 +70,8 @@
         -- arrived on both clients, yet no window). pushable=1 lets a pushable=0 panel (a merchant)
         -- shove it to center, the reference's browse-while-trading arbitration.
         UIPanelWindows["TradeFrame"] = { area = "left", pushable = 1 }
+        -- UIParent.lua l.38, verbatim — the battlemaster's instance list (decision 1974).
+        UIPanelWindows["BattlefieldFrame"] = { area = "left", pushable = 0 }
         -- The trainer window (decision 0237 phase 3, TrainerFrame.xml): an NPC session exactly like
         -- Gossip/Merchant above (area "left", pushable 0) — competes for/replaces them at the slot.
         UIPanelWindows["BenillaTrainerFrame"] = { area = "left", pushable = 0 }

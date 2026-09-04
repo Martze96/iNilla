@@ -20,16 +20,30 @@
 //! * **Battlefield queue** — `SMSG_BATTLEFIELD_STATUS` fills one of three slots and fires
 //!   `UPDATE_BATTLEFIELD_STATUS`; `AcceptBattlefieldPort(index, accept)` sends the slot's map id
 //!   with the answer as one byte.
-//! * **Meeting stone** — `SMSG 0x295 {areaId, status}` stores the queued area and fires
-//!   `MEETINGSTONE_CHANGED`; `CancelMeetingStoneRequest()` sends `0x293` unless in a party led by
-//!   someone else (`ERR_MEETING_STONE_NOT_LEADER`). The five status messages the reference prints
-//!   are not built: the carve lists the five strings but not which status byte picks which.
+//! * **Meeting stone** (wow-re `meeting-stone-status.md`, 1974) — two globals: the queued area
+//!   (`[0xb72038]`) and the cached status text (`[0xb7203c]`). `SMSG 0x295 {areaId, status}`
+//!   latches the old area, stores the new one unconditionally, prints one of five chat lines by
+//!   the status byte (with the two asymmetries §8 records: status 0 names the OLD area and is
+//!   silent when it has no row; status 1 is skipped entirely when the area did not change, names
+//!   the NEW one with an `UNKNOWN` fallback, and plays the `HARDCODED Meeting Stone Join` visual
+//!   on the player), then — on EVERY path, an out-of-range status included — rebuilds the text
+//!   (`MEETINGSTONE_TOOLTIP` over the area's name or `UNKNOWN`, into a 256-byte buffer) and fires
+//!   `MEETINGSTONE_CHANGED`. World enter resets the text to the bare `UNKNOWN` and sends the empty
+//!   `CMSG 0x296` once per world session; world leave drops the text to none.
+//!   `CancelMeetingStoneRequest()` sends `0x293` unless in a party led by someone else
+//!   (`ERR_MEETING_STONE_NOT_LEADER`). The four display-only replies (`0x297/0x298/0x299/0x2BB`)
+//!   are chat lines with no state; the status-1 arm also triggers the Meeting Stones tutorial
+//!   (`crate::tutorial`, 1976).
 
 use std::time::Instant;
 
-use benilla_protocol::messages::BattlefieldStatus;
+use benilla_protocol::messages::{BattlefieldStatus, MeetingStoneNotice};
 use benilla_ui::script::{ScriptValue, UiScript};
 use bevy::prelude::*;
+
+use crate::area::AreaTableRes;
+use crate::creature_anim::spell_visual::{meeting_stone_join_fx, SpellKitFx, SpellVisuals};
+use crate::names::NameCache;
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
 use crate::ui_party::GroupState;
@@ -130,44 +144,95 @@ impl AreaSpiritHealer {
     }
 }
 
-/// The three battleground queue slots (`0xb6e9d0`, stride `0x20`).
+/// The three battleground queue slots (`0xb6e9d0`, stride `0x20`), each with the moment its
+/// status landed — the clock every stamp in the slot is relative to.
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldQueue {
-    slots: [Option<BattlefieldStatus>; 3],
+    slots: [Option<(BattlefieldStatus, Instant)>; 3],
     changed: bool,
-    /// The slot the player is IN (`[0x8457cc]`, the status-3 arm), and the instance's clocks
-    /// (`[0xb6ebb8]`/`[0xb6ebbc]`, §4.2): the run-time stamp `now − Δ₂` and the expiration
-    /// `now + Δ₁`. Any other status for that slot resets both (1972).
+    /// The slot the player is IN (`[0x8457cc]`, the status-3 arm) and its map.
     active: Option<(usize, u32)>,
+    /// The instance's two clocks (`[0xb6ebbc]`/`[0xb6ebb8]`, wow-re `battlefield-verb-family.md`
+    /// §4.2): the run-time stamp `now − Δ₂` and the expiration `now + Δ₁`, set by a status-3
+    /// message and zeroed by ANY non-clearing message of another status — whatever slot it is
+    /// about (§10's anomaly 4, reproduced: 1972 zeroed them only for the active slot; 1974
+    /// corrects it to the handler's unconditional clear).
     run_started: Option<Instant>,
+    instance_expiration: Option<Instant>,
     /// The status-3 arm rebuilds the scoreboard and fires `UPDATE_BATTLEFIELD_SCORE` before
     /// `UPDATE_BATTLEFIELD_STATUS` (§4.2's ordering) — the score feed reads this first.
     score_dirty: bool,
+    /// The handler's two tutorial arms (`0x2f` on queued, `0x30` on confirm; 1976), owed to the
+    /// tutorial system on the next feed.
+    tutorials: Vec<u32>,
 }
 
 impl BattlefieldQueue {
-    /// `SMSG_BATTLEFIELD_STATUS`: an out-of-range slot aborts the handler; a zero map clears.
+    /// `SMSG_BATTLEFIELD_STATUS` (§4.2): an out-of-range slot abandons the message; a zero map
+    /// takes the clear arm (the slot emptied, the instance clocks zeroed only when this was the
+    /// active slot — and the active index itself left alone, as the handler leaves `[0x8457cc]`);
+    /// status 3 stamps the instance clocks and names the slot active; every other status zeroes
+    /// the instance clocks unconditionally and un-names the slot if it was the active one.
     pub(crate) fn apply(&mut self, status: BattlefieldStatus) {
+        self.apply_at(status, Instant::now());
+    }
+
+    fn apply_at(&mut self, status: BattlefieldStatus, now: Instant) {
         let index = status.slot as usize;
         let Some(slot) = self.slots.get_mut(index) else {
             return;
         };
+        if status.map_id == 0 {
+            if self.active.is_some_and(|(i, _)| i == index) {
+                self.run_started = None;
+                self.instance_expiration = None;
+            }
+            *slot = None;
+            self.changed = true;
+            return;
+        }
+        match status.status {
+            1 => self.tutorials.push(crate::tutorial::id::BATTLEGROUND_QUEUE),
+            2 => self
+                .tutorials
+                .push(crate::tutorial::id::PORT_TO_BATTLEGROUND),
+            _ => {}
+        }
         match status.in_progress {
-            Some((_, elapsed_ms)) if status.map_id != 0 => {
+            Some((expires_ms, elapsed_ms)) => {
                 self.active = Some((index, status.map_id));
-                self.run_started =
-                    Some(Instant::now() - std::time::Duration::from_millis(u64::from(elapsed_ms)));
+                self.instance_expiration = (expires_ms != 0)
+                    .then(|| now + std::time::Duration::from_millis(u64::from(expires_ms)));
+                self.run_started = (elapsed_ms != 0)
+                    .then(|| now - std::time::Duration::from_millis(u64::from(elapsed_ms)));
                 self.score_dirty = true;
             }
-            _ => {
+            None => {
+                self.run_started = None;
+                self.instance_expiration = None;
                 if self.active.is_some_and(|(i, _)| i == index) {
                     self.active = None;
-                    self.run_started = None;
                 }
             }
         }
-        *slot = (status.map_id != 0).then_some(status);
+        *slot = Some((status, now));
         self.changed = true;
+    }
+
+    /// The three slots with the instant each status landed — the queue verbs' view builder
+    /// (`crate::ui_battlefield`) reduces their stamps against `now`.
+    pub(crate) fn slots(&self) -> &[Option<(BattlefieldStatus, Instant)>; 3] {
+        &self.slots
+    }
+
+    /// `GetBattlefieldInstanceExpiration()`: `deadline − now` in ms, 0 when unset or past
+    /// (`[0xb6ebb8]`, the `jns` guard).
+    pub(crate) fn instance_expiration_ms(&self, now: Instant) -> u32 {
+        self.instance_expiration.map_or(0, |d| {
+            d.saturating_duration_since(now)
+                .as_millis()
+                .min(u128::from(u32::MAX)) as u32
+        })
     }
 
     /// The map of the battleground the player is in — `LeaveBattlefield`'s payload; `None` = 0.
@@ -194,25 +259,259 @@ impl BattlefieldQueue {
         self.slots
             .get(usize::from(index).checked_sub(1)?)
             .and_then(|s| s.as_ref())
-            .map(|s| s.map_id)
+            .map(|(s, _)| s.map_id)
     }
 }
 
-/// The meeting-stone queue (`[0xb72038]`).
+/// The cached status text's three states (`[0xb7203c]`): none from process start and after world
+/// leave; the bare localized `UNKNOWN` from world enter until the server's `0x295` lands; a
+/// built line after that. The two localized halves are resolved against the VM at push time.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+enum StoneText {
+    #[default]
+    None,
+    Unknown,
+    Built(String),
+}
+
+/// `SStrPrintf`'s buffer at the rebuild: 256 bytes, so 255 of text.
+const STONE_TEXT_BYTES: usize = 255;
+
+/// The meeting-stone queue: the two globals and what the wire still owes the screen.
 #[derive(Resource, Default)]
 pub(crate) struct MeetingStone {
+    /// `[0xb72038]` — the queued area id, `0` = none.
     pub(crate) area: u32,
-    pub(crate) status: Option<u8>,
-    changed: bool,
+    text: StoneText,
+    /// `0x295` arrivals since the last feed: `(the area BEFORE the store, status)`; the new area
+    /// is already in `area` (the handler stores it before it switches).
+    updates: Vec<(u32, u8)>,
+    notices: Vec<MeetingStoneNotice>,
+    /// `0x299` guids whose name has not resolved yet.
+    pending_members: Vec<u64>,
+    /// The VM's copy of the two globals is stale.
+    dirty: bool,
 }
 
 impl MeetingStone {
-    /// `SMSG 0x295`: the area is stored unconditionally; the status picks the (unbuilt) message.
+    /// `SMSG 0x295`: the area is stored unconditionally; the line, the rebuild and the event
+    /// follow on the next feed, with the VM.
     pub(crate) fn apply(&mut self, area: u32, status: u8) {
+        let old = self.area;
         self.area = area;
-        self.status = Some(status);
-        self.changed = true;
+        self.updates.push((old, status));
     }
+
+    /// One of the four display-only replies.
+    pub(crate) fn apply_notice(&mut self, notice: MeetingStoneNotice) {
+        self.notices.push(notice);
+    }
+
+    /// The enter-world bring-up (`0x4c9f40`): the text becomes the bare `UNKNOWN`; the area is
+    /// untouched (the server's reply resets it).
+    fn enter_world(&mut self) {
+        self.text = StoneText::Unknown;
+        self.dirty = true;
+    }
+
+    /// The leave-world sweep (`0x4c9f80`): the text goes, the area stays.
+    fn leave_world(&mut self) {
+        self.text = StoneText::None;
+        self.dirty = true;
+    }
+}
+
+/// A `GlobalStrings` value as the client's `GetText` reads it: the string, or `""` when the Lua
+/// global is missing (`0x882748`, the shared empty-string constant — never NULL).
+fn global_text(script: &UiScript, key: &str) -> String {
+    script
+        .lua()
+        .globals()
+        .get::<String>(key)
+        .unwrap_or_default()
+}
+
+/// The area's localized name, or `None` where the reference's three-part AreaTable resolve fails.
+fn area_name(areas: Option<&AreaTableRes>, id: u32) -> Option<&str> {
+    areas.and_then(|a| a.0.name(id))
+}
+
+/// The status-text rebuild `0x4ca070`: `MEETINGSTONE_TOOLTIP` (or `""` when missing) over the
+/// queued area's name (or `UNKNOWN`), printed into a 256-byte buffer.
+fn build_stone_text(script: &UiScript, areas: Option<&AreaTableRes>, area: u32) -> String {
+    let name = area_name(areas, area)
+        .map(str::to_string)
+        .unwrap_or_else(|| global_text(script, "UNKNOWN"));
+    let mut text = global_text(script, "MEETINGSTONE_TOOLTIP").replacen("%s", &name, 1);
+    if text.len() > STONE_TEXT_BYTES {
+        let mut cut = STONE_TEXT_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    text
+}
+
+/// The `0x295` handler's five-way table (§8), as the line it prints for `(old, new, status)` —
+/// `None` where the reference prints nothing: status 0 with no row for the OLD area, status 1
+/// with an unchanged area, and any status past 4.
+fn stone_line(
+    script: &UiScript,
+    areas: Option<&AreaTableRes>,
+    old: u32,
+    new: u32,
+    status: u8,
+) -> Option<crate::ui_action::Shown> {
+    match status {
+        0 => {
+            let name = area_name(areas, old)?;
+            crate::ui_action::keyed_line_s(script, "ERR_MEETING_STONE_LEFT_QUEUE_S", &[name])
+        }
+        1 => {
+            if new == old {
+                return None;
+            }
+            let name = area_name(areas, new)
+                .map(str::to_string)
+                .unwrap_or_else(|| global_text(script, "UNKNOWN"));
+            crate::ui_action::keyed_line_s(script, "ERR_MEETING_STONE_IN_QUEUE_S", &[&name])
+        }
+        2 => crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_OTHER_MEMBER_LEFT"),
+        3 => crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_PARTY_KICKED_FROM_QUEUE"),
+        4 => crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_MEMBER_STILL_IN_QUEUE"),
+        _ => None,
+    }
+}
+
+/// The inputs the meeting-stone feed reads beside the VM and its own state — bundled because the
+/// feed sits at Bevy's parameter ceiling otherwise.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MeetingStoneInputs<'w, 's> {
+    areas: Option<Res<'w, AreaTableRes>>,
+    names: ResMut<'w, NameCache>,
+    commands: Res<'w, NetCommands>,
+    visuals: Option<Res<'w, SpellVisuals>>,
+    fx: MessageWriter<'w, SpellKitFx>,
+    self_q: Query<'w, 's, Entity, With<SelfPlayer>>,
+    tutorials: Option<MessageWriter<'w, crate::tutorial::TutorialEvent>>,
+}
+
+/// The meeting stone's feed: the `0x295` lines, the rebuild and `MEETINGSTONE_CHANGED` per
+/// arrival; the four display replies; the two globals pushed when they moved.
+fn feed_meeting_stone(
+    script: Option<NonSendMut<UiScript>>,
+    mut stone: ResMut<MeetingStone>,
+    mut inputs: MeetingStoneInputs,
+    mut sink: crate::ui_action::MessageSink,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let areas = inputs.areas.as_deref();
+    let mut lines = Vec::new();
+
+    for (old, status) in std::mem::take(&mut stone.updates) {
+        let new = stone.area;
+        lines.extend(stone_line(&script, areas, old, new, status));
+        if status == 1 && new != old {
+            // The status-1 arm's extra block: `Effect_C` kind `0xc` on the local player, then
+            // the Meeting Stones tutorial (`0x4ca363`, 1976).
+            if let (Some(visuals), Ok(entity)) = (inputs.visuals.as_deref(), inputs.self_q.single())
+            {
+                if let Some(fx) = meeting_stone_join_fx(visuals, entity) {
+                    inputs.fx.write(fx);
+                }
+            }
+            if let Some(t) = inputs.tutorials.as_mut() {
+                t.write(crate::tutorial::TutorialEvent::trigger(
+                    crate::tutorial::id::MEETING_STONES,
+                ));
+            }
+        }
+        // Every path — the silent legs and an out-of-range status included — rebuilds and fires.
+        // The two globals reach the VM BEFORE the event: the stock handler's first act is
+        // `IsInMeetingStoneQueue()`, which has to see the area this packet stored.
+        let text = build_stone_text(&script, areas, new);
+        stone.text = StoneText::Built(text.clone());
+        stone.dirty = false;
+        script.set_meeting_stone(new, Some(text));
+        script.fire_event("MEETINGSTONE_CHANGED", vec![]);
+    }
+
+    for notice in std::mem::take(&mut stone.notices) {
+        match notice {
+            MeetingStoneNotice::Success => {
+                lines.extend(crate::ui_action::keyed_line(
+                    &script,
+                    "ERR_MEETING_STONE_SUCCESS",
+                ));
+            }
+            MeetingStoneNotice::InProgress => {
+                lines.extend(crate::ui_action::keyed_line(
+                    &script,
+                    "ERR_MEETING_STONE_IN_PROGRESS",
+                ));
+            }
+            MeetingStoneNotice::MemberAdded { guid } => stone.pending_members.push(guid),
+            MeetingStoneNotice::JoinFailed { code } => {
+                let key = match code {
+                    1 => "ERR_MEETING_STONE_MUST_BE_LEADER",
+                    2 => "ERR_MEETING_STONE_GROUP_FULL",
+                    3 => "ERR_MEETING_STONE_NO_RAID_GROUP",
+                    _ => continue,
+                };
+                lines.extend(crate::ui_action::keyed_line(&script, key));
+            }
+        }
+    }
+    // `0x299`'s name-cache callback: the line when the name lands, nothing until then.
+    let pending = std::mem::take(&mut stone.pending_members);
+    for guid in pending {
+        match inputs
+            .names
+            .resolve(guid, &inputs.commands)
+            .map(str::to_string)
+        {
+            Some(name) => lines.extend(crate::ui_action::keyed_line_s(
+                &script,
+                "ERR_MEETING_STONE_MEMBER_ADDED_S",
+                &[&name],
+            )),
+            None => stone.pending_members.push(guid),
+        }
+    }
+    if !lines.is_empty() {
+        crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
+    }
+
+    if std::mem::take(&mut stone.dirty) {
+        let text = match &stone.text {
+            StoneText::None => None,
+            StoneText::Unknown => Some(global_text(&script, "UNKNOWN")),
+            StoneText::Built(t) => Some(t.clone()),
+        };
+        script.set_meeting_stone(stone.area, text);
+    }
+}
+
+/// The enter-world bring-up's meeting-stone leg: the text reset, then the empty `CMSG 0x296`
+/// — once per world session, which is what the reference's run-once byte amounts to.
+fn meeting_stone_enter_world(
+    mut entered: MessageReader<crate::net::EnteredWorldMessage>,
+    mut stone: ResMut<MeetingStone>,
+    commands: Res<NetCommands>,
+) {
+    if entered.read().next().is_none() {
+        return;
+    }
+    stone.enter_world();
+    let _ = commands.0.send(ClientCommand::MeetingStoneStatusQuery);
+}
+
+/// The leave-world sweep's leg: the text dropped, the area kept.
+fn meeting_stone_leave_world(mut stone: ResMut<MeetingStone>) {
+    stone.leave_world();
 }
 
 pub(crate) fn feed_dialog_verbs(
@@ -221,8 +520,8 @@ pub(crate) fn feed_dialog_verbs(
     mut boot: ResMut<InstanceBoot>,
     mut spirit: ResMut<AreaSpiritHealer>,
     mut queue: ResMut<BattlefieldQueue>,
-    mut stone: ResMut<MeetingStone>,
     mut sink: crate::ui_action::MessageSink,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -256,11 +555,13 @@ pub(crate) fn feed_dialog_verbs(
         script.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
     }
 
+    for id in std::mem::take(&mut queue.tutorials) {
+        if let Some(t) = tutorials.as_mut() {
+            t.write(crate::tutorial::TutorialEvent::trigger(id));
+        }
+    }
     if std::mem::take(&mut queue.changed) {
         script.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
-    }
-    if std::mem::take(&mut stone.changed) {
-        script.fire_event("MEETINGSTONE_CHANGED", vec![]);
     }
 }
 
@@ -372,9 +673,15 @@ impl Plugin for UiDialogVerbsPlugin {
                 (
                     close_npc_session_out_of_range::<PetUnlearnState>.before(feed_dialog_verbs),
                     feed_dialog_verbs.before(UiInput),
+                    meeting_stone_enter_world.before(feed_meeting_stone),
+                    feed_meeting_stone.before(UiInput),
                     drain_latch_verbs.after(UiInput),
                     drain_queue_verbs.after(UiInput),
                 ),
+            )
+            .add_systems(
+                OnExit(crate::char_select::ClientState::InWorld),
+                meeting_stone_leave_world,
             );
     }
 }
@@ -454,7 +761,7 @@ mod tests {
             slot,
             map_id,
             bracket: 0,
-            unknown: 0,
+            instance_id: 0,
             status: 2,
             time_ms: Some(0),
             in_progress: None,
@@ -471,6 +778,149 @@ mod tests {
         assert_eq!(q.map_id(4), None);
         q.apply(status(1, 0));
         assert_eq!(q.map_id(2), None, "a zero map clears the slot");
+    }
+
+    /// The instance clocks (§4.2): stamped by status 3, zeroed by any other status of ANY slot,
+    /// and by a clear of the active slot only — which leaves the active index alone.
+    #[test]
+    fn the_instance_clocks_follow_the_status_handler() {
+        let mut q = BattlefieldQueue::default();
+        let now = Instant::now();
+        let mut active = BattlefieldStatus {
+            slot: 0,
+            map_id: 489,
+            bracket: 0,
+            instance_id: 3,
+            status: 3,
+            time_ms: None,
+            in_progress: Some((90_000, 30_000)),
+            queued: None,
+        };
+        q.apply_at(active.clone(), now);
+        assert_eq!(q.active_map(), Some(489));
+        assert_eq!(q.instance_expiration_ms(now), 90_000);
+        assert_eq!(q.run_time_ms(now), 30_000);
+        assert!(q.take_score_dirty());
+        // A QUEUED update for slot 2 zeroes both clocks — the handler's unconditional arm.
+        let mut queued = active.clone();
+        queued.slot = 1;
+        queued.map_id = 529;
+        queued.status = 1;
+        queued.in_progress = None;
+        queued.queued = Some((60_000, 5_000));
+        q.apply_at(queued, now);
+        assert_eq!(
+            q.active_map(),
+            Some(489),
+            "another slot's status leaves the active index"
+        );
+        assert_eq!(q.instance_expiration_ms(now), 0);
+        assert_eq!(q.run_time_ms(now), 0);
+        assert_eq!(q.map_id(2), Some(529));
+        // Re-arm, then clear the ACTIVE slot: the clocks go, the index stays (`[0x8457cc]`).
+        q.apply_at(active.clone(), now);
+        active.map_id = 0;
+        q.apply_at(active, now);
+        assert_eq!(q.instance_expiration_ms(now), 0);
+        assert_eq!(q.map_id(1), None);
+        assert_eq!(
+            q.active_map(),
+            Some(489),
+            "the clear arm never resets the active index"
+        );
+    }
+
+    /// `0x295`'s store is unconditional and the old id is latched first; the feed reads both.
+    #[test]
+    fn the_stone_latches_the_old_area_before_storing_the_new() {
+        let mut stone = MeetingStone::default();
+        stone.apply(1519, 1);
+        stone.apply(1519, 1);
+        stone.apply(0, 0);
+        stone.apply(12, 9);
+        assert_eq!(stone.area, 12);
+        assert_eq!(stone.updates, vec![(0, 1), (1519, 1), (1519, 0), (0, 9)]);
+        stone.enter_world();
+        assert_eq!(stone.text, StoneText::Unknown);
+        assert_eq!(
+            stone.area, 12,
+            "the enter-world reset leaves the area alone"
+        );
+        stone.leave_world();
+        assert_eq!(stone.text, StoneText::None);
+    }
+
+    /// The five-way table with its two asymmetries, and the rebuild's fallbacks and buffer.
+    #[test]
+    fn the_status_table_and_the_rebuild_follow_the_handler() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let areas =
+            AreaTableRes(benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable"));
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"MEETINGSTONE_TOOLTIP = "Looking for more for %s" UNKNOWN = "Unknown"
+               ERR_MEETING_STONE_LEFT_QUEUE_S = "You are no longer queued for %s."
+               ERR_MEETING_STONE_IN_QUEUE_S = "You are now in the queue to join a party for %s."
+               ERR_MEETING_STONE_OTHER_MEMBER_LEFT = "left"
+               ERR_MEETING_STONE_PARTY_KICKED_FROM_QUEUE = "kicked"
+               ERR_MEETING_STONE_MEMBER_STILL_IN_QUEUE = "still""#,
+        )
+        .unwrap();
+        let a = Some(&areas);
+        let text = |l: Option<crate::ui_action::Shown>| l.map(|l| l.text().to_string());
+        // Status 0 names the OLD area — and is silent when it has no row.
+        assert_eq!(
+            text(stone_line(&s, a, 1519, 0, 0)).as_deref(),
+            Some("You are no longer queued for Stormwind City.")
+        );
+        assert_eq!(
+            text(stone_line(&s, a, 0, 0, 0)),
+            None,
+            "no row for area 0: silent"
+        );
+        assert_eq!(text(stone_line(&s, a, 999_999, 0, 0)), None);
+        // Status 1 names the NEW area, falls back to UNKNOWN, and is skipped when unchanged.
+        assert_eq!(
+            text(stone_line(&s, a, 0, 1519, 1)).as_deref(),
+            Some("You are now in the queue to join a party for Stormwind City.")
+        );
+        assert_eq!(
+            text(stone_line(&s, a, 0, 999_999, 1)).as_deref(),
+            Some("You are now in the queue to join a party for Unknown.")
+        );
+        assert_eq!(
+            text(stone_line(&s, a, 1519, 1519, 1)),
+            None,
+            "unchanged: skipped"
+        );
+        assert_eq!(text(stone_line(&s, a, 0, 0, 2)).as_deref(), Some("left"));
+        assert_eq!(text(stone_line(&s, a, 0, 0, 3)).as_deref(), Some("kicked"));
+        assert_eq!(text(stone_line(&s, a, 0, 0, 4)).as_deref(), Some("still"));
+        assert_eq!(
+            text(stone_line(&s, a, 0, 0, 5)),
+            None,
+            "past the table: nothing"
+        );
+        // The rebuild.
+        assert_eq!(
+            build_stone_text(&s, a, 1519),
+            "Looking for more for Stormwind City"
+        );
+        assert_eq!(build_stone_text(&s, a, 0), "Looking for more for Unknown");
+        s.run("MEETINGSTONE_TOOLTIP = string.rep('x', 300) .. '%s'")
+            .unwrap();
+        assert_eq!(
+            build_stone_text(&s, a, 1519).len(),
+            STONE_TEXT_BYTES,
+            "the 256-byte buffer"
+        );
+        s.run("MEETINGSTONE_TOOLTIP = nil").unwrap();
+        assert_eq!(
+            build_stone_text(&s, a, 1519),
+            "",
+            "a missing template is GetText's empty string, not the unreachable %s fallback"
+        );
     }
 
     #[test]

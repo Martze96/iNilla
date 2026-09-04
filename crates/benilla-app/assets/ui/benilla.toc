@@ -441,10 +441,23 @@ Interface\FrameXML\BonusActionBarFrame.xml
 # their OnShow/OnHide calls the `UpdateMicroButtons` this file defines (the panel frames
 # themselves are read back through getglobal, so the reverse dependency is call-time).
 MicroMenu.xml
-# The HUD minimap cluster (decision 0203 phase 1): the chrome around the engine-rendered
-# <Minimap> widget hole (`crate::minimap` fills it). After GameTooltip (its zone-text
-# hover uses the shared tooltip).
-MinimapCluster.xml
+# ══ THE BATTLEGROUND LIST + THE MINIMAP CLUSTER — the reference's own, off the player's chain
+# (1751; decision 1974) ══
+# BattlefieldFrame.xml + BattlefieldFrame.lua: the battlemaster's instance list (the "First
+# Available" row, the join and join-as-group buttons) over `crate::ui_battlefield`'s feed and
+# the engine's queue family (GetBattlefieldStatus & co.), and — defined here, consumed by the
+# minimap file below at LOAD time — the minimap queue icon's status pass and its right-click
+# dropdown. The reference's toc seats it right before Minimap.xml (l.29-30) for that reason.
+# After UIDropDownMenu.xml (the dropdown template) and UIPanelTemplates (the buttons, the faux
+# scroll frame).
+Interface\FrameXML\BattlefieldFrame.xml
+# Minimap.xml + Minimap.lua: the cluster around the engine-rendered <Minimap> widget hole
+# (`crate::minimap` fills it), the zone text, the zoom buttons, the tracking / mail / meeting
+# stone / battlefield icons, and `MiniMapPing` — a <Model> this engine draws no pixels for; the
+# app's ping sprite (`minimap/ping.rs`) follows that frame's own show/hide and alpha, so the
+# 5 s lifetime is this file's, as the reference's is. After GameTooltip (the zone-text hover).
+# 0203's transcription is gone.
+Interface\FrameXML\Minimap.xml
 # ══ THE TIME-OF-DAY INDICATOR — the reference's own, off the player's chain (1751, window 5) ══
 # `GameTimeFrame`, `GameTimeTexture`, and `GameTime_GetTime` / `GameTimeFrame_Update` /
 # `_UpdateTooltip` / `GAMETIME_DAWN`/`_DUSK` out of `GameTime.lua`. Ours was a re-implementation of
@@ -528,13 +541,16 @@ OptionsFrameTemplates.xml
 # entry and the ESC rung that cancel-clicks it. UIDropDownMenu.xml sits above too, but that
 # direction is call-time only, so the two could sit either way round.
 Interface\FrameXML\ColorPickerFrame.xml
-# The fullscreen world map (decision 0203 phase 2), over the worldmap host API
-# (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
-# ToggleWorldMap().
-# Its per-unit blip templates load FIRST: WorldMapFrame.xml instantiates WorldMapParty1..4 and
-# WorldMapRaid1..40 with inherits=, so the virtual Frames have to be registered before it.
-WorldMapFrameTemplates.xml
-WorldMapFrame.xml
+# ══ THE WORLD MAP — the reference's own, off the player's chain (1751, migrated 1980) ══
+# The fullscreen map over the worldmap host API (`crate::ui_world_map` feeds the player, corpse,
+# party and landmark positions; `crate::ui_battlefield_positions` the battleground teammates and
+# the flag carrier); the 'M' binding (ui_script/input.rs) calls its ToggleWorldMap(). The file
+# <Include>s its own blip templates (WorldMapFrameTemplates.xml) before the frames that inherit
+# them. Its player arrow is the Create/Position/Show/UpdateWorldMapArrowFrames family
+# (`script/worldmap_arrow.rs`), an anonymous Model pane the app draws as the minimap's arrow
+# sprite; its WorldMapPing is a MinimapPing.mdx Model pane this engine holds and draws nothing
+# into (named gap, 1980).
+Interface\FrameXML\WorldMapFrame.xml
 # ══ THE CAST BAR — the reference's own, off the player's chain (1751) ══
 # `CastingBarFrame` + its Border/Flash/Spark/Text children, driven by the SPELLCAST_* events
 # `crate::ui_cast` fires (decision 0137 phase 1). Our `CastingBar.xml` was a transcription of this
@@ -1091,6 +1107,15 @@ Interface\FrameXML\HelpFrame.xml
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.
 Interface\FrameXML\CinematicFrame.xml
+# ══ THE TUTORIAL FRAME — the reference's own, off the player's chain (1751; decision 1976) ══
+# TutorialFrame.xml + TutorialFrame.lua: the alert buttons `TUTORIAL_TRIGGER` queues, the window
+# a click opens over `TUTORIAL_TITLE<n>`/`TUTORIAL<n>`, the "Display Tips" checkbox whose unticked
+# hide calls ClearTutorials, and the CINEMATIC_STOP arm that clicks the Welcome alert when the
+# intro ends. Right after CinematicFrame.xml as the reference's toc has it (l.76-80); its
+# engine — the two flag banks, the fire-once trigger, the four verbs — is `crate::tutorial`.
+# Needs UIPanelTemplates (UICheckButtonTemplate), BasicControls (the dialog button textures),
+# GameTooltip, and UiPanels' SetButtonPulse, all far above.
+Interface\FrameXML\TutorialFrame.xml
 # The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
 # layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
 # + panel manager, MicroMenu's UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing

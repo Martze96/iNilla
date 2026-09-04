@@ -95,8 +95,18 @@ pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
 /// [`super::ServerPacket::CompressedMoves`].
 pub const SMSG_COMPRESSED_MOVES: u16 = 0x02FB;
 pub const SMSG_LOGIN_VERIFY_WORLD: u16 = 0x0236;
-// The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
-// 631/632/722).
+/// The account's tutorial bank (wow-re `tutorial-flags.md` §7, decision 1976): every remaining
+/// byte of the body is the bank, both of the client's banks copied from it — vmangos sends 32
+/// bytes (256 bits) after the login. Until it lands no tutorial can fire.
+pub const SMSG_TUTORIAL_FLAGS: u16 = 0x00FD; // 253
+/// `FlagTutorial(n)` and the six auto-acknowledge sites (§5/§6, 1976): one `u32`, the 0-based id.
+pub const CMSG_TUTORIAL_FLAG: u16 = 0x00FE; // 254
+/// `ClearTutorials()` (§6, 1976): EMPTY — every bit set locally and on the server.
+pub const CMSG_TUTORIAL_CLEAR: u16 = 0x00FF; // 255
+/// `ResetTutorials()` (§6, 1976): EMPTY — every bit cleared locally and on the server.
+pub const CMSG_TUTORIAL_RESET: u16 = 0x0100; // 256
+                                             // The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
+                                             // 631/632/722).
 pub const SMSG_PLAY_MUSIC: u16 = 0x0277;
 pub const SMSG_PLAY_OBJECT_SOUND: u16 = 0x0278;
 pub const SMSG_PLAY_SOUND: u16 = 0x02D2;
@@ -1006,6 +1016,37 @@ pub const MSG_PVP_LOG_DATA: u16 = 0x02E0; // 736
 /// `LeaveBattlefield()`'s packet (§5.3, 1972): `u32 mapId` of the battleground the client is in,
 /// sent only once the scoreboard's "ended" byte has arrived.
 pub const CMSG_LEAVE_BATTLEFIELD: u16 = 0x02E1; // 737
+/// The battleground teammate positions, both ways (wow-re `worldmap-arrow-and-positions.md` §3.1,
+/// 1980): `RequestBattlefieldPositions()` sends it EMPTY (5000 ms throttle, only with an active
+/// slot); the server's answer is `u32 count`, `count × (u64 guid, f32 x, f32 y)`, then
+/// `u8 hasCarrier` and, when set, one `(u64 guid, f32 x, f32 y)` flag carrier. No event fires on
+/// arrival — the UI polls.
+pub const MSG_BATTLEGROUND_PLAYER_POSITIONS: u16 = 0x02E9; // 745
+/// `ShowBattlefieldList(index)`'s packet (wow-re `battlefield-verb-family.md` §5, 1974): `u32 mapId`
+/// of a QUEUED slot — the battlemaster-less way to reopen the instance list.
+pub const CMSG_BATTLEFIELD_LIST: u16 = 0x023C; // 572
+/// The battleground instance list (§4.1, 1974): `u64 battlemaster` (zero when the list was not
+/// opened at an NPC), `u32 mapId`, `u8 bracket`, `u32 count`, `count × u32 instanceId`. Fires
+/// `BATTLEFIELDS_SHOW`; the cached battlemaster guid decides which join opcode a later
+/// `JoinBattlefield` sends.
+pub const SMSG_BATTLEFIELD_LIST: u16 = 0x023D; // 573
+/// `JoinBattlefield`'s packet when the list arrived WITHOUT a battlemaster (§5.2, 1974): `u32 mapId`,
+/// `u32 instanceId` (0 = first available), `u8 asGroup`.
+pub const CMSG_BATTLEFIELD_JOIN: u16 = 0x023E; // 574
+/// `JoinBattlefield`'s packet when the list arrived from a battlemaster (§5.2, 1974): `u64 guid`,
+/// `u32 mapId`, `u32 instanceId` (0 = first available), `u8 asGroup`.
+pub const CMSG_BATTLEMASTER_JOIN: u16 = 0x02EE; // 750
+/// The world-enter status request (§5/§8, 1974): EMPTY; the server answers with one
+/// `SMSG_BATTLEFIELD_STATUS` per live queue slot.
+pub const CMSG_BATTLEFIELD_STATUS: u16 = 0x02D3; // 723
+/// A group join's verdict (§4.4, 1974): `u32 result` — `0xFFFFFFFE` deserters (message 439), a
+/// Map.dbc id joined (440, with the map's name), anything else the generic failure (441).
+pub const SMSG_GROUP_JOINED_BATTLEGROUND: u16 = 0x02E8; // 744
+/// A player joined the battleground (§4.5, 1974): `u64 guid`, printed as message 444 once the name
+/// cache answers.
+pub const SMSG_BATTLEGROUND_PLAYER_JOINED: u16 = 0x02EC; // 748
+/// A player left the battleground (§4.5, 1974): `u64 guid`, message 445.
+pub const SMSG_BATTLEGROUND_PLAYER_LEFT: u16 = 0x02ED; // 749
 /// The area spirit healer query the client sends when it adopts a new healer (§6): `u64 guid`;
 /// answered by [`SMSG_AREA_SPIRIT_HEALER_TIME`] (decision 1963).
 pub const CMSG_AREA_SPIRIT_HEALER_QUERY: u16 = 0x02E2; // 738
@@ -1023,6 +1064,21 @@ pub const CMSG_MEETINGSTONE_LEAVE: u16 = 0x0293; // 659
 /// The meeting-stone queue state (§8): `u32 areaId`, `u8 status`; stored unconditionally, a
 /// status message per value, then `MEETINGSTONE_CHANGED` (decision 1963).
 pub const SMSG_MEETINGSTONE_SETQUEUE: u16 = 0x0295; // 661
+/// The enter-world "what is my meeting-stone status" query (wow-re `meeting-stone-status.md`
+/// §6, 1974): EMPTY, sent once per world session right after the status text resets to the
+/// localized `UNKNOWN`; the server answers with `0x295`. The emulators' names for this block do
+/// not line up with the client's; the numbers are what is verified.
+pub const CMSG_MEETINGSTONE_STATUS_QUERY: u16 = 0x0296; // 662
+/// Display-only (§9): empty; `ERR_MEETING_STONE_SUCCESS` (1974).
+pub const SMSG_MEETINGSTONE_SUCCESS: u16 = 0x0297; // 663
+/// Display-only (§9): empty; `ERR_MEETING_STONE_IN_PROGRESS` (1974).
+pub const SMSG_MEETINGSTONE_IN_PROGRESS: u16 = 0x0298; // 664
+/// Display-only (§9): `u64 guid`; `ERR_MEETING_STONE_MEMBER_ADDED_S` with the name once the name
+/// cache answers, nothing on a miss that never resolves (1974).
+pub const SMSG_MEETINGSTONE_MEMBER_ADDED: u16 = 0x0299; // 665
+/// Display-only (§9): `u8 code` — `1` must-be-leader, `2` group full, `3` no raid group, anything
+/// else nothing (1974).
+pub const SMSG_MEETINGSTONE_JOIN_FAILED: u16 = 0x02BB; // 699
 /// `ConfirmPetUnlearn()`'s packet (§9): `u64 trainerGuid`, the latch — never an argument
 /// (decision 1963).
 pub const CMSG_PET_UNLEARN: u16 = 0x02F0; // 752

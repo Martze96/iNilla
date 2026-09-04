@@ -92,6 +92,12 @@ pub enum FrameKind {
     /// substitution set is a look composed against the player's live equipment, which the VM
     /// never holds (decisions 1060, 1969; wow-re `ui/scratch/dressup-model-equipment.md` §0).
     DressUpModel,
+    /// `TabardModel` (`0x503bd0`) — the guild tabard designer's pane: `CGCharacterModelBase`'s
+    /// other subclass (the dress-up model's sibling), with ten verbs of its own in table
+    /// `0x84ee40` — the emblem/colour cycling, the two emblem-texture setters, the save gate and
+    /// the save. Its state is [`KindState::Model`] like its siblings; the design it carries lives
+    /// app-side (`script::tabard`, decision 1977).
+    TabardModel,
     /// `CSimpleMessageFrame` — the non-scrolling message frame (`UIErrorsFrame`'s class, and the
     /// one `CreateFrame("MessageFrame")` makes). Its behaviour (the display lines, the per-line
     /// fade, `insertMode`) is modeled in [`KindState::Message`]. Sibling of

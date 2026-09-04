@@ -568,7 +568,17 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "WorldMapFrame.xml",
+        // The stock map's OnShow/OnHide call `UpdateMicroButtons` unguarded (1980), which the
+        // micro menu defines over the action bar it sits in — the spellbook kit's cluster.
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "MicroMenu.xml",
+        r"Interface\FrameXML\WorldMapFrame.xml",
     ]);
 
     // Opens normally, and takes the full-screen slot.
@@ -619,7 +629,17 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "WorldMapFrame.xml",
+        // The action-bar cluster the micro menu sits in — the stock map's OnShow/OnHide call
+        // `UpdateMicroButtons` unguarded (1980).
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "MicroMenu.xml",
+        r"Interface\FrameXML\WorldMapFrame.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.

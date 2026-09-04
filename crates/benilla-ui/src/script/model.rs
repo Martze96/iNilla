@@ -824,8 +824,37 @@ pub(crate) struct Model {
     pub(crate) battlefield_score_requests: u32,
     /// `LeaveBattlefield()` calls that passed the "ended" gate since the last drain.
     pub(crate) battlefield_leave_requests: u32,
+    /// The battleground instance list and its scalars (1974), as the app last pushed them.
+    pub(crate) battlefield_list: super::battlefield_queue::BattlefieldListView,
+    /// `[0xb6eba0]` — the selected instance id (a VALUE; `SetSelectedBattlefield` writes it).
+    pub(crate) battlefield_selected: u32,
+    /// The three queue slots (1974), pushed each frame with their clock-shaped values reduced.
+    pub(crate) battlefield_slots: Vec<super::battlefield_queue::BattlefieldQueueSlot>,
+    /// `GetBattlefieldInstanceExpiration()`'s answer, pushed each frame.
+    pub(crate) battlefield_instance_expiration_ms: u32,
+    /// `JoinBattlefield` calls since the last drain: `(instance id, as group)`.
+    pub(crate) battlefield_join_requests: Vec<(u32, bool)>,
+    /// `ShowBattlefieldList` calls that passed their gates: the queued slot's map id.
+    pub(crate) battlefield_list_requests: Vec<u32>,
+    /// The battleground teammates' map positions as the app resolved them (1980), the flag
+    /// carrier, the active map's icon scale, and `RequestBattlefieldPositions()` calls.
+    pub(crate) battlefield_positions: Vec<super::battlefield_positions::BattlefieldPositionView>,
+    pub(crate) battlefield_flag: Option<super::battlefield_positions::BattlefieldFlagView>,
+    pub(crate) battlefield_icon_scale: f32,
+    pub(crate) battlefield_position_requests: u32,
     /// `CancelMeetingStoneRequest()` calls since the last drain — the app gates on leadership.
     pub(crate) meeting_stone_cancels: u32,
+    /// The meeting stone's queued area (`[0xb72038]`) and cached status text (`[0xb7203c]`), as the
+    /// app last pushed them (1974).
+    pub(crate) meeting_stone_area: u32,
+    pub(crate) meeting_stone_status_text: Option<String>,
+    /// The tutorial system's acknowledged bank, as the app last pushed it (1976); `None` before
+    /// `SMSG_TUTORIAL_FLAGS` — `TutorialsEnabled()`'s only input.
+    pub(crate) tutorial_bank: Option<Vec<u8>>,
+    /// `FlagTutorial(n)` calls since the last drain (0-based, in range).
+    pub(crate) tutorial_flag_requests: Vec<u32>,
+    pub(crate) tutorial_clears: u32,
+    pub(crate) tutorial_resets: u32,
 
     /// The stance/shapeshift bar's form list (bar order) the app pushes — the
     /// `GetNumShapeshiftForms`/`GetShapeshiftFormInfo` family reads it ([`super::shapeshift`]).
@@ -1508,13 +1537,16 @@ pub(crate) struct Model {
     /// the app's minimap geometry lives in; the app applies the 0582 seam scale on the way in,
     /// and getting that wrong is decision 1596's first root cause).
     pub(crate) minimap_ping_request: Option<(f32, f32)>,
-    /// The live minimap ping's **normalized** offsets from the widget centre (fractions of the
-    /// widget side, x right / y up — the `MINIMAP_PING` event's arg2/arg3 space), republished
-    /// by the app every frame a ping is live and cleared when the ping ends. Behind
-    /// `Minimap:GetPingPosition()`. There is exactly one ping, so it lives here rather than on
-    /// each Minimap widget's [`KindState`](crate::widget::KindState) — one write, one read,
-    /// no arena walk (decision 1596).
-    pub(crate) minimap_ping: Option<(f32, f32)>,
+    /// The minimap ping's **normalized** offsets from the widget centre (fractions of the widget
+    /// side, x right / y up — the `MINIMAP_PING` event's arg2/arg3 space), republished by the app
+    /// every frame from the stored world point against the player's live position. Behind
+    /// `Minimap:GetPingPosition()`, which answers **two numbers always** — the reference
+    /// recomputes them per call from a pair of statics nothing ever clears (wow-re
+    /// `minimap-ping-law.md`), and the stock `Minimap_OnUpdate` multiplies the answer without a
+    /// nil test for the whole of its 5 s timer (1974; 1596's nil answer stood until then). There
+    /// is exactly one ping, so it lives here rather than on each Minimap widget's
+    /// [`KindState`](crate::widget::KindState) — one write, one read, no arena walk.
+    pub(crate) minimap_ping: (f32, f32),
     /// The realm this session is on, behind `GetRealmName()` (decision 1195). `""` until the app
     /// pushes one — the glue screen's own answer, and never `nil`, because the corpus idiom is
     /// `db[GetRealmName()] = …` at file scope and a nil index errors one call deeper.
@@ -1796,7 +1828,23 @@ impl Model {
             battlefield_run_time_ms: 0,
             battlefield_score_requests: 0,
             battlefield_leave_requests: 0,
+            battlefield_list: Default::default(),
+            battlefield_selected: 0,
+            battlefield_slots: Vec::new(),
+            battlefield_instance_expiration_ms: 0,
+            battlefield_join_requests: Vec::new(),
+            battlefield_list_requests: Vec::new(),
+            battlefield_positions: Vec::new(),
+            battlefield_flag: None,
+            battlefield_icon_scale: 1.0,
+            battlefield_position_requests: 0,
             meeting_stone_cancels: 0,
+            meeting_stone_area: 0,
+            meeting_stone_status_text: None,
+            tutorial_bank: None,
+            tutorial_flag_requests: Vec::new(),
+            tutorial_clears: 0,
+            tutorial_resets: 0,
             shapeshift_forms: Vec::new(),
             shapeshift_casts: Vec::new(),
             pet_bar: super::pet::PetBarState::default(),
@@ -1954,7 +2002,7 @@ impl Model {
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
-            minimap_ping: None,
+            minimap_ping: (0.0, 0.0),
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,

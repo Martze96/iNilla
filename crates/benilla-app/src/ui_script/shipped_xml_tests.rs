@@ -32,7 +32,7 @@ fn every_shipped_ui_xml_parses() {
     assert!(
         // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751),
         // so the floor sits well under the count rather than one step above it (1956).
-        checked >= 15,
+        checked >= 10,
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -430,8 +430,9 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
     }
     // Never let the sweep pass by matching nothing — the shipped UI still names over a hundred
     // textures (173 after 1971 retired the auction transcription, fewer again after 1973 the
-    // crafting pair; the count falls with every window that migrates, and the floor follows it).
-    assert!(refs.len() >= 80, "only {} texture paths swept", refs.len());
+    // crafting pair, 64 after 1980 the world map; the count falls with every window that
+    // migrates, and the floor follows it).
+    assert!(refs.len() >= 50, "only {} texture paths swept", refs.len());
 
     // The shape half: a doubled separator is the Lua escaping written into XML, and it resolves to
     // nothing. Checked without the client so a data-less machine still catches this exact class.
@@ -624,10 +625,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing (19 after 1971; the floor follows the census
-    // down as windows migrate).
+    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980; the floor
+    // follows the census down as windows migrate).
     assert!(
-        paths.len() >= 10,
+        paths.len() >= 5,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
@@ -845,7 +846,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
     // The same walk floor as above (1956).
-    assert!(swept >= 15, "only {swept} xml files swept — sweep broke");
+    assert!(swept >= 10, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
@@ -1372,7 +1373,10 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     // The sweep is only worth anything if there was something to hide in the first place.
     let before = names.iter().filter(|n| visible(&s, n)).count();
     assert!(
-        before > 20, // 50 until 1938 took the three bar files (and their visible frames) stock
+        // 50 until 1938 took the three bar files stock, 20 until 1974 took the minimap cluster
+        // (its 22 named frames were most of what this sweep counted); the floor follows the
+        // census of OUR files down, and 12 is what is left — the glue and dev frames.
+        before > 10,
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );

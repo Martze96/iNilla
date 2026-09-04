@@ -10,6 +10,8 @@
 //! | `GetAreaSpiritHealerTime()` | 0 → 1 number, whole seconds | reads the app's deadline |
 //! | `AcceptBattlefieldPort(index, accept)` | 2 → 0 | raises on a non-number index, silent off 1..3; the optional-bool answer |
 //! | `CancelMeetingStoneRequest()` | 0 → 0 | queued; the app applies the leadership gate |
+//! | `IsInMeetingStoneQueue()` | 0 → the number `1` or `nil`, one value always | `[0xb72038] != 0` (wow-re `meeting-stone-status.md` §3.1, 1974) |
+//! | `GetMeetingStoneStatusText()` | 0 → string or `nil` | the cached text `[0xb7203c]`, `nil` while empty (§3.2) |
 //! | `CheckPetUntrainerDist()` | 0 → `1` or `nil` | the app's latch-and-range flag |
 //! | `ConfirmPetUnlearn()` | 0 → 0 | counted; the app holds the latch and the money gate |
 //!
@@ -62,6 +64,15 @@ impl super::UiScript {
     /// `CancelMeetingStoneRequest()` calls since the last drain.
     pub fn take_meeting_stone_cancels(&mut self) -> u32 {
         std::mem::take(&mut self.model_mut().meeting_stone_cancels)
+    }
+
+    /// The meeting stone's two globals (1974): the queued area id (`[0xb72038]`, `0` = none) and
+    /// the cached status text (`[0xb7203c]`, `None` from process start to world enter and after
+    /// world leave). The app rebuilds the text; the VM only hands it back.
+    pub fn set_meeting_stone(&mut self, area: u32, status_text: Option<String>) {
+        let mut model = self.model_mut();
+        model.meeting_stone_area = area;
+        model.meeting_stone_status_text = status_text;
     }
 }
 
@@ -151,6 +162,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.meeting_stone_cancels += 1;
             Ok(())
+        })?,
+    )?;
+
+    // `IsInMeetingStoneQueue()` (`0x4ca570`): `mov eax,1` on BOTH legs — the number `1` when the
+    // queued area is non-zero, else nil; never `0` (truthy in Lua — it would pin the icon shown),
+    // never a boolean.
+    g.set(
+        "IsInMeetingStoneQueue",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(predicate(model.meeting_stone_area != 0))
+        })?,
+    )?;
+
+    // `GetMeetingStoneStatusText()` (`0x4ca5b0`): `lua_pushstring([0xb7203c])`, whose NULL leg
+    // tail-jumps to `lua_pushnil` — a string or nil, one value, never `""` for "nothing".
+    g.set(
+        "GetMeetingStoneStatusText",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match &model.meeting_stone_status_text {
+                Some(text) => Value::String(lua.create_string(text)?),
+                None => Value::Nil,
+            })
         })?,
     )?;
 
@@ -260,6 +295,41 @@ mod tests {
             s.take_battlefield_port_requests(),
             vec![(1, true), (2, false), (3, false), (2, true)],
             "truncated index, the optional-bool table, nil defaulting to no"
+        );
+    }
+
+    /// The meeting stone pair: `1`/nil on the area, string/nil on the text — one value each.
+    #[test]
+    fn the_meeting_stone_pair_answers_one_or_nil_and_string_or_nil() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', IsInMeetingStoneQueue())")
+                .unwrap(),
+            1
+        );
+        assert!(s
+            .eval::<bool>("return IsInMeetingStoneQueue() == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetMeetingStoneStatusText() == nil")
+            .unwrap());
+        s.set_meeting_stone(1519, Some("Looking for more for Stormwind City".into()));
+        assert_eq!(s.eval::<i64>("return IsInMeetingStoneQueue()").unwrap(), 1);
+        assert_eq!(
+            s.eval::<String>("return GetMeetingStoneStatusText()")
+                .unwrap(),
+            "Looking for more for Stormwind City"
+        );
+        s.set_meeting_stone(0, Some("Unknown".into()));
+        assert!(
+            s.eval::<bool>("return IsInMeetingStoneQueue() == nil")
+                .unwrap(),
+            "area 0: not queued, whatever the text says"
+        );
+        assert_eq!(
+            s.eval::<String>("return GetMeetingStoneStatusText()")
+                .unwrap(),
+            "Unknown"
         );
     }
 

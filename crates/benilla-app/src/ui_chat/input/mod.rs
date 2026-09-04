@@ -103,9 +103,6 @@ pub(super) struct ChatProbes<'w, 's> {
     /// "leader" on this wire is a guid. Here rather than as a 17th drain parameter for the
     /// reason this struct exists at all — the drain is at Bevy's 16-param ceiling.
     self_guid: Res<'w, crate::net::SelfGuid>,
-    /// The map `/partytest ping` stamps its synthetic ping with — a ping carries no map on the
-    /// wire either, so "the one we are standing on" is the client's answer in both paths.
-    map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
 }
 
 /// Everything the drain **queues into another subsystem's one setter** rather than applying itself,
@@ -218,7 +215,6 @@ pub(super) fn drain_chat_input(
         guids,
         kinds,
         self_guid,
-        map,
     } = &probes;
     let Some(mut script) = script else {
         return;
@@ -573,9 +569,7 @@ pub(super) fn drain_chat_input(
                         let w = benilla_assets::coords::bevy_to_wow(tf.translation());
                         // +x is north, −y is east (0203's north-up mapping).
                         let at = (w[0] + 24.75, w[1] - 24.75);
-                        chat_out
-                            .ping
-                            .seat(at, map.as_ref().map_or(0, |m| m.0), 0xF001);
+                        chat_out.ping.seat(at, 0xF001);
                         format!(
                             "partytest: Alice pinged ({:.0}, {:.0}) — 35 yd NE, party1, 5 s",
                             at.0, at.1
@@ -1479,6 +1473,7 @@ pub(super) fn drain_addon_chat_sends(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     commands: Res<NetCommands>,
     mut chat_log: ResMut<super::feed::ChatLog>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1495,6 +1490,19 @@ pub(super) fn drain_addon_chat_sends(
             ));
             continue;
         };
+        // `SendChatMessage`'s acknowledge (`0x49f5fc`, 1976): the twelve social wire types —
+        // party, raid, guild, officer, whisper, channel, AFK/DND, raid leader/warning, the two
+        // battleground types — say, yell and emote are not among them.
+        if !matches!(
+            kind,
+            super::edit::SendType::Say | super::edit::SendType::Yell | super::edit::SendType::Emote
+        ) {
+            if let Some(t) = tutorials.as_mut() {
+                t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                    id: crate::tutorial::id::CHATTING,
+                });
+            }
+        }
         let cmd = ClientCommand::Chat {
             kind: kind.wire(),
             target: send.target,
