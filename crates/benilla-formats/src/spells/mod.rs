@@ -202,6 +202,9 @@ const COL_MODAL_NEXT_SPELL: usize = 38;
 /// spells; 0/0 for the GCD-free (Attack, Auto Shot, wand Shoot). Same 12-spell empirical pin.
 const COL_START_RECOVERY_CATEGORY: usize = 157;
 const COL_START_RECOVERY_TIME: usize = 158;
+/// `PreventionType` (`SpellRec+0x294`, `0x294/4 == 165`) — see [`SpellDisplay::prevention_type`]
+/// for the two-way pin that separates it from its `DmgClass` neighbour at 164.
+const COL_PREVENTION_TYPE: usize = 165;
 /// `Targets` (`SpellRec+0x34`, `0x34/4 == 13`) — the wire `TARGET_FLAG_*` seed mask the cast-arm
 /// loads into its targeting flag_word (`0x6e525a`, wow-re `wave-cast.md`, VERIFIED). Empirical
 /// pin against the binder's bit semantics: Resurrection 2006 = `0x8000` (corpse-ally bit 15),
@@ -751,6 +754,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 attributes_ex: u32_at(r, COL_ATTRIBUTES_EX).unwrap_or(0),
                 attributes_ex2: u32_at(r, COL_ATTRIBUTES_EX2).unwrap_or(0),
                 attributes_ex3: u32_at(r, COL_ATTRIBUTES_EX3).unwrap_or(0),
+                prevention_type: u32_at(r, COL_PREVENTION_TYPE).unwrap_or(0),
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
                 effects: [0, 1, 2].map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0)),

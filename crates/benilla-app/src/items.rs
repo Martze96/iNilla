@@ -23,7 +23,7 @@ use bevy::prelude::*;
 
 use benilla_protocol::{ItemInfo, ObjectFields};
 
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::{ClientCommand, NetCommands, ObjectStore};
 
 /// The slice of an item template that equipment rendering + combat animation consume (decisions
 /// 0072/0073): the ItemDisplayInfo key, the two placement inputs, and the weapon class pair the
@@ -572,6 +572,46 @@ impl TestDeps {
             })
             .collect()
     }
+}
+
+/// Equipment slots 15/16 — `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`).
+pub(crate) const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
+pub(crate) const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+
+/// One equipment slot's item class, through the guid → entry → template walk. `None` for an empty
+/// slot or a template still in flight.
+fn equipped_class(
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+    slot: u8,
+) -> Option<u8> {
+    let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
+    let entry = items.object(guid).and_then(|o| o.object_entry())?;
+    Some(items.template(entry, guid, commands)?.class as u8)
+}
+
+/// **Which equipment slot this character's disarm hides** — the ladder
+/// ([`crate::creature_anim::disarmed_hand`]) asked of the raw inventory rather than of the
+/// resolved hands, which is the form the two *item*-side consumers need: the action bar's
+/// equipped-item requirement (`0x5f0c50`, which strips the bit out of its slot mask) and the
+/// item-use refusal (`CGItem::Use`'s rung 15, which compares it against the clicked item's own
+/// worn position). `None` while the flag is down or neither hand holds a weapon.
+///
+/// It lives here, next to the cache it reads, so the ladder is stated once and asked twice rather
+/// than re-derived per consumer — the failure decision 0664 names, and the reason the quest fork
+/// was once missing from all three of its call sites.
+pub(crate) fn disarmed_equipment_slot(
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> Option<u8> {
+    if store.0.unit_flags() & crate::creature_anim::UNIT_FLAG_DISARMED == 0 {
+        return None;
+    }
+    let main = equipped_class(store, items, commands, EQUIPMENT_SLOT_MAINHAND);
+    let off = equipped_class(store, items, commands, EQUIPMENT_SLOT_OFFHAND);
+    crate::creature_anim::disarmed_hand(main, off).map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8)
 }
 
 /// A minimal, VALID item template named `name` — the shared test seam for every module that

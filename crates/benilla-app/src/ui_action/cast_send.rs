@@ -472,6 +472,16 @@ fn send_spell_cast(
             }
         }
     }
+    // The CROWD-CONTROL leg of the requirement validator `0x6094f0` (decision 1903), which sits
+    // ABOVE its mounted block below — so a stunned mounted caster reads the stun. STUNNED refuses
+    // every spell; SILENCED and PACIFIED only the rows whose `PreventionType` names them.
+    if let Some(reason) =
+        state::cast_cc_refusal(ctx.rel.self_store.map_or(0, |s| s.0.unit_flags()), def)
+    {
+        debug!("ui_action: cast {spell_id} refused locally — crowd control ({reason:#x})");
+        cast_errors.push_local(spell_id, reason);
+        return;
+    }
     // The client-side mounted gate (decision 0481; wow-re `mounted-action-gate.md` §5:
     // TryCast's requirement validator `0x6094f0`, mounted block `0x609c6c` — a live
     // `UNIT_FIELD_MOUNTDISPLAYID` refuses a non-exempt cast with reason 0x39 "You are

@@ -200,6 +200,7 @@ pub(super) fn drain_inventory_uses(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     targeting: crate::ui_action::cast_target::CastTargeting,
     mut ladder: crate::ui_action::CastLadder,
+    mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
     let Some(mut script) = script else {
@@ -250,6 +251,7 @@ pub(super) fn drain_inventory_uses(
             &mut script,
             &mut gate,
             false,
+            &mut ui_errors,
         );
     }
 }
@@ -269,6 +271,7 @@ pub(super) fn drain_container_uses(
     // that lets `SMSG_LOOT_RESPONSE`'s admission gate recognise an item loot (decision 1531).
     mut loot_latch: ResMut<crate::ui_loot::LootLatch>,
     mut ladder: crate::ui_action::CastLadder,
+    mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
     let Some(mut script) = script else {
@@ -459,6 +462,7 @@ pub(super) fn drain_container_uses(
                 &mut script,
                 &mut gate,
                 false,
+                &mut ui_errors,
             );
             continue;
         }
@@ -573,6 +577,7 @@ pub(super) fn drain_container_uses(
             &mut script,
             &mut gate,
             false,
+            &mut ui_errors,
         );
     }
 }
@@ -857,6 +862,7 @@ mod tests {
             .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_action::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::ui_action::targeting::SpellTargeting>()
@@ -1024,6 +1030,7 @@ pub(super) fn drain_bind_on_use_confirms(
     script: Option<NonSendMut<UiScript>>,
     targeting: crate::ui_action::cast_target::CastTargeting,
     mut ladder: crate::ui_action::CastLadder,
+    mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
     let Some(mut script) = script else {
@@ -1046,6 +1053,7 @@ pub(super) fn drain_bind_on_use_confirms(
         &mut script,
         &mut gate,
         true,
+        &mut ui_errors,
     );
 }
 
@@ -1556,6 +1564,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_action::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::ui_action::targeting::SpellTargeting>()

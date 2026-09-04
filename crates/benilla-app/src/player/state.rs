@@ -1034,6 +1034,11 @@ pub(crate) struct Player {
     pub(super) server_riding: bool,
     /// The `splineId` of the ride in progress (echoed in `CMSG_MOVE_SPLINE_DONE` when it ends).
     pub(super) ride_spline_id: u32,
+    /// Was the ride in progress a **ground** path? — the `FLYING` bit of the [`crate::net::Spline`]
+    /// that drove it, kept because the frame the ride *ends* has already lost the spline
+    /// (`sample_splines` drops a finished path) and the endpoint still has to be grounded by the
+    /// same law as every frame before it (decision 1927). A taxi's endpoint keeps its own altitude.
+    pub(super) ride_grounded: bool,
     /// Standing on a transport (boat/zepp): the mover lives in that platform's frame (decision
     /// 0438 phase 2). Attached when the ground support is a [`crate::transport::Transport`]
     /// collider; kept through jumps above the deck (deck-frame ballistics — a jump on a moving

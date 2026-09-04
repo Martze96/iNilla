@@ -3,9 +3,11 @@
 //! ([`UiScript::tick`]: OnUpdate + the engine-side fades/cooldowns), and the FrameXML session clock
 //! ([`UiScript::now`]). The low-level handler-firing these drive lives in [`super::event`].
 
+use mlua::Lua;
+
 use crate::widget::FrameHandle;
 
-use super::{editbox, event, tooltip, ScriptValue, UiScript};
+use super::{editbox, event, tooltip, Model, ScriptValue, UiScript};
 
 impl UiScript {
     /// Queue an event to fire at the **start of the next tick**, into the same
@@ -51,15 +53,28 @@ impl UiScript {
     /// its zeroed links — memory-accident territory we render as a deterministic stop, a knowing
     /// divergence from an accident, not from a mechanism).
     pub fn fire_event(&mut self, event: &str, args: Vec<ScriptValue>) {
+        fire_event_into(&self.lua, event, args);
+    }
+}
+
+/// [`UiScript::fire_event`] against the VM directly, for a caller that holds `&Lua` rather than
+/// `&UiScript` — which is every Lua binding, and therefore `UpdateSpells` (decision 1924).
+///
+/// Identical behaviour; `fire_event` is the same call with the script's own VM. The `&mut self` on
+/// the method was never load-bearing — the body reaches everything through `lua.app_data_mut()` —
+/// and this is the shape [`crate::loader::load_into`] already uses for the same reason (1188 §2).
+pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
+    let model_mut = || lua.app_data_mut::<Model>().expect("model app_data set");
+    {
         let mut at = {
-            let model = self.model_mut();
+            let model = model_mut();
             model
                 .event_to_frames
                 .get(event)
                 .and_then(|l| l.first().copied())
         };
         while let Some(h) = at {
-            let mut model = self.model_mut();
+            let mut model = model_mut();
             // The saved handle must still be registered — its removal (by the previous handler)
             // ends the walk, per the doc above.
             let Some(pos) = model
@@ -75,13 +90,15 @@ impl UiScript {
                 .and_then(|l| l.get(pos + 1).copied());
             let id = model.frame_id(h);
             drop(model);
-            if let Err(e) = event::fire_event_handler(&self.lua, id, event, &args) {
-                self.push_error(e);
+            if let Err(e) = event::fire_event_handler(lua, id, event, &args) {
+                model_mut().record_script_error(e.to_string());
             }
             at = next;
         }
     }
+}
 
+impl super::UiScript {
     /// Advance time: run `OnUpdate(self, elapsed)` on every *effectively-visible* frame that has one
     /// (RF-0025: OnUpdate → `this` + `arg1 = elapsed`). Errors collected, never panicking.
     /// Also advances the `GetTime()` clock — the FrameXML session clock (seconds, monotonic,

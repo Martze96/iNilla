@@ -33,7 +33,6 @@ use crate::target::{can_attack, ring_reaction, Factions};
 use super::Spells;
 
 /// Leg 8's caster unit-flag test — the shared bit, declared once ([`crate::player`]).
-use crate::creature_anim::UNIT_FLAG_DISARMED;
 use crate::player::UNIT_FLAG_IN_COMBAT;
 
 /// The implicit-target enums leg 10b forks on (`0x6e3f8a`/`0x6e3fa2`): 6 = single enemy →
@@ -51,25 +50,22 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) cooldowns: &'a Cooldowns,
 }
 
-/// Equipment slots 15/16 — `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`), the
-/// two the disarm ladder can hide.
-const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
-const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+/// How many equipment indices the search covers — `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the
+/// 19 worn slots plus the four equipped bags. We walked 19 before decision 1903.
+const EQUIPMENT_SLOTS: u8 = 23;
 
-/// One equipment slot's item class, through the same guid → entry → template walk
-/// [`equipped_item_fits`] uses. `None` for an empty slot or a template still in flight — and an
-/// unresolved template therefore never triggers the disarm skip, the same benefit-of-the-doubt
-/// this file gives everywhere else.
-fn equipped_class(
-    store: &ObjectStore,
-    items: &mut Items,
-    commands: &NetCommands,
-    slot: u8,
-) -> Option<u8> {
-    let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
-    let entry = items.object(guid).and_then(|o| o.object_entry())?;
-    Some(items.template(entry, guid, commands)?.class as u8)
-}
+/// `AttributesEx3`'s two hand restrictions, which is where the reference's **slot mask** comes
+/// from (`0x5f0c50`'s callers): `0x400` → main hand only (mask `0x8000`), `0x1000000` → off hand
+/// only (mask `0x10000`), neither → every slot. Without this a main-hand-only ability counted a
+/// weapon worn anywhere, which is what made the disarm case interesting to get right: strip the
+/// hidden hand out of a mask that is already down to one bit and nothing can satisfy it.
+const ATTR_EX3_MAIN_HAND_ONLY: u32 = 0x0000_0400;
+const ATTR_EX3_OFF_HAND_ONLY: u32 = 0x0100_0000;
+
+/// `ITEM_FLAG_DEPRECATED` (vmangos `ItemPrototype.h`: *"appears red icon (like when item
+/// durability==0)"*) — one of the two rejects the reference's search applies to a worn item before
+/// matching its class. The other is being genuinely broken.
+const ITEM_FLAG_DEPRECATED: u32 = 0x0000_0010;
 
 /// Leg 4's own test (`0x6e40e0`), shared with the spell tooltip's requirement line: does some
 /// WORN item match `EquippedItemClass` + `EquippedItemSubClassMask`? `true` when the spell asks
@@ -85,33 +81,58 @@ pub(crate) fn equipped_item_fits(
         return true;
     }
     let class = d.equipped_item_class as u32;
-    // The disarm ladder (decision 1863). The reference's own equipped-item test `0x5ea5d0` walks
-    // its three `GetWeapon` slots with `visFlag = 0`, so the hand `UNIT_FLAG_DISARMED` hides does
-    // not count toward the requirement — a disarmed warrior's Heroic Strike greys out and its
-    // tooltip requirement line turns red. Exactly one hand is hidden, main first, so a disarmed
-    // dual-wielder's off-hand weapon still satisfies it.
-    let hidden = (store.0.unit_flags() & UNIT_FLAG_DISARMED != 0)
-        .then(|| {
-            let main = equipped_class(store, items, commands, EQUIPMENT_SLOT_MAINHAND);
-            let off = equipped_class(store, items, commands, EQUIPMENT_SLOT_OFFHAND);
-            crate::creature_anim::disarmed_hand(main, off)
+    // The **slot mask** first (decision 1903): `AttributesEx3` narrows the search to one hand for
+    // an ability that names one, and to everything otherwise.
+    let mut mask: u32 = if d.attributes_ex3 & ATTR_EX3_MAIN_HAND_ONLY != 0 {
+        1 << crate::items::EQUIPMENT_SLOT_MAINHAND
+    } else if d.attributes_ex3 & ATTR_EX3_OFF_HAND_ONLY != 0 {
+        1 << crate::items::EQUIPMENT_SLOT_OFFHAND
+    } else {
+        u32::MAX
+    };
+    // …then the disarm ladder strips the hidden hand's bit out of it (decision 1863, its citation
+    // corrected by 1903: the reference does this at `0x5f0c69`/`0x5f0c91` with `visFlag = 1`
+    // probes and a mask edit, NOT by `GetWeapon` returning NULL — same ladder, same outcome, one
+    // hand only). A disarmed warrior's Heroic Strike greys out and its tooltip requirement line
+    // turns red; a disarmed dual-wielder's off-hand weapon still satisfies a hand-agnostic one.
+    if let Some(hidden) = crate::items::disarmed_equipment_slot(store, items, commands) {
+        mask &= !(1u32 << hidden);
+    }
+    (0..EQUIPMENT_SLOTS)
+        .filter(|slot| mask & (1u32 << slot) != 0)
+        .any(|slot| {
+            let Some(guid) = store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
+                return false;
+            };
+            // Entry and the durability pair come off the INSTANCE in one borrow — the reference
+            // reads both from the CGItem (`[item+0x114]+0xa0`/`+0xa4`), not from the template —
+            // because the template lookup below needs `items` mutably.
+            let Some((entry, durability, max_durability)) = items.object(guid).and_then(|o| {
+                Some((
+                    o.object_entry()?,
+                    o.item_durability(),
+                    o.item_max_durability(),
+                ))
+            }) else {
+                return false;
+            };
+            let Some(t) = items.template(entry, guid, commands) else {
+                return true; // unresolved template: benefit of the doubt
+            };
+            // The reference's two rejects, applied before the class match: a DEPRECATED item and
+            // a genuinely BROKEN one (`MaxDurability > 0 && Durability == 0`) cannot satisfy a
+            // requirement. Note this is the one place durability DOES gate something — it drives
+            // no animation or model path anywhere (decision 1863).
+            if t.flags & ITEM_FLAG_DEPRECATED != 0 {
+                return false;
+            }
+            if max_durability.is_some_and(|m| m > 0) && durability == Some(0) {
+                return false;
+            }
+            t.class == class
+                && (d.equipped_item_subclass_mask == 0
+                    || d.equipped_item_subclass_mask & (1 << t.subclass) != 0)
         })
-        .flatten()
-        .map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8);
-    (0..19).filter(|slot| Some(*slot) != hidden).any(|slot| {
-        let Some(guid) = store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
-            return false;
-        };
-        let Some(entry) = items.object(guid).and_then(|o| o.object_entry()) else {
-            return false;
-        };
-        let Some(t) = items.template(entry, guid, commands) else {
-            return true; // unresolved template: benefit of the doubt
-        };
-        t.class == class
-            && (d.equipped_item_subclass_mask == 0
-                || d.equipped_item_subclass_mask & (1 << t.subclass) != 0)
-    })
 }
 
 /// The walk. Returns `(usable, not_enough_mana)` — the `IsUsableAction` pair.
@@ -305,7 +326,7 @@ mod tests {
     fn a_disarmed_hand_does_not_satisfy_the_equipped_item_requirement() {
         use crate::items::TestDeps;
 
-        /// `PLAYER_FIELD_INV_SLOT_HEAD + 2×slot` for equipment slots 15 and 16.
+        // `PLAYER_FIELD_INV_SLOT_HEAD + 2×slot` for equipment slots 15 and 16.
         const INV_MAINHAND: u16 = 486 + 2 * 15;
         const INV_OFFHAND: u16 = 486 + 2 * 16;
         const DISARMED: u32 = 0x0020_0000;
@@ -346,6 +367,143 @@ mod tests {
         assert!(fits(true, &[(INV_MAINHAND, 0x2a), (INV_OFFHAND, 0x2b)]));
         // Disarmed with an off hand only: that is the hand the ladder hides.
         assert!(!fits(true, &[(INV_OFFHAND, 0x2b)]));
+    }
+
+    /// **The slot mask and its two rejects** (decision 1903) — the rest of `0x5f0c50`, which the
+    /// mislabelled census row had hidden behind a three-slot `GetWeapon` loop that does not exist.
+    /// The search is equipment indices `0..=22`, narrowed by `AttributesEx3` to one hand when the
+    /// ability names one, and a worn item that is DEPRECATED or genuinely BROKEN cannot satisfy it.
+    #[test]
+    fn the_equipped_item_search_masks_by_hand_and_rejects_broken_gear() {
+        use crate::items::TestDeps;
+
+        const INV_MAINHAND: u16 = 486 + 2 * 15;
+        const INV_OFFHAND: u16 = 486 + 2 * 16;
+        // `ITEM_FIELD_DURABILITY` / `_MAXDURABILITY` — both INSTANCE fields (46/47), which is
+        // where the reference reads the pair from.
+        const ITEM_DURABILITY: u16 = 46;
+        const ITEM_MAX_DURABILITY: u16 = 47;
+
+        // A spell requiring a class-2 weapon, with whatever `AttributesEx3` is passed.
+        let spell = |ex3: u32| SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 0,
+            attributes_ex3: ex3,
+            ..Default::default()
+        };
+        // `hands`: per equipped weapon — (inv field, guid, template flags, instance max
+        // durability, instance current durability).
+        let fits = |d: &SpellDisplay, hands: &[(u16, u64, u32, u32, u32)]| {
+            let mut deps = TestDeps::new();
+            let mut pairs = vec![(46u16, 1u32 << 3)];
+            for (i, (field, guid, flags, max_dur, dur)) in hands.iter().enumerate() {
+                pairs.push((*field, *guid as u32));
+                let entry = 500 + i as u32;
+                deps.items.insert_object(
+                    *guid,
+                    ObjectFields::from_pairs(&[
+                        (3, entry),
+                        (ITEM_DURABILITY, *dur),
+                        (ITEM_MAX_DURABILITY, *max_dur),
+                    ]),
+                );
+                deps.items.insert_template(
+                    entry,
+                    Some(benilla_protocol::messages::ItemInfo {
+                        class: 2,
+                        subclass: 7,
+                        flags: *flags,
+                        ..crate::items::test_template("Sword")
+                    }),
+                );
+            }
+            let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+            equipped_item_fits(d, &store, &mut deps.items, &deps.commands)
+        };
+
+        let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
+
+        // Hand-agnostic: either hand satisfies it.
+        assert!(fits(&spell(0), &[sound(INV_MAINHAND)]));
+        assert!(fits(&spell(0), &[sound(INV_OFFHAND)]));
+        // MAIN-HAND-ONLY (`0x400`): the off-hand weapon no longer counts.
+        assert!(fits(
+            &spell(ATTR_EX3_MAIN_HAND_ONLY),
+            &[sound(INV_MAINHAND)]
+        ));
+        assert!(!fits(
+            &spell(ATTR_EX3_MAIN_HAND_ONLY),
+            &[sound(INV_OFFHAND)]
+        ));
+        // OFF-HAND-ONLY (`0x1000000`): the mirror.
+        assert!(fits(&spell(ATTR_EX3_OFF_HAND_ONLY), &[sound(INV_OFFHAND)]));
+        assert!(!fits(
+            &spell(ATTR_EX3_OFF_HAND_ONLY),
+            &[sound(INV_MAINHAND)]
+        ));
+
+        // The two rejects: DEPRECATED, and broken (`MaxDurability > 0 && Durability == 0`).
+        assert!(!fits(
+            &spell(0),
+            &[(INV_MAINHAND, 0x2a, ITEM_FLAG_DEPRECATED, 0, 0)]
+        ));
+        assert!(!fits(&spell(0), &[(INV_MAINHAND, 0x2a, 0, 45, 0)]));
+        // …and a merely damaged one still counts, as does one with no durability at all.
+        assert!(fits(&spell(0), &[(INV_MAINHAND, 0x2a, 0, 45, 12)]));
+        assert!(fits(&spell(0), &[(INV_MAINHAND, 0x2a, 0, 0, 0)]));
+    }
+
+    /// The mask and the disarm strip compose, and that composition is the Heroic Strike case: a
+    /// main-hand-only ability whose one allowed bit is the hand the disarm hides has nothing left
+    /// to match, whatever else is worn.
+    #[test]
+    fn a_main_hand_only_ability_is_dead_while_that_hand_is_disarmed() {
+        use crate::items::TestDeps;
+
+        const INV_MAINHAND: u16 = 486 + 2 * 15;
+        const INV_OFFHAND: u16 = 486 + 2 * 16;
+        const DISARMED: u32 = 0x0020_0000;
+
+        let fits = |ex3: u32, disarmed: bool| {
+            let mut deps = TestDeps::new();
+            let mut pairs = vec![(46u16, (1 << 3) | if disarmed { DISARMED } else { 0 })];
+            for (i, field) in [INV_MAINHAND, INV_OFFHAND].iter().enumerate() {
+                let guid = 0x2a + i as u64;
+                pairs.push((*field, guid as u32));
+                let entry = 500 + i as u32;
+                deps.items
+                    .insert_object(guid, ObjectFields::from_pairs(&[(3, entry)]));
+                deps.items.insert_template(
+                    entry,
+                    Some(benilla_protocol::messages::ItemInfo {
+                        class: 2,
+                        subclass: 7,
+                        ..crate::items::test_template("Sword")
+                    }),
+                );
+            }
+            let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+            equipped_item_fits(
+                &SpellDisplay {
+                    equipped_item_class: 2,
+                    attributes_ex3: ex3,
+                    ..Default::default()
+                },
+                &store,
+                &mut deps.items,
+                &deps.commands,
+            )
+        };
+
+        // Dual-wielding, armed: both abilities are usable.
+        assert!(fits(ATTR_EX3_MAIN_HAND_ONLY, false));
+        assert!(fits(ATTR_EX3_OFF_HAND_ONLY, false));
+        // Disarmed: the ladder hides the MAIN hand (main first), so the main-hand-only ability
+        // has an empty mask and dies…
+        assert!(!fits(ATTR_EX3_MAIN_HAND_ONLY, true));
+        // …while the off-hand-only one is untouched, and so is a hand-agnostic one.
+        assert!(fits(ATTR_EX3_OFF_HAND_ONLY, true));
+        assert!(fits(0, true));
     }
 
     fn ctx<'a>(

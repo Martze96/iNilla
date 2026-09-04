@@ -147,9 +147,21 @@ pub(crate) use view_subject::ViewSubject;
 /// pivot. A pure root (Frost Nova, Entangling Roots) sets only the first — which is why a rooted
 /// player can still turn and a stunned one cannot, the distinction B179 was reporting.
 ///
-/// It has a second consumer beyond the turn: the idle/fidget selectors bail on it
-/// (`0x5eb4f2`/`0x5ec219`), which is what stops even the idle twitch — see
-/// [`crate::creature_anim::MovementState::stunned`] (decision 0880).
+/// **It has no second consumer — the "idle/fidget" one was a misread, and this doc outlived the
+/// correction.** It used to say the idle/fidget selectors bail on the bit at `0x5eb4f2`/`0x5ec219`
+/// and pointed at a `MovementState::stunned` that decision **0889** had already deleted along with
+/// the gate: re-read at the bytes, those two addresses are inside **`ToggleSheath 0x5eb480`** and
+/// **`CanLootNow 0x5ec110`**, and **no site in the whole `0x40000` census touches animation
+/// selection**. What stops the idle twitch under a stun is the animation clock being stopped
+/// (0889's proc-11 freeze), not this flag. The claim came in quoted verbatim from wow-re
+/// `object-layer/scratch/unit-flags-movement-gates.md` §2/§3, which is being corrected there too —
+/// a stale line in one repo re-entering the other is exactly the failure mode both contracts warn
+/// about, and it survived here for a fortnight because a doc comment is not a gate.
+///
+/// The census's other movement-relevant consumers are real and stay: the two relayed
+/// `MSG_MOVE_*` wrappers that refuse outright (`0x602b20` StartTurn, `0x602b80` StartPitch — the
+/// only two of twelve carrying a stun test), and the auto-face-target smoothing suppression at
+/// `0x600dd7`.
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 
 /// `UNIT_FLAG_IN_COMBAT` — the same `UNIT_FIELD_FLAGS` word, **bit 19** (vmangos

@@ -91,6 +91,46 @@ pub(super) fn cast_range_refusal(
     None
 }
 
+/// `PreventionType` values (`Spell.dbc` column 165): which crowd-control flag can refuse this
+/// spell locally. `0` = neither.
+const PREVENTION_SILENCE: u32 = 1;
+const PREVENTION_PACIFY: u32 = 2;
+
+/// The **crowd-control leg** of the same requirement validator `0x6094f0`, sitting **above** its
+/// mounted block (`0x609c6c`) — so a stunned mounted caster is told about the stun (decision 1903;
+/// wow-re `disarm-followups-law.md` §3, byte-verified). It refuses before any packet, which is why
+/// it must be local: reason codes `0x64` STUNNED, `0x60` SILENCED, `0x5a` PACIFIED.
+///
+/// **The three arms are not symmetric, and that is the whole finding.** STUNNED (`0x6099bc`)
+/// carries no per-spell gate and refuses *everything*. SILENCED (`0x609a29`) and PACIFIED run only
+/// where the spell's `PreventionType` declares them — so a silence stops casts and leaves melee
+/// abilities alone, and a pacify does the reverse. Reading `UNIT_FLAG_SILENCED` as "no casting"
+/// is the mistake this replaces.
+///
+/// Its byte-shape was nearly missed by a census twice: the read is `f6 c4 20 test ah,0x20`, a
+/// sub-register byte-lane form with no dword immediate, invisible to an immediate scan.
+///
+/// **Unmodelled:** the aura exemption (`0x6e9e60`) that waives an arm and answers `0x8d` with a
+/// mechanic value instead — it needs an aura-mechanic join we do not have.
+pub(crate) fn cast_cc_refusal(unit_flags: u32, spell: Option<&SpellDisplay>) -> Option<u8> {
+    use crate::player::UNIT_FLAG_STUNNED;
+    /// `UNIT_FLAG_SILENCED` / `UNIT_FLAG_PACIFIED` (vmangos `UnitDefines.h`).
+    const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;
+    const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
+
+    if unit_flags & UNIT_FLAG_STUNNED != 0 {
+        return Some(0x64);
+    }
+    let prevention = spell.map_or(0, |d| d.prevention_type);
+    if unit_flags & UNIT_FLAG_SILENCED != 0 && prevention == PREVENTION_SILENCE {
+        return Some(0x60);
+    }
+    if unit_flags & UNIT_FLAG_PACIFIED != 0 && prevention == PREVENTION_PACIFY {
+        return Some(0x5a);
+    }
+    None
+}
+
 /// The **pre-send** mounted refusal (decision 0481) — the requirement validator `0x6094f0`'s
 /// mounted block (`0x609c6c`, wow-re `mounted-action-gate.md` §5): a live
 /// `UNIT_FIELD_MOUNTDISPLAYID` refuses the cast with reason `0x39` ("You are mounted") unless
@@ -1065,5 +1105,61 @@ mod tests {
         assert!(!cast_moving_refusal(mf::FORWARD, 0, Some(&auto_shot)));
         // No record: nothing to read, the press passes (the server stays the net).
         assert!(!cast_moving_refusal(mf::FORWARD, 1500, None));
+    }
+}
+
+#[cfg(test)]
+mod cc_refusal_tests {
+    use super::*;
+
+    fn spell(prevention_type: u32) -> SpellDisplay {
+        SpellDisplay {
+            prevention_type,
+            ..Default::default()
+        }
+    }
+
+    /// **The three arms are not symmetric** (decision 1903): a stun refuses everything, a silence
+    /// only `PreventionType 1`, a pacify only `2`. Reading `UNIT_FLAG_SILENCED` as "no casting at
+    /// all" — which is what our own preflight banner used to say — is the mistake this pins.
+    #[test]
+    fn crowd_control_refuses_by_prevention_type_except_the_stun() {
+        const STUNNED: u32 = 0x0004_0000;
+        const SILENCED: u32 = 0x0000_2000;
+        const PACIFIED: u32 = 0x0002_0000;
+
+        // Fireball-shaped (silence-preventable) and Heroic-Strike-shaped (pacify-preventable),
+        // and the auto-attack's neither — the three real values, pinned in `spell_catalog`.
+        let cast = spell(1);
+        let melee = spell(2);
+        let neither = spell(0);
+
+        // STUNNED carries no per-spell gate: every row refuses, `PreventionType` or not.
+        for d in [&cast, &melee, &neither] {
+            assert_eq!(cast_cc_refusal(STUNNED, Some(d)), Some(0x64));
+        }
+
+        // SILENCED takes the casts and leaves the rest alone.
+        assert_eq!(cast_cc_refusal(SILENCED, Some(&cast)), Some(0x60));
+        assert_eq!(cast_cc_refusal(SILENCED, Some(&melee)), None);
+        assert_eq!(cast_cc_refusal(SILENCED, Some(&neither)), None);
+
+        // PACIFIED is the mirror.
+        assert_eq!(cast_cc_refusal(PACIFIED, Some(&melee)), Some(0x5a));
+        assert_eq!(cast_cc_refusal(PACIFIED, Some(&cast)), None);
+
+        // The stun wins when several hold at once — it is the first arm.
+        assert_eq!(
+            cast_cc_refusal(STUNNED | SILENCED | PACIFIED, Some(&cast)),
+            Some(0x64)
+        );
+        // Nothing up, nothing refused; and no record claims no prevention.
+        assert_eq!(cast_cc_refusal(0, Some(&cast)), None);
+        assert_eq!(cast_cc_refusal(SILENCED, None), None);
+        assert_eq!(
+            cast_cc_refusal(STUNNED, None),
+            Some(0x64),
+            "the stun needs no record"
+        );
     }
 }

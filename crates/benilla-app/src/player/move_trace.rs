@@ -257,6 +257,57 @@ pub(super) fn settle(resident: bool, waited: f32, pos: bevy::prelude::Vec3) {
     );
 }
 
+/// One `rid` line per frame of a **self-spline ride** — the Charge/knockback/fear/taxi instrument,
+/// and the A/B that measured decision 1927.
+///
+/// It exists because the ride is the one mover in the client the `move` trace cannot see: the
+/// controller — and with it the mover's own per-frame line — is parked behind `control`'s ride
+/// guard for the whole ride, so a charge across a hillside left no record at all.
+///
+/// The three numbers, and why all three:
+/// - **`wire`** — the Z `sample_splines` put us at, i.e. the server's chord.
+/// - **`ground`** — the walkable surface under that XZ. `miss` is not a failure: nothing in reach
+///   is a genuinely airborne pose or ground that has not streamed in, and the ride keeps its own Z
+///   there, the same answer the creature clamp gives.
+/// - **`z`** — where the ride actually left us, and `gap` is `z − ground`: **the number that says
+///   whether the ride is riding the world or the wire.**
+///
+/// `chord` is `wire − ground` — the error the wire carried, which stays visible after the fix so
+/// the instrument still measures the defect it closed rather than reporting a flat zero. A charge
+/// down a gentle Elwynn slope reads `chord` rising to ~0.5 yd at mid-path while `gap` holds at 0;
+/// **before 1927 the two were the same number**, because `z` was `wire`.
+pub(super) fn ride(
+    spline_id: u32,
+    grounded: bool,
+    pos: bevy::prelude::Vec3,
+    wire_y: f32,
+    ground: Option<f32>,
+) {
+    if !trace::enabled_for("rid") {
+        return;
+    }
+    let wow = benilla_assets::coords::bevy_to_wow(pos);
+    trace::line(
+        "rid",
+        &format!(
+            "{spline_id} {} pos=({:8.2},{:8.2},{:7.2}) z={:7.2} wire={wire_y:7.2} {}",
+            if grounded { "ground" } else { "flying" },
+            wow[0],
+            wow[1],
+            wow[2],
+            pos.y,
+            match ground {
+                Some(g) => format!(
+                    "ground={g:7.2} gap={:+7.3} chord={:+7.3}",
+                    pos.y - g,
+                    wire_y - g
+                ),
+                None => "ground=miss".to_string(),
+            },
+        ),
+    );
+}
+
 static PREV_GROUNDED: AtomicBool = AtomicBool::new(true);
 
 pub(super) fn frame(f: Frame) {

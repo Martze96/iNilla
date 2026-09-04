@@ -26,8 +26,21 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// chain from `Interface\FrameXML\UIPanelTemplates.xml`, seated below `UiPanels.xml` exactly as
 /// the manifest seats it. So this list carries the chain pair and the loader below has to be able
 /// to READ a chain entry, which a disk-only provider under `assets/ui` cannot.
-const FILES: [&str; 7] = [
+const FILES: [&str; 8] = [
     "Interface\\FrameXML\\Fonts.xml",
+    // A REGRESSION GUARD, not a dependency (1923). FadingFrame.xml's entire body is a single
+    // `<Script file="FadingFrame.lua"/>`, so it loads correctly ONLY if that relative reference
+    // resolves against the document's own directory. Load it through the path-less `loader::load`
+    // and the base is "", the ref stays bare, the provider misses, and the assert below fires —
+    // which is exactly what it did before this file passed the path.
+    //
+    // It is self-contained on BOTH axes, and both had to be checked: zero `inherits=`, AND its Lua
+    // has no file-scope statements at all — only function definitions. The first guard tried here
+    // was CombatFeedback.xml, which also has zero `inherits=` but whose Lua calls `TEXT()` at file
+    // scope (l.7); that global is BasicControls.xml's, so it needed a dependency after all.
+    // `UnitFrame.lua` fails the same way (`TEXT(MANA)`). Structural dependencies are not the only
+    // kind.
+    "Interface\\FrameXML\\FadingFrame.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -71,7 +84,12 @@ fn load_ui(script: &UiScript) {
         let text = benilla_ui::source::decode(&bytes);
         let doc =
             benilla_ui::framexml::parse(&text).unwrap_or_else(|e| panic!("parsing {file}: {e}"));
-        let report = benilla_ui::loader::load(script, &doc, &provider);
+        // The document's OWN path, not the path-less `load` (1923). The base is what every
+        // relative `<Script file=>` / `<Include file=>` inside resolves against (1186); with
+        // an empty base they stay bare and miss the provider entirely, so a self-sourcing
+        // stock file loads as an empty shell and every handler in it goes missing — silently,
+        // because nothing in these lists used to be self-sourcing.
+        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &provider);
         assert!(
             report.errors.is_empty(),
             "{file} loaded with errors: {:#?}",

@@ -47,9 +47,23 @@ pub struct SpellDisplay {
     /// gate [`Self::form_refusal`]; the stance-bar admission bits (`0x2`/`0x10`) are read raw by
     /// `benilla::ui_shapeshift`.
     pub attributes_ex2: u32,
-    /// `AttributesEx3` (column 9, `SpellRec+0x24`) — only bit `0x8000` is consumed
-    /// ([`Self::melee_white_damage`]).
+    /// `AttributesEx3` (column 9, `SpellRec+0x24`) — bit `0x8000` is consumed
+    /// ([`Self::melee_white_damage`]), and bits `0x400` / `0x1000000` are the equipped-item
+    /// search's **hand restriction** (main-hand-only / off-hand-only), which is where
+    /// `0x5f0c50`'s slot mask comes from (decision 1903).
     pub attributes_ex3: u32,
+    /// **`PreventionType`** (column 165, `SpellRec+0x294`) — which crowd-control flag refuses this
+    /// spell **locally**, before any packet: `1` = silence, `2` = pacify, `0` = neither. The
+    /// client's CC validator `0x6094f0` (called from `TryCast 0x6e4b60`, bailing at `0x6e4f42`)
+    /// reads it per spell — so `UNIT_FLAG_SILENCED` does **not** stop everything, only the rows
+    /// that declare `1`. The STUNNED arm above it carries no such gate and refuses every spell.
+    ///
+    /// **Column pinned twice** (decision 1903): the byte offset `0x294 / 4 = 165` on a 173-field,
+    /// 692-byte record, and the shipped data itself — its neighbour 164 is `DmgClass` and takes
+    /// four values where this takes three, which **Auto Shot (75)** separates decisively at
+    /// `DmgClass = 3` (RANGED) with `PreventionType = 2`. Fireball 133 → 1, Heroic Strike 78 → 2,
+    /// Attack 6603 → 0.
+    pub prevention_type: u32,
     /// **`modalNextSpell`** (`Spell.dbc` column 38, `SpellRec + 0x98`) — the spell this one makes
     /// the client cast **by itself**, one server round-trip later, with no user input and no addon.
     /// `0` for all but 57 of the 22357 shipped rows.
@@ -302,6 +316,7 @@ impl Default for SpellDisplay {
             attributes_ex2: 0,
             modal_next_spell: 0,
             attributes_ex3: 0,
+            prevention_type: 0,
             passive: false,
             cast_ui: 0,
             effects: [0, 0, 0],

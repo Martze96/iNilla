@@ -37,6 +37,34 @@ fn spell_catalog_resolves_known_spells() {
 
     // The visual/speed column pins (decision 0107 data plane), cross-checked against the local
     // vmangos `spell_template` (`spellVisual1`/`speed`) — see `src/spells.rs` docs for the method.
+    // **`PreventionType` (column 165)** — which crowd-control flag refuses the spell LOCALLY
+    // (decision 1903): 1 silence, 2 pacify, 0 neither. Pinned here because the column has an
+    // adjacent look-alike: 164 is `DmgClass`, which takes the same 0/1/2 on every one of these
+    // rows. **Auto Shot separates them decisively** — it is `DmgClass = 3` (RANGED), a value
+    // `PreventionType` never takes, so a one-column slip fails this test rather than passing
+    // quietly. (The byte offset `SpellRec+0x294 / 4 = 165` is the other half of the pin.)
+    assert_eq!(
+        catalog.get(133).expect("Fireball").prevention_type,
+        1,
+        "Fireball is silence-preventable"
+    );
+    assert_eq!(
+        catalog.get(78).expect("Heroic Strike").prevention_type,
+        2,
+        "Heroic Strike is pacify-preventable"
+    );
+    assert_eq!(
+        catalog.get(6603).expect("Attack").prevention_type,
+        0,
+        "the auto-attack is neither"
+    );
+    assert_eq!(
+        catalog.get(75).expect("Auto Shot").prevention_type,
+        2,
+        "Auto Shot is pacify-preventable — and its DmgClass 3 is what makes column 164 \
+         distinguishable from 165 at all"
+    );
+
     let fireball = catalog.get(133).expect("Fireball");
     assert_eq!(fireball.visual, 67, "Fireball's SpellVisual id");
     assert_eq!(fireball.speed, 24.0, "Fireball's projectile speed");

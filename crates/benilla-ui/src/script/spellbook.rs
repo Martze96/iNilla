@@ -396,6 +396,46 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         }
     }
 
+    // `UpdateSpells()` — twelve bytes in the reference (`[0x4b43e0,0x4b43ec)`), and its entire
+    // content is a bare `SignalEvent(SPELLS_CHANGED)`: event 260, **no arguments**, and NO state
+    // mutation whatsoever. Byte-carved by a wow-re cross-check (decision 1924, their
+    // `system/ui/scratch/updatespells-verb.md`). Entered with both sort flags zero the worker
+    // performs exactly one memory write — a `push esi` undone nine instructions later — and
+    // `0x4b302f` is the sole fire site for event 260 image-wide.
+    //
+    // **`argc = 0` is PROVEN, not observed**: the binding overwrites `ecx` at its second
+    // instruction, so an extra argument is structurally unobservable. Zero return values.
+    //
+    // **It is NOT a no-op, and it is not a repaint.** Two readings were tried and both are wrong.
+    // A no-op breaks the five stock call sites (`ToggleSpellBook`, `SpellBookFrame_Update`'s
+    // showing leg, both page-turn OnClicks, `SpellBookSkillLineTab_OnClick`). And our old
+    // `BenillaUpdateSpells` stand-in — a loop repainting `SpellButton1..N` — was wrong in BOTH
+    // directions: narrower (it missed the skill-line tab strip, the pet/spell tab buttons,
+    // `SpellBook_UpdatePageArrows` and every other registrant) and wider (the reference gates the
+    // frame update on `IsVisible()`). The repaint is FrameXML's, reached through the event; there
+    // is no native listener mechanism at all.
+    //
+    // Fired SYNCHRONOUSLY, through [`super::tick::fire_event_into`] — the reference's
+    // `SignalEvent` is synchronous, so queueing it for the next tick would be a real divergence.
+    //
+    // Firing `SPELLS_CHANGED` from the other six reference sites (spell learned/removed/
+    // superseded, `SMSG_PET_SPELLS`, the bring-up rebuild, two UpdateFields reflexes) is a
+    // SEPARATE obligation and is where the spell-list re-sort lives; `UpdateSpells` is the one
+    // caller of the seven that never performed that recompute.
+    g.set(
+        "UpdateSpells",
+        lua.create_function(|lua, ()| {
+            super::tick::fire_event_into(lua, "SPELLS_CHANGED", Vec::new());
+            Ok(())
+        })?,
+    )?;
+
+    // `PlayerHasSpells()` — a hard-coded `1` in the reference: `push 0x3ff00000; push 0;
+    // lua_pushnumber; mov eax,1; ret`. No branch, no store read, so it cannot answer anything else
+    // (1924, found by the same dispatch). `MainMenuBarMicroButtons.lua` gates the spellbook micro
+    // button on it, which is the only reason it exists here.
+    g.set("PlayerHasSpells", lua.create_function(|_, ()| Ok(1_i64))?)?;
+
     g.set(
         "GetNumSpellTabs",
         lua.create_function(|lua, ()| {
@@ -1391,6 +1431,58 @@ mod tests {
             s.eval::<i64>(r#"return select('#', GetSpellName(1023, "spell"))"#)
                 .unwrap(),
             2
+        );
+    }
+
+    /// **`UpdateSpells()` fires `SPELLS_CHANGED` and does nothing else** — decision 1924, from a
+    /// wow-re byte read of `[0x4b43e0,0x4b43ec)`.
+    ///
+    /// The assertion is that a registered handler RAN, not that any frame repainted: the reference
+    /// verb mutates no state at all, and the repaint is FrameXML's, reached only through the event.
+    /// Asserting a repaint here would re-encode the `BenillaUpdateSpells` guess this replaces —
+    /// which was both narrower than the reference (it repainted `SpellButton1..N` and nothing else)
+    /// and wider (the reference gates its frame update on `IsVisible()`).
+    #[test]
+    fn update_spells_fires_spells_changed_and_touches_nothing() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            fired = 0
+            local f = CreateFrame("Frame", "SpellsWatcher")
+            f:RegisterEvent("SPELLS_CHANGED")
+            f:SetScript("OnEvent", function() fired = fired + 1 end)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(s.eval::<i64>("return fired").unwrap(), 0);
+        s.run("UpdateSpells()").unwrap();
+        assert_eq!(
+            s.eval::<i64>("return fired").unwrap(),
+            1,
+            "UpdateSpells must fire SPELLS_CHANGED synchronously, as SignalEvent does"
+        );
+        // Zero return values — `arity = 0 (exact)` in `reference/1.12-shapes.tsv`.
+        assert_eq!(
+            s.eval::<i64>("return select('#', UpdateSpells())").unwrap(),
+            0
+        );
+        assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+    }
+
+    /// **`PlayerHasSpells()` is a hard-coded `1`** (1924): `push 0x3ff00000; push 0;
+    /// lua_pushnumber; mov eax,1; ret` — no branch and no store read, so it cannot answer anything
+    /// else. Asserted on an EMPTY spellbook precisely because that is the state where a
+    /// plausible-looking "does the player have any spells?" implementation would answer 0 and
+    /// diverge silently.
+    #[test]
+    fn player_has_spells_is_one_even_with_an_empty_book() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return GetNumSpellTabs()").unwrap(), 0);
+        assert_eq!(s.eval::<i64>("return PlayerHasSpells()").unwrap(), 1);
+        assert_eq!(
+            s.eval::<i64>("return select('#', PlayerHasSpells())")
+                .unwrap(),
+            1
         );
     }
 }

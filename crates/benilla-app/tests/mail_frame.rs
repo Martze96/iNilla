@@ -58,7 +58,12 @@ fn load_ui(script: &UiScript) {
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
             panic!("parsing {file}: {e}");
         });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
+        // The document's OWN path, not the path-less `load` (1923). The base is what every
+        // relative `<Script file=>` / `<Include file=>` inside resolves against (1186); with
+        // an empty base they stay bare and miss the provider entirely, so a self-sourcing
+        // stock file loads as an empty shell and every handler in it goes missing — silently,
+        // because nothing in these lists used to be self-sourcing.
+        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &provider);
         assert!(
             report.errors.is_empty(),
             "{file} loaded with errors: {:#?}",
