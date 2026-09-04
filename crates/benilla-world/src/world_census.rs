@@ -79,6 +79,13 @@ pub struct CensusReport {
     /// Visible submeshes per model subsystem — `(column name, visible, of-those-gated)` — in a
     /// fixed column order, because a census whose columns move cannot be diffed across runs.
     pub kinds: [(&'static str, usize, usize); 4],
+    /// Resident submeshes per model subsystem, same column order as `kinds` — hidden or not.
+    /// A city's hidden twins (the retained pass draws them) ride every per-`Mesh3d` sweep
+    /// whether they draw or not, and this is the count that prices them.
+    pub resident: [usize; 4],
+    /// Resident submeshes per `EntityPathWhy` label (the streamer's reason a batch is an
+    /// entity), most first; `"-"` for the untagged (units, GameObjects, the app lane).
+    pub why: Vec<(&'static str, usize)>,
     /// Of every [`ExteriorScene`]-tagged submesh: how many exist, how many the cull wrote `Hidden`
     /// on, how many were exempt (the camera's own placement — decision 0784), and how many carry
     /// **no `Aabb`**, which is the cull's fail-open arm admitting them unconditionally.
@@ -191,6 +198,12 @@ impl WorldCensus<'_, '_> {
     }
 
     /// Snapshot this frame.
+    /// Live particles this instant — the one census number cheap enough to sample per frame
+    /// (a fold over the emitters, no part walk): a spell burst's signature on a tail frame.
+    pub fn live_particles(&self) -> usize {
+        self.emitters.iter().map(|p| p.live()).sum()
+    }
+
     pub fn take(&self) -> CensusReport {
         let own_instance = self
             .claim
@@ -199,13 +212,17 @@ impl WorldCensus<'_, '_> {
             .map(|c| c.room.instance);
 
         let mut kinds = [(0usize, 0usize); 4];
+        let mut resident = [0usize; 4];
+        let mut why: HashMap<&'static str, usize> = HashMap::new();
         let mut labels: HashMap<(String, bool), usize> = HashMap::new();
         let mut escaped: HashMap<(String, bool), usize> = HashMap::new();
         let (mut tagged, mut hidden, mut exempt_n, mut no_aabb) = (0, 0, 0, 0);
         let (mut submeshes, mut drawn) = (0usize, 0usize);
 
-        for (vis, part, gated, object, want, aabb, card, group) in self.parts.iter() {
+        for (vis, part, gated, object, want, aabb, card, group, path_why) in self.parts.iter() {
             submeshes += 1;
+            resident[kind_index(part.kind)] += 1;
+            *why.entry(path_why.map_or("-", |w| w.0)).or_default() += 1;
             drawn += usize::from(vis.get());
             if gated {
                 // The camera's own placement is not exterior scene to itself (decision 0784) and
@@ -266,6 +283,12 @@ impl WorldCensus<'_, '_> {
         CensusReport {
             submeshes,
             drawn,
+            why: {
+                let mut v: Vec<_> = why.into_iter().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+                v
+            },
+            resident,
             kinds: std::array::from_fn(|i| (KIND_COLUMNS[i], kinds[i].0, kinds[i].1)),
             tagged,
             hidden,
@@ -352,6 +375,7 @@ type CensusData = (
     Option<&'static Aabb>,
     Has<crate::billboard::BillboardCard>,
     Option<&'static WmoGroupVis>,
+    Option<&'static crate::model_render::EntityPathWhy>,
 );
 
 /// The census column order, pinned: entry `i` names [`kind_index`]'s slot `i`. Column positions

@@ -77,7 +77,7 @@ fn shipped_xml() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert!(out.len() >= 40, "only {} xml files swept", out.len());
+    assert!(out.len() >= 38, "only {} xml files swept", out.len());
     out
 }
 

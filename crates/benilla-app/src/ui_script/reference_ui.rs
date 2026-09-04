@@ -2048,6 +2048,12 @@ mod tests {
             ("SYSMSG", "UIErrorsFrame.lua"),
             ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
             (
+                "UNIT_QUEST_LOG_CHANGED",
+                "QuestLogFrame.lua — a party member's quest-log fields changing (the reference \
+                 fires it off the unit's PLAYER_QUEST_LOG_* descriptor updates); benilla's unit \
+                 feed does not derive it yet (1944)",
+            ),
+            (
                 "UNIT_MODEL_CHANGED",
                 "four files — the paperdoll model refresh",
             ),
@@ -2115,10 +2121,20 @@ mod tests {
                         }
                         let lines: Vec<&str> = text.lines().map(str::trim).collect();
                         for (i, t) in lines.iter().enumerate() {
+                            // …or the value of a `match` arm (`QuestPanel::Progress =>
+                            // "QUEST_PROGRESS",` — `ui_quest.rs`'s `panel_event`).
+                            let (t, arm_value) = match t.find("=> \"") {
+                                Some(k) => (t[k + 3..].trim_end_matches(','), true),
+                                None => (*t, false),
+                            };
                             let Some(lit) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"'))
                             else {
                                 continue;
                             };
+                            if arm_value && caps(lit) {
+                                fired.insert(lit.to_string());
+                                continue;
+                            }
                             let arm = i > 0
                                 && lines[i - 1].ends_with('{')
                                 && lines.get(i + 1).is_some_and(|n| n.starts_with('}'));

@@ -130,6 +130,29 @@ fn subtree_span(model: &Model, f: FrameHandle) -> Option<(f32, f32)> {
     span
 }
 
+/// Every FontString under `f` (its own regions, then its visible children's), in tree order.
+fn subtree_font_strings(model: &Model, f: FrameHandle) -> Vec<crate::widget::RegionHandle> {
+    let mut out = Vec::new();
+    let Some(frame) = model.arena.frame(f) else {
+        return out;
+    };
+    for &rh in &frame.regions {
+        if model
+            .arena
+            .region(rh)
+            .is_some_and(|r| matches!(r.kind, crate::widget::RegionKind::FontString))
+        {
+            out.push(rh);
+        }
+    }
+    for &ch in &frame.children {
+        if model.arena.frame(ch).is_some_and(|c| c.effective_visible) {
+            out.extend(subtree_font_strings(model, ch));
+        }
+    }
+    out
+}
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
@@ -229,6 +252,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UpdateScrollChildRect",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
+            // The reference derives the range from a child whose text is already laid out — its
+            // measure is synchronous. Ours measures on the metric reads and on the host's
+            // round-trip, which lands a frame later; stock `QuestLog_UpdateQuestDetails` calls
+            // this right after the SetTexts that fill the pane, and read a range of 0 (1944). So
+            // the child's FontStrings are measured here, through the installed measurer, before
+            // the layout that the range reads; with no measurer installed the round-trip fills
+            // them as before.
+            let strings: Vec<crate::widget::RegionHandle> = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                match model.arena.frame(h).map(|f| &f.kind_state) {
+                    Some(KindState::Scroll(sf)) => sf
+                        .child
+                        .map(|c| subtree_font_strings(&model, c))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                }
+            };
+            for rh in strings {
+                super::measure::ensure_measured(lua, rh);
+            }
             let (id, range) = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 super::UiScript::resolve_layout(&mut model);

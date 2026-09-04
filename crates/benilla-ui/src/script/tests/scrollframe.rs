@@ -490,3 +490,43 @@ fn hit_test_denies_a_button_clipped_out_and_admits_it_once_scrolled_into_view() 
         "scrolled into view, the button hits again"
     );
 }
+
+/// `UpdateScrollChildRect` right after the SetTexts that fill a pane reads a range that already
+/// counts the wrapped text — the reference's measure is synchronous, and with a font engine
+/// installed so is ours (1944; stock `QuestLog_UpdateQuestDetails` is the caller that found it).
+#[test]
+fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range() {
+    struct Rows;
+    impl crate::script::TextMeasure for Rows {
+        fn measure(&mut self, req: &crate::script::MeasureRequest) -> (f32, f32, f32) {
+            let natural = req.text.chars().count() as f32 * 7.0;
+            match req.wrap_width {
+                Some(w) if w > 0.0 && natural > w => (w, (natural / w).ceil() * 14.0, natural),
+                _ => (natural, 14.0, natural),
+            }
+        }
+    }
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(Rows));
+    s.run(
+        r#"
+        local sf = CreateFrame("ScrollFrame", "SF", UIParent)
+        sf:SetPoint("TOPLEFT", 0, 0); sf:SetSize(100, 50)
+        local child = CreateFrame("Frame", "SFChild", sf)
+        child:SetSize(100, 50); sf:SetScrollChild(child)
+        local fs = child:CreateFontString("SFText", "ARTWORK")
+        fs:SetPoint("TOPLEFT", 0, 0); fs:SetWidth(70)
+        sf:SetScript("OnScrollRangeChanged", function() RANGE = arg2 end)
+        fs:SetText(string.rep("x", 40))   -- 280px of ink over a 70px column: four 14px rows
+        sf:UpdateScrollChildRect()
+        "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<f64>("return RANGE").unwrap(),
+        6.0,
+        "56px of measured text under a 50px frame: the range is known at the call, not a frame later"
+    );
+}

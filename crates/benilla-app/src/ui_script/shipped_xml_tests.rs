@@ -30,7 +30,7 @@ fn every_shipped_ui_xml_parses() {
     // Never let the sweep pass by finding nothing — a moved assets dir would otherwise turn this
     // into a test that guards zero files while staying green.
     assert!(
-        checked >= 40,
+        checked >= 38, // 41 until 1944 took the two quest files stock
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -753,7 +753,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
-    assert!(swept >= 40, "only {swept} xml files swept — sweep broke");
+    assert!(swept >= 38, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is

@@ -102,7 +102,10 @@ fn setup() -> UiScript {
     // without this the rows build with no art at all and nothing goes red — which is exactly the
     // failure `load_ui_strict` exists to turn into a red test.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     // `ChatFrameEditBox`, which the reference's own purchase button indexes on every click to
     // decide where focus goes after the name box closes — a nil there raises before the charter is
     // bought. Ours guarded it; the reference does not.

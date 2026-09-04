@@ -209,6 +209,17 @@
         RegisterForSave("LOCK_ACTIONBAR")
         ALWAYS_SHOW_MULTIBARS = "0"
         RegisterForSave("ALWAYS_SHOW_MULTIBARS")
+        -- The quest pair's two flags, likewise UIOptionsFrame_Init's (stock l.110-111, l.122-123),
+        -- here since the quest windows went stock (1944). QUEST_FADING_DISABLE is the reference's
+        -- "0". AUTO_QUEST_WATCH is the string "1" ON PURPOSE (decision 1136): the reference assigns
+        -- the NUMBER 1 while every consumer — stock QuestLogFrame.lua:64/68 and the checkbox's own
+        -- load — compares against the string, so on a fresh 1.12 install the row paints unchecked
+        -- and the auto-watch is dead until the box is clicked; the string ships the advertised
+        -- default as the real one. A recorded deviation (1804's rule), not a quiet one.
+        QUEST_FADING_DISABLE = "0"
+        RegisterForSave("QUEST_FADING_DISABLE")
+        AUTO_QUEST_WATCH = "1"
+        RegisterForSave("AUTO_QUEST_WATCH")
 
         UIOptionsFrameCheckButtons = { };
         ------------------- Basic Options -------------------

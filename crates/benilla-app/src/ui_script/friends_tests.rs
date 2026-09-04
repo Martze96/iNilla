@@ -17,6 +17,7 @@ fn setup() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
@@ -44,7 +45,6 @@ fn setup() -> UiScript {
     // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
     // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
     // iterates. The manifest already seats these far above RaidFrame (1874).
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     // The reference's own `BasicControls.xml`, which is manifest entry 3 — far above the pane
     // (1874). It is here for the error/message pair and `TEXT`. NOTE: unlike `raid_tests`, this
     // harness does not load `UIParent.xml`, so `UIParentLoadAddOn` — which 1881 moved there out

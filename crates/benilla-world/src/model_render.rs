@@ -1192,6 +1192,15 @@ pub struct ModelPart {
     pub blend: ModelBlend,
 }
 
+/// **Why this submesh is an entity at all** — the world streamer's answer, one static label per
+/// batch, for the census (`VIS_CENSUS … why …`). A city keeps thousands of hidden model
+/// submeshes resident on the entity path while the retained pass draws the world (5.6k ADT
+/// doodad submeshes at the Stormwind auction house, 1945), and every one of them rides every
+/// per-`Mesh3d` sweep; which divert declined it is the first question about pricing them.
+/// Absent on units, GameObjects and everything the app lane spawns.
+#[derive(Component, Clone, Copy)]
+pub struct EntityPathWhy(pub &'static str);
+
 /// Ordering handle so the one system allowed to *override* the model-`Visibility` authority — the
 /// self-avatar first-person hide ([`crate::player`]) — can run **after** it and win the frame.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]

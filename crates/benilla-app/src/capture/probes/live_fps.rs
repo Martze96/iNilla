@@ -52,6 +52,11 @@ impl Plugin for LiveFpsPlugin {
             samples: Vec::new(),
             cpu_samples: Vec::new(),
             cpu_prev: None,
+            churn_samples: Vec::new(),
+            entities_prev: 0,
+            decodes_prev: 0,
+            load_samples: Vec::new(),
+            paced_samples: Vec::new(),
             cpu_at_start: None,
             sys_at_start: None,
             occluded_now: false,
@@ -87,6 +92,22 @@ struct LiveFps {
     /// frame was CPU work or a wait is the first question about a stutter.
     cpu_samples: Vec<f32>,
     cpu_prev: Option<f64>,
+    /// Per frame, beside `cpu_samples`: entities added net of removed, mesh assets added,
+    /// model materials added — the three spike signatures a crowd produces (a spell kit
+    /// spawning, a body dressing, a first-seen material realizing). Printed for the worst
+    /// frames only.
+    churn_samples: Vec<(i32, u32, u32, u32)>,
+    entities_prev: usize,
+    decodes_prev: u32,
+    /// Live particles and the GPU meter's freshest reading per frame — the two "same work,
+    /// more of it" signatures the churn triple cannot carry.
+    load_samples: Vec<(u32, f32)>,
+    /// The PACED clock's delta per frame (`Time<Virtual>`, `frame_pace`): under vsync with
+    /// pipelined rendering the raw delta is mis-split into long/short pairs that sum to exact
+    /// refresh multiples, so `samples`' tail counts presentation jitter as frames. The pacer
+    /// snaps a cadenced delta to whole refreshes; a paced delta of two periods is a frame the
+    /// display actually skipped.
+    paced_samples: Vec<f32>,
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
@@ -144,6 +165,10 @@ type ScreenParams<'w, 's> = (
         ),
         With<Mesh3d>,
     >,
+    // Asset adds per frame, for the worst-frame annotation (`LiveFps::churn_samples`).
+    MessageReader<'w, 's, AssetEvent<Mesh>>,
+    MessageReader<'w, 's, AssetEvent<benilla_assets::materials::WowModelMaterial>>,
+    Res<'w, Time<bevy::time::Virtual>>,
 );
 
 #[derive(SystemParam)]
@@ -196,6 +221,18 @@ fn drive_live_fps(
         &screen.5,
         &screen.6,
     );
+    let (mesh_events, mat_events) = (&mut screen.7, &mut screen.8);
+    let paced_ms = screen.9.delta_secs() * 1000.0;
+    // Read every frame (a reader that only reads inside the window would report the whole
+    // backlog on its first sampled frame).
+    let mesh_added = mesh_events
+        .read()
+        .filter(|e| matches!(e, AssetEvent::Added { .. }))
+        .count() as u32;
+    let mat_added = mat_events
+        .read()
+        .filter(|e| matches!(e, AssetEvent::Added { .. }))
+        .count() as u32;
     // Drain every frame so the state is current whichever phase we're in — the window can be
     // occluded before sampling ever starts (a detached launch spawns behind whatever is open).
     for o in occlusions.read() {
@@ -276,12 +313,31 @@ fn drive_live_fps(
             };
             probe.cpu_prev = cpu_now;
             probe.cpu_samples.push(cpu_ms);
+            let n_entities = entities.iter().count();
+            let d_entities = if probe.churn_samples.is_empty() {
+                0
+            } else {
+                n_entities as i32 - probe.entities_prev as i32
+            };
+            probe.entities_prev = n_entities;
+            let decodes = crate::sound::kit_decodes();
+            let d_decodes = decodes.saturating_sub(probe.decodes_prev);
+            probe.decodes_prev = decodes;
+            probe
+                .churn_samples
+                .push((d_entities, mesh_added, mat_added, d_decodes));
+            let mut gpu_now = 0.0;
             if let Some(gpu) = gpu {
                 let ns = gpu.0.load(std::sync::atomic::Ordering::Relaxed);
                 if ns > 0 {
-                    gpu_samples.push(ns as f32 / 1.0e6);
+                    gpu_now = ns as f32 / 1.0e6;
+                    gpu_samples.push(gpu_now);
                 }
             }
+            probe
+                .load_samples
+                .push((census.live_particles() as u32, gpu_now));
+            probe.paced_samples.push(paced_ms);
             if probe.samples.len() < probe.frames {
                 return;
             }
@@ -382,14 +438,25 @@ fn drive_live_fps(
                     c.sort_by(f32::total_cmp);
                     let cat = |q: f32| c[(((c.len() - 1) as f32) * q).round() as usize];
                     let over = probe.samples.iter().filter(|&&f| f > 16.9).count();
+                    // Real skipped frames: paced deltas of two refreshes or more.
+                    let period = 1000.0 / 60.0;
+                    let dropped = probe
+                        .paced_samples
+                        .iter()
+                        .filter(|&&f| f > 1.5 * period)
+                        .count();
+                    let paced_max = probe.paced_samples.iter().copied().fold(0.0f32, f32::max);
                     let mut worst: Vec<usize> = (0..probe.samples.len()).collect();
                     worst.sort_by(|&a, &b| probe.samples[b].total_cmp(&probe.samples[a]));
                     let worst = worst
                         .iter()
                         .take(6)
                         .map(|&i| {
+                            let (de, dm, dmat, dsnd) =
+                                probe.churn_samples.get(i).copied().unwrap_or((0, 0, 0, 0));
+                            let (np, g) = probe.load_samples.get(i).copied().unwrap_or((0, 0.0));
                             format!(
-                                "{i}:{:.1}/{:.1}",
+                                "{i}:{:.1}/{:.1}(e{de:+},m+{dm},mat+{dmat},snd+{dsnd},p{np},g{g:.1})",
                                 probe.samples[i],
                                 probe.cpu_samples.get(i).copied().unwrap_or(0.0)
                             )
@@ -398,7 +465,7 @@ fn drive_live_fps(
                         .join(",");
                     format!(
                         " cpu_ms={per_frame_ms:.2} cpu_pct={:.0} cpu_p95={:.2} cpu_p99={:.2} \
-                         frames_over={over} worst=[{worst}]",
+                         frames_over={over} dropped={dropped} paced_max={paced_max:.1} worst=[{worst}]",
                         per_frame_ms / mean as f64 * 100.0,
                         cat(0.95),
                         cat(0.99),
@@ -590,8 +657,21 @@ fn print_vis_census(seen: &benilla_world::world_census::CensusReport) {
         .map(|(name, vis, gated)| format!("{name}={vis}/gated{gated}"))
         .collect::<Vec<_>>()
         .join(" ");
+    let resident = seen
+        .kinds
+        .iter()
+        .zip(seen.resident.iter())
+        .map(|((name, _, _), n)| format!("{name}={n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let why = seen
+        .why
+        .iter()
+        .map(|(w, n)| format!("{w}={n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     println!(
-        "VIS_CENSUS visible-submeshes {line} | tagged={} hidden={} exempt={} no_aabb={}",
+        "VIS_CENSUS visible-submeshes {line} | resident {resident} | why {why} | tagged={} hidden={} exempt={} no_aabb={}",
         seen.tagged, seen.hidden, seen.exempt, seen.no_aabb
     );
     // The escapees always print: a tagged, bounded object the cull left un-hidden is a defect by

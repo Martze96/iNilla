@@ -19,11 +19,11 @@ const FILES: [&str; 10] = [
     // the `MoneyInputFrame_*` verbs. Seated straight after MoneyFrame.xml, benilla.toc's order.
     r"Interface\FrameXML\MoneyInputFrame.lua",
     r"Interface\FrameXML\MoneyInputFrame.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml",
-    "Interface\\FrameXML\\GlobalStrings.lua",
     "MailFrame.xml",
 ];
 

@@ -718,6 +718,7 @@ fn interface_harness() -> UiScript {
         &[
             "Interface\\FrameXML\\Fonts.xml",
             "MoneyFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -750,7 +751,6 @@ fn interface_harness() -> UiScript {
             "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
@@ -765,8 +765,11 @@ fn interface_harness() -> UiScript {
             "ScrollTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
-            "QuestFrame.xml",
-            "QuestLogFrame.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\ItemButtonTemplate.xml",
+            "Interface\\FrameXML\\QuestFrame.xml",
+            "MicroMenu.xml",
+            "Interface\\FrameXML\\QuestLogFrame.xml",
         ],
     );
     harness_on(s)

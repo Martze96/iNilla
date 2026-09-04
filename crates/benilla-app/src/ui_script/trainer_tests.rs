@@ -26,6 +26,7 @@ fn trainer_script() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -33,7 +34,6 @@ fn trainer_script() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml"); // the filter dropdown's kit
     load_xml(&s, "ScrollTemplates.xml"); // the faux-scroll bar kit
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // the merchant kit; the money frames are MoneyFrame.xml's (1937)
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "TrainerFrame.xml");
     s.run(
         "TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 1 \

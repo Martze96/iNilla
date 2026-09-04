@@ -206,6 +206,7 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
@@ -227,7 +228,6 @@ fn setup() -> UiScript {
     // drags in the whole unit-frame cluster — and it must be the REAL frames: loading only
     // `PartyFrame.lua` for the two names gets "attempt to index a nil value" the first time one
     // iterates. The manifest already seats these far above RaidFrame (1874).
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\TextStatusBar.lua");
     load_xml(&s, r"Interface\FrameXML\TextStatusBar.xml");
     load_xml(&s, r"Interface\FrameXML\BuffFrame.xml");

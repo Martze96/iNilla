@@ -121,6 +121,7 @@ fn shipped_spellbook_drives_end_to_end() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -130,7 +131,6 @@ fn shipped_spellbook_drives_end_to_end() {
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");

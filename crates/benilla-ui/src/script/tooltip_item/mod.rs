@@ -159,6 +159,26 @@ fn render_by_id(
 /// (rings, trinkets, one-hand weapons, and a two-hander displacing both hands) fire two
 /// shopping tooltips, ref PaperDollFrame.lua's `arg2`. Twin of the app-side
 /// `ui_items::find_equip_slot` (the equip-click fit rule) — one law, two consumers.
+/// The quest-item hover: the row's item by id, or an empty tooltip when the row is not there.
+fn set_quest_item_view(
+    lua: &Lua,
+    this: &Table,
+    item: Option<crate::script::quest::QuestItemView>,
+) -> mlua::Result<()> {
+    match item {
+        Some(it) => render_by_id(lua, this, it.item_id, it.name.clone(), Some(it.quality)),
+        None => {
+            let h = frame_handle_of(lua, this)?;
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            super::tooltip::show_or_hide_empty(lua, h);
+            Ok(())
+        }
+    }
+}
+
 fn equip_slots_for(inventory_type: u32) -> &'static [u32] {
     match inventory_type {
         1 => &[1],             // head
@@ -290,6 +310,46 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 render_by_id(lua, &this, item_id, fb_name, fb_q)
             },
         )?,
+    )?;
+
+    // GameTooltip:SetQuestItem(type, index) / SetQuestLogItem(type, index) — the quest-giver
+    // panels' and the quest log's reward/choice/required hovers (stock QuestFrameTemplates.xml:148,
+    // QuestLogFrame.xml:113; bindings 0x533610 / 0x533760, 3 args with self, 0 returns). `type` is
+    // the same "choice" | "reward" | "required" key `GetQuestItemInfo` takes, `index` the 1-based
+    // slot; the item is rendered by id through the shared renderer, with the row's own name and
+    // quality as the fallbacks a template that has not arrived yet paints from. An unknown type or
+    // an out-of-range index shows nothing — the reference's tooltip stays empty too.
+    m.set(
+        "SetQuestItem",
+        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+            let item = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.quest.as_ref().and_then(|q| {
+                    crate::script::quest::item_vec(q, &kind)
+                        .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
+                        .cloned()
+                })
+            };
+            set_quest_item_view(lua, &this, item)
+        })?,
+    )?;
+    m.set(
+        "SetQuestLogItem",
+        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+            let item = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.quest_log.detail.as_ref().and_then(|d| {
+                    let v = match kind.as_str() {
+                        "choice" => Some(&d.choices),
+                        "reward" => Some(&d.rewards),
+                        _ => None,
+                    };
+                    v.and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
+                        .cloned()
+                })
+            };
+            set_quest_item_view(lua, &this, item)
+        })?,
     )?;
 
     // GameTooltip:SetHyperlink(link) — the chat-link tooltip (ref ItemRef.lua's SetItemRef →

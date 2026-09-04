@@ -12,6 +12,7 @@ use super::test_ui::load_ui as load_xml;
 fn load_pet_bar(s: &UiScript) {
     for file in [
         "MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -21,7 +22,6 @@ fn load_pet_bar(s: &UiScript) {
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -369,6 +369,7 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -378,7 +379,6 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -677,6 +677,7 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -686,7 +687,6 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",

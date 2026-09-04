@@ -50,6 +50,10 @@ mod water;
 mod weather;
 mod zone;
 pub(crate) use emote::EmoteSounds;
+/// First-play kit decodes so far (`kit::DECODES`) — the probe's tail annotation.
+pub(crate) fn kit_decodes() -> u32 {
+    kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use message::MessageSounds;

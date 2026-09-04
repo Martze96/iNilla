@@ -646,13 +646,19 @@ fn shipped_target_frame_runs_the_level_law() {
     load_unit_frames(&s);
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     // The player at level 3, both feeds (the snapshot UnitLevel("player") reads; the req state
     // the −1 gate and GetQuestGreenRange read) — the app keeps the two in step.
     s.set_player_req_state(PlayerReqState {

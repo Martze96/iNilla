@@ -261,7 +261,10 @@ struct Active {
 fn evaluate_rig_poses(
     mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
 ) {
-    for (player, anims, mut rig) in &mut rigs {
+    // Parallel over rigs (decision 1945): a rig reads its shared clips and writes only its own
+    // pose, and a raid stands ~400 live rigs / ~12k bones — 0.4 ms of one thread's frame when
+    // walked serially, and this system sits on the main thread's critical path.
+    rigs.par_iter_mut().for_each(|(player, anims, mut rig)| {
         let src = &anims.pose;
         // This rig's contributing animations, ascending by node index (Bevy's effective blend
         // order — sorted children folded through a LIFO stack, see the module doc).
@@ -314,7 +317,7 @@ fn evaluate_rig_poses(
                 blend_rig(src, many, &mut rig);
             }
         }
-    }
+    });
 }
 
 /// The multi-animation path (a cross-fade, a masked overlay, the grip): merge-walk the

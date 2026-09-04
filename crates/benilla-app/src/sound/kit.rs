@@ -1052,9 +1052,15 @@ impl SoundKits {
             .with_context(|| format!("reading {path}"))?;
         let data = mixer::sfx_from_bytes(bytes)?;
         self.cache.insert(key, data.clone());
+        DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(data)
     }
 }
+
+/// First-play decodes so far — a chain read plus a decode on the main thread, once per
+/// distinct kit file per session. `FPS_PROBE` reads it per frame to annotate a tail frame
+/// (a raid's buff wave meets dozens of distinct spell sounds in its first minute).
+pub(crate) static DECODES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Startup: load the kit catalog off the chain (absent → no resource; every play site tolerates
 /// that, the same optional-catalog rule as `Creatures`).

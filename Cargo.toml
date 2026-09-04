@@ -58,6 +58,9 @@ sha1 = "0.10.6"
 # authority. `third_party/lua-src/BENILLA.md` has the current state and the verifying command.
 [patch.crates-io]
 lua-src = { path = "third_party/lua-src" }
+# kira 0.12.1 with one patch: spatial gains and the volume tween evaluated per CHUNK and
+# interpolated, not per frame (decision 1945; `third_party/kira/BENILLA.md`).
+kira = { path = "third_party/kira" }
 
 # Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
 # unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.

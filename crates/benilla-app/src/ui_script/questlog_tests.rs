@@ -71,6 +71,7 @@ fn eight_entries() -> QuestLogState {
                 // lands, so the fixture carries that exact shape.
                 link: Some(HAMMER_LINK.into()),
             }],
+            reward_spell: None,
         }),
     }
 }
@@ -85,6 +86,7 @@ fn shipped_questlog_frame_loads_clean() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -95,9 +97,12 @@ fn shipped_questlog_frame_loads_clean() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 }
 
 /// The whole contract in one end-to-end drive: open plays the kit and renders row 1 + the count +
@@ -111,6 +116,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -121,9 +127,12 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
 
@@ -147,7 +156,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // Row 1 carries entry 1's title (indented), the count line reads "Quests: |cffffffff8/20|r", and nothing having been
     // selected, the first non-header entry auto-selects (pin §2's SetFirstValidSelection).
     assert!(s
-        .eval::<String>("return QuestLogTitle1Text:GetText()")
+        .eval::<String>("return QuestLogTitle1NormalText:GetText()")
         .unwrap()
         .contains("Quest 1"));
     assert_eq!(
@@ -194,10 +203,12 @@ fn shipped_questlog_frame_drives_end_to_end() {
             .unwrap(),
         "You will receive:"
     );
-    assert_eq!(
-        s.eval::<String>("return QuestLogItemChooseText:GetText()")
+    // …hidden, not blanked: stock QuestFrameItems_Update Show()s/Hide()s the choose text
+    // (QuestFrame.lua:454-473) and leaves its string alone.
+    assert!(
+        !s.eval::<bool>("return QuestLogItemChooseText:IsShown()")
             .unwrap(),
-        ""
+        "no choices: the choose text is hidden"
     );
     // No choices, so the pool's first slot IS the fixed reward and the SECOND is the first
     // unused one. (One pool now — the ref's shape; there is no separate "choice row 1".)
@@ -220,7 +231,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
         })
         .expect("a 'Quest 3' row text quad");
     let before = s
-        .eval::<String>("return QuestLogTitle1Text:GetText()")
+        .eval::<String>("return QuestLogTitle1NormalText:GetText()")
         .unwrap();
     s.mouse_wheel(wx, wy, -1.0);
     assert!(s.errors().is_empty(), "wheel errors: {:?}", s.errors());
@@ -230,7 +241,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // The migration reverts our step; how far a notch should travel is a look call, recorded in
     // 1846 rather than re-authored back in.
     assert_ne!(
-        s.eval::<String>("return QuestLogTitle1Text:GetText()")
+        s.eval::<String>("return QuestLogTitle1NormalText:GetText()")
             .unwrap(),
         before,
         "wheel-down scrolled the list"
@@ -240,7 +251,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
 
     // Abandon, No path: marks the selection, shows the registry's ABANDON_QUEST entry on the
     // shared StaticPopup engine (decision 0308 §3), but No drains nothing and hides it.
-    s.run("BenillaQuestLogAbandonButton_OnClick()").unwrap();
+    s.run("QuestLogFrameAbandonButton:Click()").unwrap();
     assert!(s.eval::<bool>("return StaticPopup1:IsShown()").unwrap());
     assert_eq!(
         s.eval::<String>("return GetAbandonQuestName()").unwrap(),
@@ -269,7 +280,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     );
 
     // Abandon, Yes path: the pinned index (1, the selection at click time) drains, plus the kit.
-    s.run("BenillaQuestLogAbandonButton_OnClick()").unwrap();
+    s.run("QuestLogFrameAbandonButton:Click()").unwrap();
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert_eq!(s.take_quest_log_abandons(), vec![1]);
     // Show → igMainMenuOpen; the ref OnClick runs OnAccept FIRST (the abandon kit), THEN hides
@@ -306,8 +317,12 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // Stock seats the watch check at update time off `questNormalText:GetWidth()` (QuestLogFrame.lua:205-215),
+    // synchronously — the app's measure seam is synchronous too (measure.rs); its stand-in here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -318,11 +333,23 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    // A shift-click reaches stock QuestLogTitleButton_OnClick's unguarded `ChatFrameEditBox:IsVisible()`
+    // (QuestLogFrame.lua:478) — the chat window is on the manifest long before the log (1944).
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
+    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
+    // The app fires QUEST_LOG_UPDATE when the log lands; stock QuestLog_OnEvent's arm runs the
+    // first QuestWatch_Update, which is what hides an empty tracker.
+    s.fire_event("QUEST_LOG_UPDATE", vec![]);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -403,9 +430,12 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
             .unwrap(),
         " - Kobold Vermin slain: 3/10"
     );
-    // A manual watch is permanent: no auto-watch timer entry rides it.
+    // A manual watch is permanent: stock's shift-click inserts it with QUEST_WATCH_NO_EXPIRE
+    // (QuestLogFrame.lua:496), the timer that AutoQuestWatch_OnUpdate never counts down.
     assert!(s
-        .eval::<bool>("return BENILLA_QUEST_WATCH_TIMERS[\"Quest 1\"] == nil")
+        .eval::<bool>(
+            "return QUEST_WATCH_LIST[1] ~= nil and QUEST_WATCH_LIST[1].timer == QUEST_WATCH_NO_EXPIRE"
+        )
         .unwrap());
 
     // Shift-click again unwatches: the checkbox clears and — nothing left watched — the whole HUD
@@ -433,6 +463,7 @@ fn watch_guards_no_op_without_erroring() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -444,9 +475,18 @@ fn watch_guards_no_op_without_erroring() {
                                                             // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
                                                             // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    // A shift-click reaches stock QuestLogTitleButton_OnClick's unguarded `ChatFrameEditBox:IsVisible()`
+    // (QuestLogFrame.lua:478) — the chat window is on the manifest long before the log (1944).
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
+    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
     s.run("ToggleQuestLog()").unwrap();
@@ -482,8 +522,9 @@ fn watch_guards_no_op_without_erroring() {
     );
     assert_eq!(
         s.eval::<i64>("return GetQuestLogSelection()").unwrap(),
-        2,
-        "the click still selects"
+        1,
+        "a shift-click never selects — stock QuestLogTitleButton_OnClick's shift branch returns \
+         before the plain-click arm's QuestLog_SetSelection (QuestLogFrame.lua:472-500)"
     );
 
     // Fill the watch list to the cap (5) with quests 2-6 via the Lua API directly — the engine-level
@@ -532,6 +573,7 @@ fn progress_auto_watches_for_five_minutes() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -542,14 +584,22 @@ fn progress_auto_watches_for_five_minutes() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    // AUTO_QUEST_WATCH is the options window's (UIOptionsFrame_Init in the reference; 1944), so the
+    // auto-watch needs that window loaded, as the manifest has it long before the log.
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
 
     // A kill credit lands: the engine fires the event with the quest's 1-based log index.
     s.fire_event(
-        "BENILLA_QUEST_PROGRESS",
+        "QUEST_WATCH_UPDATE",
         vec![benilla_ui::script::ScriptValue::Int(1)],
     );
     assert!(s.errors().is_empty(), "auto-watch errors: {:?}", s.errors());
@@ -557,15 +607,20 @@ fn progress_auto_watches_for_five_minutes() {
     assert!(s
         .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
-    assert!(s
-        .eval::<bool>("return BENILLA_QUEST_WATCH_TIMERS[\"Quest 1\"] ~= nil")
-        .unwrap());
+    assert!(
+        s.eval::<bool>(
+            "return QUEST_WATCH_LIST[1] ~= nil and QUEST_WATCH_LIST[1].index == 1 \
+             and QUEST_WATCH_LIST[1].timer == MAX_QUEST_WATCH_TIMER"
+        )
+        .unwrap(),
+        "the reference's QUEST_WATCH_LIST carries the armed timer (QuestLogFrame.lua:752-769)"
+    );
 
     // 299 s in it still holds; fresh progress re-arms the timer; expiry unwatches and hides.
     s.tick(299.0);
     assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
     s.fire_event(
-        "BENILLA_QUEST_PROGRESS",
+        "QUEST_WATCH_UPDATE",
         vec![benilla_ui::script::ScriptValue::Int(1)],
     );
     s.tick(299.0);
@@ -599,25 +654,35 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The flag is declared by the options window's init since 1944, as the reference declares it
+    // in UIOptionsFrame_Init — so the window that owns it loads first, as in the manifest.
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "KeyBindingsPage.xml");
+    load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     // ScrollTemplates.xml + UIPanelTemplates.xml are NOT optional: the detail pane inherits
     // UIPanelScrollFrameTemplate, and a MISSING template is a loader *warning*, not an error —
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     s.set_quest_log(eight_entries());
     assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "1");
 
     s.run(r#"AUTO_QUEST_WATCH = "0""#).unwrap();
     s.fire_event(
-        "BENILLA_QUEST_PROGRESS",
+        "QUEST_WATCH_UPDATE",
         vec![benilla_ui::script::ScriptValue::Int(1)],
     );
     assert!(
@@ -627,7 +692,7 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
 
     s.run(r#"AUTO_QUEST_WATCH = "1""#).unwrap();
     s.fire_event(
-        "BENILLA_QUEST_PROGRESS",
+        "QUEST_WATCH_UPDATE",
         vec![benilla_ui::script::ScriptValue::Int(1)],
     );
     assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
@@ -658,8 +723,12 @@ fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let mut state = eight_entries();
     // Row 1: a plain elite quest. Row 2: an elite quest that is COMPLETE — the state word wins.
@@ -695,11 +764,11 @@ fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
     // The title is the bare (indented) name — the state word lives on the tag string now, so
     // appending it here too would double it.
     let title1 = s
-        .eval::<String>("return QuestLogTitle1Text:GetText()")
+        .eval::<String>("return QuestLogTitle1NormalText:GetText()")
         .unwrap();
     assert_eq!(title1, "  Quest 1");
     let title2 = s
-        .eval::<String>("return QuestLogTitle2Text:GetText()")
+        .eval::<String>("return QuestLogTitle2NormalText:GetText()")
         .unwrap();
     assert_eq!(title2, "  Quest 2", "no \"(Complete)\" on the title");
 
@@ -722,6 +791,7 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -732,9 +802,12 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
     s.run("ToggleQuestLog()").unwrap();
@@ -742,22 +815,24 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
 
     // A bare FontString region has no Show/Hide/IsVisible in this engine (only Frames/Buttons do —
     // `region.rs`'s method table) — the empty-state message is a toggled SetText, read back here.
+    // The empty log says the reference's QUESTLOG_NO_QUESTS_TEXT (GlobalStrings.lua:3225) through
+    // stock QuestLogNoQuestsText; "Your quest log is empty." was ours (1944).
     assert_eq!(
         s.eval::<String>("return QuestLogNoQuestsText:GetText()")
             .unwrap(),
-        "Your quest log is empty."
+        "No Active Quests"
     );
     assert!(!s.eval::<bool>("return QuestLogTitle1:IsVisible()").unwrap());
     assert!(!s
         .eval::<bool>("return QuestLogFrameAbandonButton:IsEnabled() ~= 0")
         .unwrap());
-    // The Description header is now Lua-managed (BenillaQuestLogDetail_Clear blanks it) rather than
-    // a static `text=` — it used to float "Description" over the empty-log parchment with no
-    // selection (this task's fix; QuestLogFrame.xml's header comment on the FontString).
-    assert_eq!(
-        s.eval::<String>("return QuestLogDescriptionTitle:GetText()")
+    // With no selection the reference hides the whole detail pane (stock
+    // `QuestLog_UpdateQuestDetails`: `QuestLogDetailScrollFrame:Hide()`), header included — it
+    // keeps its static `text="QUEST_DESCRIPTION"`; ours used to blank the header instead (1944).
+    assert!(
+        !s.eval::<bool>("return QuestLogDetailScrollFrame:IsVisible()")
             .unwrap(),
-        ""
+        "no selection: the detail pane is hidden, header and all"
     );
     assert_eq!(
         s.eval::<String>("return QuestLogQuestCount:GetText()")
@@ -777,6 +852,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -787,9 +863,12 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let mut state = eight_entries();
     state.detail = Some(QuestLogDetail {
@@ -826,6 +905,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
             usable: true,
             ..Default::default()
         }],
+        reward_spell: None,
     });
     s.set_quest_log(state);
     s.run("ToggleQuestLog()").unwrap();
@@ -850,7 +930,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     assert_eq!(
         s.eval::<String>("return QuestLogItemChooseText:GetText()")
             .unwrap(),
-        "You may choose one of these rewards:"
+        "You will be able to choose one of these rewards:"
     );
 
     // With choices present, the receive text reads "...also..." (QuestFrame.lua:461-462) — it
@@ -886,6 +966,24 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
 /// ResizeChild`) well past the pane — load-bearing for the scroll/clip tests below even
 /// engine-only (no font atlas, so every auto-height FontString measures 0 here — this fixture
 /// overflows on the FIXED-height portions alone: 10×12px objective rows + the reward row).
+/// The measure round-trip the app's resolve pass drives with its font engine: answer every
+/// FontString the layout asked about with the 6px-per-glyph, 12px-per-line stand-in the
+/// synchronous `FixedWidthFont(6.0)` uses, so the two agree.
+fn answer_measures(s: &mut UiScript) {
+    let answers: Vec<(u32, f32, f32, u64)> = s
+        .fontstrings_needing_measure()
+        .into_iter()
+        .map(|r| {
+            let ink = r.text.chars().count() as f32 * 6.0;
+            match r.wrap_width {
+                Some(w) if w > 0.0 && ink > w => (r.id, w, (ink / w).ceil() * 12.0, r.key),
+                _ => (r.id, ink, 12.0, r.key),
+            }
+        })
+        .collect();
+    s.set_measured_text_unwrapped(&answers);
+}
+
 fn overflowing_entry() -> QuestLogState {
     let objectives = (1..=10)
         .map(|i| QuestLogObjectiveView {
@@ -921,6 +1019,7 @@ fn overflowing_entry() -> QuestLogState {
                 usable: true,
                 ..Default::default()
             }],
+            reward_spell: None,
         }),
     }
 }
@@ -938,6 +1037,7 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -948,9 +1048,12 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
@@ -1002,8 +1105,10 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1014,13 +1119,21 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // The detail pane's scroll range is the union of its measured content (0128): the layout's
+    // measure round-trip has to be answered, as the app's resolve pass answers it every frame.
+    s.resolve();
+    answer_measures(&mut s);
+    s.resolve(); // the measured span reaches the scroll range, and the bar, on this pass
 
     s.resolve();
     let quads = s.extract();
@@ -1053,8 +1166,10 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1065,16 +1180,27 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // The detail pane's scroll range is the union of its measured content (0128): the layout's
+    // measure round-trip has to be answered, as the app's resolve pass answers it every frame.
+    s.resolve();
+    answer_measures(&mut s);
+    s.resolve(); // the measured span reaches the scroll range, and the bar, on this pass
     s.resolve(); // GetVerticalScrollRange (SetVerticalScroll's clamp) reads resolved rects.
 
-    s.run("QuestLogDetailScrollFrame:SetVerticalScroll(10)")
+    // Scroll THROUGH the bar, as the wheel and the thumb do (ScrollFrameTemplate_OnMouseWheel sets
+    // the bar; its OnValueChanged moves the frame): a reselect's `ScrollBar:SetValue(0)` is what
+    // snaps the pane back, and a bar already at 0 would fire no change over a frame-only scroll.
+    s.run("QuestLogDetailScrollFrameScrollBar:SetValue(10)")
         .unwrap();
     assert_eq!(
         s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
@@ -1093,8 +1219,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     );
 
     // A manual reselect (the row-click path — no doNotScroll) DOES reset it.
-    s.run(r#"BenillaQuestLogTitle_OnClick(QuestLogTitle1, "LeftButton")"#)
-        .unwrap();
+    s.run("QuestLogTitle1:Click()").unwrap();
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
@@ -1117,6 +1242,7 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1132,9 +1258,12 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(eight_entries());
     s.run("ToggleQuestLog()").unwrap();
@@ -1264,6 +1393,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1274,9 +1404,15 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    // A shift-click reaches stock QuestLogTitleButton_OnClick's unguarded `ChatFrameEditBox:IsVisible()`
+    // (QuestLogFrame.lua:478) — the chat window is on the manifest long before the log (1944).
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
@@ -1349,6 +1485,7 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1359,9 +1496,15 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    // A shift-click reaches stock QuestLogTitleButton_OnClick's unguarded `ChatFrameEditBox:IsVisible()`
+    // (QuestLogFrame.lua:478) — the chat window is on the manifest long before the log (1944).
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
     load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit its menus build from
     load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
@@ -1445,6 +1588,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1455,9 +1599,12 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     // Solo, quest 1 sharable and selected by the auto-selection.
     s.set_quest_log(entries_sharable(&[1]));
@@ -1489,7 +1636,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
 
     // Select an unsharable quest: party unchanged, button goes dark.
     s.run("SelectQuestLogEntry(2)").unwrap();
-    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    s.run("QuestLog_Update()").unwrap();
     assert!(
         s.eval::<bool>("return GetQuestLogPushable() == nil")
             .unwrap(),
@@ -1503,7 +1650,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
 
     // Leaving the party darkens it again from the other side.
     s.run("SelectQuestLogEntry(1)").unwrap();
-    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    s.run("QuestLog_Update()").unwrap();
     assert!(s
         .eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
         .unwrap());
@@ -1524,6 +1671,7 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1534,9 +1682,12 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(QuestLogState::default());
     s.set_party(party(4));
@@ -1557,6 +1708,7 @@ fn share_quest_click_queues_the_selected_quests_id() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1567,16 +1719,19 @@ fn share_quest_click_queues_the_selected_quests_id() {
     // an under-loaded list passes load_xml and then loses the wheel, the arrows and the bar
     // silently.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "QuestFrame.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "MicroMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     s.set_quest_log(entries_sharable(&[1, 5]));
     s.set_party(party(1));
     s.run("ToggleQuestLog()").unwrap();
 
     s.run("SelectQuestLogEntry(5)").unwrap();
-    s.run("BenillaQuestLogFrame_Update()").unwrap();
+    s.run("QuestLog_Update()").unwrap();
     s.run("QuestFramePushQuestButton:Click()").unwrap();
     assert_eq!(s.take_quest_log_pushes(), vec![5]);
     assert!(s.take_quest_log_pushes().is_empty(), "drained");

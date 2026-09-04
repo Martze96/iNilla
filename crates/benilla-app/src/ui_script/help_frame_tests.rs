@@ -30,6 +30,7 @@ fn setup() -> UiScript {
         // row, whose OnLoad calls `SmallMoneyFrame_OnLoad` — the TOC's own order (1580's
         // talent-wipe fixture hit this first).
         "MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         // The stock file's `HelpFrame_OnShow` calls `UpdateMicroButtons()` before
         // `GetGMStatus()`, so without the micro row the OnShow raises and the status ask never
@@ -39,7 +40,6 @@ fn setup() -> UiScript {
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "UIParent.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",

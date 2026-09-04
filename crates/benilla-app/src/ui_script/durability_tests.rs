@@ -389,6 +389,7 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -397,9 +398,11 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
         "MinimapCluster.xml",
         "ScrollTemplates.xml",
         "Interface\\FrameXML\\DurabilityFrame.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
-        "QuestFrame.xml",
-        "QuestLogFrame.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\ItemButtonTemplate.xml",
+        "Interface\\FrameXML\\QuestFrame.xml",
+        "MicroMenu.xml",
+        "Interface\\FrameXML\\QuestLogFrame.xml",
     ] {
         load_xml(&s, f);
     }

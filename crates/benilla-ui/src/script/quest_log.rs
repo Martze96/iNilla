@@ -137,6 +137,9 @@ pub struct QuestLogDetail {
     pub choices: Vec<QuestItemView>,
     /// Fixed rewards (`GetNumQuestLogRewards`/`GetQuestLogRewardInfo`).
     pub rewards: Vec<QuestLogQuestItem>,
+    /// The selected quest's reward spell (`rewSpell` on `SMSG_QUEST_QUERY_RESPONSE`), as
+    /// `GetQuestLogRewardSpell` answers it.
+    pub reward_spell: Option<super::quest::QuestRewardSpell>,
 }
 
 /// A quest-log reward row is the same shape as a questgiver panel row.
@@ -687,11 +690,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── v1 stubs (each the seam of a named later slice — see the module doc) ─────────────────────
+    // GetQuestLogRewardSpell() → texture, name, isTradeskillSpell (0x4e1130): the selected
+    // quest's reward spell, three nils when it has none.
     g.set(
         "GetQuestLogRewardSpell",
-        // THREE values on every reachable path, and the reference's own kinds include
-        // `(nil,nil,nil)` — so the empty answer is three nils, not one (decision 1842).
-        lua.create_function(|_, ()| Ok((Value::Nil, Value::Nil, Value::Nil)))?,
+        lua.create_function(|lua, ()| {
+            let spell = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .quest_log
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.reward_spell.clone())
+            };
+            super::quest::reward_spell_returns(lua, spell)
+        })?,
     )?;
     g.set(
         "IsUnitOnQuest",
@@ -874,6 +887,7 @@ mod tests {
                     usable: true,
                     link: Some("|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r".into()),
                 }],
+                reward_spell: None,
             }),
         }
     }

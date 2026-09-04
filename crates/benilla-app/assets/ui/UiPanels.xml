@@ -2000,6 +2000,40 @@
             hideOnEscape = 1,
         }
 
+        -- The quest log's abandon confirm and its with-items twin — ref StaticPopup.lua l.749-775,
+        -- in the reference's own home, which is this file (the same move RENAME_GUILD made). They
+        -- lived in our QuestLogFrame.xml until 1944 took that window stock; stock's Abandon button
+        -- calls `StaticPopup_Show("ABANDON_QUEST", GetAbandonQuestName())` and registers nothing.
+        -- The wording is the GlobalStrings key by name, as this file spells its dialogs (the
+        -- reference wraps the same globals in TEXT()); the with-items twin is declared as the
+        -- reference declares it, whatever `GetAbandonQuestItems()` answers.
+        StaticPopupDialogs["ABANDON_QUEST"] = {
+            text = ABANDON_QUEST_CONFIRM,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                AbandonQuest()
+                PlaySound("igQuestLogAbandonQuest")
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+        StaticPopupDialogs["ABANDON_QUEST_WITH_ITEMS"] = {
+            text = ABANDON_QUEST_CONFIRM_WITH_ITEMS,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                AbandonQuest()
+                PlaySound("igQuestLogAbandonQuest")
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
         -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
         -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
         -- (one item, one destination), and the hide is what cancels the record the new question

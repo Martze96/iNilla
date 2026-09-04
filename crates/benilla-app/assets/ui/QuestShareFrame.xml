@@ -6,7 +6,7 @@
         registration and the one-line arm) — and it fixes the dialog key, the field names and the
         one verb by name, so those are reproduced exactly.
 
-        WHY THIS IS ITS OWN FILE, next to QuestFrame.xml and QuestLogFrame.xml rather than inside
+        WHY THIS IS ITS OWN FILE, next to the (stock, since 1944) QuestFrame.xml and QuestLogFrame.xml rather than inside
         either. It belongs to neither window. The confirm has no window at all — it is raised by
         `crate::ui_quest_share` off `SMSG_QUEST_CONFIRM_ACCEPT`, exactly as DuelFrame.xml's two
         dialogs are raised off the duel packets, and answering it sends a packet neither quest

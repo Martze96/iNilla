@@ -402,10 +402,30 @@ pub fn spawn_model_entities(
         // prop lane admits steady interior props + never-fade exterior props while an
         // exterior FADER prop stays on the entity path (the exile protocol has no prop
         // shape — that keep is today's default look) and is TALLIED, never silent.
+        // The census label for a batch that stays on the entity path (`EntityPathWhy`):
+        // refined below as each divert declines it.
+        let mut why: &'static str = "gx-off";
         if let Some((gx, site)) = staticgx.as_mut() {
-            let facts = if !crate::static_gx::enabled() || shared_geometry[batch_idx] {
+            let facts = if !crate::static_gx::enabled() {
+                None
+            } else if shared_geometry[batch_idx] {
+                why = "shared-geometry";
                 None
             } else {
+                why = match site {
+                    crate::static_gx::GxSite::Doodad { .. } if is_wmo => "doodad-site-wmo",
+                    crate::static_gx::GxSite::Doodad { .. } if !class.merges() => "no-merge",
+                    crate::static_gx::GxSite::Doodad { .. } if class.interior_prop => {
+                        "interior-prop"
+                    }
+                    crate::static_gx::GxSite::Doodad { .. } => "fader-lane-off",
+                    crate::static_gx::GxSite::Wmo { .. } if !is_wmo => "wmo-site-m2",
+                    crate::static_gx::GxSite::Wmo { .. } if !class.merges() => "wmo-no-merge",
+                    crate::static_gx::GxSite::Wmo { .. } => "wmo-no-group",
+                    crate::static_gx::GxSite::Prop { .. } if is_wmo => "prop-site-wmo",
+                    crate::static_gx::GxSite::Prop { .. } if !class.merges() => "prop-no-merge",
+                    crate::static_gx::GxSite::Prop { .. } => "exterior-fader-prop",
+                };
                 match site {
                     crate::static_gx::GxSite::Doodad { owner }
                         if !is_wmo && class.merges() && !class.interior_prop =>
@@ -469,6 +489,7 @@ pub fn spawn_model_entities(
                 }
             };
             if let Some((owner, wmo, prop, fade)) = facts {
+                why = "gx-declined";
                 if gx.divert(crate::static_gx::GxBatch {
                     geometry: &sub.geometry,
                     transform,
@@ -616,6 +637,7 @@ pub fn spawn_model_entities(
                     kind,
                     blend: sub.blend,
                 },
+                crate::model_render::EntityPathWhy(why),
                 // The picker's triangles (decision 0857): the render forms are `RENDER_WORLD`-only,
                 // so the inspector/probe rays read the model's resident geometry. The caster
                 // centres a card at its pivot, the same bake the render form draws with.
@@ -650,6 +672,7 @@ pub fn spawn_model_entities(
                     kind,
                     blend: sub.blend,
                 },
+                crate::model_render::EntityPathWhy(why),
                 // The picker's triangles (decision 0857) — same rule as the card above.
                 crate::interact::PickMesh(sub.geometry.clone()),
                 mesh_tag,

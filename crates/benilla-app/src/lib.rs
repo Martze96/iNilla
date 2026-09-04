@@ -791,11 +791,11 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(UiLootPlugin)
     .add_plugins(UiLootRollPlugin)
     // The questgiver window (decision 0088): fills from the net drain's QuestGiver and drives
-    // QuestFrame.xml's four sub-panels over the Era quest API.
+    // the stock questgiver window's four sub-panels over the Era quest API (1944).
     .add_plugins(UiQuestPlugin)
     // The quest-log window (decision 0088's deferred second slice): fills from the self player's
     // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
-    // QuestLogFrame.xml over the Era quest-log API.
+    // the stock quest log over the Era quest-log API (1944).
     .add_plugins(UiQuestLogPlugin)
     // The party quest-share (decision 1733): the verdict lines on a quest we pushed, and the
     // escort-quest confirm. Neither is bound to a window, so it is its own plugin rather than a

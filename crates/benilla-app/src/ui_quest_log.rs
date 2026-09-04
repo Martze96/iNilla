@@ -53,6 +53,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -330,6 +331,7 @@ fn build_detail(
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     macros: &crate::npc_text::MacroContext,
+    spells: Option<&Spells>,
 ) -> QuestLogDetail {
     let (required_money, reward_money) = money_split(template.money);
     let rewards = template
@@ -354,6 +356,7 @@ fn build_detail(
         reward_money,
         choices,
         rewards,
+        reward_spell: crate::ui_quest::reward_spell_view(template.reward_spell, spells),
     }
 }
 
@@ -486,6 +489,7 @@ fn feed_quest_log(
     header_names: Option<Res<QuestHeaderNamesRes>>,
     tag_names: Option<Res<QuestTagNamesRes>>,
     states: Res<crate::world_state::WorldStates>,
+    spells: Option<Res<Spells>>,
     mut last: Local<crate::ui_script::VmMemo<QuestLogState>>,
     mut prior_quest_ids: Local<crate::ui_script::VmMemo<Option<HashSet<u32>>>>,
 ) {
@@ -702,9 +706,16 @@ fn feed_quest_log(
         .filter(|e| !e.is_header)
         .map(|e| e.quest_id)
         .and_then(|quest_id| {
-            quest_log
-                .template(quest_id, &commands)
-                .map(|t| build_detail(t, &mut items, icons.as_deref(), &commands, &macros))
+            quest_log.template(quest_id, &commands).map(|t| {
+                build_detail(
+                    t,
+                    &mut items,
+                    icons.as_deref(),
+                    &commands,
+                    &macros,
+                    spells.as_deref(),
+                )
+            })
         });
 
     let fresh = QuestLogState {
@@ -745,8 +756,6 @@ fn feed_quest_log(
     script.set_quest_log(fresh.clone());
     script.fire_event("QUEST_LOG_UPDATE", vec![]);
     if !progressed.is_empty() {
-        // Post-push = post-prune: the current watch list, the byte law's index space.
-        let watched = script.quest_log_watched();
         for quest in progressed {
             for line in quest.changed_lines {
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(line)]);
@@ -759,13 +768,13 @@ fn feed_quest_log(
                 };
                 script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(msg)]);
             }
-            let watch_index = watched
-                .iter()
-                .position(|&id| id == quest.quest_id)
-                .map_or(0, |p| p as i64 + 1);
-            script.fire_event("QUEST_WATCH_UPDATE", vec![ScriptValue::Int(watch_index)]);
+            // QUEST_WATCH_UPDATE's arg1 is the quest's LOG index: stock QuestLog_OnEvent hands it
+            // to AutoQuestWatch_Update(questIndex), whose end is AddQuestWatch(questIndex)
+            // (QuestLogFrame.lua:68, 752-769). Ours used to pass the watch-list position and
+            // fire a BENILLA_QUEST_PROGRESS twin carrying the log index; the twin went with the
+            // window (1944).
             script.fire_event(
-                "BENILLA_QUEST_PROGRESS",
+                "QUEST_WATCH_UPDATE",
                 vec![ScriptValue::Int(i64::from(quest.index))],
             );
         }
@@ -805,8 +814,6 @@ fn advanced(now: &QuestLogObjectiveView, was: &QuestLogObjectiveView) -> bool {
 /// One quest whose objectives advanced between log states — the announce unit of
 /// [`feed_quest_log`].
 struct QuestProgress {
-    /// The quest id (stable identity — the watch list is id-keyed).
-    quest_id: u32,
     /// The quest's 1-based index in the NEW log (the Era API's quest-log index space).
     index: u32,
     /// The quest title (the COMPLETE toast's `%s`; empty falls to the UNKNOWN form).
@@ -846,7 +853,6 @@ fn quests_with_progressed_objectives(
                 .collect();
             let completed = e.complete == 1 && prev.complete != 1;
             (!changed_lines.is_empty() || completed).then_some(QuestProgress {
-                quest_id: e.quest_id,
                 index: i as u32 + 1,
                 title: e.title.clone(),
                 changed_lines,

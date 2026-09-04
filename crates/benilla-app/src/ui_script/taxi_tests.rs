@@ -16,6 +16,7 @@ fn taxi_script() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // TaxiNodeOnButtonEnter's tooltip + SetTooltipMoney
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml"); // BenillaErrorsFrame_AddMessage — DrawOneHopLines' refusal
@@ -25,7 +26,6 @@ fn taxi_script() -> UiScript {
                                                             //   · UIPanelTemplates (.lua then .xml) — `TaxiCloseButton` inherits `UIPanelCloseButton`,
                                                             //     which lives there and NOT in our UiPanels.xml. Without it the close button loads as a
                                                             //     bare Button with no handler and a click does nothing at all.
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
     load_xml(&s, "Interface\\FrameXML\\TaxiFrame.xml");

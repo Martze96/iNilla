@@ -976,10 +976,16 @@ CraftFrame.xml
 # every verb the stock file calls at runtime — not just at load — was checked by hand against
 # the bindings before this line changed.
 Interface\FrameXML\LootFrame.xml
-# The questgiver window (decision 0088): four sub-panels over the Era quest API. Loaded after
-# MerchantFrame (grouping; the BenillaMoney coin helpers now live in MoneyFrame.xml) and GossipFrame (shared parchment
-# art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
-QuestFrame.xml
+# ══ THE QUESTGIVER WINDOW — the reference's own, off the player's chain (1751, 1944) ══
+# Stock QuestFrame.xml sources QuestFrame.lua and INCLUDES QuestFrameTemplates.xml (the panel,
+# item and title-button templates the quest log below inherits too), so one row brings the
+# three-file unit 1913 measured. Its `QuestFrameItems_Update` paints all three windows' reward
+# grids — the shared function that made the quest log un-migratable alone until the money went
+# stock (1937). Needs, all above: Fonts (QuestFont/QuestTitleFont), MoneyFrame (the two
+# MoneyFrameTemplate frames, resolved at LOAD), UiPanels, UIPanelTemplates. Its two saved-variable
+# flags (QUEST_FADING_DISABLE, AUTO_QUEST_WATCH) are declared where the reference declares them —
+# the options window's init (OptionsFrame.xml, far above).
+Interface\FrameXML\QuestFrame.xml
 # The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
 # form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. **Both are
 # the reference's own files off the player's chain now** (1751, windows 12 and 13). Loaded here,
@@ -1002,11 +1008,13 @@ Interface\FrameXML\GuildRegistrarFrame.xml
 # close/action buttons `inherits=` at LOAD), and the QuestGreeting parchment family it shares with
 # GuildRegistrarFrame directly above.
 Interface\FrameXML\PetitionFrame.xml
-# The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
-# NPC session — loaded after MerchantFrame (grouping; the coin helpers are in MoneyFrame.xml now) and
-# alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its
-# ToggleQuestLog().
-QuestLogFrame.xml
+# ══ THE QUEST LOG — the reference's own, off the player's chain (1751, 1944) ══
+# Stock QuestLogFrame.xml sources QuestLogFrame.lua; the 'L' binding calls its ToggleQuestLog(),
+# and its reward hovers are GameTooltip:SetQuestLogItem / SetQuestLogRewardSpell (engine, 1944).
+# After QuestFrame.xml (QuestItemTemplate, QuestMoneyFrame_OnLoad, QuestFrameItems_Update),
+# MicroMenu.xml (QuestLog_OnShow calls UpdateMicroButtons unguarded) and the same kit as the
+# giver; the reference's toc has the pair at l.53-54.
+Interface\FrameXML\QuestLogFrame.xml
 # The timed-quest countdown window under the minimap (decision 1150): the reference's own
 # file split. After MinimapCluster (its anchor), UIParent (the manage pass that re-seats it,
 # and SecondsToTime), GameTooltip (its row hover), and QuestLogFrame — whose window a row
