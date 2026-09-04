@@ -85,10 +85,35 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 /// an [`unit_ask_key`] analogue. Nothing visible turns on any of this: the answer is dropped
 /// ([`crate::net::apply`]'s own typemask gate), which is decision 1872's whole point.
 ///
-/// **The teardown leg** — an NPC whose questgiver bit goes off loses its cached status, so the
-/// marker goes with it (`0x5eb0a0`'s own branch), and is re-asked if the bit returns. There is no
-/// GameObject counterpart: a GameObject has no status to invalidate (`+0xcb8` is `0x9a8` bytes past
-/// the end of a `0x310`-byte `CGGameObject_C`), and all 8 of `0x6073f0`'s call sites are unit-side.
+/// **The teardown legs — and there are two of them, neither the one this file used to claim**
+/// (decision 1906, wow-re §W15). `0x5eb0a0` is a **2×2 on (questgiver bit × reaction)**, and its
+/// `0x5eb134` is a *convergent* block — reached both when the bit is clear (`0x5eb125 je`) and when
+/// the bit is set but the reaction failed (`0x5eb132 jg` not taken). That convergence is why three
+/// incompatible readings of this callback were live at once. The table:
+///
+/// | `UNIT_NPC_FLAGS & 0x2` | reaction **> 1** | reaction **≤ 1** |
+/// |---|---|---|
+/// | **set** | sends `0x182` (`0x5eb159`) | **tears down** (`0x5eb143`) |
+/// | **clear** | **nothing** (`0x5eb15e`) | **tears down** (`0x5eb143`) |
+///
+/// So the sweep tears down **iff the reaction is Hated/Hostile**, whether or not the unit is a
+/// questgiver — and it *never* tears down on the flag alone, which is what decision 0647 recorded
+/// and what this file did until now. A flag that goes off is torn down by the **`UNIT_NPC_FLAGS`
+/// field watch** instead (`0x6043c5` registers `0x604a20` → `0x60b420`, which XORs old against new
+/// and calls `0x607380` on *any* change to bit `0x2`) — and `0x607380`'s **first instruction after
+/// its prologue** is `0x607384 call 0x6073f0`, an unconditional teardown no branch can skip, with
+/// the reaction gate (`0x6073b2`) sitting *after* it and guarding only the re-issued queries. Ours
+/// is [`unit_ask_key`] moving, which is the same event observed from outside.
+///
+/// **The two sweeps therefore disagree, deliberately.** The light sweep (`0x5eb070`, 11 callers)
+/// runs the table above. The full re-query sweep (`0x5eb3c0`, 2 callers — **your revive**, and a
+/// change to your own record's reaction inputs) runs `0x5eb3f0`, whose creature arm is an
+/// unconditional `0x607380`: every creature's marker is torn down and then re-asked for. `full`
+/// below is that distinction.
+///
+/// There is no GameObject counterpart to any of it: a GameObject has no status to invalidate
+/// (`+0xcb8` is `0x9a8` bytes past the end of a `0x310`-byte `CGGameObject_C`), and all 8 of
+/// `0x6073f0`'s call sites are unit-side.
 ///
 /// **Still not covered**, and why: the reference also sweeps when an *item* moves between
 /// containers (an `ITEM` typeid watch, `0x5d9375` — quest availability can depend on carried
@@ -97,12 +122,13 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 /// equipping, unequipping and swapping a bag but not moving a stack inside one. Per unit, the
 /// reference's reaction refresh also keys on charm/persuade/duel-team/`PLAYER_BYTES_3`; we key on
 /// the faction template, and catch a standing change through the reputation sweep instead.
-#[allow(clippy::type_complexity)] // a Bevy system: each param is one resource, the app's convention
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // a Bevy system: one param per resource
 pub(super) fn query_statuses(
     self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     objects: Query<(&crate::net::Guid, &NetEntity, &ObjectStore), Without<SelfPlayer>>,
     index: Res<GuidIndex>,
     factions: Option<Res<Factions>>,
+    reputations: Res<crate::net::Reputations>,
     mut quest: ResMut<QuestGiver>,
     commands: Res<NetCommands>,
     mut state: Local<QueryState>,
@@ -117,18 +143,36 @@ pub(super) fn query_statuses(
         state.fields = self_generation(&store.0);
     }
     let generation = state.fields ^ (u64::from(quest.reask_epoch()) << 32);
-    // **This frame IS the sweep.** Both of the reference's object sweeps (`0x5eb070` and the full
-    // re-query `0x5eb3c0`) walk every object in the manager once, synchronously, when one of the
-    // 13 local-player state changes fires them; a changed generation is that moment, here. The
-    // GameObject leg below fires only on it, because that is the only way a GameObject GUID ever
-    // reaches the wire (§W14.8).
-    let swept = state.generation != generation;
-    if swept {
-        state.generation = generation;
-        state.asked.clear();
+    // **The FULL re-query sweep's own two triggers** (`0x5eb3c0`, both self-gated on
+    // `IsLocalPlayer`): your **revive** — the `≤0 → >0` crossing that `0x6046f0` sends down the
+    // sibling branch of §W13's death edge — and a change to **your own record's** reaction inputs
+    // (`0x606e20` → `0x606eef`). Everything else in the trigger set reaches the *light* sweep
+    // `0x5eb070`, which does not tear anything down. Tracked as edges rather than folded into the
+    // generation because the direction is the whole point: the death edge is a light sweep and the
+    // revive edge is a full one, and the folded alive/dead bit cannot tell them apart.
+    let alive = store.0.unit_health().unwrap_or(1) != 0;
+    // Compared only between two frames that both *saw* the field: our template arrives with the
+    // create block, and treating "absent → present" as a change would fire one spurious full sweep
+    // at every login.
+    let my_faction = store.0.unit_faction_template();
+    let full = (alive && state.was_dead)
+        || (my_faction.is_some() && state.my_faction.is_some() && state.my_faction != my_faction);
+    state.was_dead = !alive;
+    if my_faction.is_some() {
+        state.my_faction = my_faction;
     }
+    // **This frame IS a sweep.** A sweep walks every object in the manager once, synchronously,
+    // when one of the reference's local-player state changes fires it; a changed generation is that
+    // moment. The GameObject leg below fires only on it, because that is the only way a GameObject
+    // GUID ever reaches the wire (§W14.8) — and a full sweep is a sweep too, even when it arrives
+    // through an edge the generation does not carry.
+    let swept = state.generation != generation || full;
+    state.generation = generation;
     // Object lifetime is the other half of the cache key: a guid that left the world drops both
     // its "already asked" mark and its cached status, so re-entering view re-asks from scratch.
+    // The map is NOT cleared by a sweep — it holds each unit's last ask key, and a sweep re-asking
+    // everyone must stay distinguishable from that unit's own key actually moving, because only
+    // the second is a `0x607380` and only a `0x607380` tears the marker down.
     state.asked.retain(|guid, _| index.0.contains_key(guid));
     quest.retain_statuses(|npc| index.0.contains_key(&npc));
     for (guid, net, obj) in &objects {
@@ -136,26 +180,46 @@ pub(super) fn query_statuses(
             // `0x5eb0a0` @ `0x5eb0d3`: `cmp eax,9; je` — typemask EXACTLY `OBJECT|UNIT`, a plain
             // creature. A player is `0x19` and falls out of the sweep here, before any flag test.
             EntityKind::Unit => {
-                if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER == 0 {
-                    // No longer a questgiver: drop the stale answer (and the marker with it) —
-                    // **unconditionally**, never "only if we had asked". The reference's sweep
-                    // callback (`0x5eb0a0`) tears the marker down on the flag test alone, with no
-                    // prior-asked precondition (decision 0647), and the gate we used to put here
-                    // was disarmed by the very sweep that arrives with it: an escort's giver drops
-                    // `UNIT_NPC_FLAGS` in the same server tick as the quest-log write (vmangos
-                    // `FollowerAI::StartFollow`, `ScriptedEscortAI`'s "disable npcflags"), so the
-                    // quest-log change bumps the generation, `asked` is cleared above, `remove`
-                    // finds nothing, and the cached AVAILABLE status — with its `!` — was frozen
-                    // over the NPC for the whole escort, with no way back: the flag stays off, so
-                    // this arm never queries either (B257).
+                // `0x6061e0(ecx = the swept unit, arg = the player)` — the unit's reaction toward
+                // **us**, which is the direction both `call` sites in the callback use
+                // (`0x5eb12a`/`0x5eb137`, both `ecx = esi`; §W15 Q1b) and the direction
+                // [`ring_reaction`] resolves. `<= 1` is Hated/Hostile and nothing else: Unfriendly
+                // and Neutral both pass. It reads Neutral when anything is missing, so a cold
+                // catalog can never blank a marker.
+                let reaction = crate::target::ring_reaction(
+                    factions.as_deref(),
+                    &reputations,
+                    Some(obj),
+                    Some(&store),
+                );
+                if reaction <= 1 {
+                    // The sweep's ONE teardown (`0x5eb143`), and it is convergent: it fires for a
+                    // hostile creature whether or not it is a questgiver. Dropping the ask key too
+                    // means the marker comes back through a `0x607380` when the reaction recovers.
                     state.asked.remove(&guid.0);
                     quest.clear_status(guid.0);
                     continue;
                 }
-                // Re-ask when this unit's own key moves — its service bits or its faction template.
-                // The reference does the same per-unit query off those field watches.
                 let key = unit_ask_key(&obj.0);
-                if state.asked.insert(guid.0, key) != Some(key) {
+                let key_moved = state.asked.insert(guid.0, key) != Some(key);
+                // **`0x607380` — teardown first, unconditionally, then re-gate.** Reached from this
+                // unit's own field watches (`UNIT_NPC_FLAGS` via `0x60b420`'s XOR, so *either*
+                // direction; the flightmaster bit; its reaction inputs), from its create/init
+                // hooks, and from the full sweep's callback. `0x607384 call 0x6073f0` is the first
+                // instruction after the prologue and no branch can skip it.
+                //
+                // This is where **B257** actually lives, and it used to hang off the wrong
+                // mechanism: an escort's giver drops `UNIT_NPC_FLAGS` in the same server tick as
+                // the quest-log write (vmangos `FollowerAI::StartFollow`, `ScriptedEscortAI`'s
+                // "disable npcflags"), and its cached AVAILABLE status — with its `!` — stayed
+                // frozen over the NPC for the whole escort. The flag is half of [`unit_ask_key`],
+                // so the drop moves the key, and the key moving is a `0x607380`.
+                if key_moved || full {
+                    quest.clear_status(guid.0);
+                }
+                // …and re-gate: the questgiver bit, on this unit's own key change and on every
+                // sweep. (Reaction is already `> 1` — the arm above returned otherwise.)
+                if (key_moved || swept) && obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER != 0 {
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
@@ -267,8 +331,13 @@ pub(super) struct QueryState {
     fields: u64,
     /// `fields` combined with the packet epoch; a change here is the sweep.
     generation: u64,
-    /// Which guids we've asked about, and the [`unit_ask_key`] we asked at.
+    /// Which guids we've asked about, and the [`unit_ask_key`] we asked at. Pruned by object
+    /// lifetime only — never by a sweep, so "this unit's own key moved" stays a distinct event.
     asked: HashMap<u64, u64>,
+    /// Our own alive/dead and faction-template from last frame — the two edges that make a sweep a
+    /// **full** one. `None`/`false` initially, so the first frame in a world is never a full sweep.
+    was_dead: bool,
+    my_faction: Option<u32>,
 }
 
 #[cfg(test)]
@@ -300,6 +369,7 @@ mod tests {
         app.insert_resource(NetCommands(tx))
             .init_resource::<GuidIndex>()
             .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
             .add_systems(Update, query_statuses);
 
         let me = app
@@ -412,6 +482,7 @@ mod tests {
         app.insert_resource(NetCommands(tx))
             .init_resource::<GuidIndex>()
             .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
             .add_systems(Update, query_statuses);
 
         let me = app
@@ -486,6 +557,234 @@ mod tests {
         );
     }
 
+    /// **The light sweep re-asks; only the FULL sweep tears down first** (decision 1906,
+    /// wow-re §W15 Q1d). The two sweeps are not interchangeable and this is the difference:
+    /// `0x5eb0a0` (11 callers — level, money, the quest log, a skill, `PLAYER_FLAGS`, an item, your
+    /// **death**, reputation, the group roster, the quest packets) sends and never tears down,
+    /// while `0x5eb3f0` (2 callers — your **revive**, and your own record's reaction inputs) goes
+    /// through `0x607380`, whose first post-prologue instruction is an unconditional teardown.
+    ///
+    /// The death and revive edges are the sharp end: they are the same folded alive/dead bit, one
+    /// each way, and they land on *different sweeps*. A model that cannot tell them apart either
+    /// blinks every marker on a damage-to-zero or fails to blink them on the way back.
+    #[test]
+    fn a_light_sweep_re_asks_but_only_a_revive_tears_the_marker_down_first() {
+        use crate::net::{Guid, NetEntity};
+        use benilla_protocol::{EntityKind, ObjectFields};
+
+        const NPC: u64 = 0x7777;
+        const FIELD_LEVEL: u16 = 34;
+        const FIELD_HEALTH: u16 = 22;
+        const FIELD_FACTION: u16 = 35; // UNIT_FIELD_FACTIONTEMPLATE
+        const FIELD_NPC_FLAGS: u16 = 147;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
+            .add_systems(Update, query_statuses);
+
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(1),
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (FIELD_LEVEL, 5),
+                    (FIELD_HEALTH, 100),
+                    (FIELD_FACTION, 1),
+                ])),
+            ))
+            .id();
+        let npc = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                Guid(NPC),
+                ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0x2)])),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(NPC, npc);
+        let asked = |app: &mut App| -> usize {
+            app.update();
+            rx.try_iter()
+                .filter(
+                    |c| matches!(c, ClientCommand::QuestgiverStatusQuery { npc } if *npc == NPC),
+                )
+                .count()
+        };
+        let set_self = |app: &mut App, pairs: &[(u16, u32)]| {
+            *app.world_mut()
+                .entity_mut(me)
+                .get_mut::<ObjectStore>()
+                .unwrap() = ObjectStore(ObjectFields::from_pairs(pairs));
+        };
+        let restore = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<QuestGiver>()
+                .set_status(NPC, 5);
+        };
+        let held = |app: &App| app.world().resource::<QuestGiver>().status(NPC);
+
+        assert_eq!(asked(&mut app), 1, "the create-path query");
+        restore(&mut app);
+
+        // The packet half of the LIGHT sweep — a quest turn-in, a reputation change, a roster
+        // change. Re-asks; the `!` stays up until the fresh answer lands.
+        app.world_mut().resource_mut::<QuestGiver>().bump_reask();
+        assert_eq!(asked(&mut app), 1, "a light sweep re-asks");
+        assert_eq!(held(&app), Some(5), "…and does NOT tear the marker down");
+
+        // Your DEATH — the `>0 → ≤0` edge, which §W13 pins to the light sweep. Same rule.
+        set_self(
+            &mut app,
+            &[(FIELD_LEVEL, 5), (FIELD_HEALTH, 0), (FIELD_FACTION, 1)],
+        );
+        assert_eq!(asked(&mut app), 1, "death re-asks");
+        assert_eq!(held(&app), Some(5), "…and is still a light sweep");
+
+        // Your REVIVE — the `≤0 → >0` edge, the sibling branch, and the FULL sweep.
+        set_self(
+            &mut app,
+            &[(FIELD_LEVEL, 5), (FIELD_HEALTH, 100), (FIELD_FACTION, 1)],
+        );
+        assert_eq!(asked(&mut app), 1, "revive re-asks");
+        assert_eq!(
+            held(&app),
+            None,
+            "…and tears every creature's marker down first (0x5eb3f0 -> 0x607380)"
+        );
+
+        // Your own record's reaction inputs moving — the full sweep's other caller. It is NOT in
+        // the folded generation at all, so this also pins that `full` can raise a sweep by itself.
+        restore(&mut app);
+        set_self(
+            &mut app,
+            &[(FIELD_LEVEL, 5), (FIELD_HEALTH, 100), (FIELD_FACTION, 2)],
+        );
+        assert_eq!(asked(&mut app), 1, "our own faction change sweeps");
+        assert_eq!(held(&app), None, "…fully");
+    }
+
+    /// **The sweep tears down on HOSTILITY, never on the questgiver flag** (decision 1906, wow-re
+    /// §W15 Q1a). `0x5eb0a0`'s `0x5eb134` is a convergent block, so the reaction test runs for
+    /// every creature and `0x5eb143` is the callback's only teardown; the flag decides the *send*
+    /// alone. On the real `FactionTemplate.dbc`, because a reaction gate that never resolves a real
+    /// faction is not a gate.
+    #[test]
+    fn a_hostile_questgiver_is_torn_down_and_never_asked_about() {
+        use crate::net::{Guid, NetEntity};
+        use benilla_protocol::{EntityKind, ObjectFields};
+
+        const FRIENDLY: u64 = 0x1001;
+        const HOSTILE: u64 = 0x1002;
+        const FIELD_LEVEL: u16 = 34;
+        const FIELD_FACTION: u16 = 35;
+        const FIELD_NPC_FLAGS: u16 = 147;
+        /// `FactionTemplate.dbc` 35 = "friendly to players", 14 = the monster template that is
+        /// hostile to everything — the pair the ring's own tests use.
+        const TPL_FRIENDLY: u32 = 35;
+        const TPL_MONSTER: u32 = 14;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalog = benilla_formats::load_faction_catalog(&mut chain).expect("dbc");
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
+            .insert_resource(crate::target::Factions::from_catalog(catalog))
+            .add_systems(Update, query_statuses);
+
+        app.world_mut().spawn((
+            SelfPlayer,
+            Guid(1),
+            // Us: faction template 1 (PLAYER, Human).
+            ObjectStore(ObjectFields::from_pairs(&[
+                (FIELD_LEVEL, 5),
+                (FIELD_FACTION, 1),
+            ])),
+        ));
+        for (guid, tpl) in [(FRIENDLY, TPL_FRIENDLY), (HOSTILE, TPL_MONSTER)] {
+            let e = app
+                .world_mut()
+                .spawn((
+                    NetEntity {
+                        kind: EntityKind::Unit,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(&[
+                        (FIELD_NPC_FLAGS, 0x2),
+                        (FIELD_FACTION, tpl),
+                    ])),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+        }
+        let drain = |rx: &crossbeam_channel::Receiver<ClientCommand>| -> Vec<u64> {
+            rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::QuestgiverStatusQuery { npc } => Some(npc),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Bring both into view first. That frame is a `0x607380` for each of them (the create/init
+        // hook: an unconditional teardown, then the re-gate), so a status seeded *before* it would
+        // be torn down for a reason that has nothing to do with hostility — and it is not a state a
+        // client can be in anyway, since a status cannot exist for a unit never seen.
+        app.update();
+        assert_eq!(
+            drain(&rx),
+            vec![FRIENDLY],
+            "on sight, only the non-hostile questgiver is asked about"
+        );
+
+        // Now both wear a marker, and a sweep runs.
+        for g in [FRIENDLY, HOSTILE] {
+            app.world_mut()
+                .resource_mut::<QuestGiver>()
+                .set_status(g, 5);
+        }
+        app.world_mut().resource_mut::<QuestGiver>().bump_reask();
+        app.update();
+        let asked = drain(&rx);
+        let quest = app.world().resource::<QuestGiver>();
+        assert_eq!(
+            asked,
+            vec![FRIENDLY],
+            "and the sweep asks about the same one — {asked:x?}"
+        );
+        assert_eq!(
+            quest.status(FRIENDLY),
+            Some(5),
+            "the control: a friendly giver keeps its marker"
+        );
+        assert_eq!(
+            quest.status(HOSTILE),
+            None,
+            "and a Hated/Hostile one is torn down (0x5eb143), questgiver flag or not"
+        );
+    }
+
     /// **A GameObject is asked about on a SWEEP, and only on a sweep** (decision 1872, wow-re
     /// `questgiver-marker.md` §W14.6/§W14.8). Three things are being pinned here, and the third is
     /// the one a client "improves" without noticing:
@@ -520,6 +819,7 @@ mod tests {
         app.insert_resource(NetCommands(tx))
             .init_resource::<GuidIndex>()
             .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
             .add_systems(Update, query_statuses);
 
         let spawn = |app: &mut App, guid: u64, kind: EntityKind, fields: &[(u16, u32)]| {
@@ -653,6 +953,7 @@ mod tests {
         app.insert_resource(NetCommands(tx))
             .init_resource::<GuidIndex>()
             .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
             .add_systems(Update, query_statuses);
 
         // Our own store starts with every watched field present, so each leg below is a CHANGE to

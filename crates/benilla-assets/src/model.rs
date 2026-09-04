@@ -23,7 +23,7 @@ mod pose;
 // names them yet), so rustc can't see this re-export escape — allow silences the resulting
 // unused-import false positive on an otherwise-live facade re-export.
 #[allow(unused_imports)]
-pub use anims::{AnimClip, ModelAnimations, PlayableAnim, ResolvedAnim};
+pub use anims::{AnimClip, ClipEvent, ModelAnimations, PlayableAnim, ResolvedAnim};
 pub use pose::{PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack};
 
 /// A billboarded submesh's render data (Bevy space): the bone pivot the card rotates about (model-local

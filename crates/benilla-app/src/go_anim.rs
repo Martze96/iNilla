@@ -963,6 +963,17 @@ fn ghost_passable(kind: benilla_protocol::EntityKind, type_id: i32) -> bool {
     kind == benilla_protocol::EntityKind::GameObject && type_id == GO_TYPE_DOOR
 }
 
+/// What the GameObject event scanner reads per object: its clock, its park state, and the frame
+/// its fired keys resolve in ([`crate::creature_anim::EventFrame`]).
+type ScannedGo = (
+    Entity,
+    &'static ModelAnimations,
+    &'static AnimationPlayer,
+    Has<benilla_world::rig_anim::AnimParked>,
+    &'static GlobalTransform,
+    Option<&'static benilla_world::rig_anim::RigPose>,
+);
+
 /// Fire the event keyframes an animated GameObject's playing clip crossed this frame — the GO
 /// half of the M2 event-kernel surface (wow-re `go-display-sound-events.md`, the 1086 fold-back
 /// record): the reference registers an event callback per **family-A** GO at create
@@ -982,19 +993,12 @@ fn ghost_passable(kind: benilla_protocol::EntityKind, type_id: i32) -> bool {
 /// head, a loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never
 /// fires.
 fn fire_go_anim_events(
-    gos: Query<
-        (
-            Entity,
-            &ModelAnimations,
-            &AnimationPlayer,
-            Has<benilla_world::rig_anim::AnimParked>,
-        ),
-        With<GoAnim>,
-    >,
+    gos: Query<ScannedGo, With<GoAnim>>,
+    globals: Query<&GlobalTransform>,
     mut last: Local<crate::creature_anim::TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
 ) {
-    for (entity, anims, player, parked) in &gos {
+    for (entity, anims, player, parked, world, pose) in &gos {
         // The election's tick half, GO twin (decision 1482): a parked GO's event track is not
         // scanned — and there is no `MORE_AUDIBLE` exception here, because the flag lives on
         // CREATURE templates only (the reference's re-link arm reads the creature query cache).
@@ -1010,7 +1014,11 @@ fn fire_go_anim_events(
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((clip, cur)) = playing {
             if let Some(prev) = advance_track(&mut last, entity, clip.node, cur) {
-                scan_events(clip, entity, prev, cur, &mut out);
+                let frame = crate::creature_anim::EventFrame {
+                    world,
+                    rig: pose.and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
+                };
+                scan_events(clip, entity, prev, cur, &frame, &mut out);
             }
         }
     }

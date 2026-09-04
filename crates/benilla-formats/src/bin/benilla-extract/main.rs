@@ -330,6 +330,16 @@ enum Command {
     /// Also counts the models whose pose depends on the §2c remap (benilla plays nothing there today,
     /// i.e. bind pose) and the ones reaching a rate-0 freeze leg.
     Goanimscan,
+    /// Sweep every `.m2` and census the **event table's positional half**: the `bone` and
+    /// `position` every `M2Event` record carries beside its 4CC. The reference's event dispatchers
+    /// hand their arms the event's own world point (the authored `position` through its bone's live
+    /// matrix and the model's placement), while a consumer that plays at the model root uses the
+    /// placement alone — so this reports, per 4CC, how many records sit off the origin and how many
+    /// ride a bone any sequence keys. Where both are zero the two are the same point.
+    Eventmarkerscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Census the **GameObject display sound slots** (`GameObjectDisplayInfo.Sound[0..9]`) against
     /// the only thing that can reach them. Exactly one function in the reference reads those
     /// columns (`0x5f4010`) and it is called only from the GO M2 anim-event dispatcher
@@ -870,6 +880,9 @@ fn main() -> Result<()> {
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
         Command::Fxlifescan { prefix } => scan::fxlifescan(&mut chain, prefix.as_deref())?,
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
+        Command::Eventmarkerscan { prefix } => {
+            scan::eventmarkerscan(&mut chain, prefix.as_deref())?
+        }
         Command::Goslotscan => scan::goslotscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,

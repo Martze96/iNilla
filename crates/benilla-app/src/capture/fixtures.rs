@@ -51,9 +51,10 @@ pub(super) fn seed_ui_fixture(
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // Bundled: Bevy systems cap at 16 top-level params — a nested tuple is one param.
-    (mut actions, mut bank): (
+    (mut actions, mut bank, mut exit): (
         ResMut<crate::ui_action::PlayerActions>,
         ResMut<crate::ui_bank::BankOpen>,
+        MessageWriter<AppExit>,
     ),
 ) {
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
@@ -67,6 +68,22 @@ pub(super) fn seed_ui_fixture(
         return;
     }
     ctx.ui_seeded = true;
+
+    // **A UI capture with no script VM is not a capture — refuse it.** Every seed below opens its
+    // window by calling into the in-game UI, so with no VM they all fail the same way: a nil
+    // global, one `warn!` in a log full of pipeline chatter, a valid-looking PNG of a UI-less
+    // world, and exit 0. That is the false-negative shape `method.md` §6 exists to prevent, and it
+    // burned a session. `scenario_wants_ui` removed the cause (a `ui:` scenario no longer needs
+    // `WOW_CAPTURE_UI=1`); this is the tripwire for whatever else could leave the VM absent, and
+    // it exits non-zero the way the window-size refusal does (`video::warn_if_window_mismatch`).
+    if script.is_none() {
+        error!(
+            "capture: REFUSING this capture — scenario {:?} declares a UI fixture but no script              VM exists, so its window cannot be opened and the shot would be a UI-less world              wearing the scenario's name.",
+            scenario.name
+        );
+        exit.write(AppExit::error());
+        return;
+    }
 
     // A creature guid whose entry bits (24–47) carry 90001 — the NameCache resolves vendor/NPC
     // names by that entry, so inserting the name by entry makes the title path run for real.
@@ -135,6 +152,10 @@ pub(super) fn seed_ui_fixture(
     };
 
     match fixture {
+        // Nothing to open — the UI being loaded (and `demo_unit_feed`'s synthetic player/target)
+        // IS the fixture. The `script.is_none()` refusal above still guards it: these scenarios
+        // photograph the player UI, so a run without a VM is as wrong for them as for any other.
+        UiFixture::Bare => {}
         UiFixture::Merchant => {
             names.insert_creature(
                 NPC_ENTRY,

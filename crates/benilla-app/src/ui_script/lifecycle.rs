@@ -119,10 +119,14 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
 }
 
 /// Does this run want the player UI at all? Captures stay pristine — their baselines regression-test
-/// the WORLD render — unless `WOW_CAPTURE_UI=1` opts the UI in.
+/// the WORLD render — unless the UI is opted in, which happens two ways: `WOW_CAPTURE_UI=1` on any
+/// scenario, or the scenario **declaring a `ui:` fixture**, which is the harness saying the window
+/// is the subject — [`crate::run_mode::capture_ui_opted_in`] is the one predicate, and its doc says why all
+/// three consumers of it must agree. A run with no `CaptureMode` is an ordinary client and always
+/// wants its UI.
 fn ui_wanted(world: &World) -> bool {
     !world.contains_resource::<crate::run_mode::CaptureMode>()
-        || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
+        || crate::run_mode::capture_ui_opted_in()
 }
 
 /// The world-entry UI load, armed at `OnEnter(InWorld)` and run by [`run_pending_entry_load`]

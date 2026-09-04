@@ -439,9 +439,11 @@ impl Plugin for UiScriptPlugin {
 
 /// Should this CAPTURE include the player UI (+ the synthetic unit snapshot)? The visual harness's
 /// baselines must stay UI-free (they regression-test the WORLD render), so captures skip the UI
-/// unless `WOW_CAPTURE_UI=1` opts in. Normal runs always load the UI and never take synthetic data.
+/// unless it is opted in — [`crate::run_mode::capture_ui_opted_in`], the SAME predicate the UI load and the
+/// window sizing use, because the three disagreeing is how `ui-unitframes` ends up photographing
+/// empty frames. Normal runs always load the UI and never take synthetic data.
 fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool {
-    capture.is_some() && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
+    capture.is_some() && crate::run_mode::capture_ui_opted_in()
 }
 
 /// The pointer arbiter (decision 0026): `PointerOverUi = egui dev overlay ∨ player-UI hover`. Runs

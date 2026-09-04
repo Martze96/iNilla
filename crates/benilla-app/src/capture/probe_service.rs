@@ -63,7 +63,11 @@ use crate::player::Player;
 use crate::target::click::{service_action, service_arm, ServiceAction, ServiceArm};
 use crate::target::cursor_mode::npc_flags as f;
 use crate::ui_gossip::GossipState;
+use benilla_ui::script::UiScript;
+
+use crate::ui_merchant::MerchantOpen;
 use crate::ui_quest::QuestGiver;
+use crate::ui_session::InteractNpc;
 use crate::ui_trainer::TrainerOpen;
 
 /// How wide to look around a `.go` landing for the leg's NPC — **and no wider than the reference's
@@ -84,6 +88,30 @@ const SCAN_TIMEOUT_SECS: f64 = 20.0;
 /// How long a leg waits for its window after the opcode goes out. Generous for the same reason the
 /// binder probe's is: the observer is starved during a terrain load, never the wire.
 const WINDOW_TIMEOUT_SECS: f64 = 20.0;
+/// How long the re-click gate's latch may lag the window it belongs to.
+///
+/// It is allowed to lag **at all** because `feed_interact_npc` and the net apply are both in
+/// `WorldStage::Net` and deliberately unordered against each other (`ui_session`, decision 1741's
+/// note: "whether a window's first frame is seen now or next frame is invisible"), so the token can
+/// arm one frame after the window opens. A human's second right-click is a hundred milliseconds and
+/// many frames away, so one frame is invisible — but "one frame" and "never" are the same reading
+/// if you sample once, which is exactly what the first run of this assert did: it failed the quest
+/// and trainer legs, whose windows open on the packet, and passed the gossip legs only because the
+/// gossip frame holds shut for several frames waiting on its greeting query (B292). So the probe
+/// polls, and prints how long it actually took.
+const GATE_TIMEOUT_SECS: f64 = 3.0;
+
+/// **The vendor fork's leg** (decision 1914) — Brother Danil, `creature_template.entry = 152`,
+/// `npc_flags = 4` (VENDOR and nothing else, so the ladder cannot reach him by any other arm),
+/// spawned in Northshire at his own `creature.position_*` (live-DB verified this session).
+const VENDOR_ENTRY: u32 = 152;
+const VENDOR_AT: [f32; 3] = [-8901.59, -112.716, 82.0314];
+const VENDOR_MAP: u32 = 0;
+/// Tough Jerky — a 1-copper vendor trash item, `.additem`'d so the sell leg has something of its
+/// own to sell and never touches whatever the probe character was already carrying.
+const SELL_ITEM_ENTRY: u32 = 117;
+/// How long to wait for `.additem` to land in a bag, and for the sold item to leave it.
+const BAG_TIMEOUT_SECS: f64 = 20.0;
 
 /// Which NPC a leg is looking for.
 enum Ident {
@@ -183,6 +211,13 @@ struct ServiceProbe {
     passes: u32,
     fails: u32,
     skips: u32,
+    /// How many frames the current scan actually got to poll in. A starved observer and a missing
+    /// NPC look identical in a SKIP line otherwise — and on a loaded machine the first is far more
+    /// likely: at load 61 this probe logged `frame hitch: ~1010 ms` on repeat (the ~1 fps regime
+    /// decisions 0713/0777/1355 name) and its 20-second scan window bought about twenty samples.
+    /// `leg.sh` answers the same problem with a load guard (1157); a probe that does one thing and
+    /// exits is better served by reporting what it actually got.
+    polls: u32,
     /// Latched once [`Phase::Done`] has fired its exit (never re-fire on a later frame).
     exited: bool,
 }
@@ -204,7 +239,54 @@ enum Phase {
         since: f64,
         guid: u64,
     },
+    /// The window is open; waiting for the re-click gate's `"npc"` token to name its NPC
+    /// (decision 1905). Its own phase because the latch is allowed to lag the window by a frame —
+    /// see [`GATE_TIMEOUT_SECS`].
+    Gate {
+        i: usize,
+        since: f64,
+        guid: u64,
+    },
+    /// The vendor fork's own chain (decision 1914) — `.go` to the pure vendor.
+    VendorHop {
+        sent_at: f64,
+    },
+    /// The EMPTY-cursor leg: `CMSG_LIST_INVENTORY` sent, waiting for the merchant window.
+    VendorOpen {
+        since: f64,
+        guid: u64,
+    },
+    /// `.additem` sent, waiting for the jerky to appear in a bag so it can be picked up.
+    VendorArm {
+        since: f64,
+        guid: u64,
+    },
+    /// The HELD-cursor leg: `CMSG_SELL_ITEM` sent, waiting for the slot to empty.
+    VendorSell {
+        since: f64,
+        bag: i64,
+        slot: u32,
+    },
     Done,
+}
+
+/// The bag slot holding [`SELL_ITEM_ENTRY`], as `"bag,slot"`, or `""` — asked of the live VM
+/// through the same bindings a player's bag UI uses, so the probe never needs its own view of the
+/// container fields.
+fn find_item_slot(script: &UiScript) -> Option<(i64, u32)> {
+    let found = script
+        .eval::<String>(&format!(
+            "for b = 0, 4 do \
+               local n = GetContainerNumSlots(b) or 0 \
+               for s = 1, n do \
+                 local l = GetContainerItemLink(b, s) \
+                 if l and string.find(l, \"Hitem:{SELL_ITEM_ENTRY}\") then return b .. \",\" .. s end \
+               end \
+             end return \"\""
+        ))
+        .unwrap_or_default();
+    let (b, s) = found.split_once(',')?;
+    Some((b.parse().ok()?, s.parse().ok()?))
 }
 
 /// A flag word as the log wants it — the hex plus the bit names, so a reader never has to decode
@@ -265,6 +347,17 @@ fn service_probe(
     mut gossip: ResMut<GossipState>,
     mut giver: ResMut<QuestGiver>,
     mut trainer: ResMut<TrainerOpen>,
+    // `[0xb4e2d0]`'s mirror — what the re-click gate reads (decision 1905). The probe asserts it
+    // live because the gate's risk is never the `==`, it is whether this really is armed by a
+    // window and only by a window.
+    interact: Res<InteractNpc>,
+    // The vendor fork's leg (decision 1914): the window the empty-cursor leg must open, the VM the
+    // held-cursor leg picks an item up in, and the two the app needs to turn a (bag, slot) into
+    // the guid the wire addresses.
+    mut merchant: ResMut<MerchantOpen>,
+    script: Option<NonSendMut<UiScript>>,
+    items: Res<crate::items::Items>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
     self_player: Query<(), With<SelfPlayer>>,
     player: Res<Player>,
     units: Query<(&Guid, &NetEntity, &ObjectStore, &Transform), Without<SelfPlayer>>,
@@ -284,6 +377,7 @@ fn service_probe(
             if now - sent_at < SETTLE_SECS {
                 return;
             }
+            probe.polls += 1;
             let leg = &LEGS[i];
             let me = player.pos;
             let found = units.iter().find(|(guid, net_e, store, tf)| {
@@ -318,15 +412,28 @@ fn service_probe(
                         hop(&mut probe, &net, i, h + 1, now);
                         return;
                     }
+                    let polls = probe.polls;
+                    let fps = f64::from(polls) / (now - sent_at).max(0.001);
                     warn!(
                         "PROBE_SERVICE: SKIP ({}) — nothing matching streamed inside the \
                          {:.4}yd service reach of any of this leg's {} spawn point(s) in \
-                         {SCAN_TIMEOUT_SECS}s each (the `.go` may have been refused, the tile may \
-                         not have streamed, or — for the questgiver leg — this character has \
-                         nothing left to pick up in the valley). Environmental.",
+                         {SCAN_TIMEOUT_SECS}s each. Environmental. Scanned {polls} frame(s) \
+                         ({fps:.1} fps){}",
                         leg.name,
                         SCAN_RANGE_SQ.sqrt(),
-                        leg.at.len()
+                        leg.at.len(),
+                        match fps < 5.0 {
+                            // The reading is about the OBSERVER, not the world: below a handful of
+                            // frames a second this leg never really looked (0713/0777/1355).
+                            true =>
+                                " — THE OBSERVER WAS STARVED, so this SKIP says nothing about \
+                                     the NPC. Re-run on an idle machine (`uptime`; leg.sh's guard \
+                                     is load < 3).",
+                            false =>
+                                " — the machine was keeping up, so the `.go` was refused, the \
+                                      tile never streamed, or this leg's NPC genuinely was not \
+                                      there.",
+                        }
                     );
                     probe.skips += 1;
                     next(&mut probe, &net, i, now);
@@ -382,7 +489,26 @@ fn service_probe(
             giver.clear();
             trainer.clear();
 
-            let sent = match service_action(arm, guid, false) {
+            // **The first click must always get through** (decision 1905). Nothing is open here —
+            // this leg has just cleared, and the reference arms `[0xb4e2d0]` from window openers
+            // only — so the re-click gate must read disarmed at the moment of the send. If it ever
+            // reads armed here, the gate would be eating first clicks and this probe would still
+            // pass every other leg, which is why the assert is at the send and not after it.
+            if interact.1.is_some() {
+                error!(
+                    "PROBE_SERVICE: FAIL ({}) — the npc token is armed on {:#x} BEFORE the send; \
+                     the re-click gate would eat first clicks{note}",
+                    leg.name,
+                    interact.1.unwrap_or(0)
+                );
+                probe.fails += 1;
+                next(&mut probe, &net, i, now);
+                return;
+            }
+
+            // `None` = an empty cursor: no leg here holds an item, and the vendor arm's fork is
+            // the merchant probe's business, not this one's (decision 1914).
+            let sent = match service_action(arm, guid, false, None) {
                 ServiceAction::Send(cmd) => {
                     let named = format!("{cmd:?}");
                     let _ = net.0.send(cmd);
@@ -394,7 +520,9 @@ fn service_probe(
                         ServiceAction::AskBinder => "CONFIRM_BINDER, no packet",
                         ServiceAction::AskSpiritHealer => "CONFIRM_XP_LOSS, no packet",
                         ServiceAction::Silent(w) => w,
-                        ServiceAction::Send(_) => unreachable!(),
+                        ServiceAction::Send(_) | ServiceAction::SellFromCursor(_) => {
+                            unreachable!()
+                        }
                     };
                     warn!(
                         "PROBE_SERVICE: SKIP ({}) — arm {arm:?} opens no window from a packet \
@@ -442,7 +570,11 @@ fn service_probe(
                         }
                     );
                     probe.passes += 1;
-                    next(&mut probe, &net, i, now);
+                    probe.phase = Phase::Gate {
+                        i,
+                        since: now,
+                        guid,
+                    };
                 }
                 Some(open) => {
                     error!(
@@ -476,6 +608,229 @@ fn service_probe(
                     next(&mut probe, &net, i, now);
                 }
                 None => {}
+            }
+        }
+        Phase::Gate { i, since, guid } => {
+            let leg = &LEGS[i];
+            if interact.1 == Some(guid) {
+                info!(
+                    "PROBE_SERVICE: PASS ({}) — re-click gate armed on {guid:#x} {:.0} ms after \
+                     the window: a second right-click sends nothing (`0x5f0251`)",
+                    leg.name,
+                    (now - since) * 1000.0
+                );
+                probe.passes += 1;
+                next(&mut probe, &net, i, now);
+            } else if now - since > GATE_TIMEOUT_SECS {
+                error!(
+                    "PROBE_SERVICE: FAIL ({}) — the window has been open on {guid:#x} for \
+                     {GATE_TIMEOUT_SECS}s and the npc token still reads {:?}; the re-click gate \
+                     cannot fire and every re-click re-sends",
+                    leg.name, interact.1
+                );
+                probe.fails += 1;
+                next(&mut probe, &net, i, now);
+            }
+        }
+        // ── The vendor fork (decision 1914) ──────────────────────────────────────────────────
+        Phase::VendorHop { sent_at } => {
+            if now - sent_at < SETTLE_SECS {
+                return;
+            }
+            let me = player.pos;
+            let found = units.iter().find(|(_, net_e, store, tf)| {
+                net_e.kind == EntityKind::Unit
+                    && store.0.object_entry() == Some(VENDOR_ENTRY)
+                    && tf.translation.distance_squared(me) <= SCAN_RANGE_SQ
+            });
+            let Some((guid, _, store, _)) = found else {
+                if now - sent_at > SCAN_TIMEOUT_SECS {
+                    warn!(
+                        "PROBE_SERVICE: SKIP (vendor fork) — entry {VENDOR_ENTRY} never streamed \
+                         inside the service reach. Environmental."
+                    );
+                    probe.skips += 1;
+                    probe.phase = Phase::Done;
+                }
+                return;
+            };
+            let guid = guid.0;
+            let flags = store.0.unit_npc_flags();
+            gossip.clear();
+            giver.clear();
+            trainer.clear();
+            merchant.clear();
+
+            // The EMPTY-cursor leg. The arm is asserted, not assumed: a vendor who had grown a
+            // GOSSIP bit would take the gossip arm and this leg would be measuring nothing.
+            let arm = service_arm(flags, None);
+            if arm != Some(ServiceArm::Vendor) {
+                warn!(
+                    "PROBE_SERVICE: SKIP (vendor fork) — entry {VENDOR_ENTRY} reads {} and takes \
+                     {arm:?}, not the vendor arm. Environmental (a world-DB change).",
+                    flag_names(flags)
+                );
+                probe.skips += 1;
+                probe.phase = Phase::Done;
+                return;
+            }
+            match service_action(ServiceArm::Vendor, guid, false, None) {
+                ServiceAction::Send(cmd) => {
+                    info!(
+                        "PROBE_SERVICE: (vendor fork, empty cursor) {guid:#x} flags {} → {cmd:?}",
+                        flag_names(flags)
+                    );
+                    let _ = net.0.send(cmd);
+                    probe.phase = Phase::VendorOpen { since: now, guid };
+                }
+                _ => {
+                    error!(
+                        "PROBE_SERVICE: FAIL (vendor fork, empty cursor) — an EMPTY cursor took \
+                         the sale leg; `0x5df5e0 je` must fall to CMSG_LIST_INVENTORY"
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
+            }
+        }
+        Phase::VendorOpen { since, guid } => {
+            if merchant.vendor == Some(guid) {
+                info!(
+                    "PROBE_SERVICE: PASS (vendor fork, empty cursor) — merchant window open on \
+                     {guid:#x}: the zero leg is still the plain list open"
+                );
+                probe.passes += 1;
+                // The window would arm the re-click gate and eat the next click, so close it the
+                // way its own close button does (no packet) before the held-cursor leg.
+                merchant.clear();
+                let _ = net.0.send(ClientCommand::Chat {
+                    kind: ChatKind::Say,
+                    target: None,
+                    text: format!(".additem {SELL_ITEM_ENTRY} 1"),
+                });
+                probe.phase = Phase::VendorArm { since: now, guid };
+            } else if now - since > WINDOW_TIMEOUT_SECS {
+                error!(
+                    "PROBE_SERVICE: FAIL (vendor fork, empty cursor) — no merchant window on \
+                     {guid:#x} within {WINDOW_TIMEOUT_SECS}s"
+                );
+                probe.fails += 1;
+                probe.phase = Phase::Done;
+            }
+        }
+        Phase::VendorArm { since, guid } => {
+            let Some(mut script) = script else {
+                warn!("PROBE_SERVICE: SKIP (vendor fork, held cursor) — no UI VM in this build");
+                probe.skips += 1;
+                probe.phase = Phase::Done;
+                return;
+            };
+            let Some((bag, slot)) = find_item_slot(&script) else {
+                if now - since > BAG_TIMEOUT_SECS {
+                    warn!(
+                        "PROBE_SERVICE: SKIP (vendor fork, held cursor) — item {SELL_ITEM_ENTRY} \
+                         never reached a bag within {BAG_TIMEOUT_SECS}s of `.additem` \
+                         (a full bag, or the command was refused). Environmental."
+                    );
+                    probe.skips += 1;
+                    probe.phase = Phase::Done;
+                }
+                return;
+            };
+            // Pick it up exactly as a player does — through the binding, not by writing the model.
+            if let Err(e) = script.run(&format!("PickupContainerItem({bag}, {slot})")) {
+                error!("PROBE_SERVICE: SKIP (vendor fork, held cursor) — PickupContainerItem: {e}");
+                probe.skips += 1;
+                probe.phase = Phase::Done;
+                return;
+            }
+            let Some(held) = script.cursor_item() else {
+                error!(
+                    "PROBE_SERVICE: FAIL (vendor fork, held cursor) — PickupContainerItem({bag}, \
+                     {slot}) left nothing on the cursor, so the fork has no input"
+                );
+                probe.fails += 1;
+                probe.phase = Phase::Done;
+                return;
+            };
+            let slot0 = u8::try_from(held.slot.saturating_sub(1)).unwrap_or(0);
+            let Some(item_guid) = self_store
+                .single()
+                .ok()
+                .and_then(|s| crate::ui_items::slot_guid(&s.0, held.bag, slot0, &items))
+            else {
+                error!(
+                    "PROBE_SERVICE: FAIL (vendor fork, held cursor) — bag {} slot {} is on the \
+                     cursor but resolves to no item guid, so the arm cannot address the packet",
+                    held.bag, held.slot
+                );
+                probe.fails += 1;
+                probe.phase = Phase::Done;
+                return;
+            };
+            match service_action(ServiceArm::Vendor, guid, false, Some(item_guid)) {
+                ServiceAction::SellFromCursor(cmd) => {
+                    info!(
+                        "PROBE_SERVICE: (vendor fork, held cursor) bag {bag} slot {slot} = item \
+                         {item_guid:#x} → {cmd:?}"
+                    );
+                    let _ = net.0.send(cmd);
+                    script.take_cursor_item_for_sale();
+                    if script.cursor_payload().is_some() {
+                        error!(
+                            "PROBE_SERVICE: FAIL (vendor fork, held cursor) — the sell clear left \
+                             the item on the cursor"
+                        );
+                        probe.fails += 1;
+                    }
+                    probe.phase = Phase::VendorSell {
+                        since: now,
+                        bag,
+                        slot,
+                    };
+                }
+                other => {
+                    let what = match other {
+                        ServiceAction::Send(cmd) => format!("{cmd:?}"),
+                        _ => "a non-send arm".to_string(),
+                    };
+                    error!(
+                        "PROBE_SERVICE: FAIL (vendor fork, held cursor) — an item is on the cursor \
+                         and the vendor arm still answered {what}; `0x5df5e0` must take the sale"
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
+            }
+        }
+        Phase::VendorSell { since, bag, slot } => {
+            let Some(script) = script else {
+                probe.phase = Phase::Done;
+                return;
+            };
+            // The server's own verdict: the sold stack leaves the bag. Nothing client-side can
+            // fake this — it is the inventory update answering the packet.
+            let gone = script
+                .eval::<bool>(&format!(
+                    "return GetContainerItemLink({bag}, {slot}) == nil"
+                ))
+                .unwrap_or(false);
+            if gone {
+                info!(
+                    "PROBE_SERVICE: PASS (vendor fork, held cursor) — the server took the sale: \
+                     bag {bag} slot {slot} is empty {:.0} ms after CMSG_SELL_ITEM",
+                    (now - since) * 1000.0
+                );
+                probe.passes += 1;
+                probe.phase = Phase::Done;
+            } else if now - since > BAG_TIMEOUT_SECS {
+                error!(
+                    "PROBE_SERVICE: FAIL (vendor fork, held cursor) — bag {bag} slot {slot} still \
+                     holds the item {BAG_TIMEOUT_SECS}s after the sale went out; the server \
+                     refused it (wrong vendor guid, wrong item guid, or out of range)"
+                );
+                probe.fails += 1;
+                probe.phase = Phase::Done;
             }
         }
         Phase::Done => {
@@ -528,6 +883,7 @@ fn hop(probe: &mut ServiceProbe, net: &NetCommands, i: usize, h: usize, now: f64
         target: None,
         text: format!(".go xyz {x} {y} {z} {}", leg.map),
     });
+    probe.polls = 0;
     probe.phase = Phase::Hop {
         i,
         hop: h,
@@ -539,6 +895,19 @@ fn hop(probe: &mut ServiceProbe, net: &NetCommands, i: usize, h: usize, now: f64
 fn next(probe: &mut ServiceProbe, net: &NetCommands, i: usize, now: f64) {
     match i + 1 < LEGS.len() {
         true => hop(probe, net, i + 1, 0, now),
-        false => probe.phase = Phase::Done,
+        // The ladder legs are done; the vendor fork's own chain runs after them.
+        false => {
+            let [x, y, z] = VENDOR_AT;
+            info!(
+                "PROBE_SERVICE: hopping to the pure vendor (entry {VENDOR_ENTRY}) at \
+                 ({x}, {y}, {z}) map {VENDOR_MAP}"
+            );
+            let _ = net.0.send(ClientCommand::Chat {
+                kind: ChatKind::Say,
+                target: None,
+                text: format!(".go xyz {x} {y} {z} {VENDOR_MAP}"),
+            });
+            probe.phase = Phase::VendorHop { sent_at: now };
+        }
     }
 }

@@ -219,6 +219,58 @@ pub(crate) struct OverheadFallback(pub(crate) f32);
 /// parents a `NetEntity` (the `ChildOf` sites are the portrait booth, the pipe-warm menagerie and
 /// the UI glue), so its global IS its local. A `PostUpdate` caller ([`crate::nameplates`], which
 /// moved there for this very lag) is unaffected: after propagation the two are the same value.
+/// The client's **per-attachment z-bias** fallback table, `[0x862708]` — 37 floats, attachment
+/// ids `0..=0x24`, read as `[0x862708 + 4·id]` under a `0 ≤ id < 0x25` guard (wow-re
+/// `object-layer/scratch/anim-event-position-law.md` §4, §5-cross-checked). It is consulted only
+/// when the model does **not** carry the attachment the caller asked for: the sound then plays at
+/// the unit's own position raised by this much, which is how a headless or attachment-less model
+/// still puts a mouth sound somewhere plausible instead of at its feet.
+const ATTACH_Z_BIAS: [f32; 37] = [
+    1.0, 1.0, 1.0, 1.5, 1.5, 1.8, 1.8, 0.5, 0.5, 1.0, 1.0, 2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 2.0, 2.5,
+    0.0, 2.0, 1.5, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0, 1.5, 1.5, 1.0, 1.0, 1.5, 1.0, 1.0,
+];
+
+/// **`0x623b90(attachId)` — where a unit-attached sound is born**, as a [`SystemParam`] because
+/// two different routers need the same three pure reads.
+///
+/// [`SystemParam`]: bevy::ecs::system::SystemParam
+///
+/// `AttachPoints::point` returns The attachment's live world
+/// point when the model carries it (`0x712cb0` finds the record, `0x712d50` transforms it), else
+/// the unit's own `GetPosition` raised by [`ATTACH_Z_BIAS`]`[attachId]` (`0x623be2 fadd
+/// [4·ebx + 0x862708]`).
+///
+/// Two anim-event arms reach it and they are the reason this exists as a named function rather
+/// than inline at either: the emote voice `$CSD` asks for **17** (`0x623c3a push 0x11`), and a
+/// **whiffed** melee swing's `$CSS` asks for **1** (`0x624bdd`). Both are emphatically *not* the
+/// fired event's own point, which is what makes them the exceptions in
+/// `anim-event-position-law.md` §3's table — a player model's six head-mounted `$CSD` records do
+/// not decide where that sound plays.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AttachPoints<'w, 's> {
+    anchors: Query<'w, 's, &'static BoneAttach>,
+    poses: Query<'w, 's, &'static benilla_world::rig_anim::RigPose>,
+    globals: Query<'w, 's, &'static GlobalTransform>,
+}
+
+impl AttachPoints<'_, '_> {
+    /// The world point, with `fallback` standing in for the reference's `GetPosition` (the caller
+    /// already holds the unit's transform, and passing it keeps this a pure read).
+    pub(crate) fn point(&self, entity: Entity, attach: u16, fallback: Vec3) -> Vec3 {
+        self.anchors
+            .get(entity)
+            .ok()
+            .and_then(|a| {
+                let &(bone, offset) = a.points.get(&attach)?;
+                let pose = self.poses.get(entity).ok()?;
+                pose.posed_point(self.globals.get(pose.joints_root).ok()?, bone, offset)
+            })
+            .unwrap_or_else(|| {
+                fallback + Vec3::Y * ATTACH_Z_BIAS.get(attach as usize).copied().unwrap_or(0.0)
+            })
+    }
+}
+
 pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
     entity: Entity,
     tf: &Transform,
@@ -1618,5 +1670,28 @@ mod overhead_slot_tests {
         );
 
         assert_eq!(overhead_slot(&body(&[]), true), None, "never parented");
+    }
+}
+
+#[cfg(test)]
+mod attach_bias_tests {
+    use super::*;
+
+    /// The z-bias fallback table `[0x862708]`, verbatim (wow-re
+    /// `object-layer/scratch/anim-event-position-law.md` §4). It is 37 f32 for attachment ids
+    /// `0..=0x24`, and the two ids that actually reach it through an animation event are the
+    /// emote voice's **17** and a whiffed swing's **1** — so those two are what a drift here
+    /// would move, on exactly the models that lack the attachment.
+    #[test]
+    fn the_z_bias_table_is_the_reference_row_for_ever_id() {
+        assert_eq!(ATTACH_Z_BIAS.len(), 0x25, "ids 0..=0x24");
+        assert_eq!(ATTACH_Z_BIAS[17], 2.0, "$CSD's fallback lift");
+        assert_eq!(ATTACH_Z_BIAS[1], 1.0, "a whiffed $CSS's");
+        // The two that are not 1.0-or-1.5, which is what makes a transcription slip visible.
+        assert_eq!(ATTACH_Z_BIAS[19], 0.0);
+        assert_eq!(ATTACH_Z_BIAS[29], 3.0);
+        assert_eq!(ATTACH_Z_BIAS[18], 2.5);
+        // Out of range reads as no lift, matching the reference's `0 ≤ id < 0x25` guard.
+        assert_eq!(ATTACH_Z_BIAS.get(0x25), None);
     }
 }

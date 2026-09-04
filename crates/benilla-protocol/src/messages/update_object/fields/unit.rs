@@ -342,6 +342,19 @@ impl ObjectFields {
         (self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) >> 24) & 0x1 != 0
     }
 
+    /// `UNIT_FIELD_BYTES_1` byte 3's **`0x4`** — the third neighbour of the ghost (`0x1`) and creep
+    /// (`0x2`) bits above. Byte-VERIFIED as the minimap object-dot classifier's own third
+    /// precondition (wow-re `questgiver-marker.md` §W15: `byte [eax+0x213] & 4`, where `eax` is the
+    /// descriptor block base — `0x210/4 = 132` = `UNIT_FIELD_BYTES_1`; the only `& 4` site on this
+    /// byte image-wide, by two independent censuses). Set ⇒ the unit draws **no minimap dot at
+    /// all**, quest or tracking.
+    ///
+    /// The *name* is INFERRED from vmangos's `UNIT_VIS_FLAGS_UNTRACKABLE`, like its two siblings —
+    /// no flag-name string exists in the image. The bit and its effect are verified.
+    pub fn unit_is_untrackable(&self) -> bool {
+        (self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) >> 24) & 0x4 != 0
+    }
+
     /// `UNIT_FIELD_AURASTATE` ([`FIELD_UNIT_AURASTATE`]) — the aura-state bit set (defense 1,
     /// healthless-20% 2, …); the usable walk tests `1 << (state-1)` against it.
     pub fn unit_aura_state(&self) -> u32 {

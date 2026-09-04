@@ -975,9 +975,14 @@ pub(super) fn attach_spell_fx(
 /// the world position; an instance root's own is joint-local). Unlike a streamed creature, an
 /// instance is born under our eyes at t = 0, so first sight fires the head window `[0, cur]` —
 /// the level-up pillar's `$SND(888)` sits at 0.033 s and depends on it.
+#[allow(clippy::too_many_arguments)] // the scan's own params plus the frame's two reads
 pub(super) fn fire_fx_anim_events(
     units: Query<(Entity, &FxAttached)>,
     players: Query<&AnimationPlayer>,
+    // The instance root's own world frame and rig — the effect MODEL's placement, which is the
+    // frame its event records are authored in. Decoupled from the emit entity below on purpose.
+    globals: Query<&GlobalTransform>,
+    poses: Query<&benilla_world::rig_anim::RigPose>,
     fx: Option<Res<SpellFx>>,
     mut last: Local<EntityHashMap<f32>>,
     mut seen: Local<Vec<Entity>>,
@@ -1007,8 +1012,21 @@ pub(super) fn fire_fx_anim_events(
             seen.push(root);
             let prev = last.insert(root, cur).unwrap_or(-1.0);
             // The emit entity is decoupled from the scanned track's owner by design — the fx
-            // scan fires at the unit, not the joint-local instance root.
-            scan_events(clip, unit, prev, cur, &mut out);
+            // scan fires at the unit, not the joint-local instance root. **The POINT is not**:
+            // the record's `position` is authored in the effect model's own space, so it composes
+            // through the instance root's world frame. `Spells\ArcaneShot_Area.m2` puts its
+            // `$SND` 30.5 yd off that model's origin — the largest `$SND` offset in the corpus.
+            let Ok(root_world) = globals.get(root) else {
+                continue;
+            };
+            let frame = crate::creature_anim::EventFrame {
+                world: root_world,
+                rig: poses
+                    .get(root)
+                    .ok()
+                    .and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
+            };
+            scan_events(clip, unit, prev, cur, &frame, &mut out);
         }
     }
     // Roots despawn on reap/expiry — drop their seek memory with them.

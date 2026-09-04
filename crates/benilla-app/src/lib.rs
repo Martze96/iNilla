@@ -404,7 +404,11 @@ pub fn run(build: BuildId) -> AppExit {
         // border texture's native 128×32 — directly diffable against the decoded BLP. Sized
         // per-capture off WOW_CAPTURE.
         resolution: video::at_requested_dpi(
-            if capturing && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1") {
+            // Same opt-in as the UI load itself (`ui_script::lifecycle::ui_wanted`): a scenario
+            // that declares a `ui:` fixture sizes its window for the window it photographs, with
+            // or without the env var. The two must agree — a UI loaded into a world-sized window
+            // is a capture of the right content at the wrong size.
+            if capturing && crate::run_mode::capture_ui_opted_in() {
                 // `$WOW_WIN` overrides here too — the resolution-A/B instrument for UI scenarios (a
                 // scale-dependent text bug looks fine at the scenario's default size and truncates at
                 // fullscreen heights).

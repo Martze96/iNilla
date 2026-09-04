@@ -337,12 +337,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 0 => Value::Nil,
                 c => Value::Integer(i64::from(c.signum())),
             };
+            // **Returns 4 and 5 are `1`/`nil`, NOT booleans** (wow-re
+            // `ui/scratch/questlog-title-tag.md` §7's table): `isHeader` is `1` on a header row
+            // and `nil` on a quest; `isCollapsed` is `1` only for a header whose bit in
+            // `[0xbb748c]` is clear — a quest row and an EXPANDED header both answer `nil`. We
+            // pushed `true`/`false`, which every `if ( isHeader )` in FrameXML reads the same and
+            // which `isHeader == false` or a `type()` test does not. The two are one expression
+            // here because `collapsed` is meaningless off a header (the field's own doc).
+            let flag = |b: bool| if b { Value::Integer(1) } else { Value::Nil };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&e.title)?),
                 Value::Integer(i64::from(e.level)),
                 tag,
-                Value::Boolean(e.is_header),
-                Value::Boolean(e.collapsed),
+                flag(e.is_header),
+                flag(e.is_header && e.collapsed),
                 complete,
             ]))
         })?,
@@ -892,7 +900,7 @@ mod tests {
             .eval::<bool>(
                 "local t, l, tag, h, c, done = GetQuestLogTitle(1)\n\
                  return t == 'A Threat Within' and l == 1 and tag == nil\n\
-                    and h == false and c == false and done == nil"
+                    and h == nil and c == nil and done == nil"
             )
             .unwrap());
         assert!(s
@@ -948,6 +956,51 @@ mod tests {
                 "arg `{bad}` must raise Usage:, got {e}"
             );
         }
+    }
+
+    /// §7's table for returns 4 and 5: `1` on a header, `nil` on a quest; `isCollapsed` is `1`
+    /// only for a COLLAPSED header — an expanded one and every quest row answer `nil`.
+    #[test]
+    fn is_header_and_is_collapsed_are_one_or_nil_never_booleans() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries.insert(
+            0,
+            QuestLogEntryView {
+                title: "Elwynn Forest".into(),
+                is_header: true,
+                collapsed: true,
+                ..Default::default()
+            },
+        );
+        state.entries.insert(
+            1,
+            QuestLogEntryView {
+                title: "Westfall".into(),
+                is_header: true,
+                collapsed: false,
+                ..Default::default()
+            },
+        );
+        s.set_quest_log(state);
+
+        // A collapsed header: both flags are the number 1.
+        assert!(s
+            .eval::<bool>(
+                "local _, l, _, h, c = GetQuestLogTitle(1) return h == 1 and c == 1 and l == 0"
+            )
+            .unwrap());
+        // An EXPANDED header: isHeader 1, isCollapsed nil.
+        assert!(s
+            .eval::<bool>("local _, _, _, h, c = GetQuestLogTitle(2) return h == 1 and c == nil")
+            .unwrap());
+        // A quest row: both nil — and `false` would be wrong, so pin the type too.
+        assert!(s
+            .eval::<bool>(
+                "local _, _, _, h, c = GetQuestLogTitle(3)\n\
+                 return h == nil and c == nil and type(h) ~= 'boolean'"
+            )
+            .unwrap());
     }
 
     #[test]

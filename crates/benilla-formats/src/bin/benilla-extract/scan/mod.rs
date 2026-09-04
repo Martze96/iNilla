@@ -38,7 +38,7 @@ pub use particles::{
 pub use sequence::{
     fxlifescan, goanimscan, goslotscan, idleslotscan, seqclockscan, soundeventscan,
 };
-pub use skeleton::{attachscan, bonescan};
+pub use skeleton::{attachscan, bonescan, eventmarkerscan};
 pub use world::{doodadscan, placescan, skyboxscan, wmodoodads};
 
 /// Every `.m2` in the chain, in listfile order, narrowed to a path `prefix` when one is given.

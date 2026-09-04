@@ -45,7 +45,7 @@
 //! ## Running one capture by hand
 //! **Run through Cargo — never the built binary directly:**
 //! ```text
-//! WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes \
+//! WOW_CAPTURE=ui-unitframes \
 //!     WOW_CAPTURE_OUT=/tmp/shot.png cargo run -q -p benilla
 //! ```
 //! (`WOW_DATA` is only needed for a non-standard install — the client finds one in the project
@@ -60,8 +60,11 @@
 //! compile time, which fixed the capture and left a binary that worked only on the machine that
 //! built it. 1175 deleted the path instead: every shader is compiled into the binary and addressed
 //! `embedded://<crate>/shaders/…`, so there is no asset root left to resolve wrongly.
-//! `WOW_CAPTURE_UI=1` opts the player UI into the shot (off
-//! by default so world baselines stay UI-free; omit it for world-only scenes). `WOW_CAPTURE=list`
+//! A **`ui-*` scenario opts the player UI in on its own** — it declares a `ui:` fixture, which is
+//! this table saying the window is the subject ([`scenarios::ui_opted_in`], and read its doc
+//! for why that is a correctness fix and not a convenience). `WOW_CAPTURE_UI=1` remains, for what
+//! it was always actually for: painting the UI over a **world** scenario's shot. World baselines
+//! stay UI-free by default either way. `WOW_CAPTURE=list`
 //! prints the scenario names. `scripts/visual.sh` wraps all of this.
 
 use std::path::Path;
@@ -140,6 +143,7 @@ pub(crate) use probes::{
     ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, RevealAuditPlugin,
     SchedCensusPlugin, StallPlugin, TrailCensusPlugin, UnitVisualsPlugin,
 };
+pub(crate) use scenarios::ui_opted_in;
 use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};
 

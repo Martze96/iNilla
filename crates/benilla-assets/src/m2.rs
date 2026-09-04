@@ -496,6 +496,9 @@ impl AssetLoader for M2ModelLoader {
             &benilla_formats::parse_m2_event_markers(&bytes).unwrap_or_default(),
             &skeleton_pivots(&skeleton_raw),
         );
+        // …and the same pivots again for the per-clip event keys below ([`crate::ClipEvent`]),
+        // so a fired key's point is bake-consistent with the joint it composes through.
+        let pivots = skeleton_pivots(&skeleton_raw);
 
         // The animations (decision 0019): build each sequence's clip into one shared `AnimationGraph`
         // (the bench scrubs them; gameplay plays Stand). All as labeled sub-assets. `None` unless at
@@ -644,7 +647,24 @@ impl AssetLoader for M2ModelLoader {
                         // The axis mapping flips signs, so min/max are re-derived componentwise.
                         bounds_min: wow_to_bevy(anim.bounds_min).min(wow_to_bevy(anim.bounds_max)),
                         bounds_max: wow_to_bevy(anim.bounds_min).max(wow_to_bevy(anim.bounds_max)),
-                        events: anim.events.clone().into(),
+                        // The kernel's own quantity, baked (see [`ClipEvent`]): the bone-local
+                        // offset for a rigged model and the model-space point for one whose bone
+                        // chain never moves — both from the record's OWN bone, never a by-4CC
+                        // re-find, because a model may author the tag more than once.
+                        events: anim
+                            .events
+                            .iter()
+                            .map(|e| crate::ClipEvent {
+                                time: e.time,
+                                ident: e.ident,
+                                data: e.data,
+                                bone: e.bone,
+                                offset: wow_to_bevy(e.position)
+                                    - pivots.get(e.bone as usize).copied().unwrap_or(Vec3::ZERO),
+                                point: wow_to_bevy(e.position),
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
                         arm_nodes,
                         upper_node,
                         frequency: anim.frequency,

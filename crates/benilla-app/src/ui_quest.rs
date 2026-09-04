@@ -71,8 +71,8 @@ pub(crate) struct QuestGiver {
     messages: Vec<UiError>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
-    /// The last `SMSG_QUESTGIVER_STATUS` we **refused**, and how many we have refused this session
-    /// — `(guid, status)`.
+    /// What each **refused** `SMSG_QUESTGIVER_STATUS` said, per guid, and how many we have refused
+    /// this session.
     ///
     /// The only trace of a packet class benilla deliberately throws on the floor. benilla asks the
     /// server about quest-flagged GameObjects because the reference does, and vmangos — unlike the
@@ -81,7 +81,11 @@ pub(crate) struct QuestGiver {
     /// [`crate::net::apply`]'s `quest_giver_status`). Without this, the *whole* GameObject half of
     /// the feature is invisible from inside the client: a correct drop and a query that was never
     /// sent both read as "no status", which is exactly the pair a live probe has to tell apart.
-    refused: Option<(u64, u32)>,
+    /// Keyed by guid, and pruned with [`Self::retain_statuses`] — **not** a single last-writer
+    /// slot, which is what this was and why it read as a regression the first time several quest
+    /// objects were in view at once: every one of them is answered in the same packet drain, so
+    /// only the last survived to be looked at, and which object that was is archetype order.
+    refused: HashMap<u64, u32>,
     refused_count: u32,
 }
 
@@ -128,6 +132,8 @@ impl QuestGiver {
     /// the fresh answer lands (decision 0647).
     pub(crate) fn retain_statuses(&mut self, live: impl Fn(u64) -> bool) {
         self.statuses.retain(|&npc, _| live(npc));
+        // The refusal readout follows the same lifetime, for the same reason and to stay bounded.
+        self.refused.retain(|&npc, _| live(npc));
     }
 
     /// Drop one guid's cached status — the NPC stopped being a questgiver, so its marker goes with
@@ -155,13 +161,18 @@ impl QuestGiver {
 
     /// Record a dialog status the typemask gate refused — see [`Self::refused`].
     pub(crate) fn refuse_status(&mut self, npc: u64, status: u32) {
-        self.refused = Some((npc, status));
+        self.refused.insert(npc, status);
         self.refused_count = self.refused_count.saturating_add(1);
     }
 
-    /// The last refused `(guid, status)` and the session's refusal count — see the field.
-    pub(crate) fn refused(&self) -> (Option<(u64, u32)>, u32) {
-        (self.refused, self.refused_count)
+    /// What the server last answered for `npc` before we refused it, if anything.
+    pub(crate) fn refused_for(&self, npc: u64) -> Option<u32> {
+        self.refused.get(&npc).copied()
+    }
+
+    /// How many answers we have refused this session — the summary half of [`Self::refused`].
+    pub(crate) fn refused_count(&self) -> u32 {
+        self.refused_count
     }
 
     /// The stored dialog status for `npc`, if any. The store-now half of DIALOG_STATUS

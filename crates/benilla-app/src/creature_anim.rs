@@ -786,7 +786,7 @@ mod events;
 use events::fire_anim_events;
 pub(crate) use events::{
     advance_track, footfall_culls, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent,
-    TrackMemory,
+    EventFrame, TrackMemory,
 };
 
 /// The `$BTH` breath puffs — a unit's visible cold vapour in a snow zone (B233, decision 1149).
@@ -1306,6 +1306,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWP",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(
@@ -1316,6 +1317,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWR",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(
@@ -1329,6 +1331,7 @@ mod nock_latch_tests {
             entity: bare,
             ident: *b"$BWP",
             data: 0,
+            pos: None,
         });
         app.update();
         assert!(

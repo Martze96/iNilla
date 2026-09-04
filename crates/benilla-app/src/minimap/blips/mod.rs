@@ -267,7 +267,7 @@ pub(super) type BlipInputs<'w, 's> = (
     Res<'w, crate::ui_script::UiScaleCvar>,
     Res<'w, crate::ui_party::GroupState>,
     TrackedCandidates<'w, 's>,
-    Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
+    Query<'w, 's, (&'static ObjectStore, &'static Guid), With<SelfPlayer>>,
     Res<'w, NameCache>,
     Res<'w, GameObjectTemplates>,
     Option<Res<'w, crate::go_templates::Locks>>,

@@ -149,7 +149,13 @@ pub(super) fn go_display_sounds(
         if kit == 0 {
             continue;
         }
-        let pos = transform.translation();
+        // **Where the key fired, not where the object stands** (decision 1904): `0x5f3e20`'s
+        // `[ebp+0x10]` is the kernel's `eventWorldPos` and both lanes below take it verbatim —
+        // `0x458870(id, pos, -1, 1.0f)` for the one-shot, `0x461d80(id, pos, 0)` for the pool. It
+        // is the difference between a portal's hum coming from the portal and from the model's
+        // pivot: 82 of the 135 shipped `$GC0` records sit off their origin, out to 63.4 yd on
+        // `orc_waterwheel.m2`, and 83 of 177 `$GO0`s do.
+        let pos = ev.pos.unwrap_or_else(|| transform.translation());
         // The lane select. A looping kit is NOT a looping channel here: it is a *registration* in
         // the shared emitter pool, which is what makes one hum follow you down a row of braziers
         // instead of thirty channels stacking — and what makes a re-crossing of the marker (the

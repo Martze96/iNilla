@@ -343,6 +343,36 @@ pub(crate) fn clear_cursor(model: &mut Model) {
     }
 }
 
+/// **The SELL fork's cursor clear** — `0x494b60 SetCursorItem(0, …)`, which is *not* `ClearCursor`
+/// and differs from [`clear_cursor`] in exactly one way that a player can see.
+///
+/// Both drop the payload and fire `CURSOR_UPDATE`. `ClearCursor` also un-locks the source slot;
+/// this does **not**: `0x494b60`'s mode-1 arm is entered with `param1 = 0`, which skips `0x495420`,
+/// so the sold item's slot stays **greyed** until the server's own inventory update removes it
+/// (wow-re `object-layer/scratch/vendor-sell-on-right-click.md` §3, the §5 trio dispatched from
+/// benilla 1905). Leaving the lock set is the point: the item is gone from the cursor but not yet
+/// gone from the bag, and the grey is what says so.
+///
+/// Shared by the two verbs that sell off the cursor — `PickupMerchantItem`'s sell fork
+/// (`0x4fb760`) and the interact ladder's vendor arm (`0x5df5d0`) — because they are the same
+/// clear in the binary, and two copies of it is how one of them quietly grows a different
+/// behaviour. Returns the item so the caller can address the packet by its slot.
+///
+/// A non-item payload is left exactly where it was: the fork answers for **mode 1 only**
+/// (`GetCursorItem 0x494c60`), so a spell, a macro or a vendor row on the cursor is not a sale
+/// and must not be dropped by asking.
+pub(crate) fn take_cursor_item_for_sale(model: &mut Model) -> Option<CursorItem> {
+    let item = match model.cursor.take() {
+        Some(CursorPayload::Item(item)) => item,
+        other => {
+            model.cursor = other;
+            return None;
+        }
+    };
+    queue_cursor_update(model);
+    Some(item)
+}
+
 /// What the app's world pick resolves under the cursor this frame — the reference's click-time
 /// pick state `[this+0x350]` (0 = nothing / 1 = terrain / 2 = object; `0x481f60`, decisions
 /// 0571 + 0574). Fed per frame by the app ([`super::UiScript::set_world_pick`]; stays
@@ -484,6 +514,13 @@ impl super::UiScript {
     /// (object keeps everything, terrain drops items only, nothing drops any arm).
     pub fn set_world_pick(&mut self, pick: WorldPick) {
         self.model_mut().world_pick = pick;
+    }
+
+    /// The sell fork's take-and-clear, for the app-side interact ladder — see
+    /// [`take_cursor_item_for_sale`]. `None` for an empty cursor or any non-item payload, and in
+    /// that case the payload is left untouched.
+    pub fn take_cursor_item_for_sale(&mut self) -> Option<CursorItem> {
+        take_cursor_item_for_sale(&mut self.model_mut())
     }
 
     /// `ClearCursor()`'s Rust seam — drops whatever the cursor holds, any arm, silently (fires
@@ -727,6 +764,70 @@ mod tests {
             num_slots: 16,
             slots,
         }
+    }
+
+    /// **The sell clear is not `ClearCursor`** — decision 1914, and the difference is the one a
+    /// player sees.
+    ///
+    /// `0x494b60 SetCursorItem(0, …)` drops the payload and fires `CURSOR_UPDATE`, but its mode-1
+    /// arm skips `0x495420` with `param1 = 0`, so it never un-locks the source slot: the item is
+    /// off the cursor and the bag slot stays **greyed** until the server's inventory update takes
+    /// it away. `ClearCursor` un-locks. Firing `ITEM_LOCK_CHANGED` here would un-grey a slot whose
+    /// item is still sitting in it awaiting the server, which is the visible wrong.
+    ///
+    /// The second half is the blast radius: the fork answers for **mode 1 only**, so asking a
+    /// spell or a vendor row must not drop it.
+    #[test]
+    fn the_sell_clear_keeps_the_source_slot_locked() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(one_item_backpack()));
+
+        // Pick the item up, then drain whatever the pickup queued so the assert below sees only
+        // what the SELL clear itself fires.
+        s.eval::<()>("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.cursor_item().is_some(), "the pickup did not take");
+        s.model_mut().pending_events.clear();
+
+        let sold = s.take_cursor_item_for_sale().expect("mode 1 is a sale");
+        assert_eq!((sold.bag, sold.slot), (0, 1));
+        assert!(
+            s.cursor_payload().is_none(),
+            "the cursor kept the sold item"
+        );
+
+        let fired: Vec<String> = s
+            .model_ref()
+            .pending_events
+            .iter()
+            .map(|(e, _)| e.clone())
+            .collect();
+        assert!(
+            fired.iter().any(|e| e == "CURSOR_UPDATE"),
+            "the sell clear must fire CURSOR_UPDATE — got {fired:?}"
+        );
+        assert!(
+            !fired.iter().any(|e| e == "ITEM_LOCK_CHANGED"),
+            "the sell clear must NOT un-lock the source slot (that is `ClearCursor`'s job, not \
+             `SetCursorItem(0, …)`'s) — got {fired:?}"
+        );
+
+        // Mode 1 only: every other payload is left exactly where it was.
+        let mut s = UiScript::new().unwrap();
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            book_slot: 1,
+            book_type: "spell".into(),
+            spell_id: 133,
+            texture: None,
+            passive: false,
+        }));
+        assert!(
+            s.take_cursor_item_for_sale().is_none(),
+            "a spell is not a sale"
+        );
+        assert!(
+            matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))),
+            "asking for a sale dropped a non-item payload"
+        );
     }
 
     #[test]

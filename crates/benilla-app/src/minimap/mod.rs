@@ -751,10 +751,12 @@ fn emit_minimap(
     // draw under the player arrow; the quest dots draw LAST — above it (the client's own draw
     // order). Hover lands in [`blips::MinimapBlipHover`] for the tooltip drive.
     // Our own descriptor's tracking state (PRIVATE fields — only ever on the self entity).
-    let tracking = self_store
-        .iter()
-        .next()
-        .map(|s| blips::SelfTracking {
+    let me = self_store.iter().next();
+    // Our own guid — the classifier compares a candidate's charm/summon owner against it, so our
+    // own pet and minions never take a dot (§W15 Q2d).
+    let self_guid = me.map(|(_, g)| g.0);
+    let tracking = me
+        .map(|(s, _)| blips::SelfTracking {
             creatures: s.0.player_track_creatures(),
             resources: s.0.player_track_resources(),
             stealthed: s.0.player_track_stealthed(),
@@ -872,6 +874,7 @@ fn emit_minimap(
                 tracking,
                 &tracked,
                 quest.statuses(),
+                self_guid,
                 &names,
                 &go_templates,
                 locks.as_deref().map(|l| &l.0),
@@ -885,8 +888,8 @@ fn emit_minimap(
             blips::emit_quest_dots(
                 ctx,
                 quest.statuses(),
-                &guids,
-                &unit_pos,
+                &tracked,
+                self_guid,
                 icons,
                 player_indoors,
                 // A dot NPC's own containment — the same faces-only down-ray the entity light

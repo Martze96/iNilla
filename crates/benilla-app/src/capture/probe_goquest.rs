@@ -18,8 +18,11 @@
 //! That makes this probe's job the three-way distinction a unit test cannot make at the real
 //! object: **the query went out**, **the answer came back**, and **we refused it** — where "never
 //! asked" and "asked and correctly refused" both read as an empty status map. The refusal readout
-//! ([`QuestGiver::refused`]) is what separates them, and an arriving status can only exist if our
-//! query did.
+//! ([`QuestGiver::refused_for`]) is what separates them, and an arriving status can only exist if
+//! our query did. It is keyed by guid on purpose: Goldshire has several quest objects in view and
+//! the server answers all of them in one drain, so a single last-writer slot reads as whichever
+//! object archetype order happened to put last (it read as a regression exactly once, on a run
+//! where nothing about the behaviour had changed).
 //!
 //! Four readings, in order, and the last two are the controls that make it a regression test:
 //!
@@ -333,10 +336,8 @@ fn goquest_probe(
             }
         }
         Phase::Read { level: at, since } => {
-            let (refused, count) = quest.refused();
-            let mine = refused
-                .filter(|(g, _)| Some(*g) == probe.poster)
-                .map(|(_, s)| s);
+            let count = quest.refused_count();
+            let mine = probe.poster.and_then(|p| quest.refused_for(p));
             // The HIGH window must see a *different* answer than LOW, or one stale refusal would
             // satisfy both.
             let settled = if at == LOW_LEVEL {
@@ -418,7 +419,7 @@ fn goquest_probe(
                 probe.poster.unwrap_or_default(),
                 probe.low,
                 probe.high,
-                quest.refused().1,
+                quest.refused_count(),
             );
             // The probe self-exit pattern (`ProbeExitPlugin::fire_probe_exit`): a polite AppExit
             // plus a hard backstop thread, so a net/winit teardown hang can't leave a zombie

@@ -693,6 +693,21 @@ fn run(
     }
 }
 
+/// Drain the writer's sent-packet log into the trace as `out` lines — one per packet that reached
+/// the socket, by opcode name and body length. A no-op unless the `out` tag armed the log when the
+/// connection was handed over.
+fn trace_sends(w: &mut WorldWriter) {
+    w.drain_sent(|opcode, len| {
+        benilla_assets::trace::line(
+            "out",
+            &format!(
+                "{opcode:#06x} {} len={len}",
+                benilla_protocol::messages::opcode_name(opcode).unwrap_or("?")
+            ),
+        );
+    });
+}
+
 /// The single write thread: `select!` between app commands, writer swaps from the read thread, and
 /// the 30 s keepalive tick ([`PING_INTERVAL`] — the real client's ping cadence). While disconnected
 /// (no writer yet, or the socket died under the current one), commands drop with a capped warn and
@@ -716,7 +731,13 @@ fn writer_loop(
     loop {
         crossbeam_channel::select! {
             recv(writer_rx) -> w => match w {
-                Ok(w) => {
+                Ok(mut w) => {
+                    // Arm the outbound opcode trace for this connection (tag `out`). Armed here
+                    // rather than at construction because the sink is an app-side concern and a
+                    // writer outlives none of them; a fresh socket starts a fresh log.
+                    if benilla_assets::trace::enabled_for("out") {
+                        w.watch_sends();
+                    }
                     writer = Some(w);
                     warned = 0;
                     // A fresh connection restarts the keepalive from scratch, like the real
@@ -767,6 +788,7 @@ fn writer_loop(
                             warned += 1;
                         }
                     }
+                    trace_sends(w);
                 }
             },
             recv(cmd_rx) -> cmd => {
@@ -1343,6 +1365,13 @@ fn writer_loop(
                         warned += 1;
                     }
                 }
+                // **What actually reached the socket, by name** (tag `out`) — the outbound twin of
+                // the `in` line above. One command can be more than one packet, so this drains
+                // rather than naming the command: the log is the writer's own, recorded after each
+                // successful write, so a line here is a transmission and never an intention. It is
+                // what `wire`'s "a silent failure log beside a busy `snd` log means every packet
+                // went out" was standing in for, said directly.
+                trace_sends(w);
             },
         }
     }

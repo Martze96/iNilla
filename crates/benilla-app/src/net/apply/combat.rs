@@ -156,6 +156,9 @@ pub(super) fn attacker_state(
             swing,
             text_only: false,
             natural: None,
+            // The receive-time arm: no tag fired, so the reference has no event point either —
+            // the consumer falls back to the victim, the only anchor the packet leaves us.
+            pos: None,
         });
     }
 }
