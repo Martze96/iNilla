@@ -419,17 +419,19 @@ Interface\FrameXML\ActionBarFrame.xml
 # that fills the four SHOW_MULTI_ACTIONBAR_* globals from the server's byte; the manage pass runs
 # from the options rows' setters, as the stock options window runs it on hide.
 Interface\FrameXML\MultiActionBars.xml
-# The pet action bar (decision 0982): hidden until `crate::ui_pet`'s feed reports a bar,
-# i.e. until the server sends `SMSG_PET_SPELLS` for a live pet or charm — so a class that
-# never has one never sees it. Right after the stance bar, whose row it shares (either
-# one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
-# (CooldownFrame_SetTimer), MainMenuBar.xml (the `MainMenuBar` anchor target),
-# GameTooltip.xml (its hover), Fonts.xml (NORMAL_FONT_COLOR_CODE, which wraps the binding
-# a token slot's tooltip appends) and UIParent.xml (GetBindingText, which renders it).
-# It is also the pet ARC's file, so decision 1066's three
-# right-click-menu dialogs (ABANDON_PET / RENAME_PET / PETRENAMECONFIRM) register here —
-# which adds UiPanels.xml to its dependency set, already far above.
-PetActionBar.xml
+# ══ THE PET ACTION BAR — the reference's own, off the player's chain (1751; decision 1953) ══
+# PetActionBarFrame.xml + PetActionBarFrame.lua: the ten buttons over `crate::ui_pet`'s feed
+# (GetPetActionInfo & co., decision 0982's engine), the slide, the grid, the hotkey pass. Right
+# after the stance bar, whose row it shares (UIParent.xml's managed "pet" delta), and after
+# Cooldown.xml, MainMenuBar.xml (its parent), GameTooltip.xml, ActionBarFrame.xml
+# (ActionButton_UpdateState) and UiPanels.xml (SetDesaturation, and where 1066's three
+# right-click dialogs — ABANDON_PET / RENAME_PET / PETRENAMECONFIRM — now live). 0982's
+# transcription is gone.
+Interface\FrameXML\PetActionBarFrame.xml
+# The one adapter the reference's file needs from this engine: its autocast shine is a <Model>
+# (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla draws is
+# its own token texture (1383). BENILLA_ALLOW_OWN_UI=1.
+PetActionBarAdapters.xml
 # The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both, and the
 # reference's toc seats it right after PetActionBarFrame (l.73-74): the bonus buttons'
 # Up/Down call PetActionButtonUp/Down, which PetActionBar.xml above defines.
@@ -739,14 +741,13 @@ ContainerFrameAdapters.xml
 # `GroupLootFrame` did for months (1838). The bar, its update, its two text verbs,
 # `MAX_PLAYER_LEVEL` and `FACTION_BAR_COLORS` all went home with it (1875).
 Interface\FrameXML\ReputationFrame.xml
-# The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
-# top-level file — it declares `parent="CharacterFrame"`, which really attaches (1734), and
-# is positioned by name via `<Anchors relativeTo="CharacterFrame">`, the geometry it ships
-# with. Loaded after CharacterFrame.xml so it paints ON TOP of
-# it (later file = higher z) and so `CharacterFrame` already exists for that anchor to
-# resolve against — seated at the real client's own tab 4, between Reputation above and
-# Honor below.
-SkillFrame.xml
+# ══ THE SKILLS TAB — the reference's own, off the player's chain (1751; decision 1956) ══
+# SkillFrame.xml + SkillFrame.lua: CharacterFrame's fourth page (`parent="CharacterFrame"`,
+# `id="4"`), the twelve-row list over 0437's skills seam (GetNumSkillLines/GetSkillLineInfo's
+# twelve-value tuple, the expand/collapse pair, the selection), the detail bar, the unlearn
+# button (its UNLEARN_SKILL dialog lives with the other dialogs in UiPanels.xml). At the
+# reference's own slot, after ReputationFrame and before HonorFrame. 0437's transcription is gone.
+Interface\FrameXML\SkillFrame.xml
 # The Honor tab: the same separate-top-level-file shape as the three pages above it, and LAST of
 # them because it is the last of the tabs (the real client's 5, ref HonorFrame.xml:5) — which
 # CLOSES the row: the character window's five tabs are now the reference's five, in its order, at

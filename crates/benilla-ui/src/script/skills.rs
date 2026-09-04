@@ -66,6 +66,9 @@
 //! clears it. `GetAdjustedSkillPoints()` is a vestigial 1.12 leftover the ref reads; it always
 //! returns `0` — there is no training-point economy behind a skill line in this client.
 //!
+//! `CancelSkillUps()` is bound (the page's Close button calls it, 1956): the temp-point reset
+//! over a table this model keeps empty.
+//!
 //! The ref Lua's other globals (`SkillBar_OnClick`'s `RemoveSkillUp`/`AddSkillUp`/`BuySkillTier`,
 //! `UnitCharacterPoints`) back the training-up machinery this pane doesn't ship (0437's named
 //! out-of-scope) — none are transcribed, engine-side or XML-side, rather than stubbing dead call
@@ -534,6 +537,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+
+    // CancelSkillUps() — `0x4d3e30` → `0x4d35c9` (reference `1.12-shapes.tsv`: no arguments, no
+    // returns): the reset leg of the temp-point table, zeroing every entry's `numTempPoints` and
+    // giving the points back to the pool. The stock page's LIVE Close button calls it before
+    // hiding (`SkillFrame.xml`'s SkillFrameCancelButton, decision 1496), so it is reached on
+    // every close. This model carries no temp points (module docs, 1919): the table it resets is
+    // empty by construction, so the reset moves nothing — the binding's whole effect on this
+    // client's data, not a stand-in for it. The day temp points are modelled, this is where
+    // they are cleared.
+    g.set("CancelSkillUps", lua.create_function(|_, ()| Ok(()))?)?;
 
     Ok(())
 }

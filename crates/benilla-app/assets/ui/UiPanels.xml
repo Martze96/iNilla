@@ -2034,6 +2034,88 @@
             hideOnEscape = 1,
         }
 
+        -- The pet arc's three (decision 1066; ref StaticPopup.lua l.738, l.1069, l.365). ABANDON_PET
+        -- is the plain confirm. RENAME_PET is a CHAIN of two, which is the reference's own shape and
+        -- not a flourish: the first collects the name, the second reads it back ("Name your pet
+        -- 'Bruce'?") before anything is sent — a rename is one-shot, so a typo is permanent the way
+        -- the abandon is. That second Show happens while the first dialog is still up, which is
+        -- why the engine's two instances are both needed. Registered beside the other dialogs since
+        -- the pet bar became the reference's file (1953).
+        StaticPopupDialogs["ABANDON_PET"] = {
+            text = ABANDON_PET,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function()
+                PetAbandon();
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        StaticPopupDialogs["RENAME_PET"] = {
+            text = PET_RENAME_LABEL,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            hasEditBox = 1,
+            -- The 12-letter cap is the reference's, and it is the client's only name check: the
+            -- server re-validates with CheckPetName and refuses with SMSG_PET_NAME_INVALID.
+            maxLetters = 12,
+            OnAccept = function()
+                -- `this` is the clicked button, so its parent is THIS dialog — never
+                -- StaticPopup1 by name, which would read the wrong box the moment this dialog
+                -- lands in the second instance (the chain below is exactly that case).
+                local text = getglobal(this:GetParent():GetName() .. "EditBox"):GetText()
+                local dialog = StaticPopup_Show("PETRENAMECONFIRM", text)
+                if dialog then
+                    dialog.data = text
+                end
+            end,
+            EditBoxOnEnterPressed = function()
+                local text = getglobal(this:GetParent():GetName() .. "EditBox"):GetText()
+                local dialog = StaticPopup_Show("PETRENAMECONFIRM", text)
+                if dialog then
+                    dialog.data = text
+                end
+                this:GetParent():Hide()
+            end,
+            OnShow = function()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        StaticPopupDialogs["PETRENAMECONFIRM"] = {
+            -- "Name your pet '%s'?" — the name arrives as text_arg1 AND as `data`; the first
+            -- fills the question, the second is what actually gets sent.
+            text = PET_RENAME_CONFIRMATION,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function(data)
+                PetRename(data);
+            end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
+        -- The skills page's unlearn confirm (ref StaticPopup.lua l.1121-1133), registered beside
+        -- the other dialogs since the page became the reference's file (1956).
+        StaticPopupDialogs["UNLEARN_SKILL"] = {
+            text = UNLEARN_SKILL,
+            button1 = UNLEARN,
+            button2 = CANCEL,
+            OnAccept = function(index)
+                AbandonSkill(index)
+            end,
+            timeout = 60,
+            exclusive = 1,
+            whileDead = 1,
+            showAlert = 1,
+            hideOnEscape = 1
+        }
+
         -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
         -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
         -- (one item, one destination), and the hide is what cancels the record the new question

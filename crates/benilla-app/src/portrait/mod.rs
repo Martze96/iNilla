@@ -1297,6 +1297,12 @@ fn booth_view_shape() -> impl Bundle {
         bevy::render::view::Hdr,
         Tonemapping::None,
         Msaa::Off,
+        // No bevy light ever reaches a booth (its lighting is the material variant,
+        // `portrait::light`), so the per-view cluster assignment is dead work here exactly as
+        // it is on the world camera (`player::setup`): with the default config every booth view
+        // rebuilt its empty cluster grid each frame — 0.2 ms of the raid's main thread for
+        // nothing drawn by it.
+        bevy::light::cluster::ClusterConfig::None,
     )
 }
 

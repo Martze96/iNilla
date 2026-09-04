@@ -457,9 +457,10 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
 
 // ── The PET menu (decision 1066; report B219) ───────────────────────────────────────────────────
 
-/// The pet menu's own prefix. Two things join the popup prefix: `UiPanels.xml` (the StaticPopup
-/// engine, because two of the four rows go behind a dialog) and `PetActionBar.xml`, which is where
-/// those three dialogs are registered — with the pet arc, not with the rows. `Cooldown.xml` and
+/// The pet menu's own prefix. What joins the popup prefix is `UiPanels.xml` — the StaticPopup
+/// engine, because two of the four rows go behind a dialog, and since 1953 where the pet arc's
+/// three dialogs are registered (they rode our pet-bar file until it became the reference's).
+/// `Cooldown.xml` and
 /// `ActionBar.xml` are the pet bar's own load deps, not this menu's.
 fn load_pet_menu_frames(s: &UiScript) {
     for file in [
@@ -487,7 +488,6 @@ fn load_pet_menu_frames(s: &UiScript) {
         "Interface\\FrameXML\\MainMenuBar.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        "PetActionBar.xml",
     ] {
         load_xml(s, file);
     }

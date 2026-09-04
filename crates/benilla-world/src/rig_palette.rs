@@ -111,6 +111,8 @@ pub(crate) fn palette_regions_bytes() -> u64 {
 pub struct RigPalettes {
     /// `3 × MAX_PALETTE_BONES` vec4 rows — the CPU mirror (the mouseover picker reads it).
     rows: Arc<Vec<[f32; 4]>>,
+    /// The row buffer retired by the last clone (`rows_make_mut`), reused once unshared.
+    spare: Option<Arc<Vec<[f32; 4]>>>,
     /// Slot → base bone index. Slot 0 is the tag's "no rig" sentinel and never allocated.
     table: Arc<Vec<u32>>,
     /// Slot → the world position this rig's rows are measured from (decision 0974); `w` unused.
@@ -154,6 +156,7 @@ impl Default for RigPalettes {
     fn default() -> Self {
         Self {
             rows: Arc::new(vec![[0.0; 4]; 3 * MAX_PALETTE_BONES]),
+            spare: None,
             table: Arc::new(vec![0; MAX_RIG_SLOTS]),
             origins: Arc::new(vec![[0.0; 4]; MAX_RIG_SLOTS]),
             origin_generation: 0,
@@ -196,6 +199,7 @@ pub fn rig_cost_enabled() -> bool {
 /// invariant (see [`RigPalettes::bone_watermark`]), so the prefix IS the whole content.
 fn rows_make_mut<'a>(
     rows: &'a mut Arc<Vec<[f32; 4]>>,
+    spare: &mut Option<Arc<Vec<[f32; 4]>>>,
     watermark_bones: u32,
     copies: &mut u32,
     copy_us: &mut f32,
@@ -203,19 +207,24 @@ fn rows_make_mut<'a>(
     if Arc::strong_count(rows) > 1 || Arc::weak_count(rows) > 0 {
         let t = std::time::Instant::now();
         let live = 3 * watermark_bones as usize;
-        let mut new = vec![[0.0f32; 4]; rows.len()];
+        // The retired buffer from two publishes ago, once the render world has let go of it:
+        // copy the live prefix in and take it back. Its tail is stale — and never read: the GPU
+        // only ever receives dirty ranges, so what the CPU vector holds past the watermark
+        // reaches nothing (the calloc'd zeros it replaced were never uploaded either). A fresh
+        // allocation only while the render world still holds both.
+        let mut new = match spare.take().and_then(|a| Arc::try_unwrap(a).ok()) {
+            Some(v) if v.len() == rows.len() => v,
+            _ => vec![[0.0f32; 4]; rows.len()],
+        };
         new[..live].copy_from_slice(&rows[..live]);
-        *rows = Arc::new(new);
+        *spare = Some(std::mem::replace(rows, Arc::new(new)));
         *copy_us += t.elapsed().as_secs_f32() * 1e6;
         *copies += 1;
     }
-    // Sole owner here either way: no clone left to happen.
+    // Uniquely owned now — `make_mut` is a plain borrow.
     Arc::make_mut(rows)
 }
 
-/// Move a world affine into the rig's own frame (decision 0974): same 3×3, translation measured
-/// from `origin`. The subtraction is where the ~9 k-yard magnitude leaves the number — everything
-/// downstream of it is a rig-sized quantity.
 fn rebase(mut world: Affine3A, origin: Vec3) -> Affine3A {
     world.translation -= bevy::math::Vec3A::from(origin);
     world
@@ -317,6 +326,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -385,6 +395,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -429,6 +440,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -487,6 +499,7 @@ impl RigPalettes {
         let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            &mut self.spare,
             wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
@@ -1188,7 +1201,13 @@ mod tests {
         // The extract's held reference — the shared state every first-write-of-a-frame sees.
         let held = p.rows.clone();
         let wm = p.bone_watermark();
-        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        let rows = rows_make_mut(
+            &mut p.rows,
+            &mut p.spare,
+            wm,
+            &mut p.cost_copies,
+            &mut p.cost_copy_us,
+        );
         rows[0] = [9.0; 4];
         assert_eq!(p.cost_copies, 1, "the shared write copied");
         assert_eq!(
@@ -1218,7 +1237,13 @@ mod tests {
         // A fresh shared write after the shrink still carries the survivor whole.
         let _held3 = p.rows.clone();
         let wm = p.bone_watermark();
-        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        let rows = rows_make_mut(
+            &mut p.rows,
+            &mut p.spare,
+            wm,
+            &mut p.cost_copies,
+            &mut p.cost_copy_us,
+        );
         rows[1] = [7.0; 4];
         assert_eq!(
             p.rows[0], [9.0; 4],

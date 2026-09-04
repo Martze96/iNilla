@@ -257,6 +257,12 @@ pub(super) type CharSkinMaterials = (
     (Option<MatQuint>, Option<MatQuint>),
 );
 
+/// The `WOW_PROBE_SHARED_SKIN` pricing lever (see its use in [`build_char_skin_materials`]).
+fn shared_skin_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_PROBE_SHARED_SKIN").is_some())
+}
+
 /// Build a character body's per-appearance materials — the **body** atlas (as a (single-sided,
 /// two-sided) pair — a body batch keeps its own M2 0x04, e.g. the robe skirt) and the **hair**-mesh
 /// texture (a single CharSections BLP, decision 0045) — each as a (steady, interior-matte, fade,
@@ -313,7 +319,7 @@ pub(super) fn build_char_skin_materials(
     let body_tex: Option<Handle<Image>> = match &look.body {
         BodySkin::Baked(name) => Some(asset_server.load::<Image>(baked_npc_url(name))),
         BodySkin::Composite { face } => world_assets.and_then(|world| {
-            let key = SkinKey {
+            let mut key = SkinKey {
                 race: look.race,
                 sex: look.sex,
                 skin: look.skin,
@@ -324,6 +330,23 @@ pub(super) fn build_char_skin_materials(
                 equip,
                 emblem,
             };
+            // `WOW_PROBE_SHARED_SKIN=1` — a PRICING lever, never a look: every body composites
+            // the same key, so every body part of one mesh shares one material and bevy's
+            // batcher can instance them. What it measures is the ceiling of the shared-body-
+            // material lane (draw count → render-thread CPU) before that lane is built.
+            if shared_skin_probe() {
+                key = SkinKey {
+                    race: 1,
+                    sex: 0,
+                    skin: 0,
+                    face: 0,
+                    facial_hair: 0,
+                    hair_style: 0,
+                    hair_color: 0,
+                    equip: [0; 8],
+                    emblem: None,
+                };
+            }
             match skin_cache.fetch(&key) {
                 Some(handle) => Some(handle),
                 None => {

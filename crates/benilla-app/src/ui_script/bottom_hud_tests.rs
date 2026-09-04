@@ -77,7 +77,9 @@ fn shipped_xml() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert!(out.len() >= 38, "only {} xml files swept", out.len());
+    // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751), so
+    // the floor sits well under the count rather than one step above it (1956).
+    assert!(out.len() >= 20, "only {} xml files swept", out.len());
     out
 }
 

@@ -57,8 +57,18 @@ fn skill(
 /// silently never got built (`SkillDetailScrollFrame` inherits `UIPanelScrollFrameTemplate`).
 /// [`super::test_ui::load_ui_strict`] is that lesson made into a check.
 fn shown_skills_page() -> UiScript {
+    shown_skills_page_with(None)
+}
+
+/// [`shown_skills_page`] with a text measurer seated BEFORE the files load — the state the app's
+/// VM is in at world entry (the glue screens' frames seat it), which a stock `OnLoad` that measures
+/// text relies on.
+fn shown_skills_page_with(measurer: Option<Box<dyn benilla_ui::script::TextMeasure>>) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    if let Some(m) = measurer {
+        s.set_text_measurer(m);
+    }
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
     }
@@ -201,7 +211,7 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
     );
 
     // Selecting the single-rank row paints the detail pane the same way (the shared PaintBar).
-    s.run("SetSelectedSkill(2) BenillaSkillFrame_Update()")
+    s.run("SetSelectedSkill(2) SkillFrame_UpdateSkills()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return SkillDetailStatusBarSkillRank:GetText() or \"\"")
@@ -458,30 +468,20 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
-/// The tab's **fit law** (ref `SkillFrameExpandButtonFrame`'s OnLoad, l.312-316:
-/// `SetWidth(GetTextWidth()+45)`). benilla seats the VM's font engine at the frame boundary, so
-/// the XML-load call reads 0 — the guard leaves the declared width standing, and the first Update
-/// with a measurer fits the tab. Both states are pinned here because only the second one is the
-/// reference's, and only the first is what a cold load sees.
+/// The tab's **fit law** (ref `SkillFrameExpandButtonFrame`'s OnLoad:
+/// `SetWidth(SkillFrameCollapseAllButton:GetTextWidth()+45)`), which the reference applies ONCE,
+/// at load, with its font engine already up. The app's VM is in that state at world entry (the
+/// glue screens seat the measurer on it), so the test seats one first; the transcription used to
+/// guard a 0 measure and re-fit on the first Update, which the reference never does (1956).
 #[test]
-fn the_expand_tab_fits_its_label_once_a_measure_answers() {
+fn the_expand_tab_fits_its_label_at_load() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = shown_skills_page();
-    assert_eq!(
-        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
-            .unwrap(),
-        54.0,
-        "unmeasured, the declared width stands — a 0 measure must not squash the tab to 45"
-    );
-
-    s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
-    s.run("BenillaSkillFrame_Update()").unwrap();
-    s.resolve();
+    let mut s = shown_skills_page_with(Some(Box::new(super::FixedWidthFont(7.0))));
     assert_eq!(
         s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         7.0 * 3.0 + 45.0,
-        "then the ref's own law: the label's width + 45"
+        "the ref's own law at load: the ALL label's width + 45"
     );
     // The middle slab is the span between the two caps, so the fit reaches the art for free.
     let (mid_l, mid_r, cap_r_l) = s
@@ -495,6 +495,14 @@ fn the_expand_tab_fits_its_label_once_a_measure_answers() {
         mid_r - mid_l,
         66.0 - 16.0,
         "and carries the whole span minus the two caps"
+    );
+    // An Update leaves the fit alone — the reference sizes the tab at load and never again.
+    s.run("SkillFrame_UpdateSkills()").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
+            .unwrap(),
+        66.0
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }

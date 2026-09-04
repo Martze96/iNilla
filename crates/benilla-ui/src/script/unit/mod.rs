@@ -195,6 +195,9 @@ pub struct UnitState {
     /// player-options newbie tip. `UnitIsPlayer`'s note used to call this reach a gap we did not
     /// carry; the unit-frame migration is what closed it.
     pub player_controlled: bool,
+    /// `UNIT_FIELD_FLAGS`, raw — what `UNIT_FLAGS` fires on (the app's `fire_transitions`); the
+    /// three readings above are bits of it.
+    pub flags: u32,
     /// The unit's guild membership (`GetGuildInfo(unit)`, decision 1257). `None` = guildless, or
     /// a creature, or a player whose `PLAYER_GUILDID` has not streamed yet. Filled from the
     /// PUBLIC descriptor fields 191/192 joined against the app's guild-identity cache — see

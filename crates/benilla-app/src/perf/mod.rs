@@ -54,7 +54,7 @@ mod trace;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
-pub(crate) use clock::{process_cpu_secs, system_cpu_ticks, thread_cpu_table};
+pub(crate) use clock::{process_cpu_secs, process_faults, system_cpu_ticks, thread_cpu_table};
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
 pub(crate) use hud::PerfHud;
 pub(crate) use journal::FpsJournalPlugin;

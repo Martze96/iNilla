@@ -30,7 +30,9 @@ fn every_shipped_ui_xml_parses() {
     // Never let the sweep pass by finding nothing — a moved assets dir would otherwise turn this
     // into a test that guards zero files while staying green.
     assert!(
-        checked >= 38, // 41 until 1944 took the two quest files stock
+        // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751),
+        // so the floor sits well under the count rather than one step above it (1956).
+        checked >= 20,
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -123,6 +125,23 @@ fn loading_the_shipped_ui_queues_no_sounds() {
 /// a white slab over its autocast ring and another under its tab row. Every gate was green.
 ///
 /// The shape half runs everywhere; the resolve half needs client data and skips without it (a
+/// The reference's pet bar, up with the hunter fixture (Claw autocasting), settled past its
+/// slide — the pet half of the two shine pins below.
+fn pet_bar_vm() -> benilla_ui::script::UiScript {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    super::pet_bar_tests::load_pet_bar(&s);
+    super::pet_bar_tests::declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, super::pet_bar_tests::hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    for _ in 0..3 {
+        s.tick(0.05);
+    }
+    s.resolve();
+    assert!(s.errors().is_empty(), "pet bar errors: {:?}", s.errors());
+    s
+}
+
 /// The autocast **corner brackets** (`UI-AutoCastableOverlay`), per template — the sibling pin to
 /// the shine's, and the same invariant: not a magic size, but the **bracket square against its
 /// button**, which is the thing an eye actually reads.
@@ -199,6 +218,12 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
         .eval("return SpellButton1AutoCastable:GetWidth(), SpellButton1:GetWidth()")
         .unwrap();
     found.push(("SpellButton1AutoCastable".into(), overlay * ART, button));
+    // The pet button's overlay is the reference's own template (1953) — measured the same way.
+    let s = pet_bar_vm();
+    let (overlay, button): (f32, f32) = s
+        .eval("return PetActionButton1AutoCastable:GetWidth(), PetActionButton1:GetWidth()")
+        .unwrap();
+    found.push(("PetActionButton1AutoCastable".into(), overlay * ART, button));
     assert_eq!(found.len(), 2, "expected two autocast overlays: {found:?}");
     for (name, brackets, button) in &found {
         assert!(
@@ -316,6 +341,23 @@ fn the_shine_tokens_ask_for_the_rims_we_meant() {
     let scale = crate::autocast_shine::token_model_scale(&token).expect("a shine token");
     let view: f32 = s.eval("return SpellButton1Shine:GetWidth()").unwrap();
     found.push(("SpellButton1Shine".into(), 0.02 * 1280.0 * scale, view));
+    // The pet button's shine is PetActionBarAdapters.xml's, over the whole button (1953): the
+    // token off the shown marker's quad, the viewport off that quad's own rect.
+    let s = pet_bar_vm();
+    let (token, view) = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match (&q.content, q.rect) {
+            (benilla_ui::script::QuadContent::Texture { path: Some(p), .. }, Some(r))
+                if p.starts_with(crate::autocast_shine::SHINE_TOKEN) =>
+            {
+                Some((p.clone(), r.right - r.left))
+            }
+            _ => None,
+        })
+        .expect("the pet bar's shine marker (Claw autocasts in the hunter fixture)");
+    let scale = crate::autocast_shine::token_model_scale(&token).expect("a shine token");
+    found.push(("PetActionButton1Shine".into(), 0.02 * 1280.0 * scale, view));
     assert_eq!(
         found.len(),
         2,
@@ -797,7 +839,8 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
-    assert!(swept >= 38, "only {swept} xml files swept — sweep broke");
+    // The same walk floor as above (1956).
+    assert!(swept >= 20, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
@@ -1394,7 +1437,9 @@ fn every_declared_parent_really_attaches() {
 
     let declared = shipped_frame_parents();
     assert!(
-        declared.len() > 30, // 67 before 1938 took the three bar files (25 of them) stock
+        // A sanity floor for the scan, not a census — the declarations retire with the files
+        // that carry them (1751); 67 before 1938, 30 after 1956.
+        declared.len() >= 15,
         "only {} parent declarations found — the scan broke",
         declared.len()
     );

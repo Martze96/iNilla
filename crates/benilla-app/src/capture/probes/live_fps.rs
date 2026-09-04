@@ -58,6 +58,7 @@ impl Plugin for LiveFpsPlugin {
             load_samples: Vec::new(),
             paced_samples: Vec::new(),
             threads_at_start: None,
+            faults_at_start: None,
             cpu_at_start: None,
             sys_at_start: None,
             occluded_now: false,
@@ -112,6 +113,8 @@ struct LiveFps {
     /// Per-thread CPU at the window's first frame (`perf::thread_cpu_table`), keyed by pthread
     /// identity — subtracted at the window's end for `thr=[name:ms/frame,…]`.
     threads_at_start: Option<Vec<(usize, String, f64, f64)>>,
+    /// The page-fault counters at the window's first frame (`perf::process_faults`).
+    faults_at_start: Option<(u64, u64)>,
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
@@ -164,7 +167,7 @@ type ScreenParams<'w, 's> = (
         (
             &'static bevy::camera::visibility::ViewVisibility,
             Has<MeshMaterial3d<benilla_assets::materials::TerrainMaterial>>,
-            Has<benilla_world::model_render::ModelPart>,
+            Option<&'static benilla_world::model_render::ModelPart>,
             Has<MeshMaterial3d<benilla_assets::materials::LiquidMaterial>>,
         ),
         With<Mesh3d>,
@@ -302,6 +305,7 @@ fn drive_live_fps(
             if probe.samples.is_empty() {
                 probe.cpu_at_start = crate::perf::process_cpu_secs();
                 probe.threads_at_start = crate::perf::thread_cpu_table();
+                probe.faults_at_start = crate::perf::process_faults();
                 main_split.restart();
                 probe.sys_at_start = crate::perf::system_cpu_ticks();
                 // The churn census restarts with the window — warmup noise (streaming, shader
@@ -419,10 +423,14 @@ fn drive_live_fps(
                             a.load(std::sync::atomic::Ordering::Relaxed)
                         };
                         format!(
-                            " wgpu_bufs={} wgpu_texs={} wgpu_bgs={}",
+                            " wgpu_bufs={} wgpu_texs={} wgpu_bgs={} draws=o{}/t{}/s{}/ui{}",
                             ld(&c.0.buffers),
                             ld(&c.0.textures),
-                            ld(&c.0.bind_groups)
+                            ld(&c.0.bind_groups),
+                            ld(&c.0.draws_opaque),
+                            ld(&c.0.draws_transparent),
+                            ld(&c.0.draws_shadow),
+                            ld(&c.0.draws_ui)
                         )
                     })
                     .unwrap_or_default();
@@ -504,7 +512,19 @@ fn drive_live_fps(
                                 .inside_ms()
                                 .map(|m| format!(" main_in={m:.2}"))
                                 .unwrap_or_default();
-                            format!(" thr=[{list}]{inside}")
+                            // Page faults per frame beside the split: `sys` time with no
+                            // syscall under it is the kernel zero-filling pages the allocator
+                            // gave back and asked for again.
+                            let faults =
+                                match (probe.faults_at_start, crate::perf::process_faults()) {
+                                    (Some((mi0, ma0)), Some((mi1, ma1))) => format!(
+                                        " faults={:.0}/{:.1}",
+                                        (mi1 - mi0) as f64 / v_len as f64,
+                                        (ma1 - ma0) as f64 / v_len as f64
+                                    ),
+                                    _ => String::new(),
+                                };
+                            format!(" thr=[{list}]{inside}{faults}")
                         }
                         _ => String::new(),
                     };
@@ -609,13 +629,19 @@ fn drive_live_fps(
                 ui_batches.iter().count(),
                 vis = {
                     let mut n = [0usize; 4];
+                    // Of the model parts, how many draw in the transparent pass (M2 `Blend`
+                    // batches) — the sorted phase whose draws never batch across materials.
+                    let mut blended = 0usize;
                     for (vv, terrain, model, liquid) in vis_meshes.iter() {
                         if !vv.get() {
                             continue;
                         }
                         let k = if terrain {
                             0
-                        } else if model {
+                        } else if let Some(part) = model {
+                            if part.blend == benilla_formats::ModelBlend::Blend {
+                                blended += 1;
+                            }
                             1
                         } else if liquid {
                             2
@@ -625,7 +651,7 @@ fn drive_live_fps(
                         n[k] += 1;
                     }
                     format!(
-                        " vis_terrain={} vis_model={} vis_liquid={} vis_other={}",
+                        " vis_terrain={} vis_model={}(blend {blended}) vis_liquid={} vis_other={}",
                         n[0], n[1], n[2], n[3]
                     )
                 },

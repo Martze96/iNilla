@@ -1480,6 +1480,33 @@ mod tests {
                  why nothing has hit it — the wrapper answers first for our own rows.",
             ),
             (
+                "SkillFrame.xml",
+                "BuySkillTier",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's LearnSkillButton calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
+                "SkillFrame.xml",
+                "AddSkillUp",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's RightArrow calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
+                "SkillFrame.xml",
+                "RemoveSkillUp",
+                "a 5875 binding (wow-re `bindings.md`: marshals and delegates to a C++ \
+                 method/net-send) of the pre-1.12 skill-point purchase UI. the detail bar's LeftArrow calls it, and \
+                 that button shows only while `UnitCharacterPoints`'s second value or a row's \
+                 step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
+                 skill-point wire exists; not built (1956).",
+            ),
+            (
                 "ClassTrainerFrameTemplates.xml",
                 "ClassTrainerSkillButton_OnClick",
                 "defined by `Blizzard_TrainerUI`, a LoadOnDemand addon we do not load yet. The \
@@ -2070,10 +2097,6 @@ mod tests {
         // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
         const UNPRODUCED: &[(&str, &str)] = &[
             ("BAG_OPEN", "ContainerFrame.lua"),
-            (
-                "CVAR_UPDATE",
-                "TextStatusBar.lua — a CVar change does not repaint the bar text",
-            ),
             ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
             (
                 "GMSURVEY_DISPLAY",
@@ -2177,8 +2200,13 @@ mod tests {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
-                    const CALLS: [&str; 2] =
-                        [concat!("fire_event", "("), concat!("fire_event_into", "(")];
+                    // The engine's deferred lane (`pending_events.push((name, args))`,
+                    // `cursor.rs`) is a fire too — the pet grid pair rides it (1953).
+                    const CALLS: [&str; 3] = [
+                        concat!("fire_event", "("),
+                        concat!("fire_event_into", "("),
+                        concat!("pending_events.push", "(("),
+                    ];
                     let mut fires_indirectly = false;
                     for call in CALLS {
                         let mut from = 0;

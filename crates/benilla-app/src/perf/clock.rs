@@ -37,6 +37,29 @@ pub(crate) fn process_cpu_secs() -> Option<f64> {
     }
 }
 
+/// The process's page-fault counters so far — `(minor, major)` from `getrusage`. A minor fault
+/// is a page the kernel had to map or zero-fill on first touch: memory the allocator handed back
+/// to the OS and then asked for again. It is CPU time the process pays in the kernel with no
+/// syscall in any user stack — invisible to a sampler, visible to [`thread_cpu_table`]'s `sys`
+/// column. Per frame, it is the number that says whether that column is allocator churn.
+pub(crate) fn process_faults() -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        // SAFETY: as in `process_cpu_secs` — `getrusage` fills the out-param completely.
+        unsafe {
+            let mut ru: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {
+                return None;
+            }
+            Some((ru.ru_minflt as u64, ru.ru_majflt as u64))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// CPU seconds consumed by **the calling thread** (`CLOCK_THREAD_CPUTIME_ID`).
 ///
 /// The twin [`process_cpu_secs`] cannot answer the question a hitch actually poses. It sums every

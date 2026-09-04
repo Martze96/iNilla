@@ -284,7 +284,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // bag row. It comes with `ContainerFrame.xml`, manifest 585 against the pane's 693 (1875).
     "Interface\\FrameXML\\ContainerFrame.xml",
     r"Interface\FrameXML\ReputationFrame.xml",
-    "SkillFrame.xml",
+    "Interface\\FrameXML\\SkillFrame.xml",
     "Interface\\FrameXML\\HonorFrame.xml",
 ];
 

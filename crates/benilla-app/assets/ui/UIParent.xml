@@ -124,8 +124,10 @@
           Nothing consumes them yet; they are set for the day the bag anchors do.
     -->
     <Script><![CDATA[
-        -- Declared by the ref's ContainerFrame.lua / PetActionBarFrame.lua / WorldStateFrame.lua
-        -- (files we don't ship); the manage pass below overwrites them every run.
+        -- Declared by the ref's ContainerFrame.lua / PetActionBarFrame.lua / WorldStateFrame.lua;
+        -- PetActionBarFrame.lua is on the chain (1953) and re-declares its two below, the other
+        -- two files are not shipped. Pre-declared here so a manage pass that runs before the pet
+        -- file loads reads a number; the pass overwrites them every run.
         CONTAINER_OFFSET_X = 0
         CONTAINER_OFFSET_Y = 70
         BATTLEFIELD_TAB_OFFSET_Y = 210

@@ -187,6 +187,8 @@ impl Plugin for UiUnitPlugin {
             (
                 feed_units,
                 feed_unit_reach,
+                feed_player_control,
+                feed_farsight_focus,
                 melee_unit_combat,
                 fire_unit_combat,
                 fire_combat_text,
@@ -730,6 +732,55 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
     (dz * dz + dx * dx) + dy * dy
 }
 
+/// `PLAYER_CONTROL_LOST` / `PLAYER_CONTROL_GAINED` — `SMSG_CLIENT_CONTROL_UPDATE` naming the
+/// local player reaches `0x4958e0`, which writes the player-control flag and, **on a change**,
+/// fires LOST when the byte is zero and GAINED when it is not; the boot init is "in control"
+/// (wow-re `farsight-and-client-control.md` §5, `incoming-trade-request-law.md`). The flag is
+/// [`crate::player::Player::control_lost`], which `player::wire_in` writes from that packet; this
+/// fires the edge, and a fresh VM's memo is the boot value.
+fn feed_player_control(
+    script: Option<NonSendMut<UiScript>>,
+    player: Option<Res<crate::player::Player>>,
+    mut lost: Local<crate::ui_script::VmMemo<bool>>,
+) {
+    let (Some(mut script), Some(player)) = (script, player) else {
+        return;
+    };
+    let lost = lost.get(&script);
+    if *lost != player.control_lost {
+        *lost = player.control_lost;
+        let event = if player.control_lost {
+            "PLAYER_CONTROL_LOST"
+        } else {
+            "PLAYER_CONTROL_GAINED"
+        };
+        script.fire_event(event, vec![]);
+    }
+}
+
+/// `PLAYER_FARSIGHT_FOCUS_CHANGED` — the `PLAYER_FARSIGHT` field-change callback (`0x5de0d0`)
+/// fires it on both of its legs, whether or not the new guid resolves to a streamed object
+/// (wow-re `farsight-and-client-control.md` §2). The edge is the FIELD's, so this diffs the
+/// descriptor value the camera's `publish_view_subject` reads, never the resolved pose.
+fn feed_farsight_focus(
+    script: Option<NonSendMut<UiScript>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut focus: Local<crate::ui_script::VmMemo<Option<u64>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let Some(store) = self_q.iter().next() else {
+        return;
+    };
+    let anchor = store.0.player_farsight();
+    let focus = focus.get(&script);
+    if *focus != anchor {
+        *focus = anchor;
+        script.fire_event("PLAYER_FARSIGHT_FOCUS_CHANGED", vec![]);
+    }
+}
+
 /// Feed the **unit reach map** — for every token that resolves to a live unit object, its squared
 /// distance from us, plus whether that unit passes inspect's own two non-distance refusals.
 ///
@@ -899,6 +950,7 @@ pub(crate) fn snapshot(
         // leg of the selection ring). Wider than `is_player` above: a pet or a charmed creature
         // sets it without being a player.
         player_controlled: store.0.unit_flags() & 0x8 != 0,
+        flags: store.0.unit_flags(),
         // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
         // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
         // that idiom found the local-player readers reading this identical bit, so there is no
@@ -1174,6 +1226,12 @@ pub(crate) fn fire_transitions(
     }
     if changed(|u| u64::from(u.power_type)) {
         script.fire_event("UNIT_DISPLAYPOWER", vec![tok()]);
+    }
+    // `UNIT_FLAGS` — on a change of the unit's `UNIT_FIELD_FLAGS`, the field the reference's
+    // per-unit reflex is registered on by byte offset (wow-re `pet-action-bar-api.md` §9's
+    // `0x5ff580`). The stock pet bar filters it for `"pet"` and re-derives its usability (1953).
+    if changed(|u| u64::from(u.flags)) {
+        script.fire_event("UNIT_FLAGS", vec![tok()]);
     }
     // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
     // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
@@ -1928,6 +1986,128 @@ mod tests {
     /// Bit `0x8` has **no** arm, in the reference or here — proven there by enumerating all 122
     /// instructions and 12 branches of the watcher. The negative half is asserted too, because
     /// "fire on both, it's cheaper" is the obvious wrong simplification.
+    /// `UNIT_FLAGS` rides the raw field: any change of `UNIT_FIELD_FLAGS` fires it with the
+    /// token, an unchanged field does not, and a unit's first snapshot is a transition (1953).
+    #[test]
+    fn a_flags_change_fires_unit_flags_with_the_token() {
+        let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_FLAGS")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "pet", prev.as_ref(), &cur);
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let base = UnitState {
+            exists: true,
+            has_object: true,
+            flags: 0x8,
+            ..Default::default()
+        };
+        assert_eq!(
+            fired(
+                Some(base.clone()),
+                UnitState {
+                    flags: 0x8 | 0x0400_0000,
+                    ..base.clone()
+                }
+            ),
+            vec!["UNIT_FLAGS:pet".to_string()]
+        );
+        assert_eq!(
+            fired(Some(base.clone()), base.clone()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            fired(None, base.clone()),
+            vec!["UNIT_FLAGS:pet".to_string()]
+        );
+    }
+
+    /// The two edges on the player's own state (1953): the control flag's, which fires LOST on
+    /// the way down and GAINED on the way up and nothing while it holds (the boot value is "in
+    /// control"), and the far-sight field's, which fires on every change including the clear.
+    #[test]
+    fn the_control_and_far_sight_edges_fire_once_each_way() {
+        use bevy::prelude::*;
+        const FIELD_PLAYER_FARSIGHT: u16 = 712;
+        let mut app = App::new();
+        app.init_resource::<crate::player::Player>()
+            .add_systems(Update, (feed_player_control, feed_farsight_focus));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_CONTROL_LOST")
+                f:RegisterEvent("PLAYER_CONTROL_GAINED")
+                f:RegisterEvent("PLAYER_FARSIGHT_FOCUS_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(0x77),
+                ObjectStore(benilla_protocol::ObjectFields::default()),
+            ))
+            .id();
+        let seen = |app: &mut App| -> Vec<String> {
+            app.update();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        assert_eq!(
+            seen(&mut app),
+            Vec::<String>::new(),
+            "in control, no far sight: quiet"
+        );
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = true;
+        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
+        assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = false;
+        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
+
+        let set_farsight = |app: &mut App, guid: u64| {
+            app.world_mut().entity_mut(me).insert(ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&[
+                    (FIELD_PLAYER_FARSIGHT, guid as u32),
+                    (FIELD_PLAYER_FARSIGHT + 1, (guid >> 32) as u32),
+                ]),
+            ));
+        };
+        set_farsight(&mut app, 0xf130_0000_0000_0042);
+        assert_eq!(
+            seen(&mut app),
+            vec!["PLAYER_FARSIGHT_FOCUS_CHANGED".to_string()],
+            "set — whether or not the guid resolves"
+        );
+        assert_eq!(seen(&mut app), Vec::<String>::new());
+        set_farsight(&mut app, 0);
+        assert_eq!(
+            seen(&mut app),
+            vec!["PLAYER_FARSIGHT_FOCUS_CHANGED".to_string()],
+            "cleared — the other leg"
+        );
+    }
+
     #[test]
     fn the_tapped_bit_fires_unit_faction_and_the_by_player_bit_fires_nothing() {
         let fired = |prev: UnitState, cur: UnitState| -> Vec<String> {
