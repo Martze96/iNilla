@@ -164,6 +164,27 @@ pub(crate) use view_subject::ViewSubject;
 /// `0x600dd7`.
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 
+/// **`IsSelfControlled`** — the reference's `0x5fa550` (`5fa566 a9 04 00 c0 00 test eax, 0xc00004`):
+/// is this unit acting under its *own* control? False while `DISABLE_MOVE` (`0x4`), `CONFUSED`
+/// (`0x400000`) or `FLEEING` (`0x800000`) — and note what is **absent**: `UNIT_FLAG_STUNNED` is
+/// not in the mask (it has its own, separate gate), and neither is the taxi bit. wow-re
+/// `object-layer/scratch/unit-flags-movement-gates.md` §4.
+///
+/// Its consumers in the reference are the movement/collision layer and `DoEmote` — and the
+/// polarity is the trap: it returns **1 for an ordinary player**, so a gate written on it fires
+/// in the *normal* case and is suppressed while feared, not the other way round.
+///
+/// **One leg is deliberately unmodelled.** `POSSESSED` (`0x1000000`) does not refuse here: the
+/// reference redirects at `0x5fa582` to the charmer's GUID and **recurses** into itself, so the
+/// answer is the charmer's. Reproducing that needs the charmer's descriptor, and the only
+/// consumer that would notice is whether a red toast appears while mind-controlled. Named rather
+/// than invented (decision 1904).
+pub(crate) fn self_controlled(unit_flags: u32) -> bool {
+    /// `DISABLE_MOVE | CONFUSED | FLEEING` — the reference's literal `0xc00004`.
+    const NOT_SELF_CONTROLLED: u32 = 0x0000_0004 | 0x0040_0000 | 0x0080_0000;
+    unit_flags & NOT_SELF_CONTROLLED == 0
+}
+
 /// `UNIT_FLAG_IN_COMBAT` — the same `UNIT_FIELD_FLAGS` word, **bit 19** (vmangos
 /// `UnitDefines.h`; the client reads it as `shr reg,0x13; test rl,1`).
 ///

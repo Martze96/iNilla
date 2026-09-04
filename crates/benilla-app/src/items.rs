@@ -490,6 +490,14 @@ impl Items {
         })
     }
 
+    /// [`Self::template`]'s **read-only** twin: the record for `entry` only if it is already
+    /// cached, and never an ask. For callers holding `&Items` — the cast ladder's equipped-item
+    /// rung runs inside a `&Items` borrow, and by the time a button is pressed the greying feed
+    /// that shares its search has had the template for many frames.
+    pub(crate) fn template_cached(&self, entry: u32) -> Option<&ItemInfo> {
+        self.templates.get(&entry)?.as_ref()
+    }
+
     /// Record a template answer (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`); `None` = unknown entry.
     pub(crate) fn insert_template(&mut self, entry: u32, info: Option<ItemInfo>) {
         self.pending.remove(&entry);
@@ -612,6 +620,23 @@ pub(crate) fn disarmed_equipment_slot(
     let main = equipped_class(store, items, commands, EQUIPMENT_SLOT_MAINHAND);
     let off = equipped_class(store, items, commands, EQUIPMENT_SLOT_OFFHAND);
     crate::creature_anim::disarmed_hand(main, off).map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8)
+}
+
+/// [`disarmed_equipment_slot`]'s read-only twin — same ladder, no ask (decision 1925).
+pub(crate) fn disarmed_equipment_slot_cached(store: &ObjectStore, items: &Items) -> Option<u8> {
+    if store.0.unit_flags() & crate::creature_anim::UNIT_FLAG_DISARMED == 0 {
+        return None;
+    }
+    let class_of = |slot: u8| -> Option<u8> {
+        let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
+        let entry = items.object(guid).and_then(|o| o.object_entry())?;
+        Some(items.template_cached(entry)?.class as u8)
+    };
+    crate::creature_anim::disarmed_hand(
+        class_of(EQUIPMENT_SLOT_MAINHAND),
+        class_of(EQUIPMENT_SLOT_OFFHAND),
+    )
+    .map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8)
 }
 
 /// A minimal, VALID item template named `name` — the shared test seam for every module that

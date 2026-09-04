@@ -2224,7 +2224,7 @@ pub(crate) struct LoginQueuedMessage {
 
 /// The session ended (socket death, logout's teardown edge) — bridged from the Net drain's
 /// `Disconnected` arm. [`crate::login`]'s policy reads it as "the IO thread is back at its
-/// pre-logon park"; whether anything re-authenticates is [`Self::ends_the_session`]'s answer.
+/// pre-logon park"; whether anything re-authenticates is `Self::ends_the_session`'s answer.
 #[derive(Message, Clone)]
 pub(crate) struct DisconnectedMessage {
     pub(crate) reason: String,

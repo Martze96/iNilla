@@ -1,6 +1,13 @@
-//! The **query** half of the overhead questgiver markers: when to ask the server what an NPC's
-//! `!`/`?` should be — and, for a GameObject, when to ask a question whose answer is thrown away.
-//! The rendering half is [`super`].
+//! The **query** half of the overhead markers: when to ask the server what an NPC's `!`/`?` should
+//! be — and, for a GameObject, when to ask a question whose answer is thrown away. The rendering
+//! half is [`super`].
+//!
+//! **Both markers, not just the questgiver one** (decision 1918). The gold `!` and the flight
+//! master's green `!` are the same `unit+0xb2c`: `0x607480` installs whichever arrives into that
+//! one slot, `0x6073f0` zeroes it (along with `+0xcb8`), and `0x607380` — the per-unit path — tears
+//! it down once and then re-issues *both* queries, `0x182` on `UNIT_NPC_FLAGS` bit 1 and `0x1aa` on
+//! bit 3. One slot cannot have two lifetimes, so one system owns both asks; `ui_taxi` keeps the
+//! resulting fact ([`crate::ui_taxi::FlightMasterStatus`]) and nothing else.
 //!
 //! **A GameObject is queried and never rendered** (decision 1872, wow-re `questgiver-marker.md`
 //! §W14). The reference sends `CMSG_QUESTGIVER_STATUS_QUERY` for a quest-flagged GameObject from
@@ -29,6 +36,9 @@ use crate::ui_quest::QuestGiver;
 
 /// `UNIT_NPC_FLAGS` questgiver service bit (vanilla; `update_object.rs`'s accessor doc).
 const NPC_FLAG_QUESTGIVER: u32 = 0x2;
+/// `UNIT_NPC_FLAGS` flightmaster service bit — the other half of `0x607380`'s re-gate
+/// (`0x6073de shr eax,3; test al,1`), and the gate on the only live `0x1aa` sender there is.
+const NPC_FLAG_FLIGHTMASTER: u32 = 0x8;
 /// `GAMEOBJECT_FLAGS` bit **2** (mask `0x4`) — the whole of the sweep's GameObject gate, and the
 /// one place a GameObject GUID can reach this opcode at all.
 ///
@@ -125,12 +135,22 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // a Bevy system: one param per resource
 pub(super) fn query_statuses(
     self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
-    objects: Query<(&crate::net::Guid, &NetEntity, &ObjectStore), Without<SelfPlayer>>,
+    objects: Query<
+        (
+            Entity,
+            &crate::net::Guid,
+            &NetEntity,
+            &ObjectStore,
+            Option<&crate::ui_taxi::FlightMasterStatus>,
+        ),
+        Without<SelfPlayer>,
+    >,
     index: Res<GuidIndex>,
     factions: Option<Res<Factions>>,
     reputations: Res<crate::net::Reputations>,
     mut quest: ResMut<QuestGiver>,
     commands: Res<NetCommands>,
+    mut ecs: Commands,
     mut state: Local<QueryState>,
 ) {
     let Some(store) = self_q.iter().next() else {
@@ -175,7 +195,18 @@ pub(super) fn query_statuses(
     // the second is a `0x607380` and only a `0x607380` tears the marker down.
     state.asked.retain(|guid, _| index.0.contains_key(guid));
     quest.retain_statuses(|npc| index.0.contains_key(&npc));
-    for (guid, net, obj) in &objects {
+    for (entity, guid, net, obj, fm) in &objects {
+        // `0x6073f0` zeroes `+0xb2c` (the marker instance) and `+0xcb8` (the questgiver status)
+        // **together**, and the flight master's green `!` lives in that same `+0xb2c` — so every
+        // teardown below takes both. Only removed when there is something to remove: a `Commands`
+        // write per unit per frame would be a queue of no-ops.
+        let tear_down = |quest: &mut QuestGiver, ecs: &mut Commands| {
+            quest.clear_status(guid.0);
+            if fm.is_some() {
+                ecs.entity(entity)
+                    .remove::<crate::ui_taxi::FlightMasterStatus>();
+            }
+        };
         match net.kind {
             // `0x5eb0a0` @ `0x5eb0d3`: `cmp eax,9; je` — typemask EXACTLY `OBJECT|UNIT`, a plain
             // creature. A player is `0x19` and falls out of the sweep here, before any flag test.
@@ -197,7 +228,7 @@ pub(super) fn query_statuses(
                     // hostile creature whether or not it is a questgiver. Dropping the ask key too
                     // means the marker comes back through a `0x607380` when the reaction recovers.
                     state.asked.remove(&guid.0);
-                    quest.clear_status(guid.0);
+                    tear_down(&mut quest, &mut ecs);
                     continue;
                 }
                 let key = unit_ask_key(&obj.0);
@@ -214,15 +245,29 @@ pub(super) fn query_statuses(
                 // "disable npcflags"), and its cached AVAILABLE status — with its `!` — stayed
                 // frozen over the NPC for the whole escort. The flag is half of [`unit_ask_key`],
                 // so the drop moves the key, and the key moving is a `0x607380`.
-                if key_moved || full {
-                    quest.clear_status(guid.0);
+                let per_unit = key_moved || full;
+                if per_unit {
+                    tear_down(&mut quest, &mut ecs);
                 }
-                // …and re-gate: the questgiver bit, on this unit's own key change and on every
-                // sweep. (Reaction is already `> 1` — the arm above returned otherwise.)
-                if (key_moved || swept) && obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER != 0 {
+                // …and re-gate. Reaction is already `> 1` — the arm above returned otherwise —
+                // so what is left is the two service bits, and **they are not symmetric**:
+                //
+                // - `0x182` (questgiver) is issued by `0x607380` @`0x6073cd` on bit `0x2` **and**
+                //   inline by the light sweep's own callback (`0x5eb159`), so every sweep re-asks;
+                // - `0x1aa` (taxi node status) has exactly ONE live sender site image-wide —
+                //   `0x607380` @`0x6073e8` — so it is re-asked on this unit's own key moving and
+                //   on a full sweep, and **never** on a light one. `0x5eb0a0` does not test bit
+                //   `0x8` at all.
+                let flags = obj.0.unit_npc_flags();
+                if (per_unit || swept) && flags & NPC_FLAG_QUESTGIVER != 0 {
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+                }
+                if per_unit && flags & NPC_FLAG_FLIGHTMASTER != 0 {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::TaxiNodeStatusQuery { guid: guid.0 });
                 }
             }
             // `0x5eb0da shr ecx,5; test cl,1` — typemask bit 5, `TYPEMASK_GAMEOBJECT`. Sweep-only,
@@ -782,6 +827,164 @@ mod tests {
             quest.status(HOSTILE),
             None,
             "and a Hated/Hostile one is torn down (0x5eb143), questgiver flag or not"
+        );
+    }
+
+    /// **The flight master's green `!` shares one slot with the gold one, so it shares its
+    /// lifetime** (decision 1918, wow-re §W16). Three things, and the middle one is the asymmetry
+    /// a re-implementer gets wrong:
+    ///
+    /// - `CMSG_TAXINODE_STATUS_QUERY` has **one** live sender site image-wide, `0x607380`
+    ///   @`0x6073e8` — so it goes out on this unit's own key moving and on a full sweep, and
+    ///   **never** on a light one. There is no mouseover trigger; the function that claim rested on
+    ///   (`0x5eb220`) is the callback of a seeder nothing calls.
+    /// - the questgiver query is the opposite: the light sweep's callback sends it inline
+    ///   (`0x5eb159`), so every sweep re-asks.
+    /// - and `0x6073f0` zeroes `+0xb2c` and `+0xcb8` together, so whatever tears one marker down
+    ///   takes the other with it.
+    #[test]
+    fn a_flight_master_is_asked_by_the_per_unit_path_only_and_loses_its_green_with_the_gold() {
+        use crate::net::{Guid, NetEntity};
+        use crate::ui_taxi::FlightMasterStatus;
+        use benilla_protocol::{EntityKind, ObjectFields};
+
+        const FM: u64 = 0x9001; // flightmaster only
+        const GIVER: u64 = 0x9002; // questgiver only — the asymmetry's control
+        const VENDOR: u64 = 0x9003; // neither — never asked at all
+        const FIELD_LEVEL: u16 = 34;
+        const FIELD_HEALTH: u16 = 22;
+        const FIELD_NPC_FLAGS: u16 = 147;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
+            .add_systems(Update, query_statuses);
+
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(1),
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (FIELD_LEVEL, 5),
+                    (FIELD_HEALTH, 100),
+                ])),
+            ))
+            .id();
+        let spawn = |app: &mut App, guid: u64, flags: u32| {
+            let e = app
+                .world_mut()
+                .spawn((
+                    NetEntity {
+                        kind: EntityKind::Unit,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, flags)])),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+            e
+        };
+        let fm = spawn(&mut app, FM, NPC_FLAG_FLIGHTMASTER);
+        spawn(&mut app, GIVER, NPC_FLAG_QUESTGIVER);
+        spawn(&mut app, VENDOR, 0x4);
+
+        let drain = |rx: &crossbeam_channel::Receiver<ClientCommand>| -> (Vec<u64>, Vec<u64>) {
+            let (mut taxi, mut giver) = (Vec::new(), Vec::new());
+            for c in rx.try_iter() {
+                match c {
+                    ClientCommand::TaxiNodeStatusQuery { guid } => taxi.push(guid),
+                    ClientCommand::QuestgiverStatusQuery { npc } => giver.push(npc),
+                    _ => {}
+                }
+            }
+            (taxi, giver)
+        };
+
+        // On sight: the create/init hook IS a `0x607380`, so both services are asked, once each.
+        app.update();
+        let (taxi, giver) = drain(&rx);
+        assert_eq!(taxi, vec![FM], "the flight master is asked on sight");
+        assert_eq!(
+            giver,
+            vec![GIVER],
+            "and so is the questgiver — the vendor never"
+        );
+
+        app.update();
+        assert_eq!(drain(&rx), (vec![], vec![]), "then quiet");
+
+        // A LIGHT sweep: the questgiver is re-asked inline by the callback; the flight master is
+        // not, because `0x5eb0a0` does not test bit 0x8 at all.
+        app.world_mut().resource_mut::<QuestGiver>().bump_reask();
+        app.update();
+        let (taxi, giver) = drain(&rx);
+        assert_eq!(giver, vec![GIVER], "a light sweep re-asks the questgiver");
+        assert_eq!(
+            taxi,
+            vec![] as Vec<u64>,
+            "…and never the flight master: 0x1aa has one sender site and it is not in the sweep"
+        );
+
+        // The green marker is up, and a FULL sweep (a revive) takes it down and re-asks.
+        app.world_mut()
+            .entity_mut(fm)
+            .insert(FlightMasterStatus { known: false });
+        let set_self = |app: &mut App, hp: u32| {
+            *app.world_mut()
+                .entity_mut(me)
+                .get_mut::<ObjectStore>()
+                .unwrap() = ObjectStore(ObjectFields::from_pairs(&[
+                (FIELD_LEVEL, 5),
+                (FIELD_HEALTH, hp),
+            ]));
+        };
+        set_self(&mut app, 0); // death — a LIGHT sweep
+        app.update();
+        assert_eq!(
+            drain(&rx).0,
+            vec![] as Vec<u64>,
+            "death does not re-ask taxi"
+        );
+        assert!(
+            app.world().entity(fm).get::<FlightMasterStatus>().is_some(),
+            "…and a light sweep leaves the green marker up"
+        );
+
+        set_self(&mut app, 100); // revive — a FULL sweep
+        app.update();
+        assert_eq!(drain(&rx).0, vec![FM], "a revive re-asks the flight master");
+        assert!(
+            app.world().entity(fm).get::<FlightMasterStatus>().is_none(),
+            "…after tearing its green marker down first (0x607384, the shared 0x6073f0)"
+        );
+
+        // And its own key moving is a `0x607380` too: the flightmaster bit going off takes the
+        // marker with it, and does not re-ask.
+        app.world_mut()
+            .entity_mut(fm)
+            .insert(FlightMasterStatus { known: false });
+        *app.world_mut()
+            .entity_mut(fm)
+            .get_mut::<ObjectStore>()
+            .unwrap() = ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0)]));
+        app.update();
+        assert_eq!(
+            drain(&rx).0,
+            vec![] as Vec<u64>,
+            "no longer a flight master"
+        );
+        assert!(
+            app.world().entity(fm).get::<FlightMasterStatus>().is_none(),
+            "and its green marker goes with the bit"
         );
     }
 

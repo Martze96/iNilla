@@ -67,6 +67,85 @@ const ATTR_EX3_OFF_HAND_ONLY: u32 = 0x0100_0000;
 /// matching its class. The other is being genuinely broken.
 const ITEM_FLAG_DEPRECATED: u32 = 0x0000_0010;
 
+/// `TARGET_FLAG_ITEM` (`Targets`, column 13, bit 4) — an item-targeting spell. Its
+/// `EquippedItem*` columns describe the **clicked item**, not the caster's gear, so the
+/// equipped-item search short-circuits on it (`0x6e40e0`'s second gate).
+const TARGET_FLAG_ITEM: u32 = 0x0000_0010;
+
+/// The search's **slot mask**, from `AttributesEx3` (`0x6e4136`–`0x6e4153`): bit 10 → equipment
+/// index 15 alone, else bit 24 → index 16 alone, else every slot.
+fn hand_mask(d: &SpellDisplay) -> u32 {
+    if d.attributes_ex3 & ATTR_EX3_MAIN_HAND_ONLY != 0 {
+        1 << crate::items::EQUIPMENT_SLOT_MAINHAND
+    } else if d.attributes_ex3 & ATTR_EX3_OFF_HAND_ONLY != 0 {
+        1 << crate::items::EQUIPMENT_SLOT_OFFHAND
+    } else {
+        u32::MAX
+    }
+}
+
+/// [`equipped_item_fits`]'s **read-only** twin, for the cast ladder's rung 7: the same search over
+/// the same slots, but it never asks the server for a missing template — it runs inside a `&Items`
+/// borrow. By the time a button is pressed the greying feed that shares this search has had the
+/// template for many frames, and an uncached one is the shared benefit-of-the-doubt anyway.
+pub(crate) fn equipped_item_fits_cached(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    items: &Items,
+) -> bool {
+    if d.equipped_item_class < 0
+        || d.equipped_item_subclass_mask == 0
+        || d.targets & TARGET_FLAG_ITEM != 0
+    {
+        return true;
+    }
+    let mut mask = hand_mask(d);
+    if let Some(hidden) = crate::items::disarmed_equipment_slot_cached(store, items) {
+        mask &= !(1u32 << hidden);
+    }
+    equipped_slots_match(
+        store,
+        mask,
+        d.equipped_item_class as u32,
+        d.equipped_item_subclass_mask,
+        |guid| {
+            let obj = items.object(guid)?;
+            let t = items.template_cached(obj.object_entry()?)?;
+            Some(WornItem {
+                class: t.class,
+                subclass: t.subclass,
+                flags: t.flags,
+                durability: obj.item_durability(),
+                max_durability: obj.item_max_durability(),
+            })
+        },
+    )
+}
+
+/// **Which equipped-item reason the cast refuses with** — TryCast rung 7's own selection
+/// (`0x6e40e0` @ `6e416e`–`6e4180`, decision 1925). It is keyed on `AttributesEx3` **alone**: not
+/// on `EquippedItemClass`, and not on which hand's search failed.
+///
+/// ```text
+/// 6e4171: test dh,0x4      ; bit 10 (0x400)  main-hand-only -> 0x1a
+/// 6e417a: shr edx,0x17     ; else bit 24 (0x1000000) off-hand-only -> 0x1b
+/// 6e4180: or  dl,0x19      ; else -> 0x19
+/// ```
+///
+/// All three render `ERR_SPELL_FAILED_EQUIPPED_ITEM_CLASS_S` — "Must have a %s equipped" — with
+/// the item **subclass** name. `0x18` ("Must have the proper item equipped") is **not** from this
+/// function: it belongs to the next rung, the ranged-slot check, and the disarm gate never touches
+/// slot 2. `0x2f` is this function's ammo tail, not an equipped-item reason at all.
+pub(crate) fn equipped_item_reason(d: &SpellDisplay) -> u8 {
+    if d.attributes_ex3 & ATTR_EX3_MAIN_HAND_ONLY != 0 {
+        0x1a
+    } else if d.attributes_ex3 & ATTR_EX3_OFF_HAND_ONLY != 0 {
+        0x1b
+    } else {
+        0x19
+    }
+}
+
 /// Leg 4's own test (`0x6e40e0`), shared with the spell tooltip's requirement line: does some
 /// WORN item match `EquippedItemClass` + `EquippedItemSubClassMask`? `true` when the spell asks
 /// for nothing (`class < 0`). An equipped item whose template hasn't streamed yet counts as a
@@ -77,19 +156,31 @@ pub(crate) fn equipped_item_fits(
     items: &mut Items,
     commands: &NetCommands,
 ) -> bool {
-    if d.equipped_item_class < 0 {
+    // The reference's four short-circuits, all answering "fits" without looking at a single slot
+    // (`0x6e40e0` @ `6e4103`–`6e4130`; decision 1925 correcting 1903, which shipped only the first
+    // of them):
+    //
+    // 1. the caster is not the active player — so a **pet** cast never takes this refusal;
+    // 2. `EquippedItemClass < 0` — the spell asks for nothing;
+    // 3. **`EquippedItemSubClassMask == 0`** — likewise, and this one is not the same as "every
+    //    subclass matches": the reference answers fits with **no item required at all**, where
+    //    treating it as a wildcard still demands something of the right class be worn. That was
+    //    1903's bug, and it made a mask-less requirement refusable on an empty slot;
+    // 4. `Targets & TARGET_FLAG_ITEM` — an item-targeting spell describes the CLICKED item with
+    //    these columns, not the caster's gear, and a different validator (`0x495d60`) enforces
+    //    them there.
+    //
+    // Leg 1 is ours by construction: this only ever runs for the local player.
+    if d.equipped_item_class < 0
+        || d.equipped_item_subclass_mask == 0
+        || d.targets & TARGET_FLAG_ITEM != 0
+    {
         return true;
     }
     let class = d.equipped_item_class as u32;
     // The **slot mask** first (decision 1903): `AttributesEx3` narrows the search to one hand for
     // an ability that names one, and to everything otherwise.
-    let mut mask: u32 = if d.attributes_ex3 & ATTR_EX3_MAIN_HAND_ONLY != 0 {
-        1 << crate::items::EQUIPMENT_SLOT_MAINHAND
-    } else if d.attributes_ex3 & ATTR_EX3_OFF_HAND_ONLY != 0 {
-        1 << crate::items::EQUIPMENT_SLOT_OFFHAND
-    } else {
-        u32::MAX
-    };
+    let mut mask = hand_mask(d);
     // …then the disarm ladder strips the hidden hand's bit out of it (decision 1863, its citation
     // corrected by 1903: the reference does this at `0x5f0c69`/`0x5f0c91` with `visFlag = 1`
     // probes and a mask edit, NOT by `GetWeapon` returning NULL — same ladder, same outcome, one
@@ -98,40 +189,70 @@ pub(crate) fn equipped_item_fits(
     if let Some(hidden) = crate::items::disarmed_equipment_slot(store, items, commands) {
         mask &= !(1u32 << hidden);
     }
+    equipped_slots_match(store, mask, class, d.equipped_item_subclass_mask, |guid| {
+        let (entry, durability, max_durability) = items.object(guid).and_then(|o| {
+            Some((
+                o.object_entry()?,
+                o.item_durability(),
+                o.item_max_durability(),
+            ))
+        })?;
+        let t = items.template(entry, guid, commands)?;
+        Some(WornItem {
+            class: t.class,
+            subclass: t.subclass,
+            flags: t.flags,
+            durability,
+            max_durability,
+        })
+    })
+}
+
+/// One worn item, as the equipped-item search reads it.
+pub(crate) struct WornItem {
+    pub(crate) class: u32,
+    pub(crate) subclass: u32,
+    /// The **template** flags — `ITEM_FLAG_DEPRECATED` is the reject.
+    pub(crate) flags: u32,
+    /// The **instance** durability pair (`[item+0x114]+0xa0`/`+0xa4`), not the template's.
+    pub(crate) durability: Option<u32>,
+    pub(crate) max_durability: Option<u32>,
+}
+
+/// The search body, over a per-slot resolver the caller supplies — because two callers need it
+/// with different borrows: the greying leg and the tooltip hold `&mut Items` and may ASK the
+/// server on a miss, while the cast ladder's rung 7 runs inside a `&Items` borrow and must not
+/// (decision 1925). `None` from the resolver is the shared benefit-of-the-doubt: an item whose
+/// template has not landed counts as a match, never a refusal on missing data.
+fn equipped_slots_match(
+    store: &ObjectStore,
+    mask: u32,
+    class: u32,
+    subclass_mask: u32,
+    mut worn: impl FnMut(u64) -> Option<WornItem>,
+) -> bool {
     (0..EQUIPMENT_SLOTS)
         .filter(|slot| mask & (1u32 << slot) != 0)
         .any(|slot| {
             let Some(guid) = store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
                 return false;
             };
-            // Entry and the durability pair come off the INSTANCE in one borrow — the reference
-            // reads both from the CGItem (`[item+0x114]+0xa0`/`+0xa4`), not from the template —
-            // because the template lookup below needs `items` mutably.
-            let Some((entry, durability, max_durability)) = items.object(guid).and_then(|o| {
-                Some((
-                    o.object_entry()?,
-                    o.item_durability(),
-                    o.item_max_durability(),
-                ))
-            }) else {
-                return false;
-            };
-            let Some(t) = items.template(entry, guid, commands) else {
+            let Some(it) = worn(guid) else {
                 return true; // unresolved template: benefit of the doubt
             };
             // The reference's two rejects, applied before the class match: a DEPRECATED item and
             // a genuinely BROKEN one (`MaxDurability > 0 && Durability == 0`) cannot satisfy a
             // requirement. Note this is the one place durability DOES gate something — it drives
             // no animation or model path anywhere (decision 1863).
-            if t.flags & ITEM_FLAG_DEPRECATED != 0 {
+            if it.flags & ITEM_FLAG_DEPRECATED != 0 {
                 return false;
             }
-            if max_durability.is_some_and(|m| m > 0) && durability == Some(0) {
+            if it.max_durability.is_some_and(|m| m > 0) && it.durability == Some(0) {
                 return false;
             }
-            t.class == class
-                && (d.equipped_item_subclass_mask == 0
-                    || d.equipped_item_subclass_mask & (1 << t.subclass) != 0)
+            // A zero subclass mask never reaches here — it short-circuits above, as the
+            // reference does.
+            it.class == class && subclass_mask & (1 << it.subclass) != 0
         })
 }
 
@@ -334,7 +455,9 @@ mod tests {
         // "Requires a melee weapon" — class 2, any subclass.
         let needs_a_weapon = SpellDisplay {
             equipped_item_class: 2,
-            equipped_item_subclass_mask: 0,
+            // Subclass 7 = Sword1H, the fixture's item. A **zero** mask would short-circuit the
+            // whole search to "fits" — the reference's third gate — so it cannot be the fixture.
+            equipped_item_subclass_mask: 1 << 7,
             ..Default::default()
         };
         let fits = |disarmed: bool, hands: &[(u16, u64)]| {
@@ -387,7 +510,7 @@ mod tests {
         // A spell requiring a class-2 weapon, with whatever `AttributesEx3` is passed.
         let spell = |ex3: u32| SpellDisplay {
             equipped_item_class: 2,
-            equipped_item_subclass_mask: 0,
+            equipped_item_subclass_mask: 1 << 7, // Sword1H — a zero mask short-circuits to "fits"
             attributes_ex3: ex3,
             ..Default::default()
         };
@@ -486,6 +609,7 @@ mod tests {
             equipped_item_fits(
                 &SpellDisplay {
                     equipped_item_class: 2,
+                    equipped_item_subclass_mask: 1 << 7, // Sword1H
                     attributes_ex3: ex3,
                     ..Default::default()
                 },

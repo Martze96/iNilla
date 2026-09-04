@@ -427,7 +427,7 @@ pub(crate) struct Model {
     pub(crate) target_nearest_friend_requests: Vec<bool>,
     /// `(name, exactMatch)` pairs `TargetByName` queued since the app's last
     /// [`UiScript::take_target_by_name_requests`] drain — the by-NAME twin of
-    /// [`Self::target_requests`], which takes unit tokens. The app runs the shared by-name
+    /// `Self::target_requests`, which takes unit tokens. The app runs the shared by-name
     /// resolver (`crate::target::by_name`, decision 0886) and commits the selection ([`unit`]).
     pub(crate) target_by_name_requests: Vec<(String, bool)>,
     /// Set when `ClearTarget()` fired with a live target — the ESC chain's LAST leg

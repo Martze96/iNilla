@@ -168,7 +168,7 @@ impl RelayChain {
 
     /// The scheduling lead this move got — `fire − arrival`, i.e. how long the dead-reckon has to
     /// cover before the pose lands. Negative means the move was already due and applies at arrival.
-    /// Trace/diagnostic only ([`super::remote::trace_schedule`]).
+    /// Trace/diagnostic only (`super::remote::trace_schedule`).
     pub(crate) fn lead_ms(&self, now_ms: f64) -> f64 {
         self.last_fire_ms - now_ms
     }

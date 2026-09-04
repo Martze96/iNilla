@@ -45,7 +45,7 @@ impl WorldWriter {
 
     /// Open an item by bag position (`CMSG_OPEN_ITEM`, layout in [`messages::open_item`]) — crack
     /// the clam, empty the picked lockbox, unwrap the gift. The right-click fork for an
-    /// [`crate::ItemInfo::openable`] item; the server answers with `SMSG_LOOT_RESPONSE` on the
+    /// `crate::ItemInfo::openable` item; the server answers with `SMSG_LOOT_RESPONSE` on the
     /// item's **own** guid (so the loot window opens over a thing in the bag), or an equip error
     /// on a refusal (still locked, dead, flying).
     pub fn open_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {

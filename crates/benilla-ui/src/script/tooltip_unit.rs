@@ -448,7 +448,7 @@ impl super::UiScript {
     /// one GOLD line (the reference's engine SetText gold; a cross-interior dot renders FAINT
     /// gold — the byte law's `|cffb0b0b0` wrap modulating the gold base, director-matched),
     /// seated centred ABOVE the cursor: the tooltip's BOTTOM at the given UI-space point. The
-    /// plate FOLLOWS the pointer — [`Self::minimap_tooltip_move`] re-seats it as the cursor
+    /// plate FOLLOWS the pointer — `Self::minimap_tooltip_move` re-seats it as the cursor
     /// drifts within one blip. Same world-owned fade lifecycle as the mouseover tooltip:
     /// hover loss arms [`Self::world_tooltip_fade`].
     pub fn minimap_tooltip(&mut self, text: &str, ui_x: f32, ui_y: f32, grey: bool) -> bool {

@@ -99,9 +99,11 @@ cosmic-text = "0.16"
 # `fontdb` in the graph.
 fontdb = "0.23"
 # kira renders the mix; the device it plays through is OURS (`sound::output`, decision 1857) —
-# kira's own cpal backend is not enabled, and cpal is out of the graph on our path with it: on
-# macOS it could neither report a lost default device nor rebuild on one, and it discarded the
-# IO-cycle timestamp the deadline meters need.
+# kira's own `cpal` backend is not enabled on any target. On macOS that took cpal out of the graph
+# entirely: it could neither report a lost default device nor rebuild on one, and it discarded the
+# IO-cycle timestamp the deadline meters need. Off macOS cpal is back (1920) but as OUR device
+# layer under the same backend, not as kira's — the ring, the render thread and the meters are the
+# same code on every platform.
 kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
 # The realtime-audio allocation tripwire (decision 1857): `assert_no_alloc(|| …)` around the output
 # IO callback and the render pass aborts a DEBUG build on any allocation inside them, so a
@@ -167,3 +169,15 @@ objc2-app-kit = { version = "0.2", features = [
     "NSEvent",
 ] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
+
+# Everywhere else: the same device layer over cpal (decision 1920, `sound::output::cpal`). 1857
+# owns the mix-ahead ring, the render thread and the meters on every platform; only the last
+# hop — find the default device, open a stream on it, hand back one buffer per cycle — is
+# platform code, and off macOS that hop is ALSA/PipeWire, WASAPI or the host's own API. cpal is
+# the layer that already speaks all of them; on macOS it is still not in the graph, because
+# there its defects (a no-op error callback on the default device, a pinned `DefaultOutput`
+# unit, the discarded IO-cycle timestamp) are exactly what 1857 went direct to escape. On an
+# unsupported target cpal compiles to its Null host, which reports no device — the same silent
+# posture the old `stub.rs` had, without a second file to rot.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cpal = "0.17"

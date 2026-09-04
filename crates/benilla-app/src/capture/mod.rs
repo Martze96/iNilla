@@ -553,9 +553,21 @@ fn resize_request() -> Option<(u32, u32)> {
 /// doesn't uncap" was the *power state* withholding the grant, not the mode — no present mode
 /// escapes that; `cpu_ms` on the probe line is the rail-proof metric. `WOW_PROBE_UNCAP=immediate`
 /// re-runs the losing arm when macOS/wgpu move.
+///
+/// `WOW_PROBE_UNCAP=vsync` does not uncap at all: the leg keeps the player's present mode and
+/// rails at the display's rate on purpose. It was built because the WindowServer's grant is not
+/// ours to schedule — one sitting on the M2 Air read 123.5, 60.0, 60.0 and 87.5 fps across four
+/// otherwise identical uncapped legs — and 1442's "railed-60.0 pairs only" rule discards every
+/// pair the grant split. **Measured the same day, it is not a neutral instrument:** two
+/// interleaved rounds at the Goldshire pin, no crowd, read `cpu_ms` 11.80 / 11.55 uncapped
+/// (both railed 60.0 by the WindowServer anyway) against 14.65 / 12.43 under this arm — the
+/// vsync wait costs the process CPU, and unevenly. So the default stays uncapped and a pair is
+/// still accepted only when both legs happened to rail; this arm is for a sitting whose legs
+/// refuse to rail at all, with the tax read against a same-arm baseline.
 pub(crate) fn probe_uncap_mode() -> bevy::window::PresentMode {
     match std::env::var("WOW_PROBE_UNCAP").as_deref() {
         Ok("immediate") => bevy::window::PresentMode::Immediate,
+        Ok("vsync") => bevy::window::PresentMode::AutoVsync,
         _ => bevy::window::PresentMode::AutoNoVsync,
     }
 }

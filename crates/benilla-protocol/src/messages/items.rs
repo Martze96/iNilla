@@ -573,7 +573,7 @@ const TARGET_FLAG_UNIT: u16 = 0x0002;
 /// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
 /// `TARGET_FLAG_ITEM` — a bound *item* target, the same bit and the same packed guid an
-/// item-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_on_item`]). One block
+/// item-targeted `CMSG_CAST_SPELL` writes (`super::spells::cast_spell_on_item`). One block
 /// builder, two opcodes (decision 0923).
 const TARGET_FLAG_ITEM: u16 = 0x0010;
 

@@ -50,7 +50,7 @@ impl super::UiScript {
     }
 
     /// The dressing-room pane's bake yaw in radians (the ref's `Model:SetRotation`), read by the
-    /// app onto the `"dressup"` booth slot each frame — the twin of [`Self::paperdoll_yaw`].
+    /// app onto the `"dressup"` booth slot each frame — the twin of `Self::paperdoll_yaw`.
     pub fn dressup_yaw(&self) -> f32 {
         self.model_ref().dressup_yaw
     }

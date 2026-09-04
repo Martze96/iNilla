@@ -206,7 +206,7 @@
                 local t = { "QuestDescription", "QuestObjectiveText", "QuestDetailRewardTitleText",
                             "QuestDetailItemChooseText", "QuestDetailItemReceiveText" }
                 for i = 1, MAX_NUM_ITEMS do table.insert(t, "QuestDetailItem" .. i) end
-                for i = 1, 3 do table.insert(t, "QuestDetailMoneyCoin" .. i) end
+                table.insert(t, "QuestDetailMoneyFrame")
                 return t
             end)(),
             ["QuestProgressScrollFrame"] = (function()
@@ -220,7 +220,7 @@
                 local t = { "QuestRewardText", "QuestRewardRewardTitleText",
                             "QuestRewardItemChooseText", "QuestRewardItemReceiveText" }
                 for i = 1, MAX_NUM_ITEMS do table.insert(t, "QuestRewardItem" .. i) end
-                for i = 1, 3 do table.insert(t, "QuestRewardMoneyCoin" .. i) end
+                table.insert(t, "QuestRewardMoneyFrame")
                 return t
             end)(),
         }
@@ -358,6 +358,16 @@
             HideUIPanel(getglobal("QuestFrame"))
         end
 
+        -- The reference's own `QuestMoneyFrame_OnLoad` (QuestFrame.lua:306-309), which lives in
+        -- THIS file in the reference too — so it is home, not a squatter. Its whole body is these
+        -- two calls. Needed because 1928 put the two reward panels on `MoneyFrameTemplate`, whose
+        -- instances call it from their OnLoad exactly as the reference's do. Both callees are our
+        -- `MoneyFrame.xml`'s, which the manifest loads at entry 141 — far above this file.
+        function QuestMoneyFrame_OnLoad()
+            MoneyFrame_OnLoad()
+            MoneyFrame_SetType("STATIC")
+        end
+
         -- ── The shared reward grid — `QuestFrameItems_Update(questState)`, the REFERENCE'S OWN
         -- NAME and the reference's own algorithm (QuestFrame.lua:311-522), ported line-for-line.
         --
@@ -454,10 +464,17 @@
                 end
             end
 
+            -- The reference's own tail (QuestFrame.lua:350-356), on the reference's own widget.
+            -- `QuestFrame_SetAsLastShown` is deliberately NOT called: it anchors a SPACER FRAME
+            -- that this client does not have — our panels size their scroll child from
+            -- `BENILLA_QUEST_PANEL_WIDGETS` instead (see 1928). The money half converges here; the
+            -- sizing model stays ours until this window migrates.
+            local moneyFrame = getglobal(questState .. "MoneyFrame")
             if money and money > 0 then
-                BenillaMoney_Set(questState .. "Money", money, true)
+                moneyFrame:Show()
+                MoneyFrame_Update(questState .. "MoneyFrame", money)
             else
-                BenillaMoney_Clear(questState .. "Money")
+                moneyFrame:Hide()
             end
         end
 
@@ -1154,9 +1171,7 @@
                                     <Button name="QuestDetailItem9" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
                                     <Button name="QuestDetailItem10" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
 
-                                    <Frame name="QuestDetailMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestDetailMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestDetailMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestDetailMoneyFrame" inherits="MoneyFrameTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors><Scripts><OnLoad>QuestMoneyFrame_OnLoad()</OnLoad></Scripts></Frame>
                                         </Frames>
                                     </Frame>
                                 </Frames>
@@ -1292,9 +1307,7 @@
                                     <Button name="QuestRewardItem9" inherits="QuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
                                     <Button name="QuestRewardItem10" inherits="QuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
 
-                                    <Frame name="QuestRewardMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestRewardMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="QuestRewardMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestRewardMoneyFrame" inherits="MoneyFrameTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors><Scripts><OnLoad>QuestMoneyFrame_OnLoad()</OnLoad></Scripts></Frame>
 
                                     <!-- The choice-selection glow (moved onto the clicked choice
                                          row; ref QuestRewardItemHighlight, QuestFrame.xml:254-278

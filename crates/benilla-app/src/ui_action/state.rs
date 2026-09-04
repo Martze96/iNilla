@@ -61,7 +61,7 @@ pub(super) struct StateMemory {
 }
 
 /// The client's cast-fail reasons for the two range refusals ("Out of range." / "Target too
-/// close" in [`super::cast_error_text`]'s table) — what `CanTargetUnit 0x6e4440` emits when
+/// close" in `super::cast_error_text`'s table) — what `CanTargetUnit 0x6e4440` emits when
 /// `IsTargetInRange 0x6e47b0` fails on its max² / min² compare.
 pub(super) const ERR_OUT_OF_RANGE: u8 = 0x59;
 pub(super) const ERR_TOO_CLOSE: u8 = 0x76;
@@ -97,36 +97,76 @@ const PREVENTION_SILENCE: u32 = 1;
 const PREVENTION_PACIFY: u32 = 2;
 
 /// The **crowd-control leg** of the same requirement validator `0x6094f0`, sitting **above** its
-/// mounted block (`0x609c6c`) — so a stunned mounted caster is told about the stun (decision 1903;
-/// wow-re `disarm-followups-law.md` §3, byte-verified). It refuses before any packet, which is why
-/// it must be local: reason codes `0x64` STUNNED, `0x60` SILENCED, `0x5a` PACIFIED.
+/// mounted block (`0x609c6c`) — so a stunned mounted caster is told about the stun (decision 1904;
+/// wow-re `equipped-item-and-cc-cast-gates.md` §2.1, byte-verified). It refuses before any packet,
+/// which is why it must be local.
 ///
-/// **The three arms are not symmetric, and that is the whole finding.** STUNNED (`0x6099bc`)
-/// carries no per-spell gate and refuses *everything*. SILENCED (`0x609a29`) and PACIFIED run only
-/// where the spell's `PreventionType` declares them — so a silence stops casts and leaves melee
-/// abilities alone, and a pacify does the reverse. Reading `UNIT_FLAG_SILENCED` as "no casting"
-/// is the mistake this replaces.
+/// **Six arms, in the reference's order, first match wins** — 1863's fold-back recorded four:
 ///
-/// Its byte-shape was nearly missed by a census twice: the read is `f6 c4 20 test ah,0x20`, a
-/// sub-register byte-lane form with no dword immediate, invisible to an immediate scan.
+/// | # | arm | gate | reason |
+/// |---|---|---|---|
+/// | 1 | CHARMED | `UNIT_FIELD_CHARMEDBY != 0` and the charmer is not us | `0x14` |
+/// | 2 | STUNNED | bit 18 — **no per-spell gate, every spell** | `0x64` |
+/// | 3 | SILENCED | bit 13 **and** `PreventionType == 1` | `0x60` |
+/// | 4 | PACIFIED | bit 17 **and** `PreventionType == 2` | `0x5a` |
+/// | 5 | FLEEING | bit 23 | `0x1e` |
+/// | 6 | CONFUSED | bit 22 | `0x16` |
 ///
-/// **Unmodelled:** the aura exemption (`0x6e9e60`) that waives an arm and answers `0x8d` with a
-/// mechanic value instead — it needs an aura-mechanic join we do not have.
-pub(crate) fn cast_cc_refusal(unit_flags: u32, spell: Option<&SpellDisplay>) -> Option<u8> {
+/// The asymmetry is the finding: STUNNED, FLEEING, CHARMED and CONFUSED carry no per-spell gate at
+/// all, while SILENCED and PACIFIED run only where the spell's own `PreventionType` names them —
+/// so a silence stops casts and leaves melee abilities alone, and a pacify does the reverse.
+/// Reading `UNIT_FLAG_SILENCED` as "no casting" is the mistake this replaces.
+///
+/// **A dead caster skips all six** (`0x60980d`, a `jle` on `UNIT_FIELD_HEALTH`).
+///
+/// This ladder is **TryCast-only** — one caller, no address-takes — so a button does **not** grey
+/// while stunned, silenced or pacified: it refuses on the press. (Fear, confuse and charm *are*
+/// greyed, by a second copy of the same helpers inside `0x6e3d60`; that copy is not built here.)
+///
+/// Its byte-shape was nearly missed by a census twice: SILENCED's read is `f6 c4 20 test ah,0x20`,
+/// a sub-register byte-lane form with no dword immediate, invisible to an immediate scan.
+///
+/// **Unmodelled, and now known to be buildable rather than out of reach:** each arm first asks an
+/// exemption helper whether any of the caster's own auras grants immunity — a scan of
+/// `UNIT_FIELD_AURA[0..47]`'s spell ids against `EffectApplyAuraName` (Spell.dbc columns 91–93).
+/// A hit **lifts** the refusal; it never creates one, and a set flag with no matching aura still
+/// refuses with the generic reason above. So omitting it can only refuse where the reference would
+/// have allowed — never the reverse.
+pub(crate) fn cast_cc_refusal(
+    unit_flags: u32,
+    health: Option<u32>,
+    charmed_by_other: bool,
+    spell: Option<&SpellDisplay>,
+) -> Option<u8> {
     use crate::player::UNIT_FLAG_STUNNED;
-    /// `UNIT_FLAG_SILENCED` / `UNIT_FLAG_PACIFIED` (vmangos `UnitDefines.h`).
+    /// `UNIT_FIELD_FLAGS` bits 13/17/22/23 (vmangos `UnitDefines.h`).
     const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;
     const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
+    const UNIT_FLAG_CONFUSED: u32 = 0x0040_0000;
+    const UNIT_FLAG_FLEEING: u32 = 0x0080_0000;
 
+    // The dead caster's skip (`0x60980d`): a corpse is refused by an earlier rung, not this one.
+    if health == Some(0) {
+        return None;
+    }
+    let prevention = spell.map_or(0, |d| d.prevention_type);
+    if charmed_by_other {
+        return Some(0x14);
+    }
     if unit_flags & UNIT_FLAG_STUNNED != 0 {
         return Some(0x64);
     }
-    let prevention = spell.map_or(0, |d| d.prevention_type);
     if unit_flags & UNIT_FLAG_SILENCED != 0 && prevention == PREVENTION_SILENCE {
         return Some(0x60);
     }
     if unit_flags & UNIT_FLAG_PACIFIED != 0 && prevention == PREVENTION_PACIFY {
         return Some(0x5a);
+    }
+    if unit_flags & UNIT_FLAG_FLEEING != 0 {
+        return Some(0x1e);
+    }
+    if unit_flags & UNIT_FLAG_CONFUSED != 0 {
+        return Some(0x16);
     }
     None
 }
@@ -1112,6 +1152,12 @@ mod tests {
 mod cc_refusal_tests {
     use super::*;
 
+    const STUNNED: u32 = 0x0004_0000;
+    const SILENCED: u32 = 0x0000_2000;
+    const PACIFIED: u32 = 0x0002_0000;
+    const CONFUSED: u32 = 0x0040_0000;
+    const FLEEING: u32 = 0x0080_0000;
+
     fn spell(prevention_type: u32) -> SpellDisplay {
         SpellDisplay {
             prevention_type,
@@ -1119,47 +1165,92 @@ mod cc_refusal_tests {
         }
     }
 
-    /// **The three arms are not symmetric** (decision 1903): a stun refuses everything, a silence
-    /// only `PreventionType 1`, a pacify only `2`. Reading `UNIT_FLAG_SILENCED` as "no casting at
-    /// all" — which is what our own preflight banner used to say — is the mistake this pins.
-    #[test]
-    fn crowd_control_refuses_by_prevention_type_except_the_stun() {
-        const STUNNED: u32 = 0x0004_0000;
-        const SILENCED: u32 = 0x0000_2000;
-        const PACIFIED: u32 = 0x0002_0000;
+    /// A live caster, nobody else at the reins.
+    fn cc(flags: u32, d: &SpellDisplay) -> Option<u8> {
+        cast_cc_refusal(flags, Some(100), false, Some(d))
+    }
 
-        // Fireball-shaped (silence-preventable) and Heroic-Strike-shaped (pacify-preventable),
-        // and the auto-attack's neither — the three real values, pinned in `spell_catalog`.
+    /// **The arms are not symmetric** (decision 1904, widened by 1925): stun, fear, charm and
+    /// confuse refuse EVERY spell; silence and pacify only the rows whose `PreventionType` names
+    /// them. Reading `UNIT_FLAG_SILENCED` as "no casting at all" — which our own preflight banner
+    /// used to say — is the mistake this pins.
+    #[test]
+    fn crowd_control_refuses_by_prevention_type_except_the_unconditional_arms() {
+        // Fireball-shaped (silence-preventable), Heroic-Strike-shaped (pacify-preventable), and
+        // the auto-attack's neither — the three real values, pinned in `spell_catalog`.
         let cast = spell(1);
         let melee = spell(2);
         let neither = spell(0);
 
-        // STUNNED carries no per-spell gate: every row refuses, `PreventionType` or not.
-        for d in [&cast, &melee, &neither] {
-            assert_eq!(cast_cc_refusal(STUNNED, Some(d)), Some(0x64));
+        // The four arms with NO per-spell gate: every row refuses.
+        for (flags, reason) in [(STUNNED, 0x64), (FLEEING, 0x1e), (CONFUSED, 0x16)] {
+            for d in [&cast, &melee, &neither] {
+                assert_eq!(cc(flags, d), Some(reason), "flags {flags:#x}");
+            }
         }
+        // …and charm, which is not a flag at all but "somebody else holds the reins".
+        assert_eq!(
+            cast_cc_refusal(0, Some(100), true, Some(&neither)),
+            Some(0x14)
+        );
 
         // SILENCED takes the casts and leaves the rest alone.
-        assert_eq!(cast_cc_refusal(SILENCED, Some(&cast)), Some(0x60));
-        assert_eq!(cast_cc_refusal(SILENCED, Some(&melee)), None);
-        assert_eq!(cast_cc_refusal(SILENCED, Some(&neither)), None);
+        assert_eq!(cc(SILENCED, &cast), Some(0x60));
+        assert_eq!(cc(SILENCED, &melee), None);
+        assert_eq!(cc(SILENCED, &neither), None);
 
         // PACIFIED is the mirror.
-        assert_eq!(cast_cc_refusal(PACIFIED, Some(&melee)), Some(0x5a));
-        assert_eq!(cast_cc_refusal(PACIFIED, Some(&cast)), None);
+        assert_eq!(cc(PACIFIED, &melee), Some(0x5a));
+        assert_eq!(cc(PACIFIED, &cast), None);
 
-        // The stun wins when several hold at once — it is the first arm.
-        assert_eq!(
-            cast_cc_refusal(STUNNED | SILENCED | PACIFIED, Some(&cast)),
-            Some(0x64)
-        );
         // Nothing up, nothing refused; and no record claims no prevention.
-        assert_eq!(cast_cc_refusal(0, Some(&cast)), None);
-        assert_eq!(cast_cc_refusal(SILENCED, None), None);
+        assert_eq!(cc(0, &cast), None);
+        assert_eq!(cast_cc_refusal(SILENCED, Some(100), false, None), None);
         assert_eq!(
-            cast_cc_refusal(STUNNED, None),
+            cast_cc_refusal(STUNNED, Some(100), false, None),
             Some(0x64),
             "the stun needs no record"
+        );
+    }
+
+    /// **The order is the reference's, first match wins** — charm outranks the stun, the stun
+    /// outranks everything below it. When several hold at once the player sees exactly one line,
+    /// and which one is not arbitrary.
+    #[test]
+    fn the_arms_are_tried_in_the_references_order() {
+        let cast = spell(1);
+        // Charm is arm 1: it beats a simultaneous stun.
+        assert_eq!(
+            cast_cc_refusal(STUNNED | SILENCED, Some(100), true, Some(&cast)),
+            Some(0x14)
+        );
+        // Stun is arm 2: it beats silence, pacify, fear and confuse.
+        assert_eq!(
+            cc(STUNNED | SILENCED | PACIFIED | FLEEING | CONFUSED, &cast),
+            Some(0x64)
+        );
+        // Silence (3) beats fear (5) and confuse (6).
+        assert_eq!(cc(SILENCED | FLEEING | CONFUSED, &cast), Some(0x60));
+        // With the spell out of silence's reach, fear takes it before confuse.
+        assert_eq!(cc(SILENCED | FLEEING | CONFUSED, &spell(0)), Some(0x1e));
+    }
+
+    /// **A dead caster skips all six** (`0x60980d`'s `jle` on `UNIT_FIELD_HEALTH`) — a corpse is
+    /// refused by an earlier rung, and reporting a stun over it would be the wrong line.
+    #[test]
+    fn a_dead_caster_takes_no_crowd_control_refusal() {
+        let cast = spell(1);
+        assert_eq!(cast_cc_refusal(STUNNED, Some(0), false, Some(&cast)), None);
+        assert_eq!(cast_cc_refusal(0, Some(0), true, Some(&cast)), None);
+        // Alive again, and the arm is back.
+        assert_eq!(
+            cast_cc_refusal(STUNNED, Some(1), false, Some(&cast)),
+            Some(0x64)
+        );
+        // No health field at all is not death — the descriptor simply has not landed.
+        assert_eq!(
+            cast_cc_refusal(STUNNED, None, false, Some(&cast)),
+            Some(0x64)
         );
     }
 }

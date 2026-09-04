@@ -249,7 +249,7 @@ pub(super) type MatQuint = (
 /// The full character material set [`build_char_skin_materials`] returns: `(body, hair, object,
 /// skin_extra)`, the body + skin-extra each a (single-sided, two-sided) pair. Each per-slot
 /// [`MatQuint`] is `None` for an absent row (a bald style, a non-fur race) or missing tables. Named
-/// so the create-preview builder ([`super::create_preview`]) can select the steady variant per part.
+/// so the create-preview builder (`super::create_preview`) can select the steady variant per part.
 pub(super) type CharSkinMaterials = (
     Option<(MatQuint, MatQuint)>,
     Option<MatQuint>,

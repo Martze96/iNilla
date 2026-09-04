@@ -444,14 +444,52 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetSpellTabInfo(i) -> name, texture, offset, numSpells (the Era flat tuple); 1-based `i`,
-    // out of range -> a single nil (GetMerchantItemInfo's own out-of-range shape).
+    // GetSpellTabInfo(i) -> name, texture, offset, numSpells. **FOUR values on every path that
+    // returns** — `0x4b3ce0` has two live `ret`s and both `mov eax,4`; the `eax=0` one at `0x4b3d0d`
+    // is dead code after `luaL_error` longjmps. Byte-carved by a wow-re cross-check (decision 1931,
+    // `system/ui/scratch/spelltabinfo-return-contract.md`).
+    //
+    // **OUT OF RANGE IS `nil, nil, 0, 0` — LITERAL zeros, not a single nil.** This comment used to say
+    // "out of range -> a single nil (GetMerchantItemInfo's own out-of-range shape)", i.e. one
+    // binding's shape copied onto another on the assumption that they generalise. They do not
+    // (1919 proved it for GetSkillLineInfo; this is the same bug one verb over). Leg `0x4b3e12`
+    // pushes nil, nil, then `push 0; push 0; lua_pushnumber` twice — `0x6f3810` copies its two
+    // stack dwords VERBATIM, so that is exactly +0.0, not a stale offset and nothing off the array
+    // base. Index 0, a negative, past-the-count and the empty/no-player registry all reach it via
+    // ONE unsigned branch (`0x4b3d26 dec ebx / cmp ebx,eax / jae`).
+    //
+    // Why the zeros are load-bearing rather than cosmetic: `SpellBookFrame_OnLoad` runs
+    // `SpellBookSkillLineTab_OnClick(1)` -> `GetSpellTabInfo(1)` UNCONDITIONALLY at load, and
+    // `SpellBookFrame_Update` can pass `SpellBookFrame:GetID()`, which is 0. The stock file then
+    // does `id > (offset + numSpells)` unguarded (l.295) — a nil there raises, and `(0+0)` makes it
+    // true, so the reference HIDES EVERY BUTTON ON THE PAGE. That is the behaviour to match.
+    //
+    // **The argument RAISES when absent or not number-coercible** — `luaL_error(L, "Usage:
+    // GetSpellTabInfo(index)")`, a numeric string accepted. [`number_arg`] is that exact shape
+    // (coerce, truncate toward zero, raise the usage string), and the decrement happens AFTER it.
+    // Do NOT share `GetSpellName`'s marshaller: `0x4b3ec0` does `fsub 1.0` BEFORE truncating, and
+    // the two disagree below 1 (`0.5` is out-of-range here and index 0 there).
+    //
+    // Slot 1 is also nil on an IN-RANGE tab whose skillLineId has no DBC row (`0x4b3dbd`), and
+    // `(string?, nil, num, num)` is live in shipped data (SkillLine.dbc 733/753/754 have
+    // spellIconID 0) — both already the shape the in-range arm below produces.
     g.set(
         "GetSpellTabInfo",
-        lua.create_function(|lua, i: usize| {
+        lua.create_function(|lua, i: Value| {
+            let i = super::binding_abi::number_arg(lua, i, "Usage: GetSpellTabInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(tab) = i.checked_sub(1).and_then(|n| model.spellbook.tabs.get(n)) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+            // Truncate (done), THEN decrement, then the unsigned compare: a negative or zero
+            // index lands below 0 and `usize::try_from` refuses it — the `jae` leg.
+            let tab = usize::try_from(i64::from(i) - 1)
+                .ok()
+                .and_then(|n| model.spellbook.tabs.get(n));
+            let Some(tab) = tab else {
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
+                ]));
             };
             let texture = match &tab.texture {
                 Some(t) => Value::String(lua.create_string(t)?),
@@ -929,7 +967,11 @@ mod tests {
     fn tab_info_shapes_and_book_id_offsets() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(s.eval::<i64>("return GetNumSpellTabs()").unwrap(), 0);
-        assert!(s.eval::<bool>("return GetSpellTabInfo(1) == nil").unwrap());
+        // `== nil` reads true either way — Lua compares only the first value. The ARITY is the
+        // load-bearing half and lives in `out_of_range_answers_four_values` below (1931).
+        assert!(s
+            .eval::<bool>("return (GetSpellTabInfo(1)) == nil")
+            .unwrap());
 
         s.set_spellbook(book());
         assert_eq!(s.eval::<i64>("return GetNumSpellTabs()").unwrap(), 2);
@@ -1483,6 +1525,61 @@ mod tests {
             s.eval::<i64>("return select('#', PlayerHasSpells())")
                 .unwrap(),
             1
+        );
+    }
+
+    /// **Out of range answers `nil, nil, 0, 0` — four values, the last two NUMBERS** (1931). The
+    /// count is the assertion: `GetSpellTabInfo(0) == nil` is true either way, which is exactly how
+    /// the old one-nil shape passed. Stock `SpellBookFrame.lua:295` does `id > (offset + numSpells)`
+    /// unguarded straight off `SpellBookFrame_OnLoad`, so slots 3+4 nil is a raise on load, and
+    /// `(0+0)` is what makes the reference hide every button — the behaviour this pins.
+    #[test]
+    fn out_of_range_answers_four_values() {
+        let s = UiScript::new().unwrap();
+        for idx in ["0", "1", "99", "-1", "0.5"] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return select('#', GetSpellTabInfo({idx}))"))
+                    .unwrap(),
+                4,
+                "GetSpellTabInfo({idx}) must answer four values"
+            );
+            assert_eq!(
+                s.eval::<i64>(&format!(
+                    "local _,_,o,n = GetSpellTabInfo({idx}) return o + n"
+                ))
+                .unwrap(),
+                0,
+                "GetSpellTabInfo({idx}) slots 3+4 must be NUMBERS summing to 0"
+            );
+            assert!(s
+                .eval::<bool>(&format!("return (GetSpellTabInfo({idx})) == nil"))
+                .unwrap());
+        }
+    }
+
+    /// The argument is shape A (1931): absent or non-numeric RAISES the reference's own usage
+    /// string; a numeric STRING is coerced; a negative is truncated and falls to the fallback
+    /// rather than raising. `-1` and `0.5` are covered by the test above.
+    #[test]
+    fn tab_index_raises_when_absent_and_coerces_a_numeric_string() {
+        let mut s = UiScript::new().unwrap();
+        for bad in [
+            "GetSpellTabInfo()",
+            "GetSpellTabInfo(nil)",
+            "GetSpellTabInfo({})",
+            "GetSpellTabInfo('abc')",
+        ] {
+            let err = s.run(bad).expect_err(bad);
+            assert!(
+                format!("{err}").contains("Usage: GetSpellTabInfo(index)"),
+                "{bad}: got {err}"
+            );
+        }
+        s.set_spellbook(book());
+        // "1" coerces exactly as 1 does — same name comes back.
+        assert_eq!(
+            s.eval::<String>("return (GetSpellTabInfo('1'))").unwrap(),
+            s.eval::<String>("return (GetSpellTabInfo(1))").unwrap()
         );
     }
 }

@@ -189,7 +189,7 @@ pub(super) fn drain_bag_autostores(
 /// Drain the inventory-slot ids `UseInventoryItem` queued (decision 0208 phase 1b: the doll
 /// slot's right-click) and route the equipped position (bag 255 plus the 0-based wire slot —
 /// `HandleUseItemOpcode` takes equipped positions the same as bag ones, vmangos `ItemHandler.cpp`)
-/// through the shared use fork ([`super::item_use_command`]): the reference's doll click lands in
+/// through the shared use fork (`super::item_use_command`): the reference's doll click lands in
 /// the same `CGItem::Use` a bag click does (`0x4c7af0`), quest fork included — one of the five
 /// equippable quest-starters, worn and right-clicked, offers its quest instead of casting nothing.
 /// Ids outside 1..=19 (ammo, the bag icons) are a no-op — the engine's own queue never receives

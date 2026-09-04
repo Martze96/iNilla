@@ -185,6 +185,12 @@ pub(super) struct ChatOut<'w> {
     /// same `seat` the wire arm calls, so the remote leg — the `partyN` token, the marker, the
     /// pin holding while you walk — is exercisable solo.
     ping: ResMut<'w, crate::minimap::MinimapPing>,
+    /// The red UIErrorsFrame line by GlobalStrings key — the emote-while-moving refusal is its one
+    /// tenant here (decision 1904). It rides this bundle rather than the system's own parameter
+    /// list because that list is at Bevy's arity limit; checked first against every other param,
+    /// since a resource reachable twice from one system is a `B0002` panic on the first live frame
+    /// (1903). Nothing else in this system touches `UiErrorKeys`.
+    ui_errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -796,13 +802,33 @@ pub(super) fn drain_chat_input(
                 // A chat-only text emote (no Emotes.dbc row) has no EmoteFlags to test and no
                 // posture to set — it always sends.
                 let posture = emote_id.and_then(|id| emotes.as_deref()?.posture_state(id));
-                // GATE A (`CheckEmoteEligible` `0x47db40`): suppresses the anim AND the packet.
-                let eligible = match emotes.as_deref() {
+                // GATE A (`CheckEmoteEligible` `0x47db40`): suppresses the anim AND the packet —
+                // except its `0x4000` arm, which refuses out loud instead (decision 1904).
+                let gate = match emotes.as_deref() {
                     Some(e) => emote_id
                         .and_then(|id| e.emote_flags(id))
-                        .is_none_or(|f| emote_send_eligible(f, stand_state, swimming)),
-                    None => true,
+                        .map_or(EmoteGate::Send, |f| {
+                            emote_send_eligible(f, stand_state, swimming, flags)
+                        }),
+                    None => EmoteGate::Send,
                 };
+                // The `0x4000` arm's own half of the law, which lives in `DoEmote` (`0x5ef5d0`)
+                // and not in the eligibility check: the red line fires only while the caster is
+                // acting under its OWN control, so a feared or confused player emotes normally.
+                if gate == EmoteGate::Moving {
+                    let controlled = self_store
+                        .single()
+                        .is_ok_and(|s| crate::player::self_controlled(s.0.unit_flags()));
+                    if controlled {
+                        debug!("chat: emote {text_id} refused — moving (ERR_NOEMOTEWHILERUNNING)");
+                        chat_out
+                            .ui_errors
+                            .0
+                            .push(crate::ui_action::UiError::key("ERR_NOEMOTEWHILERUNNING"));
+                        continue;
+                    }
+                }
+                let eligible = gate != EmoteGate::Suppressed;
                 // GATE B (`0x5ef5f3`): asleep, only a POSTURE emote gets through — which is how
                 // `/stand` (and `/sit`) is the way out of `/sleep`, while a `/wave` in bed does
                 // nothing at all.
@@ -1355,6 +1381,22 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
 ///
 /// # The fifth flag, `0x4000` — NOT built, and the reason recorded here was WRONG
 ///
+/// What `CheckEmoteEligible 0x47db40` decides about one emote — three outcomes, not two, which is
+/// why this replaced a `bool` (decision 1904).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum EmoteGate {
+    /// Send it: packet, posture, animation.
+    Send,
+    /// **Silently** dropped — no packet, no animation, and no line. A seated `/bow` is this.
+    Suppressed,
+    /// The `0x4000` "requires standing still" arm tripped. The reference does NOT suppress here:
+    /// `CheckEmoteEligible` writes an out-param and `DoEmote` reads it at `0x5ef5d0`, raising
+    /// `ERR_NOEMOTEWHILERUNNING` and aborting **only when `IsSelfControlled 0x5fa550` is
+    /// non-zero** — so the toast fires for an ordinary moving player and a **feared** one emotes
+    /// away happily. That caster-state test is the caller's, exactly as it is the reference's.
+    Moving,
+}
+
 /// This doc used to say `0x4000` ("requires standing still") *"only sets an out param the client
 /// acts on while fear/confuse-controlled, which benilla doesn't model"*. A §5 trio carve of the
 /// neighbouring stand-state gate re-read the leg and **inverted that polarity**
@@ -1378,25 +1420,40 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
 /// to do with B155 and could never have covered it (`super::super::tests::
 /// the_posture_emotes_carry_no_swim_suppression_flag` is the data half of that same negative). The
 /// posture path's water refusal lives in [`crate::player::state`]'s `stand_state_refused`.
-pub(super) fn emote_send_eligible(emote_flags: u32, stand_state: u8, swimming: bool) -> bool {
+pub(super) fn emote_send_eligible(
+    emote_flags: u32,
+    stand_state: u8,
+    swimming: bool,
+    move_flags: u32,
+) -> EmoteGate {
     // `0x0400`: unconditional suppress (client `0x47db58`).
     if emote_flags & 0x0400 != 0 {
-        return false;
+        return EmoteGate::Suppressed;
     }
     // `0x0001` + non-zero stand-state: "requires STAND" (client `0x47db65`..`0x47db74`).
     if emote_flags & 0x0001 != 0 && stand_state != 0 {
-        return false;
+        return EmoteGate::Suppressed;
     }
     // `0x0080` while swimming (client `0x47db76`..`0x47db7d`).
     if emote_flags & 0x0080 != 0 && swimming {
-        return false;
+        return EmoteGate::Suppressed;
     }
     // `0x0200` ABSENT at SLEEP(3)/DEAD(7): the bit means "allowed while asleep/dead" (client
     // `0x47db8e`..`0x47db9f`).
     if emote_flags & 0x0200 == 0 && matches!(stand_state, 3 | 7) {
-        return false;
+        return EmoteGate::Suppressed;
     }
-    true
+    // `0x4000` "requires standing still" (client `0x47dbab`), tested against the live CMovement
+    // word at `0x47dbb3` — the reference's own `0x20ff`, which is exactly
+    // [`crate::creature_anim::move_flags::INTEGRATED`]: the four direction bits, the two turn
+    // bits, the two pitch bits and FALLING. Pointedly **not** SWIMMING.
+    //
+    // This arm does not suppress: it writes `*out = 1`, and DoEmote turns that into a red line
+    // (or not) on a caster-state test the caller owns — see [`EmoteGate::Moving`].
+    if emote_flags & 0x4000 != 0 && move_flags & crate::creature_anim::move_flags::INTEGRATED != 0 {
+        return EmoteGate::Moving;
+    }
+    EmoteGate::Send
 }
 
 /// Turn an addon's `SendChatMessage` calls into sends (decision 1199).

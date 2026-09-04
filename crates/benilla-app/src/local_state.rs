@@ -310,6 +310,8 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 /// this instrument was built for — the director's, and the long probe rounds — keep it. The
 /// alternative, an ungated second accessor, would put "which paths are exempt from hermetic?" back
 /// into someone's head, which is what the single rule exists to prevent.
+// Same one reader as `sound::output::device_open`: the macOS-only stall watchdog.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Diagnostics"))
 }

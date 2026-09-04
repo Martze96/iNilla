@@ -2,7 +2,7 @@ use crate::net::ChatKind;
 
 use super::event::{default_color, ChatEvent, ChatEventKind as K};
 use super::frames::compose;
-use super::input::{emote_send_eligible, emote_target, ParsedChat};
+use super::input::{emote_send_eligible, emote_target, EmoteGate, ParsedChat};
 
 /// A player-line event (the wire bridge's output shape) — sender resolved, optional flag.
 fn ev(kind: K, text: &str, sender: &str) -> ChatEvent {
@@ -1474,6 +1474,80 @@ fn real_alias_table_resolves_the_shipped_commands() {
     );
 }
 
+/// **The `0x4000` "requires standing still" arm** (decision 1904) — the one gate arm that does not
+/// suppress silently. It reports [`EmoteGate::Moving`] and the CALLER turns that into a red
+/// `ERR_NOEMOTEWHILERUNNING`, but only while the caster is self-controlled.
+///
+/// The mask is the reference's own `0x20ff` — [`move_flags::INTEGRATED`] — and what it leaves out
+/// matters as much as what it holds: **SWIMMING is not in it**, so a swimmer standing still in the
+/// water emotes fine. That negative is why this arm has nothing to do with the swim suppression
+/// tested above.
+#[test]
+fn the_standing_still_arm_reports_moving_and_ignores_swimming() {
+    use super::input::EmoteGate;
+    use crate::creature_anim::move_flags;
+
+    const STILL: u32 = 0x4000;
+
+    // Not moving: it sends.
+    assert_eq!(emote_send_eligible(STILL, 0, false, 0), EmoteGate::Send);
+    // Any INTEGRATED bit trips it — a direction, a keyboard turn, or a fall.
+    for f in [
+        move_flags::FORWARD,
+        move_flags::BACKWARD,
+        move_flags::STRAFE_LEFT,
+        move_flags::TURN_RIGHT,
+        move_flags::FALLING,
+    ] {
+        assert_eq!(
+            emote_send_eligible(STILL, 0, false, f),
+            EmoteGate::Moving,
+            "move flag {f:#x}"
+        );
+    }
+    // SWIMMING is NOT in `0x20ff`: a still swimmer is still.
+    assert_eq!(
+        emote_send_eligible(STILL, 0, false, move_flags::SWIMMING),
+        EmoteGate::Send,
+        "the mover-integration mask carries no SWIMMING"
+    );
+    // WALK_MODE and LEVITATING are mode bits, not motion.
+    assert_eq!(
+        emote_send_eligible(STILL, 0, false, move_flags::WALK_MODE),
+        EmoteGate::Send
+    );
+    // Without the flag, movement is irrelevant.
+    assert_eq!(
+        emote_send_eligible(0, 0, false, move_flags::FORWARD),
+        EmoteGate::Send
+    );
+    // An unconditionally-suppressed emote never reaches this arm — it stays SILENT, which is why
+    // only 20 of the 33 rows carrying `0x4000` can actually raise the line.
+    assert_eq!(
+        emote_send_eligible(0x4400, 0, false, move_flags::FORWARD),
+        EmoteGate::Suppressed
+    );
+}
+
+/// **`IsSelfControlled`'s polarity** (`0x5fa550`, decision 1904) — the half that decides whether
+/// the moving refusal is heard. It is `true` for an ordinary player and `false` while confused,
+/// fleeing or move-disabled, so the red line fires in the NORMAL case and a feared player emotes
+/// away. STUNNED is deliberately absent from the mask.
+#[test]
+fn self_controlled_is_true_for_an_ordinary_player() {
+    use crate::player::self_controlled;
+
+    assert!(self_controlled(0));
+    assert!(self_controlled(1 << 3), "an ordinary PvP-attackable player");
+    assert!(!self_controlled(0x0040_0000), "confused");
+    assert!(!self_controlled(0x0080_0000), "fleeing");
+    assert!(!self_controlled(0x0000_0004), "move-disabled");
+    assert!(
+        self_controlled(0x0004_0000),
+        "STUNNED is not in the 0xc00004 mask — it has its own gate"
+    );
+}
+
 // ── The send-side posture-eligibility gate (`emote_send_eligible`) — the director-verified rows
 // from wow-re `emote-posture-gate.md` §3, real `Emotes.dbc` `EmoteFlags` values.
 const BOW: u32 = 0x4801;
@@ -1486,41 +1560,54 @@ const LAUGH: u32 = 0x0980;
 #[test]
 fn seated_stand_required_emotes_are_suppressed() {
     let _data = benilla_formats::wow_data_or_skip!();
-    assert!(!emote_send_eligible(BOW, 1, false)); // 0x4801 has 0x1 (requires STAND)
-    assert!(!emote_send_eligible(RUDE, 1, false));
+    assert_eq!(emote_send_eligible(BOW, 1, false, 0), EmoteGate::Suppressed); // 0x4801 has 0x1 (requires STAND)
+    assert_eq!(
+        emote_send_eligible(RUDE, 1, false, 0),
+        EmoteGate::Suppressed
+    );
 }
 
 #[test]
 fn seated_non_stand_emotes_pass() {
     let _data = benilla_formats::wow_data_or_skip!();
-    assert!(emote_send_eligible(APPLAUD, 1, false));
-    assert!(emote_send_eligible(CHEER, 1, false));
-    assert!(emote_send_eligible(LAUGH, 1, false));
-    assert!(emote_send_eligible(SALUTE, 1, false));
+    assert_eq!(emote_send_eligible(APPLAUD, 1, false, 0), EmoteGate::Send);
+    assert_eq!(emote_send_eligible(CHEER, 1, false, 0), EmoteGate::Send);
+    assert_eq!(emote_send_eligible(LAUGH, 1, false, 0), EmoteGate::Send);
+    assert_eq!(emote_send_eligible(SALUTE, 1, false, 0), EmoteGate::Send);
 }
 
 #[test]
 fn swimming_suppresses_only_the_0x80_emotes() {
     let _data = benilla_formats::wow_data_or_skip!();
-    assert!(!emote_send_eligible(LAUGH, 0, true)); // 0x0980 has 0x80
-    assert!(emote_send_eligible(CHEER, 0, true));
+    assert_eq!(
+        emote_send_eligible(LAUGH, 0, true, 0),
+        EmoteGate::Suppressed
+    ); // 0x0980 has 0x80
+    assert_eq!(emote_send_eligible(CHEER, 0, true, 0), EmoteGate::Send);
 }
 
 #[test]
 fn standing_and_dry_everyone_is_eligible() {
     let _data = benilla_formats::wow_data_or_skip!();
     for flags in [BOW, RUDE, APPLAUD, CHEER, SALUTE, LAUGH] {
-        assert!(emote_send_eligible(flags, 0, false), "flags {flags:#x}");
+        assert_eq!(
+            emote_send_eligible(flags, 0, false, 0),
+            EmoteGate::Send,
+            "flags {flags:#x}"
+        );
     }
 }
 
 #[test]
 fn unconditional_and_sleep_dead_rules() {
     let _data = benilla_formats::wow_data_or_skip!();
-    assert!(!emote_send_eligible(0x0400, 0, false)); // unconditional suppress
-    assert!(!emote_send_eligible(0, 3, false)); // SLEEP without the allow bit
-    assert!(!emote_send_eligible(0, 7, false)); // DEAD without the allow bit
-    assert!(emote_send_eligible(0x0200, 3, false)); // "allowed while asleep/dead"
+    assert_eq!(
+        emote_send_eligible(0x0400, 0, false, 0),
+        EmoteGate::Suppressed
+    ); // unconditional suppress
+    assert_eq!(emote_send_eligible(0, 3, false, 0), EmoteGate::Suppressed); // SLEEP without the allow bit
+    assert_eq!(emote_send_eligible(0, 7, false, 0), EmoteGate::Suppressed); // DEAD without the allow bit
+    assert_eq!(emote_send_eligible(0x0200, 3, false, 0), EmoteGate::Send); // "allowed while asleep/dead"
 }
 
 // ── The open-the-box law, shared by the ENTER key and an addon's ChatFrame_OpenChat ──────────
@@ -2318,8 +2405,9 @@ fn the_posture_emotes_carry_no_swim_suppression_flag() {
         }
         // …so the emote gate lets it through mid-swim. (`stand_state` here is the performer's
         // CURRENT state; a standing swimmer pressing `/sit` is the reported case.)
-        assert!(
-            super::input::emote_send_eligible(flags, 0, true),
+        assert_eq!(
+            super::input::emote_send_eligible(flags, 0, true, 0),
+            super::input::EmoteGate::Send,
             "posture emote {id} passes the emote gate while swimming"
         );
     }

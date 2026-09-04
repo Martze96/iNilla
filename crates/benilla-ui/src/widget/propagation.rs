@@ -453,7 +453,7 @@ impl WidgetArena {
     }
 
     /// `EnableKeyboard` (`0x776f90`) — kind-0/kind-1 bucket membership. Stored and answered; the
-    /// key path is not gated on it yet (see [`crate::widget::WidgetState::keyboard_enabled`]).
+    /// key path is not gated on it yet (see `crate::widget::WidgetState::keyboard_enabled`).
     pub fn set_keyboard_enabled(&mut self, h: FrameHandle, enabled: bool) {
         if let Some(f) = self.frame_mut(h) {
             f.keyboard_enabled = enabled;

@@ -179,7 +179,7 @@ impl Plugin for UiChatPlugin {
 ///
 /// `shutdown_ui_state`'s own doc carves the reference's logout tail: `PLAYER_LEAVING_WORLD` →
 /// `PLAYER_LOGOUT` → the saved files → **destroy the Lua state**. That last step is the one
-/// [`crate::ui_script::IngameUiLoaded`] exists to stand in for; while it does, every window in the
+/// `crate::ui_script::IngameUiLoaded` exists to stand in for; while it does, every window in the
 /// VM keeps its contents across a character switch. The director saw it as the previous
 /// character's `Joined Channel:` lines still sitting under the new character's — chat scrollback
 /// is simply the most visible tenant of a VM that should have been rebuilt.

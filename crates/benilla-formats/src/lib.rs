@@ -817,7 +817,8 @@ mod tests {
     fn registered_dbc_schemas_dump_the_shipped_tables() {
         let data = crate::wow_data_or_skip!();
         let mut chain = open_chain(&data).expect("open chain");
-        let out = std::env::temp_dir().join("benilla-schema-registry-test.csv");
+        let out =
+            std::env::temp_dir().join(format!("benilla-schema-reg-{}.csv", std::process::id()));
         for table in [
             "CreatureDisplayInfo",
             "CreatureDisplayInfoExtra",

@@ -22,7 +22,7 @@ pub(super) const MOVEMENT_FLAG_SPLINE_ELEVATION: u32 = 0x400_0000;
 /// `flags`/`position`/`orientation`/`timestamp`/`fall_time`, the **transport pose** ([`TransportPose`],
 /// present iff `MOVEFLAG_ON_TRANSPORT` — this is how a boarded rider's `MSG_MOVE_*` heartbeat carries
 /// its local frame, decision 0438 "Riding is the mover's platform frame"), the **swim pitch**
-/// ([`Self::pitch`], present iff `MOVEFLAG_SWIMMING`), and the **jump tail** ([`JumpInfo`], so an
+/// (`Self::pitch`, present iff `MOVEFLAG_SWIMMING`), and the **jump tail** ([`JumpInfo`], so an
 /// observer can replay a jump arc); the spline-elevation tail is parsed to stay aligned but discarded.
 ///
 /// VERIFIED byte-for-byte against vmangos `MovementInfo::Read` (build 1.12.1): note 1.12 has **no**
@@ -265,7 +265,7 @@ pub struct TransportPose {
 /// (decision 0438 phase 2). The transport, swim-pitch, and jump tails are conditional
 /// outbound, gated on their flags. Inbound, every conditional tail is parsed (see
 /// [`read_movement_info`]) — the transport pose into [`Self::transport`], the swim pitch into
-/// [`Self::pitch`], the jump tail into [`Self::jump`], and the spline-elevation float to stay aligned
+/// `Self::pitch`, the jump tail into [`Self::jump`], and the spline-elevation float to stay aligned
 /// only (no consumer needs it).
 pub struct MovementInfo {
     pub flags: u32,

@@ -314,6 +314,24 @@ fn send_spell_cast(
     if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, items, cast_errors) {
         return;
     }
+    // **TryCast rung 7** (`0x6e4e03`, decision 1925) — the equipped-item requirement, which the
+    // cast path did not have at all: the greying ladder correctly greyed the button and pressing
+    // it still sent. The search is the same one the greying leg and the tooltip requirement line
+    // use, so all three now agree, and the reason it refuses with is `AttributesEx3`'s own pick
+    // ([`super::usable::equipped_item_reason`]).
+    //
+    // Position is the reference's: four rungs above the crowd-control validator below, so a
+    // player who is both stunned and missing the required weapon is told about **the weapon**.
+    if let Some(d) = def {
+        if let Some(store) = ctx.rel.self_store {
+            if !super::usable::equipped_item_fits_cached(d, store, items) {
+                let reason = super::usable::equipped_item_reason(d);
+                debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
+                cast_errors.push_local(spell_id, reason);
+                return;
+            }
+        }
+    }
     // ArmCast (`0x6e5250`): resolve the wire target from the spell's targeting constraints —
     // never the raw selection ([`cast_target`] module docs). A refusal is local and pre-commit,
     // like the ref's residual flag_word: no send, no GCD, no pending arm, no autorepeat key.
@@ -472,12 +490,20 @@ fn send_spell_cast(
             }
         }
     }
-    // The CROWD-CONTROL leg of the requirement validator `0x6094f0` (decision 1903), which sits
-    // ABOVE its mounted block below — so a stunned mounted caster reads the stun. STUNNED refuses
-    // every spell; SILENCED and PACIFIED only the rows whose `PreventionType` names them.
-    if let Some(reason) =
-        state::cast_cc_refusal(ctx.rel.self_store.map_or(0, |s| s.0.unit_flags()), def)
-    {
+    // The CROWD-CONTROL leg of the requirement validator `0x6094f0` (decision 1903, widened from
+    // three arms to the reference's six by 1925), which sits ABOVE its mounted block below — so a
+    // stunned mounted caster reads the stun.
+    let self_fields = ctx.rel.self_store.map(|s| &s.0);
+    if let Some(reason) = state::cast_cc_refusal(
+        self_fields.map_or(0, |f| f.unit_flags()),
+        self_fields.and_then(|f| f.unit_health()),
+        // The charm arm asks whether somebody ELSE holds the reins (`60994d`'s active-player
+        // compare) — a self-charm is not something the reference refuses on.
+        self_fields
+            .and_then(|f| f.unit_charmed_by())
+            .is_some_and(|charmer| Some(charmer) != ctx.self_guid),
+        def,
+    ) {
         debug!("ui_action: cast {spell_id} refused locally — crowd control ({reason:#x})");
         cast_errors.push_local(spell_id, reason);
         return;
