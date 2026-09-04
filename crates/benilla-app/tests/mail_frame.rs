@@ -14,7 +14,8 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// helpers (postage display), so a load error in either fails here.
 const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
     // the `MoneyInputFrame_*` verbs. Seated straight after MoneyFrame.xml, benilla.toc's order.
     r"Interface\FrameXML\MoneyInputFrame.lua",

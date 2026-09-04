@@ -1201,7 +1201,8 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     // The reference's `PanelTemplates_SelectTab` ends with `if GameTooltip:IsOwned(tab)` —
     // an arm our deleted copy omitted ("our tabs set no tooltip"), so selecting a tab now needs

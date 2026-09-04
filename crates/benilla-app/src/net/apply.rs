@@ -246,7 +246,20 @@ pub(super) fn apply_net_updates(
                 // `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
                 // `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose
                 // Accept is the only thing that unlearns anything. The binder's twin above.
-                ResMut<crate::ui_talent_wipe::TalentWipeState>,
+                (
+                    ResMut<crate::ui_talent_wipe::TalentWipeState>,
+                    // The dialog engine's verbs (decision 1963): the pet trainer's latch, the
+                    // instance-boot clock, the area spirit healer, the battleground queue and
+                    // the meeting-stone queue — each a feed for a stock dialog. Nested beside
+                    // the talent wipe because this tuple sits at Bevy's sixteen-entry limit.
+                    (
+                        ResMut<crate::ui_dialog_verbs::PetUnlearnState>,
+                        ResMut<crate::ui_dialog_verbs::InstanceBoot>,
+                        ResMut<crate::ui_dialog_verbs::AreaSpiritHealer>,
+                        ResMut<crate::ui_dialog_verbs::BattlefieldQueue>,
+                        ResMut<crate::ui_dialog_verbs::MeetingStone>,
+                    ),
+                ),
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
                 // stamped with — the wire carries no map field, so "where you were standing when
                 // the guard told you" is the client's to remember (`crate::poi_marker`).
@@ -460,7 +473,16 @@ pub(super) fn apply_net_updates(
                 mut played_time_answer,
                 mut guild,
                 mut binder,
-                mut talent_wipe,
+                (
+                    mut talent_wipe,
+                    (
+                        mut pet_unlearn,
+                        mut instance_boot,
+                        mut area_spirit,
+                        mut battlefield_queue,
+                        mut meeting_stone,
+                    ),
+                ),
                 mut poi_marker,
                 current_map,
                 mut inspect_honor,
@@ -916,6 +938,29 @@ pub(super) fn apply_net_updates(
                     debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
                     talent_wipe.ask(trainer, cost);
                 }
+            }
+            // The pet trainer's question (decision 1963) — the talent-wipe twin above; a zero
+            // guid is the reference's own `ERR_TALENT_WIPE_ERROR` leg, carried over as observed.
+            SessionEvent::PetUnlearnConfirm { trainer, cost } => {
+                if trainer == 0 {
+                    debug!("net: pet unlearn refused (zero trainer) — no dialog");
+                    ui_error_keys
+                        .0
+                        .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+                } else {
+                    debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
+                    pet_unlearn.ask(trainer, cost);
+                }
+            }
+            SessionEvent::RaidGroupOnly { delay_ms, reason } => {
+                instance_boot.apply(delay_ms, reason, std::time::Instant::now());
+            }
+            SessionEvent::AreaSpiritHealerTime { healer, ms } => {
+                area_spirit.on_time(healer, ms, std::time::Instant::now());
+            }
+            SessionEvent::BattlefieldStatus(status) => battlefield_queue.apply(status),
+            SessionEvent::MeetingStoneSetQueue { area, status } => {
+                meeting_stone.apply(area, status);
             }
             SessionEvent::PlayerBound { binder: npc, area } => {
                 debug!("net: bound to area {area} by {npc:#x}");

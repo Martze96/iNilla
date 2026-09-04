@@ -89,7 +89,8 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",

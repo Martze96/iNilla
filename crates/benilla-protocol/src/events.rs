@@ -465,6 +465,24 @@ pub enum SessionEvent {
     /// `trainer` to answer with and the `cost` in copper its money frame shows. Answering means
     /// sending the SAME opcode back with the guid; declining sends nothing (decision 1580).
     TalentWipeConfirm { trainer: u64, cost: u32 },
+    /// A pet trainer is asking whether to unlearn the pet's skills (`SMSG_PET_UNLEARN_CONFIRM`) —
+    /// the `CONFIRM_PET_UNLEARN(cost)` dialog's question, the talent-wipe twin for a pet
+    /// (decision 1963). Answering sends `CMSG_PET_UNLEARN` with the guid; declining sends nothing.
+    PetUnlearnConfirm { trainer: u64, cost: u32 },
+    /// The instance-boot clock (`SMSG_RAID_GROUP_ONLY`): a positive delay arms it
+    /// (`INSTANCE_BOOT_START`), zero clears it (`INSTANCE_BOOT_STOP`) and names `reason` 1/2 on
+    /// screen (decision 1963).
+    RaidGroupOnly { delay_ms: u32, reason: u32 },
+    /// A battleground spirit healer's next resurrection wave (`SMSG_AREA_SPIRIT_HEALER_TIME`):
+    /// arms `GetAreaSpiritHealerTime` and fires `AREA_SPIRIT_HEALER_IN_RANGE` for the cached
+    /// healer (decision 1963).
+    AreaSpiritHealerTime { healer: u64, ms: u32 },
+    /// One battleground queue slot's state (`SMSG_BATTLEFIELD_STATUS`), the client's three-slot
+    /// queue that `AcceptBattlefieldPort` answers out of (decision 1963).
+    BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// The meeting-stone queue state (`SMSG 0x295`): the area queued for and a status byte
+    /// (decision 1963).
+    MeetingStoneSetQueue { area: u32, status: u8 },
     /// The bind took (`SMSG_PLAYERBOUND`): `area` is the AreaTable id we are now bound in, the
     /// same one [`Self::BindPoint`] carries in the packet beside it.
     PlayerBound { binder: u64, area: u32 },

@@ -657,6 +657,58 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //
     // `slot` is the 1-based display row, like every other loot getter; the coin pile and a
     // cleared row have no tooltip.
+    // GameTooltip:SetTradePlayerItem(id) / SetTradeTargetItem(id) — `0x5341e0` / `0x534410`, two
+    // arguments exact (self, slot), no returns: the trade slot's item, rendered off its template
+    // the way the loot slot is (decision 1966; the stock TradeFrame.xml's slot OnEnter). The
+    // target side reads the partner's slot guids (`[0xb715a0 + slot*4]`, wow-re
+    // `loot-slot-record.md`); an empty or out-of-range slot leaves the tooltip untouched. The
+    // slot's enchant line waits on the trade snapshot carrying the wire's enchant id (0592 P3).
+    for (name, player_side) in [("SetTradePlayerItem", true), ("SetTradeTargetItem", false)] {
+        m.set(
+            name,
+            lua.create_function(move |lua, (this, slot): (Table, usize)| {
+                let h = frame_handle_of(lua, &this)?;
+                let item = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    model.trade.as_ref().and_then(|t| {
+                        let side = if player_side { &t.player } else { &t.target };
+                        slot.checked_sub(1)
+                            .and_then(|n| side.slots.get(n))
+                            .and_then(|s| s.clone())
+                    })
+                };
+                let Some(item) = item.filter(|i| i.item_id != 0) else {
+                    return Ok(());
+                };
+                {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    clear_content(&mut model, h);
+                }
+                fire_cleared(lua, h);
+                let inst = render::ItemInstance {
+                    name: item.name.clone(),
+                    ..Default::default()
+                };
+                match view_of(lua, item.item_id) {
+                    Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                    None => {
+                        if let Some(name) = item.name.clone() {
+                            append_line(
+                                lua,
+                                &this,
+                                (name, quality_color(item.quality.unwrap_or(1))),
+                                None,
+                                false,
+                            )?;
+                        }
+                    }
+                }
+                show_or_hide_empty(lua, h);
+                Ok(())
+            })?,
+        )?;
+    }
+
     m.set(
         "SetLootItem",
         lua.create_function(|lua, (this, slot): (Table, usize)| {

@@ -23,7 +23,8 @@ fn harness() -> UiScript {
     // `STATICPOPUP_NUMDIALOGS`, which the reference's own `MirrorTimer_Show` bounds its free-bar
     // search by (MirrorTimer.lua l.32 — a copy-paste from StaticPopup.lua, and its own bug). A
     // session without it searches `1, nil` and finds no free bar at all, so this is not scenery.
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");

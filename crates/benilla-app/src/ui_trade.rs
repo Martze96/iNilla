@@ -299,6 +299,10 @@ impl Plugin for UiTradePlugin {
                     // engine state — so it sits ahead of the feed, and an accepted request's
                     // `partner` is on screen the same frame the window opens.
                     answer_trade_request.before(feed_trade),
+                    // The coinage-change reflex's trade half (1965): after the world's fields land.
+                    trim_offer_to_purse
+                        .after(crate::ui_unit::UnitFeed)
+                        .before(feed_trade),
                     drain_trade.after(UiInput),
                 ),
             );
@@ -608,7 +612,7 @@ fn snapshot(
 #[allow(clippy::too_many_arguments)]
 fn feed_trade(
     script: Option<NonSendMut<UiScript>>,
-    trade: Res<TradeSession>,
+    mut trade: ResMut<TradeSession>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     mut names: ResMut<NameCache>,
@@ -617,6 +621,7 @@ fn feed_trade(
     mut last_open: Local<crate::ui_script::VmMemo<bool>>,
     mut last_accept: Local<crate::ui_script::VmMemo<(bool, bool)>>,
     mut last_player_gold: Local<crate::ui_script::VmMemo<u32>>,
+    mut last_their_gold: Local<crate::ui_script::VmMemo<u32>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -625,6 +630,7 @@ fn feed_trade(
     let last_open = last_open.get(&script);
     let last_accept = last_accept.get(&script);
     let last_player_gold = last_player_gold.get(&script);
+    let last_their_gold = last_their_gold.get(&script);
 
     let fresh = snapshot(&trade, &mut items, icons.as_deref(), &mut names, &commands);
     let opened = !*last_open && trade.is_open();
@@ -633,7 +639,40 @@ fn feed_trade(
     if changed {
         script.set_trade(fresh.clone());
     }
+    // The per-slot events the stock TradeFrame.lua repaints one slot on (`0x4bf414`/`0x4bf452`
+    // TRADE_TARGET_ITEM_CHANGED, `0x4bf487`/`0x4bfaef` TRADE_PLAYER_ITEM_CHANGED, arg1 the 1-based
+    // slot — wow-re `event-firesites.tsv`; decision 1966). The full TRADE_UPDATE below is kept:
+    // the reference fires it too, from `0x4c034f`.
+    if changed && trade.is_open() && !opened {
+        let empty = TradeState::default();
+        let old = last.as_ref().unwrap_or(&empty);
+        if let Some(new) = fresh.as_ref() {
+            let changed_slots = |mine: &[Option<TradeSlotItem>],
+                                 theirs: &[Option<TradeSlotItem>]| {
+                mine.iter()
+                    .zip(theirs.iter())
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .map(|(i, _)| ScriptValue::Int(i as i64 + 1))
+                    .collect::<Vec<_>>()
+            };
+            for slot in changed_slots(&new.player.slots, &old.player.slots) {
+                script.fire_event("TRADE_PLAYER_ITEM_CHANGED", vec![slot]);
+            }
+            for slot in changed_slots(&new.target.slots, &old.target.slots) {
+                script.fire_event("TRADE_TARGET_ITEM_CHANGED", vec![slot]);
+            }
+        }
+    }
     if opened {
+        // `SetTradePartner 0x4bf4e0`'s open leg (decision 1965): coins held on the cursor fold
+        // into the offer before anything else — the one leg that fires the two money events
+        // locally, the send following through the money drain below.
+        if let Some(offer) = script.fold_cursor_money_into_trade() {
+            trade.set_own_gold(offer);
+            script.fire_event("PLAYER_TRADE_MONEY", vec![]);
+            script.fire_event("PLAYER_MONEY", vec![]);
+        }
         script.fire_event("TRADE_SHOW", vec![]);
     } else if closed {
         script.fire_event("TRADE_CLOSED", vec![]);
@@ -666,6 +705,16 @@ fn feed_trade(
         script.fire_event("PLAYER_TRADE_MONEY", vec![]);
     }
     *last_player_gold = if trade.is_open() { player_gold } else { 0 };
+    // The partner's gold: TRADE_MONEY_CHANGED, the event the stock money kit's TARGET_TRADE
+    // frame repaints on (MoneyFrame.lua's OnEvent pairs the two exactly this way — ours on
+    // PLAYER_TRADE_MONEY, theirs on TRADE_MONEY_CHANGED; the reference's fire site `0x4bf4d6`
+    // sits beside PLAYER_TRADE_MONEY's `0x4bf4ab` in the status handler). Which side each site
+    // reads is INFERRED from the consumer; flagged (1962).
+    let their_gold = trade.their.gold;
+    if trade.is_open() && their_gold != *last_their_gold {
+        script.fire_event("TRADE_MONEY_CHANGED", vec![]);
+    }
+    *last_their_gold = if trade.is_open() { their_gold } else { 0 };
 
     *last = fresh;
     *last_open = trade.is_open();
@@ -767,6 +816,50 @@ fn drain_trade(
             let _ = commands.0.send(ClientCommand::CancelTrade);
         }
         trade.close();
+    }
+    // The TRADE dialog's pair (decision 1963): `BeginTrade` is the empty `0x117`, `CancelTrade`
+    // the bare `0x11C` — no teardown of ours, the server's status reply drives the window.
+    if script.take_trade_begin() {
+        let _ = commands.0.send(ClientCommand::BeginTrade);
+    }
+    if script.take_trade_cancel() {
+        let _ = commands.0.send(ClientCommand::CancelTrade);
+    }
+}
+
+/// The offer the purse can no longer cover, if any — the coinage-change reflex (`0x5ddf30`,
+/// decision 1965): when the purse drops below the standing offer, the client trims the offer to
+/// the purse and sends it.
+fn trimmed_offer(offer: u32, purse: u32) -> Option<u32> {
+    (offer > purse).then_some(purse)
+}
+
+/// The coinage-change reflex's trade half: on every change of `PLAYER_FIELD_COINAGE` with a trade
+/// open, an offer past the purse is trimmed to it and re-sent as an absolute `CMSG_SET_TRADE_GOLD`
+/// (the coin sound and `PLAYER_MONEY` are `sound/money.rs`'s and the aura feed's).
+fn trim_offer_to_purse(
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut trade: ResMut<TradeSession>,
+    commands: Res<NetCommands>,
+    mut prev: Local<Option<u32>>,
+) {
+    let Some(money) = self_q
+        .iter()
+        .next()
+        .and_then(|store| store.0.player_money())
+    else {
+        *prev = None;
+        return;
+    };
+    let old = prev.replace(money);
+    if !matches!(old, Some(p) if p != money) || !trade.is_open() {
+        return;
+    }
+    if let Some(trimmed) = trimmed_offer(trade.our.gold, money) {
+        trade.set_own_gold(trimmed);
+        let _ = commands
+            .0
+            .send(ClientCommand::SetTradeGold { copper: trimmed });
     }
 }
 
@@ -1270,7 +1363,9 @@ mod tests {
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx))
             .insert_resource(Selection::default());
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut vm = UiScript::new().unwrap();
+        vm.set_money(20_000); // the engine's purse gate on SetTradeMoney (1965)
+        app.insert_non_send_resource(vm);
 
         // No window yet → the offer is dropped.
         app.world_mut()

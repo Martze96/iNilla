@@ -294,6 +294,31 @@ pub enum ServerPacket {
         trainer: u64,
         cost: u32,
     },
+    /// `SMSG_PET_UNLEARN_CONFIRM` — the pet trainer's question (decision 1963): the talent-wipe
+    /// twin for a pet, the same latch-and-confirm shape; nothing is unlearned until
+    /// `CMSG_PET_UNLEARN` goes back with the guid.
+    PetUnlearnConfirm {
+        trainer: u64,
+        cost: u32,
+    },
+    /// `SMSG_RAID_GROUP_ONLY` — the instance-boot clock (decision 1963): a positive delay arms
+    /// the boot, zero clears it and names the reason on screen.
+    RaidGroupOnly {
+        delay_ms: u32,
+        reason: u32,
+    },
+    /// `SMSG_AREA_SPIRIT_HEALER_TIME` — a battleground spirit healer's next wave (decision 1963).
+    AreaSpiritHealerTime {
+        healer: u64,
+        ms: u32,
+    },
+    /// `SMSG_BATTLEFIELD_STATUS` — one of the three queue slots (decision 1963).
+    BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// `SMSG 0x295` — the meeting-stone queue state (decision 1963).
+    MeetingStoneSetQueue {
+        area: u32,
+        status: u8,
+    },
     /// `SMSG_SUMMON_REQUEST` — someone is *asking* to pull us to them (decision 1747): a
     /// warlock's ritual, a meeting stone, a GM. The twin of [`Self::BinderConfirm`] in shape —
     /// nothing moves until `CMSG_SUMMON_RESPONSE` goes back — and its opposite in teardown:
@@ -1540,6 +1565,11 @@ impl ServerPacket {
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
             ServerPacket::SummonRequest { .. } => "SMSG_SUMMON_REQUEST".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
+            ServerPacket::PetUnlearnConfirm { .. } => "SMSG_PET_UNLEARN_CONFIRM".into(),
+            ServerPacket::RaidGroupOnly { .. } => "SMSG_RAID_GROUP_ONLY".into(),
+            ServerPacket::AreaSpiritHealerTime { .. } => "SMSG_AREA_SPIRIT_HEALER_TIME".into(),
+            ServerPacket::BattlefieldStatus(_) => "SMSG_BATTLEFIELD_STATUS".into(),
+            ServerPacket::MeetingStoneSetQueue { .. } => "SMSG_MEETINGSTONE_SETQUEUE".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),

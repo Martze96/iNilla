@@ -1260,6 +1260,26 @@ pub(crate) enum ClientCommand {
     TalentWipeConfirm {
         trainer: u64,
     },
+    // ── The dialog engine's verbs (decision 1963) ──
+    /// `ForceLogout()` — `CMSG_PLAYER_LOGOUT` (`0x4A`, empty), the forced flavour of the logout
+    /// dispatcher; sent only with a live world session.
+    ForceLogout,
+    /// `AcceptAreaSpiritHeal()` — `CMSG_AREA_SPIRIT_HEALER_QUEUE` with the cached healer.
+    AreaSpiritHealerQueue {
+        healer: u64,
+    },
+    /// `AcceptBattlefieldPort(index, accept)` — `CMSG_BATTLEFIELD_PORT`: the slot's map id and
+    /// the answer as one byte.
+    BattlefieldPort {
+        map_id: u32,
+        accept: bool,
+    },
+    /// `CancelMeetingStoneRequest()` — `CMSG 0x293`, empty.
+    MeetingStoneLeave,
+    /// `ConfirmPetUnlearn()` — `CMSG_PET_UNLEARN` with the latched trainer guid.
+    PetUnlearn {
+        trainer: u64,
+    },
     /// Open the bank (`CMSG_BANKER_ACTIVATE`, decision 0604): the direct opener a right-click on
     /// a pure banker (bit 8 the lowest service bit) uses — a gossip-flagged banker routes through
     /// the gossip menu instead, whose bank option makes the server volunteer the same answer.
@@ -1997,6 +2017,12 @@ pub(crate) enum ClientCommand {
     /// Befriend a character by name (`CMSG_ADD_FRIEND`).
     AddFriend {
         name: String,
+    },
+    /// The client's LFG slots and comment (`CMSG_SET_LOOKING_FOR_GROUP`), sent by
+    /// `SetLookingForGroup` only when the commit changed something (1961).
+    SetLookingForGroup {
+        slots: [u32; 3],
+        comment: String,
     },
     /// Drop a friend by guid (`CMSG_DEL_FRIEND`) — the caller resolves the name first.
     DelFriend {

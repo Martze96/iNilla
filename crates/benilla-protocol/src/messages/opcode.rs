@@ -348,6 +348,10 @@ pub const CMSG_CHAR_CREATE: u16 = 0x0036;
 pub const CMSG_CHAR_ENUM: u16 = 0x0037;
 pub const CMSG_PLAYER_LOGIN: u16 = 0x003D;
 pub const CMSG_LOGOUT_REQUEST: u16 = 0x004B;
+/// The forced logout (`ForceLogout 0x48ab50`, decision 1963): the same session dispatcher as
+/// `Logout`/`Quit` with `force = 1`, which turns the opcode from `0x4B` into `0x4A` and bypasses
+/// the pending-logout latch. Empty body (wow-re `staticpopup-dialog-bindings.md` §4).
+pub const CMSG_PLAYER_LOGOUT: u16 = 0x004A; // 74
 /// 78 — call off a pending logout (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body; answered by
 /// [`SMSG_LOGOUT_CANCEL_ACK`]. The CAMP/QUIT dialog's Cancel (decision 0674).
 pub const CMSG_LOGOUT_CANCEL: u16 = 0x004E;
@@ -980,6 +984,42 @@ pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 /// `0x48dc40` → `0x5df980`): both directions run through one range-gated function, whose outbound
 /// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
+/// `SMSG_RAID_GROUP_ONLY` (wow-re `staticpopup-dialog-bindings.md` §5.2): `u32 delayMs`,
+/// `u32 reason`. Every arrival fires an instance-boot event — START for a positive delay, STOP
+/// for zero — and a zero delay with reason 1/2 also shows `ERR_RAID_GROUP_ONLY`/`_FULL`
+/// (decision 1963).
+pub const SMSG_RAID_GROUP_ONLY: u16 = 0x0286; // 646
+/// The battleground queue's slot update (§7): `u32 slot`, `u32 mapId`, `u8 bracket`, `u32`,
+/// `u32 status`, then `u32` when status is 2 and two `u32` when it is 3; fires
+/// `UPDATE_BATTLEFIELD_STATUS` (decision 1963).
+pub const SMSG_BATTLEFIELD_STATUS: u16 = 0x02D4; // 724
+/// `AcceptBattlefieldPort(index, accept)`'s packet (§7): `u32 mapId` (the slot's Map.dbc row),
+/// `u8 accept` (decision 1963).
+pub const CMSG_BATTLEFIELD_PORT: u16 = 0x02D5; // 725
+/// The area spirit healer query the client sends when it adopts a new healer (§6): `u64 guid`;
+/// answered by [`SMSG_AREA_SPIRIT_HEALER_TIME`] (decision 1963).
+pub const CMSG_AREA_SPIRIT_HEALER_QUERY: u16 = 0x02E2; // 738
+/// `AcceptAreaSpiritHeal()`'s packet (§6): `u64 guid`, the CACHED current-area healer, never an
+/// argument (decision 1963).
+pub const CMSG_AREA_SPIRIT_HEALER_QUEUE: u16 = 0x02E3; // 739
+/// The healer's next-resurrection clock (§6): `u64 guid`, `u32 ms`; a match against the cached
+/// healer with a positive time arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`
+/// (decision 1963).
+pub const SMSG_AREA_SPIRIT_HEALER_TIME: u16 = 0x02E4; // 740
+/// `CancelMeetingStoneRequest()`'s packet (§8): EMPTY. Gated client-side on party leadership
+/// only; clears nothing — the server's `0x295` reply does (decision 1963). The emulators' name
+/// for this number does not line up with the client's block; the number is what is verified.
+pub const CMSG_MEETINGSTONE_LEAVE: u16 = 0x0293; // 659
+/// The meeting-stone queue state (§8): `u32 areaId`, `u8 status`; stored unconditionally, a
+/// status message per value, then `MEETINGSTONE_CHANGED` (decision 1963).
+pub const SMSG_MEETINGSTONE_SETQUEUE: u16 = 0x0295; // 661
+/// `ConfirmPetUnlearn()`'s packet (§9): `u64 trainerGuid`, the latch — never an argument
+/// (decision 1963).
+pub const CMSG_PET_UNLEARN: u16 = 0x02F0; // 752
+/// The pet trainer's question (§9): `u64 trainerGuid`, `u32 costCopper` — latched, then
+/// `CONFIRM_PET_UNLEARN(cost)`; a zero guid shows `ERR_TALENT_WIPE_ERROR` instead (the reference
+/// re-uses the talent-wipe string there) (decision 1963).
+pub const SMSG_PET_UNLEARN_CONFIRM: u16 = 0x02F1; // 753
 
 /// The player-summon pair — the question and the accept (VERIFIED vmangos `Opcodes_1_12_1.h`:
 /// 683/684 + `Opcodes.cpp`'s `HandleSummonResponseOpcode` registration; decision 1747). A
@@ -1150,6 +1190,10 @@ pub const CMSG_FRIEND_LIST: u16 = 0x0066; // 102
 pub const SMSG_FRIEND_LIST: u16 = 0x0067; // 103
 pub const SMSG_FRIEND_STATUS: u16 = 0x0068; // 104
 pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
+/// The client's LFG slots and comment (wow-re `lfg-set-get-law.md`: written into a `CDataStore`
+/// at exactly one site image-wide, `0x4e8948`; no registered handler answers it). The name is
+/// the emulators' — the value and its site are the bytes'.
+pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108

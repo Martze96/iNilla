@@ -39,7 +39,8 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\BasicControls.xml",
     // The reference's own since 1751 window 24 — `common::load_ui` speaks both stores.
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     // `Model_OnLoad` — the model pane's `<OnLoad>` calls it, so this is a LOAD-time dependency of
     // the paper doll, not of the window. The reference declares it in `UIParent.lua`; ours lives
     // in our counterpart of that file.

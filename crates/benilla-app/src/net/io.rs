@@ -1064,6 +1064,15 @@ fn writer_loop(
                     ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
                     ClientCommand::SummonResponse { summoner } => w.summon_response(summoner),
                     ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
+                    ClientCommand::ForceLogout => w.player_logout(),
+                    ClientCommand::AreaSpiritHealerQueue { healer } => {
+                        w.area_spirit_healer_queue(healer)
+                    }
+                    ClientCommand::BattlefieldPort { map_id, accept } => {
+                        w.battlefield_port(map_id, accept)
+                    }
+                    ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
+                    ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
                     ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
                     ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
@@ -1326,6 +1335,9 @@ fn writer_loop(
                     ClientCommand::ToggleCloak => w.toggle_cloak(),
                     ClientCommand::FriendListRequest => w.friend_list(),
                     ClientCommand::AddFriend { name } => w.add_friend(&name),
+                    ClientCommand::SetLookingForGroup { slots, comment } => {
+                        w.set_looking_for_group(slots, &comment)
+                    }
                     ClientCommand::DelFriend { guid } => w.del_friend(guid),
                     ClientCommand::AddIgnore { name } => w.add_ignore(&name),
                     ClientCommand::DelIgnore { guid } => w.del_ignore(guid),

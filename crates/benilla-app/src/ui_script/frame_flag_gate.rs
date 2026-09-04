@@ -186,13 +186,6 @@ const KNOWN: &[Known] = &[
     // anything. `TargetFrame.xml` is the reference's own now and its ToT bars inherit
     // `TextStatusBar` like every other unit bar. The gate found them itself, which is its job.
     Known {
-        frame: "TradePlayerItem7",
-        flag: Flag::Mouse,
-        why:
-            "the enchant slot: ours inherits BenillaTradeEnchantItemTemplate, the reference's the \
-              ordinary PlayerTradeItemTemplate. A structural difference in our own trade window.",
-    },
-    Known {
         frame: "WorldStateAlwaysUpFrame",
         flag: Flag::Mouse,
         why:

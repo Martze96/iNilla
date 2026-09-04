@@ -20,7 +20,8 @@ fn load_action_bar(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -278,8 +279,6 @@ fn shipped_stance_bar_drives_end_to_end() {
     // other state.
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -290,7 +289,6 @@ fn shipped_stance_bar_drives_end_to_end() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -466,7 +464,8 @@ fn multibar_hover_renders_the_buttons_own_action() {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -585,8 +584,6 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -597,7 +594,6 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -651,8 +647,6 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -663,7 +657,6 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -742,8 +735,6 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -754,7 +745,6 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -810,8 +800,6 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -822,7 +810,6 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -880,8 +867,6 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -892,7 +877,6 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -987,8 +971,6 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -999,7 +981,6 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1134,8 +1115,6 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1146,7 +1125,6 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1225,8 +1203,6 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1237,7 +1213,6 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1281,8 +1256,6 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1293,7 +1266,6 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1357,8 +1329,6 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1369,7 +1339,6 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1482,8 +1451,6 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1494,7 +1461,6 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");
@@ -1603,8 +1569,6 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     load_action_bar(&s);
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "UiPanels.xml");
@@ -1615,7 +1579,6 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\MultiActionBars.xml");

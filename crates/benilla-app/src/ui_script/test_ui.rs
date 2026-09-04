@@ -145,7 +145,8 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml", // TEXT()
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -158,7 +159,8 @@ pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -237,7 +239,8 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     r"Interface\FrameXML\LocaleProperties.lua",
     "Interface\\FrameXML\\BasicControls.xml", // TEXT(), which every one of those label sets goes through
     "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
     "UiPanels.xml", // CharacterFrameTabButtonTemplate, UIPanelWindows, Show/HideUIPanel
     "GameTooltip.xml",
@@ -312,7 +315,8 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
     "Interface\\FrameXML\\MainMenuBar.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "GameTooltip.xml",
     "Interface\\FrameXML\\ActionBarFrame.xml",
     "Interface\\FrameXML\\BonusActionBarFrame.xml",
@@ -362,7 +366,8 @@ pub(super) const BAG_UI: &[&str] = &[
     // windows fall out of the cascade and the reference's own layout pass has nothing to measure.
     "UIParent.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "GameTooltip.xml",
@@ -499,4 +504,17 @@ pub(super) fn click(s: &mut UiScript, name: &str, button: &str) {
     s.mouse_move(x, y);
     s.mouse_button(x, y, button, true);
     s.mouse_button(x, y, button, false);
+}
+
+/// Seat one of the reference's LoadOnDemand Blizzard addons off the chain, so a harness's
+/// `UIParentLoadAddOn(name)` can load it the way the app does (1957; the combat text since
+/// 1964). Needs client data — the caller has already checked with `wow_data_or_skip!`.
+pub(super) fn seat_chain_addon(s: &mut UiScript, name: &str) {
+    let toc = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))
+        .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
+        .unwrap_or_else(|| panic!("{name}: no toc off the chain"));
+    let mut info = super::addons::info_from_toc(name, &toc);
+    info.chain = true;
+    s.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    s.register_addons(vec![info], None, None, None);
 }

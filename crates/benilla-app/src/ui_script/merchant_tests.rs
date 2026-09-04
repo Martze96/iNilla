@@ -1081,7 +1081,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
                                                             // TradeFrame's money entry is the chain's own since 1882 — its OnLoad calls MoneyInputFrame_*.
     load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.lua");
     load_xml(&s, "Interface\\FrameXML\\MoneyInputFrame.xml");
-    load_xml(&s, "TradeFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\TradeFrame.xml");
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 
     let target = benilla_ui::script::TradeSideState {
@@ -1144,11 +1144,8 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "Interface\\FrameXML\\UIPanelTemplates.lua",
-        "Interface\\FrameXML\\UIPanelTemplates.xml",
-        "UiPanels.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
+        // (the panel templates, UiPanels and the dialog engine are MERCHANT_UI's already — a
+        // second load of the stock money kit's frames trips its own global-named update)
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);

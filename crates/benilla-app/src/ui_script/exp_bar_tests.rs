@@ -17,7 +17,8 @@ fn exp_bar_harness() -> UiScript {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

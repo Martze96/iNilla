@@ -11,12 +11,12 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, auction, bank, binder, broadcast, channel, chat, combat_log,
-    death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail,
-    mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
-    quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
-    world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
-    SplineMode,
+    action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
+    combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
+    mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
+    progression, pvp, quest, social, spellbook, spells, stable, summon, taxi, trade, trainer,
+    update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode,
+    ServerPacket, SpeedKind, SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -378,6 +378,37 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::TalentWipeConfirm {
                 trainer: ask.trainer,
                 cost: ask.cost,
+            }
+        }
+        opcode::SMSG_PET_UNLEARN_CONFIRM => {
+            let ask = pet::read_pet_unlearn_confirm(&mut r)?;
+            ServerPacket::PetUnlearnConfirm {
+                trainer: ask.trainer,
+                cost: ask.cost,
+            }
+        }
+        opcode::SMSG_RAID_GROUP_ONLY => {
+            let boot = instance::read_raid_group_only(&mut r)?;
+            ServerPacket::RaidGroupOnly {
+                delay_ms: boot.delay_ms,
+                reason: boot.reason,
+            }
+        }
+        opcode::SMSG_AREA_SPIRIT_HEALER_TIME => {
+            let t = death::read_area_spirit_healer_time(&mut r)?;
+            ServerPacket::AreaSpiritHealerTime {
+                healer: t.healer,
+                ms: t.ms,
+            }
+        }
+        opcode::SMSG_BATTLEFIELD_STATUS => {
+            ServerPacket::BattlefieldStatus(battlefield::read_battlefield_status(&mut r)?)
+        }
+        opcode::SMSG_MEETINGSTONE_SETQUEUE => {
+            let q = meeting_stone::read_meeting_stone_set_queue(&mut r)?;
+            ServerPacket::MeetingStoneSetQueue {
+                area: q.area,
+                status: q.status,
             }
         }
         opcode::SMSG_PLAYERBOUND => {

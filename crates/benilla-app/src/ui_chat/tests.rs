@@ -439,7 +439,8 @@ fn chat_vm() -> benilla_ui::script::UiScript {
     // dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         // The UIMenu kit is the reference's own file since 1751 window 21, so this reads both

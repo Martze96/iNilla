@@ -220,6 +220,50 @@
         RegisterForSave("QUEST_FADING_DISABLE")
         AUTO_QUEST_WATCH = "1"
         RegisterForSave("AUTO_QUEST_WATCH")
+        -- Combat text uvars (ref UIOptionsFrame.lua l.135-152, verbatim). They lived in our
+        -- CombatText.xml while that file stood in for the addon; the addon is the reference's
+        -- own `Blizzard_CombatText` off the chain now, LoadOnDemand as the reference ships it,
+        -- so its option family's defaults sit where the reference keeps them (1964).
+        SHOW_COMBAT_TEXT = "0"
+        RegisterForSave("SHOW_COMBAT_TEXT")
+        COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_LOW_HEALTH_MANA")
+        COMBAT_TEXT_SHOW_AURAS = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_AURAS")
+        COMBAT_TEXT_SHOW_AURA_FADE = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_AURA_FADE")
+        COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_COMBAT_STATE")
+        COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
+        COMBAT_TEXT_SHOW_RESISTANCES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_RESISTANCES")
+        COMBAT_TEXT_SHOW_REPUTATION = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_REPUTATION")
+        COMBAT_TEXT_SHOW_REACTIVES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_REACTIVES")
+        COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_FRIENDLY_NAMES")
+        COMBAT_TEXT_SHOW_COMBO_POINTS = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_COMBO_POINTS")
+        COMBAT_TEXT_SHOW_MANA = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_MANA")
+        COMBAT_TEXT_FLOAT_MODE = "1"
+        RegisterForSave("COMBAT_TEXT_FLOAT_MODE")
+        COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_HONOR_GAINED")
+
+        -- The family's apply, ref UIOptionsFrame_Save l.371-376 verbatim: the addon is
+        -- LoadOnDemand, so turning the master on loads it, and the update runs only once it is
+        -- there. Every combat-text row's `applyFunc` is this (1964).
+        function CombatText_UpdateOrLoad()
+            if ( SHOW_COMBAT_TEXT == "1" ) then
+                UIParentLoadAddOn("Blizzard_CombatText")
+            end
+            if ( CombatText_UpdateDisplayedMessages ) then
+                CombatText_UpdateDisplayedMessages()
+            end
+        end
         -- CHAT_LOCKED / REMOVE_CHAT_DELAY — the chat window's two uvars, the reference's own
         -- UIOptionsFrame.lua l.96-99 defaults ("0" and "0"), read every frame by
         -- FloatingChatFrame.lua's FCF_Get_ChatLocked and FCF_OnUpdate since the chat window went
@@ -1073,6 +1117,11 @@
         end
 
         function OptionsFrame_ApplySavedSettings()
+            -- ref UIOptionsFrame_OnEvent's VARIABLES_LOADED arm, l.224-226: the combat text
+            -- addon loads at login when the saved master is on (1964).
+            if ( SHOW_COMBAT_TEXT == "1" ) then
+                UIParentLoadAddOn("Blizzard_CombatText")
+            end
             local ran = {}
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
                 for _, rkey in ipairs(rows) do
@@ -2792,7 +2841,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_COMBAT_TEXT",
                                                     "Enable Floating Combat Text", "OPTION_TOOLTIP_SHOW_COMBAT_TEXT")
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The scroll mode. 1.12's own dropdown, values and all
@@ -2812,7 +2861,7 @@
                                                     { text = "Arc", value = "3" },
                                                 })
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLowHealthMana" inherits="OptionsCheckboxRowTemplate">
@@ -2825,7 +2874,7 @@
                                                     "Show Low Mana and Health",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_LOW_HEALTH_MANA", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAuras" inherits="OptionsCheckboxRowTemplate">
@@ -2837,7 +2886,7 @@
                                                 OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURAS",
                                                     "Show Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURAS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAuraFade" inherits="OptionsCheckboxRowTemplate">
@@ -2849,7 +2898,7 @@
                                                 OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURA_FADE",
                                                     "Show Fading Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURA_FADE", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowCombatState" inherits="OptionsCheckboxRowTemplate">
@@ -2862,7 +2911,7 @@
                                                     "Show Combat State",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBAT_STATE", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowDodgeParryMiss" inherits="OptionsCheckboxRowTemplate">
@@ -2875,7 +2924,7 @@
                                                     "Show Dodge/Parries/Misses",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowResistances" inherits="OptionsCheckboxRowTemplate">
@@ -2888,7 +2937,7 @@
                                                     "Show Damage Reduction",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_RESISTANCES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowReputation" inherits="OptionsCheckboxRowTemplate">
@@ -2901,7 +2950,7 @@
                                                     "Show Reputation",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REPUTATION", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowReactives" inherits="OptionsCheckboxRowTemplate">
@@ -2914,7 +2963,7 @@
                                                     "Show Reactive Spells and Abilities",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REACTIVES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowFriendlyNames" inherits="OptionsCheckboxRowTemplate">
@@ -2927,7 +2976,7 @@
                                                     "Show Friendly Healer Names",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_FRIENDLY_NAMES", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Combo Points carries the reference's SECOND gate: greyed
@@ -2943,7 +2992,7 @@
                                                     "Show Combo Points",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBO_POINTS", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowEnergyGains" inherits="OptionsCheckboxRowTemplate">
@@ -2956,7 +3005,7 @@
                                                     "Show Energy Gains",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_MANA", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowHonorGained" inherits="OptionsCheckboxRowTemplate">
@@ -2969,7 +3018,7 @@
                                                     "Show Honor Gained",
                                                     "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_HONOR_GAINED", 1)
                                                 self.parentRow = "RowCombatText"
-                                                self.applyFunc = "CombatText_UpdateDisplayedMessages" -- by NAME, resolved when applied: this file loads before its definer now (1938)
+                                                self.applyFunc = "CombatText_UpdateOrLoad" -- by NAME, resolved when applied: this file loads before its definer now (1938)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

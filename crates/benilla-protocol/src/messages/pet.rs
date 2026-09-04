@@ -765,3 +765,27 @@ mod tests {
         assert!(odd.kind() != PET_ACT_COMMAND && odd.kind() != PET_ACT_REACTION);
     }
 }
+
+/// `SMSG_PET_UNLEARN_CONFIRM` (VERIFIED at the bytes, wow-re `staticpopup-dialog-bindings.md`
+/// §9, arm `0x5e4a26`): the pet trainer's guid and what unlearning costs, in copper — the
+/// reference latches both and fires `CONFIRM_PET_UNLEARN(cost)`. Decision 1963.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PetUnlearnConfirm {
+    pub trainer: u64,
+    pub cost: u32,
+}
+
+/// Parse `SMSG_PET_UNLEARN_CONFIRM`: `u64 trainerGuid`, `u32 costCopper`.
+pub(super) fn read_pet_unlearn_confirm(
+    r: &mut impl std::io::Read,
+) -> std::io::Result<PetUnlearnConfirm> {
+    Ok(PetUnlearnConfirm {
+        trainer: crate::wire::read_u64_le(r)?,
+        cost: crate::wire::read_u32_le(r)?,
+    })
+}
+
+/// Body of `CMSG_PET_UNLEARN` (VERIFIED, §9 `0x5dfba0`'s confirm arm): the latched trainer guid.
+pub fn pet_unlearn(trainer: u64) -> Vec<u8> {
+    trainer.to_le_bytes().to_vec()
+}

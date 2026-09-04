@@ -508,32 +508,91 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SendMail",
         lua.create_function(|lua, (target, subject, body): (String, String, String)| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send = Some((target, subject, body));
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `SendMail 0x4ae800` (decision 1965): money and COD are exclusive AT SEND TIME — both
+            // set is a silent abort, no packet — and a COD with no attached item aborts the same
+            // way. 0 returns on every path, so Lua cannot tell.
+            if model.mail_send_money != 0 && model.mail_send_cod != 0 {
+                return Ok(());
+            }
+            if model.mail_send_cod != 0 && model.mail_send_item.is_none() {
+                return Ok(());
+            }
+            model.mail_send = Some((target, subject, body));
             Ok(())
         })?,
     )?;
 
     // SetSendMailMoney(copper) → 1 (the SEND_MONEY popup's OnAccept gates SendMail on the truthy
     // return, StaticPopup.lua l.252). Stores the enclose-money amount the app reads at send time.
+    // SetSendMailMoney(copper) — `0x4ae0f0` → `0x4adbe0` (decision 1965): a non-number RAISES;
+    // more than the purse (unsigned) shows ERR_NOT_ENOUGH_MONEY and answers nil; else the store,
+    // SEND_MAIL_MONEY_CHANGED, and the number 1 — StaticPopup.lua l.257 branches on that value.
     g.set(
         "SetSendMailMoney",
-        lua.create_function(|lua, copper: u32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send_money = copper;
+        lua.create_function(|lua, copper: Value| {
+            let n = crate::script::binding_abi::number_arg(
+                lua,
+                copper,
+                "Usage: SetSendMailMoney(amount)",
+            )? as u32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if u64::from(n) > model.money {
+                model.ui_errors.push("ERR_NOT_ENOUGH_MONEY");
+                return Ok(Value::Nil);
+            }
+            model.mail_send_money = n;
+            model
+                .pending_events
+                .push(("SEND_MAIL_MONEY_CHANGED".to_string(), Vec::new()));
             Ok(Value::Integer(1))
         })?,
     )?;
 
+    // GetSendMailMoney() / GetSendMailCOD() → the two amounts as stored (`0x4ae150` / `0x4ae1c0`,
+    // one number each — `reference/1.12-shapes.tsv`): what the stock money kit's SEND_MAIL and
+    // SEND_MAIL_COD types display (1962).
+    g.set(
+        "GetSendMailMoney",
+        lua.create_function(|lua, ()| {
+            Ok(i64::from(
+                lua.app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .mail_send_money,
+            ))
+        })?,
+    )?;
+    g.set(
+        "GetSendMailCOD",
+        lua.create_function(|lua, ()| {
+            Ok(i64::from(
+                lua.app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .mail_send_cod,
+            ))
+        })?,
+    )?;
+
     // SetSendMailCOD(copper) — store the COD amount the app reads at send time (MailFrame.lua l.497).
+    // SetSendMailCOD(copper) — `0x4ae180` → `0x4adc70` (decision 1965): a non-number RAISES;
+    // without an attached item nothing happens at all — no store, no event, no message — and
+    // there is no affordability or sign check; 0 returns on every path.
     g.set(
         "SetSendMailCOD",
-        lua.create_function(|lua, copper: u32| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .mail_send_cod = copper;
+        lua.create_function(|lua, copper: Value| {
+            let n = crate::script::binding_abi::number_arg(
+                lua,
+                copper,
+                "Usage: SetSendMailCOD(amount)",
+            )? as u32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if model.mail_send_item.is_none() {
+                return Ok(());
+            }
+            model.mail_send_cod = n;
+            model
+                .pending_events
+                .push(("SEND_MAIL_COD_CHANGED".to_string(), Vec::new()));
             Ok(())
         })?,
     )?;
@@ -906,21 +965,33 @@ mod tests {
     #[test]
     fn send_folds_money_cod_and_returns_true_from_setmoney() {
         let mut s = UiScript::new().unwrap();
+        s.set_money(5_000);
         assert!(s.take_mail_send().is_none());
+        // The purse gate (1965): more than the purse answers nil and names the refusal.
+        assert!(s
+            .eval::<bool>("return SetSendMailMoney(9999) == nil")
+            .unwrap());
+        assert_eq!(s.take_ui_errors(), vec!["ERR_NOT_ENOUGH_MONEY"]);
         assert!(s
             .eval::<bool>("return SetSendMailMoney(1234) == 1")
             .unwrap());
+        // A COD with no attached item is completely silent: no store, no event (1965).
         s.run("SetSendMailCOD(50)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetSendMailCOD()").unwrap(), 0);
         s.run("SendMail('Jaina', 'Hi', 'body text')").unwrap();
         let req = s.take_mail_send().expect("a send was queued");
         assert_eq!(req.target, "Jaina");
         assert_eq!(req.subject, "Hi");
         assert_eq!(req.body, "body text");
-        assert_eq!((req.money, req.cod), (1234, 50));
+        assert_eq!((req.money, req.cod), (1234, 0));
         assert_eq!(req.item, None);
         assert!(s.take_mail_send().is_none(), "drained");
-        // GetSendMailPrice is the flat 30c.
         assert_eq!(s.eval::<i64>("return GetSendMailPrice()").unwrap(), 30);
+        assert!(
+            s.run("SetSendMailMoney(nil)").is_err(),
+            "a non-number raises"
+        );
+        assert!(s.run("SetSendMailCOD({})").is_err());
     }
 
     #[test]

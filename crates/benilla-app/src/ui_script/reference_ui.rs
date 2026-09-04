@@ -1525,69 +1525,9 @@ mod tests {
             ),
             (
                 "StaticPopup.xml",
-                "AcceptAreaSpiritHeal",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's Accept, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "CancelAreaSpiritHeal",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's Cancel, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "GetAreaSpiritHealerTime",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by AREA_SPIRIT_HEAL's OnShow, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "AcceptBattlefieldPort",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_BATTLEFIELD_ENTRY / CONFIRM_LEAVE_QUEUE, raised only by BattlefieldFrame.lua, which is not on the chain yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "BeginTrade",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by the TRADE dialog, which 1.12.1 can never show (wow-re `incoming-trade-request-law.md`: TRADE_REQUEST is signalled by nothing).",
-            ),
-            (
-                "StaticPopup.xml",
-                "CancelTrade",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by the TRADE dialog, which 1.12.1 can never show (wow-re `incoming-trade-request-law.md`: TRADE_REQUEST is signalled by nothing).",
-            ),
-            (
-                "StaticPopup.xml",
                 "ReplaceTradeEnchant",
                 "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
                  wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "CancelMeetingStoneRequest",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_LEAVE_QUEUE's meeting-stone arm, raised only by BattlefieldFrame.lua / the meeting-stone gossip, neither on the chain yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "CheckPetUntrainerDist",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_PET_UNLEARN's OnUpdate, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "ConfirmPetUnlearn",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by CONFIRM_PET_UNLEARN's Accept, an event this engine does not fire yet.",
-            ),
-            (
-                "StaticPopup.xml",
-                "GetInstanceBootTimeRemaining",
-                "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
-                 wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by INSTANCE_BOOT's OnShow, an event this engine does not fire yet.",
             ),
         ];
 
@@ -2147,6 +2087,25 @@ mod tests {
             stale.join("\n  ")
         );
     }
+    /// `text` with every whitespace run that precedes a `.` removed — a method chain rustfmt
+    /// broke across lines reads as one call again.
+    fn glue_chains(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut pending = String::new();
+        for c in text.chars() {
+            if c.is_whitespace() {
+                pending.push(c);
+            } else {
+                if c != '.' {
+                    out.push_str(&pending);
+                }
+                pending.clear();
+                out.push(c);
+            }
+        }
+        out.push_str(&pending);
+        out
+    }
 
     /// **A stock file listening for an event nothing produces is silent on both sides.**
     ///
@@ -2291,6 +2250,9 @@ mod tests {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    // rustfmt splits a long chain at its dots (`model\n.pending_events\n.push((`), so
+                    // the three shapes are matched with the whitespace before each `.` removed.
+                    let text = glue_chains(&text);
                     // The engine's deferred lane (`pending_events.push((name, args))`,
                     // `cursor.rs`) is a fire too — the pet grid pair rides it (1953).
                     const CALLS: [&str; 3] = [

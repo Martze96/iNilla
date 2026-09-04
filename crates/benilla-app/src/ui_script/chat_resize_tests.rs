@@ -18,7 +18,8 @@ fn chat_ui() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

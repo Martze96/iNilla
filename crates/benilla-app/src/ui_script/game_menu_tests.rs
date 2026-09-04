@@ -41,7 +41,8 @@ fn harness_with(extra: &[&str]) -> UiScript {
         // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
         // (decision 1734) — UIParent must already be there, as it is in the manifest.
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -562,7 +563,6 @@ fn escape_during_a_countdown_cancels_it_and_does_not_open_the_menu() {
 fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness_with(&[
-        "MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
@@ -614,7 +614,6 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
 fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness_with(&[
-        "MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
@@ -681,7 +680,6 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
             "UIParent.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
-            "MoneyFrame.xml",
             "GameTooltip.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
@@ -811,7 +809,6 @@ fn backpack() -> ContainerState {
 fn the_menu_rides_the_shared_era_window_scale() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with(&[
-        "MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",

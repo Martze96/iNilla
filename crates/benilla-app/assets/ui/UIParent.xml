@@ -75,6 +75,12 @@
                 this:RegisterEvent("CONFIRM_TALENT_WIPE")
                 this:RegisterEvent("CONFIRM_BINDER")
                 this:RegisterEvent("CONFIRM_SUMMON")
+                -- The dialog engine's verbs (1963): the feeds behind these exist now.
+                this:RegisterEvent("INSTANCE_BOOT_START")
+                this:RegisterEvent("INSTANCE_BOOT_STOP")
+                this:RegisterEvent("CONFIRM_PET_UNLEARN")
+                this:RegisterEvent("AREA_SPIRIT_HEALER_IN_RANGE")
+                this:RegisterEvent("AREA_SPIRIT_HEALER_OUT_OF_RANGE")
             </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
             <!-- The reference's own UIParent OnUpdate line (its UIParent.xml l.19): the floating
@@ -683,6 +689,30 @@
             end
             if ( event == "CONFIRM_SUMMON" ) then
                 StaticPopup_Show("CONFIRM_SUMMON")
+                return
+            end
+            -- ref UIParent.lua l.429-436 and l.525-546, verbatim (1963).
+            if ( event == "AREA_SPIRIT_HEALER_IN_RANGE" ) then
+                StaticPopup_Show("AREA_SPIRIT_HEAL")
+                return
+            end
+            if ( event == "AREA_SPIRIT_HEALER_OUT_OF_RANGE" ) then
+                StaticPopup_Hide("AREA_SPIRIT_HEAL")
+                return
+            end
+            if ( event == "INSTANCE_BOOT_START" ) then
+                StaticPopup_Show("INSTANCE_BOOT")
+                return
+            end
+            if ( event == "INSTANCE_BOOT_STOP" ) then
+                StaticPopup_Hide("INSTANCE_BOOT")
+                return
+            end
+            if ( event == "CONFIRM_PET_UNLEARN" ) then
+                local dialog = StaticPopup_Show("CONFIRM_PET_UNLEARN")
+                if ( dialog ) then
+                    MoneyFrame_Update(dialog:GetName().."MoneyFrame", arg1)
+                end
                 return
             end
             -- The ready-check popup's opener (decision 1549), ref UIParent.lua l.570-572. The

@@ -126,6 +126,7 @@ mod ui_cast;
 mod ui_char;
 mod ui_chat;
 mod ui_craft;
+mod ui_dialog_verbs;
 mod ui_dressup;
 mod ui_duel;
 mod ui_follow;
@@ -213,6 +214,7 @@ use ui_cast::UiCastPlugin;
 use ui_char::UiCharPlugin;
 use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
+use ui_dialog_verbs::UiDialogVerbsPlugin;
 use ui_duel::UiDuelPlugin;
 use ui_follow::UiFollowPlugin;
 use ui_gm_ticket::UiGmTicketPlugin;
@@ -636,6 +638,9 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // The dialog engine's own verbs (decision 1963): the pet trainer's question, the instance
+    // boot clock, the area spirit healer, the battleground queue, the meeting stone.
+    .add_plugins(UiDialogVerbsPlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.

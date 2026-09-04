@@ -49,14 +49,6 @@ use crate::ui_script::UiInput;
 /// The icon *order* is the client's own and it is not the numeric one — `_05, _06, _03, _04, _01,
 /// _02` as the amount climbs. What each of the six pieces of art depicts is not claimed here; the
 /// ladder is byte-derived and the art is whatever the reference picks at that step.
-const COIN_ICONS: [(u32, &str); 6] = [
-    (10, "Interface\\Icons\\INV_Misc_Coin_05"),
-    (100, "Interface\\Icons\\INV_Misc_Coin_06"),
-    (1_000, "Interface\\Icons\\INV_Misc_Coin_03"),
-    (10_000, "Interface\\Icons\\INV_Misc_Coin_04"),
-    (100_000, "Interface\\Icons\\INV_Misc_Coin_01"),
-    (u32::MAX, "Interface\\Icons\\INV_Misc_Coin_02"),
-];
 /// `item_template.bonding == BIND_WHEN_PICKED_UP` — the first of the two conjuncts that defer a
 /// loot take behind the LOOT_BIND confirm (VERIFIED vmangos `ItemPrototype.h`'s `ItemBondingType`:
 /// `NO_BIND` 0, `BIND_WHEN_PICKED_UP` 1, `BIND_WHEN_EQUIPPED` 2, `BIND_WHEN_USE` 3, `QUEST_ITEM` 4;
@@ -677,14 +669,10 @@ fn format_money(copper: u32) -> String {
     parts.join(" ")
 }
 
-/// The coin-pile icon for a copper amount — the reference's six-step ladder, see [`COIN_ICONS`].
-/// `u32::MAX` is the last step's bound, so the `map_or` fallback is unreachable and is there only
-/// because the table is data rather than a match.
+/// The coin-pile icon for a copper amount — the reference's six-step ladder, one table for the
+/// loot slot, `GetCoinIcon` and the money cursor's bitmap (`benilla_ui::script::coin_icon`, 1965).
 fn coin_icon(copper: u32) -> &'static str {
-    COIN_ICONS
-        .iter()
-        .find(|(below, _)| copper < *below)
-        .map_or(COIN_ICONS[5].1, |(_, icon)| icon)
+    benilla_ui::script::coin_icon(i64::from(copper))
 }
 
 /// Resolve one wire [`LootItem`] into the Lua-facing [`LootRow`]: the icon comes straight from the

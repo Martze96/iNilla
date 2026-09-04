@@ -133,7 +133,9 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
             | CursorPayload::PetAction(_)
             // Mode 10 (decision 1677) — a stabled pet refuses a bag/doll slot exactly as the
             // spell/action family does, and stays on the cursor for the stable window to take.
-            | CursorPayload::StablePet(_)),
+            | CursorPayload::StablePet(_)
+            // Mode 2 (1962) — coins have no slot to land in; a money frame's DropFunc takes them.
+            | CursorPayload::Money(_)),
         ) => {
             model.cursor = Some(other);
             false

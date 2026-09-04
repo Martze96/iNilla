@@ -774,6 +774,19 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
         }
+        ServerPacket::PetUnlearnConfirm { trainer, cost } => {
+            vec![SessionEvent::PetUnlearnConfirm { trainer, cost }]
+        }
+        ServerPacket::RaidGroupOnly { delay_ms, reason } => {
+            vec![SessionEvent::RaidGroupOnly { delay_ms, reason }]
+        }
+        ServerPacket::AreaSpiritHealerTime { healer, ms } => {
+            vec![SessionEvent::AreaSpiritHealerTime { healer, ms }]
+        }
+        ServerPacket::BattlefieldStatus(status) => vec![SessionEvent::BattlefieldStatus(status)],
+        ServerPacket::MeetingStoneSetQueue { area, status } => {
+            vec![SessionEvent::MeetingStoneSetQueue { area, status }]
+        }
         ServerPacket::PlayerBound { binder, area } => {
             vec![SessionEvent::PlayerBound { binder, area }]
         }

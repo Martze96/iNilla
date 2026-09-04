@@ -22,7 +22,8 @@ mod common;
 /// on its way to the chain, so the dependency is gone.
 const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     // The four money-entry frames come off the chain since 1882 — `MoneyInputFrameTemplate` and
     // the `MoneyInputFrame_*` verbs, replacing our own verbatim copy of both.
     r"Interface\FrameXML\MoneyInputFrame.lua",

@@ -15,7 +15,8 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// helpers (the two gold displays), so a load error in either fails here.
 const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     // The money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and the
     // `MoneyInputFrame_*` verbs the window's OnLoad calls. Seated straight after MoneyFrame.xml,
     // which is benilla.toc's own order.
@@ -29,7 +30,9 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
     "GameTooltip.xml",
-    "TradeFrame.xml",
+    // The stock slot updates go through ItemButtonTemplate.lua's SetItemButton* helpers (1966).
+    r"Interface\FrameXML\ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\TradeFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -123,7 +126,7 @@ fn trade_frame_loads_and_key_regions_exist() {
         "TradeRecipientItem7",
         "TradeFrameTradeButton",
         "TradeFrameCancelButton",
-        "TradePlayerInputMoneyGold", // our gold is now the editable input (P2)
+        "TradePlayerInputMoneyFrameGold", // our gold is now the editable input (P2)
         "TradeRecipientMoneyFrameCopperButton",
         "TradeHighlightPlayer",
         "TradeHighlightRecipientEnchant",
@@ -144,6 +147,16 @@ fn trade_show_opens_and_both_columns_populate() {
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
+    // The stock header reads `UnitName("NPC")` — the partner rides the shared "npc" booth the
+    // app's session feed points at them (1966).
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Thrall".into()),
+            ..Default::default()
+        }),
+    );
 
     s.fire_event("TRADE_SHOW", vec![]);
     assert!(
@@ -174,18 +187,18 @@ fn trade_show_opens_and_both_columns_populate() {
         "Silk Cloth"
     );
     assert!(
-        s.eval::<bool>("return TradePlayerItem1ItemButtonIcon:IsShown()")
+        s.eval::<bool>("return TradePlayerItem1ItemButtonIconTexture:IsShown()")
             .unwrap(),
         "a filled slot shows its icon"
     );
-    // An empty slot clears its name + hides its icon.
-    assert_eq!(
-        s.eval::<String>("return TradePlayerItem2Name:GetText()")
-            .unwrap(),
-        ""
-    );
+    // An empty slot clears its name (the stock's `SetText(nil)`) + hides its icon.
+    assert!(s
+        .eval::<Option<String>>("return TradePlayerItem2Name:GetText()")
+        .unwrap()
+        .unwrap_or_default()
+        .is_empty());
     assert!(!s
-        .eval::<bool>("return TradePlayerItem2ItemButtonIcon:IsShown()")
+        .eval::<bool>("return TradePlayerItem2ItemButtonIconTexture:IsShown()")
         .unwrap());
 
     // The partner's name paints from GetTradePartnerName().
@@ -224,7 +237,8 @@ fn enchant_slot_shows_the_not_traded_note() {
     assert_eq!(
         s.eval::<String>("return TradePlayerItem7Name:GetText()")
             .unwrap(),
-        "|cffffffffWill Not Be Traded|r"
+        // The stock wording, TRADEFRAME_NOT_MODIFIED_TEXT (ours had read "Will Not Be Traded").
+        "|cffffffffItem not yet modified|r"
     );
     assert!(s.take_errors().is_empty());
 }
@@ -313,6 +327,7 @@ fn trade_button_click_queues_accept() {
 fn player_money_input_reflects_then_offers() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.set_money(1_000_000); // SetTradeMoney is purse-gated (1965)
     load_ui(&s);
     s.set_trade(Some(state())); // state().player.gold == 12345 (1g 23s 45c)
     s.fire_event("TRADE_SHOW", vec![]);
@@ -321,7 +336,7 @@ fn player_money_input_reflects_then_offers() {
     for box_ in ["Gold", "Silver", "Copper"] {
         assert!(
             s.eval::<bool>(&format!(
-                "return getglobal('TradePlayerInputMoney{box_}') ~= nil"
+                "return getglobal('TradePlayerInputMoneyFrame{box_}') ~= nil"
             ))
             .unwrap(),
             "money box {box_} exists"
@@ -334,9 +349,9 @@ fn player_money_input_reflects_then_offers() {
     s.fire_event("PLAYER_TRADE_MONEY", vec![]);
     assert_eq!(
         s.eval::<(String, String, String)>(
-            "return TradePlayerInputMoneyGold:GetText(), \
-             TradePlayerInputMoneySilver:GetText(), \
-             TradePlayerInputMoneyCopper:GetText()"
+            "return TradePlayerInputMoneyFrameGold:GetText(), \
+             TradePlayerInputMoneyFrameSilver:GetText(), \
+             TradePlayerInputMoneyFrameCopper:GetText()"
         )
         .unwrap(),
         ("1".into(), "23".into(), "45".into()),
@@ -351,7 +366,8 @@ fn player_money_input_reflects_then_offers() {
     // A genuine keystroke offers the running total (bypass the affordability clamp — a bare harness
     // has no purse).
     s.run("GetMoney = function() return 100000000 end").unwrap();
-    s.run("TradePlayerInputMoneyGold:SetText('2')").unwrap();
+    s.run("TradePlayerInputMoneyFrameGold:SetText('2')")
+        .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.take_trade_money(),

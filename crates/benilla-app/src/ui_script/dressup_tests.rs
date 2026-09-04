@@ -49,7 +49,6 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\UIPanelTemplates.xml",
     "UiPanels.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
-    "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
 ];
 
@@ -60,7 +59,8 @@ const ROOM_UI: &[&str] = &[
 fn load_room(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -124,7 +124,6 @@ fn shown_paper_doll() -> UiScript {
         "Interface\\FrameXML\\UIPanelTemplates.xml",
         "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         super::test_ui::load_ui_strict(&s, file);

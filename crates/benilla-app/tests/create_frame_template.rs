@@ -41,7 +41,8 @@ const FILES: &[&str] = &[
     // `UnitFrame.lua` fails the same way (`TEXT(MANA)`). Structural dependencies are not the only
     // kind.
     "Interface\\FrameXML\\FadingFrame.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",

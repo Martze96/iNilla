@@ -18,7 +18,8 @@ fn load_popup_frames(s: &UiScript) {
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         // `StaticPopupDialogs` and the `PanelTemplates_*` family, both of which FriendsFrame.xml
         // reaches at LOAD (its tab row and its confirm dialogs).
         "UiPanels.xml",
@@ -484,7 +485,8 @@ fn load_pet_menu_frames(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

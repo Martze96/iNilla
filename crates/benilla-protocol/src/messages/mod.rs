@@ -21,6 +21,7 @@ mod area_trigger;
 mod attack;
 mod auction;
 mod bank;
+mod battlefield;
 mod binder;
 mod broadcast;
 mod channel;
@@ -38,6 +39,7 @@ mod instance;
 mod items;
 mod loot;
 mod mail;
+mod meeting_stone;
 mod mirror_timer;
 mod monster_move;
 mod movement;
@@ -82,6 +84,7 @@ pub use auction::{
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };
+pub use battlefield::{battlefield_port, BattlefieldStatus};
 pub use binder::{binder_activate, PlayerBound};
 pub use channel::{channel_notice, ChannelNoticeTail, ChannelNotify};
 pub use chat::{
@@ -109,8 +112,8 @@ pub use combat_log::{
     SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
 pub use death::{
-    reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
-    ResurrectRequestBody,
+    area_spirit_healer, reclaim_corpse, resurrect_response, spirit_healer_activate,
+    AreaSpiritHealerTime, CorpseLocation, ResurrectRequestBody,
 };
 pub use duel::{
     duel_accepted, duel_cancelled, read_duel_complete, read_duel_countdown, read_duel_requested,
@@ -145,7 +148,7 @@ pub use guild::{
     GUILD_RANKS_MIN_COUNT, GUILD_RANK_MAX_LENGTH, GUILD_RANK_RIGHT_ORDER,
 };
 pub use instance::{
-    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidInstanceMessage,
+    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidGroupOnly, RaidInstanceMessage,
     RaidInstanceWarning,
 };
 pub use items::{
@@ -164,6 +167,7 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
+pub use meeting_stone::{meeting_stone_leave, MeetingStoneSetQueue};
 pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
@@ -175,12 +179,12 @@ pub use page_text::page_text_query;
 pub use parse::parse_server;
 pub use pet::{
     pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
-    pet_stop_attack, PetActionEntry, PetMode, PetSpellCooldown, PetSpells, PET_ACTION_SLOTS,
-    PET_ACT_COMMAND, PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION,
-    PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS,
-    PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE,
-    PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST,
-    PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
+    pet_stop_attack, pet_unlearn, PetActionEntry, PetMode, PetSpellCooldown, PetSpells,
+    PetUnlearnConfirm, PET_ACTION_SLOTS, PET_ACT_COMMAND, PET_ACT_DISABLED, PET_ACT_ENABLED,
+    PET_ACT_PASSIVE, PET_ACT_REACTION, PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON, PET_COMMAND_ATTACK,
+    PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT,
+    PET_REACT_AGGRESSIVE, PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED,
+    PET_TYPE_SPELL_FIRST, PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
 };
 pub use petition::{
     offer_petition, petition_buy, petition_decline, petition_query, petition_rename,
@@ -215,9 +219,9 @@ pub use roster::{
 pub use skills::unlearn_skill;
 pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
-    read_friend_list, read_friend_status, read_ignore_list, read_who, who, FriendEntry,
-    FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS,
-    WHO_MAX_ZONES,
+    read_friend_list, read_friend_status, read_ignore_list, read_who, set_looking_for_group, who,
+    FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults,
+    WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{

@@ -128,17 +128,15 @@ UIParent.xml
 # `$parentNormalTexture`, 37x37) — which is what makes this the safest of the foundational swaps
 # rather than the widest: everything that inherits it asks for the same four names.
 Interface\FrameXML\ItemButtonTemplate.xml
-# The reference's money-frame kit: MoneyFrameTemplate/SmallMoneyFrameTemplate + MoneyTypeInfo
-# + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge) — and it must
-# come BEFORE UiPanels.xml, because the shared StaticPopup's coin row is a child frame declaring
-# `inherits="SmallMoneyFrameTemplate"`, which is resolved at LOAD (decision 1580). That is the
-# reference's own order too (FrameXML.toc: MoneyFrame.xml l.10, StaticPopup.xml l.23); this file
-# used to sit 140 lines lower, beside the other shared widget kits, which was only ever tenable
-# while nothing above it showed coins. AuctionFrame far below is laid out on it as well (its price
-# columns need a money TYPE, which the other kit has no notion of); our other eight coin displays
-# still run on the BenillaMoney_* slot kit (which now lives HERE), and this file's header is where
-# the two are reconciled.
-MoneyFrame.xml
+# ══ THE MONEY KIT — the reference's own, off the player's chain (1751; decision 1962) ══
+# MoneyFrame.lua + MoneyFrame.xml (two rows: the .xml sources no .lua): MoneyTypeInfo, the
+# MoneyFrame_* API, MoneyFrameTemplate / SmallMoneyFrameTemplate. Needs only Fonts, and must come
+# BEFORE the dialog engine (StaticPopup's coin row inherits SmallMoneyFrameTemplate at LOAD), which
+# is the reference's own order too (FrameXML.toc l.9-10 against l.23). The money CURSOR family the
+# kit's PickupFunc/DropFunc rows drive (PickupPlayerMoney, DropCursorMoney, GetCursorMoney, the
+# trade and send-mail pairs) is this engine's now. 1190's transcription is gone.
+Interface\FrameXML\MoneyFrame.lua
+Interface\FrameXML\MoneyFrame.xml
 # ══ THE MONEY INPUT KIT — the reference's own, off the player's chain (1751, window 23) ══
 # `MoneyInputFrameTemplate` and the ten `MoneyInputFrame_*` verbs out of `MoneyInputFrame.lua` —
 # the three-box gold/silver/copper editor a player types an amount into. Nothing of ours ever
@@ -312,10 +310,10 @@ Interface\FrameXML\PetFrame.xml
 # below TargetFrame.xml. Its fade chain needs UiPanels.xml's `UIFrameFade` family, far above, at
 # call time. `MAX_COMBO_POINTS` comes from TargetFrame.lua now, which is where 1.12 declares it.
 Interface\FrameXML\ComboFrame.xml
-# The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
-# transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
-# only Fonts.xml (CombatTextFont) + UIParent before it.
-CombatText.xml
+# The scrolling combat text is the reference's own `Blizzard_CombatText`, a LoadOnDemand addon
+# off the chain (its toc says so), loaded by the options window when SHOW_COMBAT_TEXT is "1" —
+# at login and on the switch, the reference's own two sites. No row here (decision 1964; 0578's
+# transcription is gone).
 # ── MEASUREMENT (1938): the options window at the reference's slot (FrameXML.toc l.21, before
 #    MainMenuBar l.34) with the four rows it inherits from. ──
 # The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
@@ -358,6 +356,10 @@ Interface\FrameXML\UIPanelTemplates.xml
 # the 37 dialogs UiPanels.xml carried and the seven free-standing dialog files (Death, Duel,
 # QuestShare, EnchantConfirm, BinderConfirm, ConfirmSummon, TalentWipeConfirm) are gone.
 Interface\FrameXML\StaticPopup.xml
+# The coin pickup dialog (the reference's toc l.24, right here): shift-click a purse coin and pick
+# how many. Pure gain with the money kit — nothing of ours ever answered `OpenCoinPickupFrame`
+# (decision 1962).
+Interface\FrameXML\CoinPickupFrame.xml
 
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
@@ -859,11 +861,15 @@ Interface\FrameXML\MerchantFrame.xml
 # beside MerchantFrame in the NPC-window cluster; its postage/enclosed/COD coin displays use
 # the BenillaMoney_* kit, which is defined in MoneyFrame.xml far above.
 MailFrame.xml
-# The player-to-player trade window (decision 0592 P1): the two-sided offer over the trade
-# API (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. Kept beside
-# MerchantFrame in the NPC-window cluster; its two gold displays use the BenillaMoney_* kit,
-# defined in MoneyFrame.xml far above.
-TradeFrame.xml
+# ══ THE TRADE WINDOW — the reference's own, off the player's chain (1751; decision 1966) ══
+# TradeFrame.xml + TradeFrame.lua: both columns' seven slots over the trade API
+# (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain, the recipient's
+# SmallMoneyFrame (TARGET_TRADE) and the player's MoneyInputFrame, the accept glows. Its slot
+# tooltips are this engine's SetTradePlayerItem / SetTradeTargetItem; its per-slot events
+# (TRADE_PLAYER_ITEM_CHANGED / TRADE_TARGET_ITEM_CHANGED) the feed's. Loaded here, after
+# ItemButtonTemplate, MoneyInputFrame, the money kit and the dialog engine it inherits from.
+# 0592's transcription is gone.
+Interface\FrameXML\TradeFrame.xml
 # ══ THE ITEM-TEXT READER — the reference's own, off the player's chain (1751, window 9) ══
 # `ItemTextFrame` and its page chrome, over the `ItemTextGet*` seam
 # (`benilla-ui/src/script/item_text.rs`) and `crate::ui_item_text`'s feed/drain. Letters (mail-made

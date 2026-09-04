@@ -24,7 +24,8 @@ const FILES: &[&str] = &[
     // so the window simply never opens. Our deleted copy carried the string as a local fallback.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     // `GetMaterialTextColors`, which the reference's own `ItemTextFrame_OnEvent` calls to pick the
     // page and title ink. 1.12 keeps it in UIParent.lua and ours does the same (1751 window 9).

@@ -11,7 +11,8 @@ fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -261,4 +262,57 @@ fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
         .eval::<bool>(r#"return StaticPopup_FindVisible("T_NOPE") == nil"#)
         .unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The dialog engine's verbs (decision 1963): the five UIParent arms the feeds behind them now
+/// reach — each verbatim from UIParent.lua, each raising a stock dialog whose Accept calls a
+/// binding this engine answers.
+#[test]
+fn the_verb_dialogs_open_from_their_events_and_call_their_verbs() {
+    use benilla_ui::script::ScriptValue;
+    let mut s = setup();
+    load_xml(&s, "UIParent.xml"); // the arms
+    s.set_money(50_000);
+    // The pet trainer's question: the dialog, its money frame at the cost, Accept → the confirm.
+    s.fire_event("CONFIRM_PET_UNLEARN", vec![ScriptValue::Int(12_345)]);
+    s.tick(0.0);
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1.which").unwrap(),
+        "CONFIRM_PET_UNLEARN"
+    );
+    assert_eq!(
+        s.eval::<f64>("return StaticPopup1MoneyFrame.staticMoney")
+            .unwrap(),
+        12_345.0
+    );
+    s.run("StaticPopup1Button1:Click()").unwrap();
+    assert_eq!(s.take_pet_unlearn_confirms(), 1);
+    // The instance boot: START shows, STOP hides.
+    s.set_instance_boot_secs(30);
+    s.fire_event("INSTANCE_BOOT_START", vec![]);
+    s.tick(0.0);
+    assert!(s
+        .eval::<bool>("return StaticPopup_Visible(\"INSTANCE_BOOT\") ~= nil")
+        .unwrap());
+    s.fire_event("INSTANCE_BOOT_STOP", vec![]);
+    s.tick(0.0);
+    assert!(!s
+        .eval::<bool>("return StaticPopup_Visible(\"INSTANCE_BOOT\") ~= nil")
+        .unwrap());
+    // The area spirit healer: in range shows, out of range hides; Accept queues the heal.
+    s.set_area_spirit_healer(true, 20);
+    s.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
+    s.tick(0.0);
+    assert!(s
+        .eval::<bool>("return StaticPopup_Visible(\"AREA_SPIRIT_HEAL\") ~= nil")
+        .unwrap());
+    s.run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AREA_SPIRIT_HEAL\"), 1)")
+        .unwrap();
+    assert_eq!(s.take_area_spirit_accepts(), 1);
+    s.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+    s.tick(0.0);
+    assert!(!s
+        .eval::<bool>("return StaticPopup_Visible(\"AREA_SPIRIT_HEAL\") ~= nil")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

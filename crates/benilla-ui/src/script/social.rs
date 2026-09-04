@@ -101,6 +101,9 @@ pub enum SocialRequest {
     /// `AddOrDelIgnore(name)` — `/ignore`'s toggle: ignore if not ignored, un-ignore if it is.
     /// The app decides which, because only it holds the list.
     ToggleIgnore(String),
+    /// `SetLookingForGroup(...)` committed a change: the slots as stored and the comment, for
+    /// `CMSG_SET_LOOKING_FOR_GROUP` (1961).
+    SetLookingForGroup { slots: [u32; 3], comment: String },
     /// `SetSelectedFriend(index)` — mirrored into the app so the next push agrees.
     SelectFriend(u32),
     /// `SetSelectedIgnore(index)`.
@@ -207,40 +210,98 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetLookingForGroup() → four values, the first the flag (1 | nil); SetLookingForGroup(flag):
-    // the LFG check box's pair (`0x4e95d0` / `0x4e96b0`, registered; the getter's arity of FOUR
-    // is `reference/1.12-shapes.tsv`'s, its other three values and both bodies uncarved — a
-    // wow-re orchestrator is out, and the stock FrameXML reads only the first). The flag is
-    // client-side until the wire is read: `SetLookingForGroup` writes it and sends nothing yet,
-    // which is also what both local emulators do with the packet (1959).
+    // The LFG pair, as the bytes define it (wow-re `lfg-set-get-law.md`, 1961 — which corrects
+    // 1959's flag): the stock 1.12.1 FrameXML never calls either (FriendsFrame.xml's two call
+    // sites sit inside its l.1212-1301 XML comment), so this is an addon surface.
+    //
+    // `GetLookingForGroup()` → FOUR values: the three slot NAMES — each nil for a slot word whose
+    // id maps to nothing, and the reference's own pack (below) leaves every slot word 0, so nil
+    // is the only value a name can take here — then the comment, always a string. Never a
+    // number, never `1|nil`.
     g.set(
         "GetLookingForGroup",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let flag = if model.looking_for_group {
-                Value::Integer(1)
-            } else {
-                Value::Nil
-            };
             Ok(mlua::MultiValue::from_vec(vec![
-                flag,
                 Value::Nil,
                 Value::Nil,
                 Value::Nil,
+                Value::String(lua.create_string(&model.lfg_comment)?),
             ]))
         })?,
     )?;
+    // `SetLookingForGroup(type1, entry1, type2, entry2, type3, entry3, comment)` → nothing. Up to
+    // three pairs, read at arguments 1/3/5 and 2/4/6; the loop ENDS (it does not skip a pair) on
+    // a non-number type, a type >= 6, or an entry at or past the per-type eligible count, and the
+    // word it stores is `(type << 24) & entry` — an AND where every consumer decodes an OR
+    // (`0x4e9713`), so the stored word is 0 for every admissible input. Which is why the
+    // eligible-count table is not modelled: with the pack as it is, no admissible pair can store
+    // anything but 0, and an inadmissible one ends the loop leaving 0 — the slots never change.
+    // The comment is gated on argument 4 being a number or a string (`lua_isstring(L, 4)`) and
+    // read from argument 7 (`lua_tostring(L, 7)`, nil for an absent one); both immediates raw.
+    // The commit stores what changed and sends `CMSG_SET_LOOKING_FOR_GROUP` only then — so only a
+    // changed comment ever sends. `SStrCopy(…, 0x80)`: the comment keeps 127 bytes.
     g.set(
         "SetLookingForGroup",
-        lua.create_function(|lua, flag: Value| {
-            let on = match flag {
-                Value::Nil | Value::Boolean(false) => false,
-                Value::Integer(i) => i != 0,
-                Value::Number(n) => n != 0.0,
-                _ => true,
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            let args: Vec<Value> = args.into_iter().collect();
+            let arg = |i: usize| args.get(i - 1).cloned().unwrap_or(Value::Nil);
+            let number = |v: &Value| match v {
+                Value::Integer(i) => Some(*i as f64),
+                Value::Number(n) => Some(*n),
+                Value::String(s) => s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()),
+                _ => None,
+            };
+            let mut slots = [0u32; 3];
+            for (slot, i) in slots.iter_mut().zip([1usize, 3, 5]) {
+                let Some(ty) = number(&arg(i)) else { break };
+                let ty = ty.trunc();
+                if !(0.0..6.0).contains(&ty) {
+                    break;
+                }
+                let entry = number(&arg(i + 1)).unwrap_or(0.0).trunc();
+                // `(type << 24) & entry`, the reference's own pack.
+                *slot = ((ty as u32) << 24) & (entry as i64 as u32);
+            }
+            let comment = match arg(4) {
+                Value::Integer(_) | Value::Number(_) | Value::String(_) => match arg(7) {
+                    Value::String(s) => Some(s.to_string_lossy()),
+                    Value::Integer(i) => Some(i.to_string()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                },
+                _ => None,
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.looking_for_group = on;
+            let mut changed = false;
+            if model.lfg_slots != slots {
+                model.lfg_slots = slots;
+                changed = true;
+            }
+            if let Some(comment) = comment {
+                let mut kept: String = comment
+                    .chars()
+                    .take_while({
+                        let mut n = 0usize;
+                        move |c| {
+                            n += c.len_utf8();
+                            n <= 127
+                        }
+                    })
+                    .collect();
+                kept.shrink_to_fit();
+                if model.lfg_comment != kept {
+                    model.lfg_comment = kept;
+                    changed = true;
+                }
+            }
+            if changed {
+                let slots = model.lfg_slots;
+                let comment = model.lfg_comment.clone();
+                model
+                    .social_requests
+                    .push(SocialRequest::SetLookingForGroup { slots, comment });
+            }
             Ok(())
         })?,
     )?;
@@ -464,28 +525,69 @@ fn clamp_index(index: i64, len: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::SocialRequest;
     use crate::script::UiScript;
 
-    /// The LFG pair (1959): the setter writes the flag, the getter answers it first of four —
-    /// the reference's arity — with nothing on the wire until the bodies are carved.
+    /// The LFG pair as the bytes define it (1961, correcting 1959): four string-or-nil returns,
+    /// the slots zeroed by the reference's own pack, the comment from argument 7 behind the gate
+    /// on argument 4, and the wire only on a change.
     #[test]
-    fn the_looking_for_group_flag_round_trips_with_the_references_arity() {
+    fn the_lfg_pair_stores_the_comment_and_sends_only_on_a_change() {
         let mut s = UiScript::new().unwrap();
         assert!(s
             .eval::<bool>("return select('#', GetLookingForGroup()) == 4")
             .unwrap());
         assert!(s
-            .eval::<bool>("return GetLookingForGroup() == nil")
+            .eval::<bool>(
+                "local a, b, c, d = GetLookingForGroup() return a == nil and b == nil and c == nil and d == \"\""
+            )
             .unwrap());
-        s.run("SetLookingForGroup(1)").unwrap();
-        assert_eq!(s.eval::<i64>("return (GetLookingForGroup())").unwrap(), 1);
-        s.run("SetLookingForGroup(nil)").unwrap();
-        assert!(s
-            .eval::<bool>("return GetLookingForGroup() == nil")
-            .unwrap());
+        // Three admissible pairs: every word packs to 0, nothing changed, nothing sent.
+        s.run("SetLookingForGroup(1, 3, 3, 12, 5, 0)").unwrap();
         assert!(
             s.take_social_requests().is_empty(),
-            "nothing queued for the wire"
+            "the AND pack stores zero"
         );
+        // A comment behind the gate: argument 4 is a number, argument 7 the text.
+        s.run(r#"SetLookingForGroup(1, 3, 3, 12, 5, 0, "LF2M UBRS")"#)
+            .unwrap();
+        assert_eq!(
+            s.take_social_requests(),
+            vec![SocialRequest::SetLookingForGroup {
+                slots: [0; 3],
+                comment: "LF2M UBRS".into()
+            }]
+        );
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap(),
+            "LF2M UBRS"
+        );
+        // The same comment again: no change, no send.
+        s.run(r#"SetLookingForGroup(1, 3, 3, 12, 5, 0, "LF2M UBRS")"#)
+            .unwrap();
+        assert!(s.take_social_requests().is_empty());
+        // Fewer than four arguments: the comment at 7 is never read.
+        s.run(r#"SetLookingForGroup(1, 3, nil, nil, nil, nil, "ignored")"#)
+            .unwrap();
+        assert!(s.take_social_requests().is_empty());
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap(),
+            "LF2M UBRS"
+        );
+        // 127 bytes kept of a longer comment (`SStrCopy` into the 0x80 buffer).
+        s.run(&format!(
+            r#"SetLookingForGroup(0, 0, 0, 0, 0, 0, "{}")"#,
+            "x".repeat(200)
+        ))
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return select(4, GetLookingForGroup())")
+                .unwrap()
+                .len(),
+            127
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 }

@@ -30,7 +30,8 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "UIParent.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\MainMenuBar.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
@@ -255,7 +256,7 @@ fn the_talent_button_appears_at_level_ten_and_the_row_closes_up_below_it() {
 /// single missing argument is invisible until someone hovers that one button.
 #[test]
 fn every_micro_button_hovers_with_its_reference_explanation() {
-    let mut s = harness_with(&["MoneyFrame.xml", "UIParent.xml", "GameTooltip.xml"]);
+    let mut s = harness_with(&["UIParent.xml"]);
     set_player_level(&mut s, 10);
     s.resolve();
 

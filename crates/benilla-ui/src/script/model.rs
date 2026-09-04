@@ -481,10 +481,12 @@ pub(crate) struct Model {
     /// Social intents (`AddFriend`/`RemoveFriend`/`SendWho`/…) queued since the app's last
     /// [`super::UiScript::take_social_requests`] drain — the outbound seam ([`social`]).
     pub(crate) social_requests: Vec<social::SocialRequest>,
-    /// `GetLookingForGroup`'s flag, written by `SetLookingForGroup` — the Who and Guild frames'
-    /// LFG check box. Client-side here; the wire (`CMSG_SET_LOOKING_FOR_GROUP`) waits on its
-    /// carve, and both local emulators ignore it anyway (1959).
-    pub(crate) looking_for_group: bool,
+    /// The client's three LFG slot words (`[0xbc70a0]`) and its comment (`[0xbc6e98]`, a
+    /// 0x80-byte buffer), the BSS `SetLookingForGroup` writes and `GetLookingForGroup` reads
+    /// back — never the server's (wow-re `lfg-set-get-law.md`, 1961). The slots are always zero
+    /// in the reference: see [`social`].
+    pub(crate) lfg_slots: [u32; 3],
+    pub(crate) lfg_comment: String,
     /// The guild snapshot the app pushes (roster, ranks, MOTD, info text — decision 1257):
     /// `GetNumGuildMembers`/`GetGuildRosterInfo`/`GuildControlGetRankFlags`/… read it
     /// ([`guild`]). Already display-resolved and already sorted + filtered, because the sort
@@ -795,6 +797,27 @@ pub(crate) struct Model {
     /// from OnUpdate and hides itself when it goes false; the binder question's twin, and the same
     /// range gate stands behind both (decision 1580).
     pub(crate) talent_master_pending: bool,
+    // ── The dialog engine's verbs (decision 1963; wow-re `staticpopup-dialog-bindings.md`) ──
+    /// `ConfirmPetUnlearn()` calls since the app's last drain — the pet trainer's twin of
+    /// [`Self::talent_wipe_confirms`]; the app holds the latched trainer and the money gate.
+    pub(crate) pet_unlearn_confirms: u32,
+    /// Whether the pet trainer's question is pending AND the trainer is in reach — what
+    /// `CheckPetUntrainerDist()` answers, pushed by the app each frame.
+    pub(crate) pet_untrainer_pending: bool,
+    /// `GetInstanceBootTimeRemaining()`'s answer in whole seconds, 0 when idle — the app derives
+    /// it from the `SMSG_RAID_GROUP_ONLY` deadline each frame.
+    pub(crate) instance_boot_secs: u32,
+    /// Whether a battleground spirit healer is the cached current-area healer (a non-zero
+    /// `[0xb4e330/334]`), and the seconds to its next wave (`[0xb4e338]`), both the app's.
+    pub(crate) area_spirit_healer_cached: bool,
+    pub(crate) area_spirit_secs: u32,
+    /// `AcceptAreaSpiritHeal()` calls since the last drain (each one `CMSG_AREA_SPIRIT_HEALER_QUEUE`
+    /// with the cached healer — the app holds the guid).
+    pub(crate) area_spirit_accepts: u32,
+    /// `AcceptBattlefieldPort(index, accept)` calls: the 1-based slot and the normalised answer.
+    pub(crate) battlefield_port_requests: Vec<(u8, bool)>,
+    /// `CancelMeetingStoneRequest()` calls since the last drain — the app gates on leadership.
+    pub(crate) meeting_stone_cancels: u32,
 
     /// The stance/shapeshift bar's form list (bar order) the app pushes — the
     /// `GetNumShapeshiftForms`/`GetShapeshiftFormInfo` family reads it ([`super::shapeshift`]).
@@ -1200,6 +1223,9 @@ pub(crate) struct Model {
     pub(crate) trade_accept: bool,
     pub(crate) trade_unaccept: bool,
     pub(crate) trade_close: bool,
+    /// `BeginTrade()` / `CancelTrade()` since the last drain (decision 1963).
+    pub(crate) trade_begin: bool,
+    pub(crate) trade_cancel: bool,
     pub(crate) trade_set_money: Option<u32>,
     /// Cursor-drop placements onto our trade slots: `(trade_id 1-based, bag, slot)` → the app resolves
     /// `(bag, slot)` → wire position → `CMSG_SET_TRADE_ITEM`. `trade_clear_items` are the 1-based ids
@@ -1674,7 +1700,8 @@ impl Model {
             reset_instance_asks: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
-            looking_for_group: false,
+            lfg_slots: [0; 3],
+            lfg_comment: String::new(),
             guild: guild::GuildState::default(),
             guild_control: guild::GuildRankEdit::default(),
             guild_requests: Vec::new(),
@@ -1747,6 +1774,14 @@ impl Model {
             talent_learns: Vec::new(),
             talent_wipe_confirms: 0,
             talent_master_pending: false,
+            pet_unlearn_confirms: 0,
+            pet_untrainer_pending: false,
+            instance_boot_secs: 0,
+            area_spirit_healer_cached: false,
+            area_spirit_secs: 0,
+            area_spirit_accepts: 0,
+            battlefield_port_requests: Vec::new(),
+            meeting_stone_cancels: 0,
             shapeshift_forms: Vec::new(),
             shapeshift_casts: Vec::new(),
             pet_bar: super::pet::PetBarState::default(),
@@ -1869,6 +1904,8 @@ impl Model {
             trade_accept: false,
             trade_unaccept: false,
             trade_close: false,
+            trade_begin: false,
+            trade_cancel: false,
             trade_set_money: None,
             trade_set_items: Vec::new(),
             trade_clear_items: Vec::new(),

@@ -76,7 +76,8 @@ fn setup() -> UiScript {
     // `UIPanelCloseButton`, which the loot window's four close buttons inherit.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
@@ -547,20 +548,21 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     // UiPanels.xml before GroupLootFrame.xml, mirroring the shipped manifest order
     // (`ui_script::load_default_ui`): the roll file's CONFIRM_LOOT_ROLL entry indexes
     // `StaticPopupDialogs`, and indexing a nil there aborts the WHOLE inline <Script> chunk —
     // taking every BenillaGroupLootFrame_* function down with it, not just the popup.
-    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `TOOLTIP_DEFAULT_COLOR`, which the chain's dropdown backdrops read in their OnLoad — the
     // dropdown kit rides in with the loot window now (1838), so this bespoke setup needs it too.
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "GameTooltip.xml");
     load_group_loot(&s);
 
@@ -626,7 +628,6 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_loot_rolls(rolls());
 

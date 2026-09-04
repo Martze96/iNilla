@@ -1174,7 +1174,8 @@ mod bind_confirm_tests {
         // reader that joins `assets/ui` cannot resolve one (1838, 1887, 1888).
         for file in [
             "Interface\\FrameXML\\Fonts.xml",
-            "MoneyFrame.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
             "UiPanels.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\BasicControls.xml",

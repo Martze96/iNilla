@@ -36,12 +36,23 @@ fn harness() -> UiScript {
 /// before it for the kit's TOOLTIP_DEFAULT_COLOR — the app's own order.
 fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
+    // A file loads ONCE, as in the client: the definer harnesses below load some of these ahead
+    // of this list to capture file-scope values, and a second load of the stock money kit's
+    // frames trips its own global-named update (`MoneyFrame_Update` writes the amount onto
+    // `getglobal(name)` — the first instance — while the second instance reads its own).
+    let loaded = |s: &UiScript, file: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return (BENILLA_TEST_LOADED or {{}})[{file:?}] == true"
+        ))
+        .unwrap_or(false)
+    };
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
         // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
         // exist by the time they are read, exactly as it does in the manifest (decision 1734).
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -64,6 +75,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
         // here is what made this kit break the moment a file it loads migrated (1751).
         // The dialect announces DROPPED subtrees as warnings, not errors — for the new file,
         // a warning is a silently-missing piece of chrome, so it fails there.
+        if loaded(&s, file) {
+            continue;
+        }
         if file == "OptionsFrame.xml" {
             super::test_ui::load_ui_strict(&s, file);
         } else {
@@ -680,15 +694,17 @@ fn audio_harness() -> UiScript {
     s
 }
 
-/// The Combat page's harness (decision 1134): the **real** `CombatText.xml` loaded ahead of the
-/// window, in the manifest's own order (it is file 59, OptionsFrame.xml file 281), so the rows
-/// capture the same file-scope defaults and the same `applyFunc` they capture in the client —
-/// nothing about the family is restated here. `UIParent.xml` comes first because CombatText's
-/// strings anchor to it.
+/// The Combat page's harness (decision 1134, 1964): the family's defaults are the window's own
+/// file-scope block (the reference's UIOptionsFrame.lua l.135-152), and the addon they drive is
+/// `Blizzard_CombatText` off the chain, loaded on demand by the master row's apply.
 fn combat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["UIParent.xml", "CombatText.xml"]);
+    load_definers(&s, &["UIParent.xml"]);
+    // The family's definers are the options window's own since 1964 (the reference's
+    // UIOptionsFrame.lua block); the addon itself is LoadOnDemand off the chain, seated so the
+    // master row's apply can load it the way the client does.
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_CombatText");
     harness_on(s)
 }
 
@@ -698,9 +714,12 @@ fn combat_harness() -> UiScript {
 /// exactly the ordering the real manifest guarantees.
 fn load_definers(s: &UiScript, files: &[&str]) {
     for file in files {
-        // Both stores: a definer can be the reference's own file now (BuffFrame.xml since 1751
-        // window 18), and `test_ui::load_ui` is the reader that speaks either.
         super::test_ui::load_ui(s, file);
+        // Remembered so `harness_on` loads each file once (see there).
+        s.run(&format!(
+            "BENILLA_TEST_LOADED = BENILLA_TEST_LOADED or {{}} BENILLA_TEST_LOADED[{file:?}] = true"
+        ))
+        .unwrap();
     }
 }
 
@@ -721,7 +740,8 @@ fn interface_harness() -> UiScript {
         &s,
         &[
             "Interface\\FrameXML\\Fonts.xml",
-            "MoneyFrame.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -796,7 +816,8 @@ fn chat_harness() -> UiScript {
         &s,
         &[
             "Interface\\FrameXML\\Fonts.xml",
-            "MoneyFrame.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -838,7 +859,8 @@ fn actionbars_harness() -> UiScript {
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
-            "MoneyFrame.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
             "GameTooltip.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
@@ -3150,6 +3172,9 @@ fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
     // What the saved chunk does, verbatim: assign over the file-scope default, then the event.
     s.run("SHOW_COMBAT_TEXT = \"1\"").unwrap();
     s.fire_event("VARIABLES_LOADED", vec![]);
+    // The walk loaded the addon (1964); a frame passes before any message can arrive, and the
+    // stock message placement reads the strings' screen positions, which that frame lays out.
+    s.resolve();
 
     s.fire_event(
         "COMBAT_TEXT_UPDATE",

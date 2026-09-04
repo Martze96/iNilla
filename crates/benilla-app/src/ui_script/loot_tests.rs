@@ -478,8 +478,6 @@ fn shipped_loot_pushed_to_center_by_merchant() {
         load_xml(&s, f);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     // Loot opens onto the empty left slot.
@@ -621,7 +619,6 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "Interface\\FrameXML\\UIPanelTemplates.xml",
         "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(&s, file);

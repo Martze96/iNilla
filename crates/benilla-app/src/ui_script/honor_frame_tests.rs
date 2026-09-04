@@ -369,7 +369,8 @@ fn shown_inspect_honor_page() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         // `TEXT`, the stock level line's formatter.
         "Interface\\FrameXML\\BasicControls.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",

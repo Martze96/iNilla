@@ -16,7 +16,8 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
@@ -392,7 +393,8 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

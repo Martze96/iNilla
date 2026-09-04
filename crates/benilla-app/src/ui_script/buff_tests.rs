@@ -30,10 +30,12 @@ fn harness() -> UiScript {
                                                     // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
                                                     // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
                                                     // does not, so a session without the tooltip loses the whole repaint.
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "GameTooltip.xml");
     // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");

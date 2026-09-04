@@ -488,6 +488,8 @@ mod tests {
             // the registrar's case, the server does not close the menu first.
             ("TalentWipeState", "rides the still-open gossip session"),
             ("BinderState", "rides the still-open gossip session"),
+            // The pet trainer's question (1963): the talent wipe's twin, reached the same way.
+            ("PetUnlearnState", "rides the still-open gossip session"),
         ];
 
         // The chain's own source is the authority on what is wired — not a hand-copied list here,

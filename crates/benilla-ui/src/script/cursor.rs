@@ -19,6 +19,7 @@ mod bag_verbs;
 mod bar;
 mod doll;
 mod drag;
+pub(crate) mod money;
 mod pet;
 
 pub(crate) use bar::place_action;
@@ -71,6 +72,18 @@ pub enum CursorPayload {
     /// this variant is what puts it back on the shared cursor, so a stable pet dropped on the world
     /// or another window clears through the same path as every other payload.
     StablePet(CursorStablePet),
+    /// Coins picked up off a money frame — **mode 2** (see [`CursorMoney`]).
+    Money(CursorMoney),
+}
+
+/// Copper held on the cursor — payload **mode 2**, the client's `[0xb4e2f0]` amount written by
+/// `0x494cc0` from `PickupPlayerMoney 0x48abc0` with `LOOTWINDOWCOINSOUND` (wow-re
+/// `cursor-dragdrop-payload.md` §1's payload table). The purse is never debited by the pickup:
+/// the stock `MoneyTypeInfo["PLAYER"]` shows `GetMoney() - GetCursorMoney() - …`, the subtraction
+/// being how the held coins leave the display while the money stays yours (1962).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorMoney {
+    pub copper: u32,
 }
 
 /// A vendor row held on the cursor — payload **mode 5**, set by `PickupMerchantItem 0x4fb760`.
@@ -342,6 +355,8 @@ pub(crate) fn clear_cursor(model: &mut Model) {
             | CursorPayload::Macro(_)
             | CursorPayload::PetAction(_)
             | CursorPayload::StablePet(_)
+            // Mode 2 — coins go back where they never left (the purse was not debited).
+            | CursorPayload::Money(_)
             // Mode 5 clears like every other non-item payload, and clearing it sends NO packet —
             // a vendor cursor abandoned on the world, on ESC, or by the window closing costs
             // nothing. `ClearCursor`'s own mode-5 arm is `0x49525f`.
@@ -678,6 +693,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(CursorPayload::StablePet(_)) => {
                     Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil))
                 }
+                // Mode 2 — coins (1962). Reported as nothing for the same reason: the money arm
+                // of `GetCursorInfo` is not carved, and `GetCursorMoney` is the reference's own
+                // way of asking. Joins the carve when it lands.
+                Some(CursorPayload::Money(_)) => {
+                    Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil))
+                }
                 // Mode 5 — the vendor grab. Reported as nothing, for the same reason and with a
                 // stronger warrant: **no registered binding in the 5875 image exposes mode 5 to
                 // Lua at all.** `CursorHasItem`, `CursorHasSpell`, `CursorHasMoney` and
@@ -735,6 +756,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     bag_verbs::install(lua)?;
     bar::install(lua)?;
     pet::install(lua)?;
+    money::install(lua)?;
 
     Ok(())
 }

@@ -27,7 +27,8 @@ const FILES: &[&str] = &[
     // `TEXT`.
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
     "UIParent.xml",

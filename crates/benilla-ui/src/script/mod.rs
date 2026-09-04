@@ -46,6 +46,7 @@ mod bank;
 mod bind_confirm;
 mod binder;
 mod binding_abi;
+mod dialog_verbs;
 // The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
 mod camera_view;
@@ -176,9 +177,10 @@ pub use container::{
     PetitionSlotView, RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::money::coin_icon;
 pub use cursor::{
-    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorPayload, CursorPetAction,
-    CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
+    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
@@ -605,6 +607,7 @@ impl UiScript {
         spellbook::install(&lua)?;
         macros::install(&lua)?;
         talent::install(&lua)?;
+        dialog_verbs::install(&lua)?;
         shapeshift::install(&lua)?;
         pet::install(&lua)?;
         gossip::install(&lua)?;

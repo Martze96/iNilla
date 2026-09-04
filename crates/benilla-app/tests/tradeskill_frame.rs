@@ -22,7 +22,8 @@ mod common;
 /// its guarded-global utilities) so a load error in EITHER window fails here.
 const FILES: &[&str] = &[
     "Interface\\FrameXML\\Fonts.xml",
-    "MoneyFrame.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",

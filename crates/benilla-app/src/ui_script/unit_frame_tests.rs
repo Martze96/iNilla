@@ -25,7 +25,8 @@ fn load_unit_frames(s: &UiScript) {
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(s, "MoneyFrame.xml");
+    load_xml(s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(s, "Interface\\FrameXML\\BasicControls.xml"); // `TEXT`, which UnitPopup.lua reads at file scope
@@ -646,7 +647,6 @@ fn shipped_target_frame_runs_the_level_law() {
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
-    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -1212,7 +1212,8 @@ fn the_party_art_paints_over_the_bars() {
     // files resolve it at LOAD (`CombatFeedback.lua` l.7-17, `UnitFrame.lua` l.1-6).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
