@@ -9,16 +9,10 @@ use benilla_ui::script::UiScript;
 /// Fonts (for any `inherits=`), then UIParent — the manifest's order.
 fn ui_parent() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    for file in ["Fonts.xml", "UIParent.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    // Through the chain-aware reader: this list names chain files now, and a
+    // reader that joins `assets/ui` cannot resolve one (1838, 1887, 1888).
+    for file in ["Interface\\FrameXML\\Fonts.xml", "UIParent.xml"] {
+        crate::ui_script::test_ui::load_ui(&s, file);
     }
     s.set_screen_size(1024.0, 768.0);
     s.run(
@@ -166,13 +160,8 @@ fn mouse_is_over_survives_a_frame_with_no_resolved_rect() {
 #[test]
 fn raid_class_colors_is_the_references_own_nine() {
     let mut s = UiScript::new().unwrap();
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    // RAID_CLASS_COLORS comes off the chain with the font registry since 1888.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     s.set_screen_size(1024.0, 768.0);
 
     // PaintChips-2.0's own line, verbatim in shape — the one that was raising.
@@ -225,13 +214,8 @@ fn raid_class_colors_is_the_references_own_nine() {
 #[test]
 fn the_font_path_globals_are_the_references_own_four() {
     let mut s = UiScript::new().unwrap();
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    // The four font-path globals come off the chain with the registry since 1888.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     s.set_screen_size(1024.0, 768.0);
 
     for name in [

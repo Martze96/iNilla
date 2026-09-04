@@ -35,7 +35,7 @@ use benilla_ui::script::{UiScript, UnitCombatStats, UnitState};
 /// `RESISTANCE_TOOLTIP_SUBTEXT` (`:184`/`:224`), `ARMOR` and `ARMOR_TOOLTIP` (`:236`/`:249`).
 const FILES: [&str; 12] = [
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml",
     // The reference's own since 1751 window 24 — `common::load_ui` speaks both stores.
     "Interface\\FrameXML\\ItemButtonTemplate.xml",

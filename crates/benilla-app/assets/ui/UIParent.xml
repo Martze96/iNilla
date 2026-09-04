@@ -215,6 +215,40 @@
         -- statements on the same event). `MultiActionBar_Update` is existence-guarded because the
         -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
         -- level and always installed. Decision 1500.
+        -- ── ITEM_QUALITY_COLORS (ref UIParent.lua l.65-72) ───────────────────────────────
+        -- Its reference home is THIS file. It lived in our own `Fonts.xml` until 1888 put
+        -- that file on the chain — the reference's `Fonts.xml` does not declare it, so the
+        -- table had to come back here or vanish. Every reader is below UIParent.xml in the
+        -- manifest (GameTooltip 169, UnitPopup 203, AuctionFrame 928; UnitPopup's is a
+        -- FILE-SCOPE read inside a table literal, which is the one that makes the order
+        -- load-bearing rather than incidental).
+        -- The item-quality palette — **built from the engine verb, exactly as the reference
+        -- builds it** (ref UIParent.lua l.65-72, verbatim shape; decision 1199):
+        --
+        --     ITEM_QUALITY_COLORS = { }
+        --     for i = -1, 6 do … = GetItemQualityColor(i) end
+        --
+        -- It used to be seven hand-typed rows here. They were CLOSE and not exact — 0.62 where
+        -- the client's byte is 0x9d/255 = 0.6157, 0.64/0.21/0.93 where Epic is
+        -- 0xa3/0x35/0xee — and they carried no `.hex`, which the reference's table has and
+        -- which addons splice straight into a chat link. `GetItemQualityColor` is now a real
+        -- engine binding over wow-5875-re RF-0055's byte-verified table, so the rounding and
+        -- the second source both go.
+        --
+        -- The loop starts at -1 like the reference's, and the -1 row is not a curiosity: it is the
+        -- colour a loot row wears while its item template is uncached, which is the value
+        -- `GetLootSlotInfo` answers there. `GetItemQualityColor`'s clamp is UNSIGNED, so -1 lands
+        -- on Common/white with 7-and-up (decision 1805, correcting 1199's "reads before the
+        -- array").
+        ITEM_QUALITY_COLORS = { }
+        for i = -1, 6 do
+            ITEM_QUALITY_COLORS[i] = { }
+            ITEM_QUALITY_COLORS[i].r,
+            ITEM_QUALITY_COLORS[i].g,
+            ITEM_QUALITY_COLORS[i].b,
+            ITEM_QUALITY_COLORS[i].hex = GetItemQualityColor(i)
+        end
+
         -- ── UIParentLoadAddOn (ref UIParent.lua l.638-647, and now our slot for it) ──────
         -- It lived in our own BasicControls.xml until 1881 migrated that file to the chain;
         -- the reference never put it there, so the move is back to where it belongs.
@@ -283,6 +317,16 @@
             if ( TalentFrame_Toggle ) then
                 TalentFrame_Toggle();
             end
+        end
+
+        -- ref UIParent.lua l.194-196, verbatim — the fifth squatter, and the smallest. Stock
+        -- `HelpFrame.xml` calls it when a GM survey is waiting (its l.1487), and its whole body is
+        -- `UIParentLoadAddOn("Blizzard_GMSurveyUI")` — a verb 1881 already moved here and an addon
+        -- that really is on the player's chain (patch-2.MPQ). So this is the reference's own
+        -- function, not a stand-in: 1889 needed it because the stock help window is on the chain
+        -- now and ours is gone.
+        function GMSurveyFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_GMSurveyUI")
         end
 
         -- ref UIParent.lua's own `ShowMacroFrame`, moved here from our MacroFrame.xml when 1848

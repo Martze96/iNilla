@@ -38,7 +38,13 @@
 
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
-Fonts.xml
+# ══ THE FONT REGISTRY — the reference's own, off the player's chain (1751, 1888) ══
+# All 51 `<Font>` objects, name for name, plus the colour codes, `CHAT_FONT_HEIGHTS`,
+# `MATERIAL_TEXT_COLOR_TABLE`, `MATERIAL_TITLETEXT_COLOR_TABLE` and `RAID_CLASS_COLORS`.
+# Ours was a transcription differing only in formatting (it inlined `<FontHeight>`), plus one
+# addition: `ITEM_QUALITY_COLORS`, whose reference home is `UIParent.lua` and which 1888 moved
+# to our UIParent.xml so it survives this swap.
+Interface\FrameXML\Fonts.xml
 
 # ══ THE STRINGS — the reference's own first line, seated second here (1848) ══
 # **Second, not first, and that is deliberate.** Manifest entry 0 is the FONT REGISTRY:
@@ -337,6 +343,19 @@ TalentWipeConfirm.xml
 # The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
 # consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
 Cooldown.xml
+# ══ THE ACTION-BUTTON REGIONS — the reference's own, off the player's chain (1751) ══
+# `ActionButtonTemplate`: the REGIONS-ONLY half of the reference's two-level split — icon, count,
+# hotkey, name, border, flash, cooldown and normal texture. It declares NO scripts and calls
+# nothing, so it needs no `.lua` beside it. The handler half is `ActionBarButtonTemplate`, which
+# ActionBar.xml still declares and which inherits this; those handlers stay ours until
+# `ActionButton.lua`'s 21 verbs migrate (we have 10 of them, under the reference's own names).
+#
+# Ours was a transcription of this exact file — the eight `$parent*` child names match to the
+# letter — so the swap is a deletion.
+#
+# **It must come BEFORE ActionBar.xml.** A template is registered by name and the later line
+# wins, so seated below it our transcription would take the name straight back.
+Interface\FrameXML\ActionButtonTemplate.xml
 ActionBar.xml
 # The four OPTIONAL extra bars (bottom left/right 61-72 / 49-60, vertical right/left
 # 25-36 / 37-48), all shipping hidden until the player ticks their row (decision 1500):
@@ -493,9 +512,16 @@ Interface\FrameXML\ColorPickerFrame.xml
 # WorldMapRaid1..40 with inherits=, so the virtual Frames have to be registered before it.
 WorldMapFrameTemplates.xml
 WorldMapFrame.xml
-# The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
-# the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
-CastingBar.xml
+# ══ THE CAST BAR — the reference's own, off the player's chain (1751) ══
+# `CastingBarFrame` + its Border/Flash/Spark/Text children, driven by the SPELLCAST_* events
+# `crate::ui_cast` fires (decision 0137 phase 1). Our `CastingBar.xml` was a transcription of this
+# very file under a different name — all five frame names identical — so the swap is a deletion.
+#
+# The file SOURCES ITS OWN LUA (`<Script file="CastingBarFrame.lua"/>` at its l.3), which is why
+# only the `.xml` is listed here and `every_chain_xml_brings_its_own_lua` is satisfied.
+#
+# It brings `CastingBarFrame_UpdatePosition`, which ours never had. Only needs Fonts before it.
+Interface\FrameXML\CastingBarFrame.xml
 # ══ THE MIRROR TIMERS — the reference's own, off the player's chain (1751, window 7) ══
 # `MirrorTimer1..3`, `MIRRORTIMER_NUMTIMERS`, `MirrorTimerColors` and the `MirrorTimer_Show` /
 # `MirrorTimerFrame_*` family out of `MirrorTimer.lua`. The breath/fatigue bars at top-centre,
@@ -1014,7 +1040,12 @@ ScriptLogFrame.xml
 # resolved at call time, so that pair could sit either way round). The one seat that is a REAL
 # requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
 # TemporaryEnchantFrame out of its own way, and that frame is declared there.
-HelpFrame.xml
+#
+# **The reference's own since 1889.** Ours was 1017 lines against the reference's 2088 — the
+# largest shortfall of any window we shipped — so this swap is mostly ARRIVAL, not replacement.
+# The file sources its own `HelpFrame.lua` (its l.3), so only the `.xml` is listed. Its one
+# named need, `GMSurveyFrame_LoadUI`, is now in UIParent.xml where the reference declares it.
+Interface\FrameXML\HelpFrame.xml
 # The cinematic frame: the ESC that skips a fly-by, and the SCREENSHOT chord it hands back. It
 # draws NOTHING — the letterbox moved to Bevy UI nodes in `crate::cinematic` (decision 1699),
 # because the lane this frame paints into is dark for the whole shot.

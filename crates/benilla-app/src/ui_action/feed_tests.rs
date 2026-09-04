@@ -419,7 +419,10 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
         script.set_screen_size(1024.0, 768.0);
         // The errors frame is the reference's own file since 1751 window 14, so this reads both
         // stores through the one loader that speaks them.
-        for file in ["Fonts.xml", "Interface\\FrameXML\\UIErrorsFrame.xml"] {
+        for file in [
+            "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\UIErrorsFrame.xml",
+        ] {
             crate::ui_script::load_ui_for_test(&script, file);
         }
     }

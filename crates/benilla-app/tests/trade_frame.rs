@@ -14,7 +14,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// MerchantFrame.xml rides along because TradeFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (the two gold displays), so a load error in either fails here.
 const FILES: [&str; 9] = [
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and the
     // `MoneyInputFrame_*` verbs the window's OnLoad calls. Seated straight after MoneyFrame.xml,

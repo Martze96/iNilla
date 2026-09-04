@@ -21,7 +21,7 @@ mod common;
 /// CraftFrame.xml rides along (it loads right after TradeSkillFrame.xml in the app and shares
 /// its guarded-global utilities) so a load error in EITHER window fails here.
 const FILES: [&str; 10] = [
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",

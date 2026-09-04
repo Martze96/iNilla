@@ -13,7 +13,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
 const FILES: [&str; 9] = [
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
     // the `MoneyInputFrame_*` verbs. Seated straight after MoneyFrame.xml, benilla.toc's order.

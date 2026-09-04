@@ -15,13 +15,14 @@ use super::test_ui::load_ui_strict as load_xml;
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     // The row right-click menu is the shared UnitPopup "FRIEND" menu, so the window's slice of
     // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "ScrollTemplates.xml");
     // The guild pane's frames inherit the reference's shared UIPanelButtonTemplate /

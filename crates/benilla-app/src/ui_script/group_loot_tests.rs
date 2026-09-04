@@ -70,8 +70,8 @@ fn setup() -> UiScript {
     // loader warns on a key with no global behind it rather than failing — which is exactly the
     // kind of warning `load_ui_no_warnings` is here to catch (decision 1838).
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS + GameFontNormalSmall
-                               // The loot window's slots inherit it — the same dependency the inspect window needed (1832).
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml"); // ITEM_QUALITY_COLORS + GameFontNormalSmall
+                                                    // The loot window's slots inherit it — the same dependency the inspect window needed (1832).
     load_xml(&s, r"Interface\FrameXML\ItemButtonTemplate.xml");
     // `UIPanelCloseButton`, which the loot window's four close buttons inherit.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -80,6 +80,7 @@ fn setup() -> UiScript {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers
     load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the in-flight icon fallback) —
                                    // buff_tests.rs's own load-order precedent for this same global.
     s
@@ -444,9 +445,12 @@ fn in_flight_roll_does_not_error_and_falls_back() {
 /// exactly how a roll dialog that shipped "green" reached the director showing a `?` icon and a
 /// blank name.
 ///
-/// The guarantee this pins is therefore not an ordering but a *repair*: whenever a roll's display
-/// identity changes under an open frame — the snapshot finally arriving, or a late item template —
-/// `UPDATE_LOOT_ROLL(rollID)` repaints it.
+/// What this pins now is the DEFECT, deliberately: a roll whose template lands after the frame is
+/// up keeps its `?`. Our retired frame repaired it from an `UPDATE_LOOT_ROLL(rollID)`; the stock
+/// frame has no such seam and never listened, so 1883 stopped firing an event the 1.12 client does
+/// not have. Decision 1838 carries the real fix — hold the roll until its template resolves, which
+/// is the reference's own invariant. This test goes green-to-red the day that lands, which is the
+/// point of writing it against the current behaviour rather than deleting it.
 #[test]
 fn a_roll_that_opens_before_its_snapshot_stays_blank() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -473,11 +477,12 @@ fn a_roll_that_opens_before_its_snapshot_stays_blank() {
 
     // ...and then the snapshot carrying it lands.
     s.set_loot_rolls(rolls());
-    s.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(7)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // **The repaint does not happen, and this is the migration's one real loss.** Our retired file
-    // split the paint out of `OnShow` precisely so `UPDATE_LOOT_ROLL` could re-enter it; the
+    // split the paint out of `OnShow` precisely so an `UPDATE_LOOT_ROLL` could re-enter it — an
+    // event the 1.12 client does not have, which 1883 stopped firing once the stock frame proved
+    // nothing listened for it. The
     // reference has no such seam, because its `GetLootRollItemInfo` reads live C state that is
     // already populated when `START_LOOT_ROLL` fires. Ours reads a pushed snapshot, and while
     // `feed_loot_rolls` does push it BEFORE firing, the item template can still be in flight.
@@ -506,9 +511,8 @@ fn a_roll_that_opens_before_its_snapshot_stays_blank() {
         }),
         "and no icon arrives either — same missing repaint, same one cause"
     );
-    // An update for a roll this frame does not hold still leaves it alone and still does not
+    // A snapshot naming a roll this frame does not hold still leaves it alone and still does not
     // error — the half of this test that survives the migration intact.
-    s.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(999)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<Option<String>>("return GroupLootFrame1Name:GetText()")
@@ -532,7 +536,7 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     // UiPanels.xml before GroupLootFrame.xml, mirroring the shipped manifest order
     // (`ui_script::load_default_ui`): the roll file's CONFIRM_LOOT_ROLL entry indexes

@@ -23,7 +23,7 @@ use benilla_ui::script::{
 const FILES: [&str; 13] = [
     // `PLAYER_LEVEL` and the rest of the strings the stock file formats through.
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     // `TEXT`.
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",

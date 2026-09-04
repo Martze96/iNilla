@@ -13,17 +13,18 @@ fn load_pet_bar(s: &UiScript) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
         // two template files its check boxes inherit through (1875).
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
@@ -363,17 +364,18 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     for file in [
         "MoneyFrame.xml",
         "UiPanels.xml",
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "UIParent.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
         // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
         // two template files its check boxes inherit through (1875).
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
@@ -654,7 +656,7 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 /// prerequisite for the managed stack — for `GetBindingText`, which renders the key.
 fn load_pet_bar_with_tooltip(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -662,6 +664,7 @@ fn load_pet_bar_with_tooltip(s: &UiScript) {
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own

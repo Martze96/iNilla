@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(toc.directive("Title"), Some("benilla"));
         assert_eq!(
             toc.files.first().map(String::as_str),
-            Some("Fonts.xml"),
+            Some("Interface\\FrameXML\\Fonts.xml"),
             "the font registry is the manifest's first entry — the loader splits there"
         );
     }

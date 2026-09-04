@@ -1482,9 +1482,12 @@
         does (decision 1636).
     -->
     <!-- **The reference's own two-level split, which ours used to conflate into one template.**
-         `ActionButtonTemplate` (ref ActionButtonTemplate.xml:3) is REGIONS ONLY and carries no
-         scripts at all; `ActionBarButtonTemplate` (ref ActionBarFrame.xml:4) inherits it and adds
-         the handler set. Addons rely on both halves being separately inheritable: `zBar.xml:7` is
+         `ActionButtonTemplate` is REGIONS ONLY and carries no scripts at all — and since 1887 it
+         is the reference's own, off the chain (`Interface\FrameXML\ActionButtonTemplate.xml`,
+         seated immediately above this file in benilla.toc, which the order REQUIRES: a template is
+         registered by name and the later line wins). `ActionBarButtonTemplate` below is the other
+         half (ref ActionBarFrame.xml:4); it inherits that one and adds the handler set, and stays
+         ours until `ActionButton.lua`'s verbs migrate. Addons rely on both halves being separately inheritable: `zBar.xml:7` is
          `<CheckButton name="zBarButtonTemplate" inherits="ActionBarButtonTemplate">` and then
          wires its OWN OnLoad, and its per-button code reads
          `getglobal(button:GetName().."NormalTexture")` — a derived name it only gets by inheriting
@@ -1493,66 +1496,6 @@
          published they got a bare frame, no art, no regions, and no error (1203's silent shape).
          `BenillaActionButtonTemplate` survives below as a pure alias so every one of our own
          `inherits=` sites is untouched. -->
-    <CheckButton name="ActionButtonTemplate" virtual="true">
-        <Size><AbsDimension x="36" y="36"/></Size>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentIcon"/>
-            </Layer>
-            <Layer level="ARTWORK">
-                <Texture name="$parentFlash" file="Interface\Buttons\UI-QuickslotRed" hidden="true"/>
-                <FontString name="$parentHotKey" inherits="NumberFontNormalSmallGray" justifyH="RIGHT">
-                    <Size><AbsDimension x="36" y="10"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-2" y="-2"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
-                    <Anchors>
-                        <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-                <!-- ref ActionButtonTemplate.xml's `$parentName` — the macro-name line along the
-                     button's bottom edge. `BenillaActionButton_Update` writes it from
-                     `GetActionText` on every update (a MACRO slot's macro name, nil — cleared —
-                     for any other kind); it is also part of the template's published contract, so
-                     an addon indexing `<button>Name` gets the region. -->
-                <FontString name="$parentName" inherits="GameFontHighlightSmallOutline">
-                    <Size><AbsDimension x="36" y="10"/></Size>
-                    <Anchors>
-                        <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-            </Layer>
-            <Layer level="OVERLAY">
-                <Texture name="$parentBorder" file="Interface\Buttons\UI-ActionButton-Border" hidden="true" alphaMode="ADD">
-                    <Size><AbsDimension x="62" y="62"/></Size>
-                    <Anchors>
-                        <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                    </Anchors>
-                </Texture>
-            </Layer>
-        </Layers>
-        <Frames>
-            <Cooldown name="$parentCooldown" hidden="true">
-                <Size><AbsDimension x="36" y="36"/></Size>
-                <Anchors>
-                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-                </Anchors>
-            </Cooldown>
-        </Frames>
-        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
-            <Size><AbsDimension x="66" y="66"/></Size>
-            <Anchors>
-                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-            </Anchors>
-        </NormalTexture>
-        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
-        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
-        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
-    </CheckButton>
-
-    <!-- The bar half: the reference's `ActionBarButtonTemplate`, regions inherited, handlers added. -->
     <CheckButton name="ActionBarButtonTemplate" inherits="ActionButtonTemplate" virtual="true">
         <Scripts>
             <OnEvent>ActionButton_OnEvent()</OnEvent>

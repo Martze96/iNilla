@@ -12,7 +12,7 @@ use super::test_ui::load_ui as load_xml;
 /// The full ChatFrame stack (fonts first, so the FontString's `inherits="ChatFontNormal"` resolves).
 fn chat_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // GameTooltip.xml + UIDropDownMenu.xml are real RUNTIME dependencies of the chat tabs since
     // decision 1589: a left click closes any open menu (`CloseDropDownMenus`, the reference's own
     // first move in `FCF_Tab_OnClick`) and a right click opens the window's options menu.
@@ -241,7 +241,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -978,7 +978,7 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

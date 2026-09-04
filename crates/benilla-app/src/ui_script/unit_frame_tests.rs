@@ -19,7 +19,7 @@ fn load_unit_frames(s: &UiScript) {
     // drawing an empty plate. Hand-setting the union of those is a second copy of the reference's
     // own file; naming the file is the only version that cannot drift. (`DEAD` is l.898 of it.)
     load_xml(s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(s, "Fonts.xml");
+    load_xml(s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(s, "UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
     // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
@@ -1198,18 +1198,20 @@ fn the_party_art_paints_over_the_bars() {
     // GlobalStrings first, for the same reason `load_unit_frames` names it — the stock unit-frame
     // files resolve it at LOAD (`CombatFeedback.lua` l.7-17, `UnitFrame.lua` l.1-6).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    // Before UnitPopup: that file reads ITEM_QUALITY_COLORS at FILE SCOPE and its
+    // declarer is UIParent (ref UIParent.lua:65) since 1888.
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "UnitPopup.xml");
     // The reference's own kit, in the manifest's order. `UIParent.xml` is not decoration here:
     // `RaiseFrameLevel`/`LowerFrameLevel` live in it (ref UIParent.lua l.1890-1896) and stock
     // `TargetofTargetTextureFrame`'s OnLoad calls one of them.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");

@@ -26,10 +26,10 @@ fn harness() -> UiScript {
     // under a timed aura. Our copy carried them as `X = X or "%d s"` fallbacks; the reference's
     // file formats them straight and `format(nil, …)` raises.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml"); // NORMAL/HIGHLIGHT_FONT_COLOR + the FontStrings' faces
-                               // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
-                               // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
-                               // does not, so a session without the tooltip loses the whole repaint.
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml"); // NORMAL/HIGHLIGHT_FONT_COLOR + the FontStrings' faces
+                                                    // `GameTooltip`, which the reference's BuffButton_Update indexes on EVERY repaint to ask
+                                                    // `IsOwned(this)` (BuffFrame.lua l.104) — not just on hover. Ours guarded it; the reference
+                                                    // does not, so a session without the tooltip loses the whole repaint.
     load_xml(&s, "GameTooltip.xml");
     // `SecondsToTimeAbbrev`, which 1.12 keeps in UIParent.lua and so do we since window 18.
     load_xml(&s, "MoneyFrame.xml");
@@ -38,6 +38,7 @@ fn harness() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "ActionBar.xml"); // BENILLA_FALLBACK_ICON (the unknown-icon fallback)
                                    // The timer switch, PLANTED ON — not the shipped value. 1.12 declares it in
                                    // UIOptionsFrame.lua (default "0"); we have no counterpart to that file, so it lives with the

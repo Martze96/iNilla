@@ -27,7 +27,7 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// the manifest seats it. So this list carries the chain pair and the loader below has to be able
 /// to READ a chain entry, which a disk-only provider under `assets/ui` cannot.
 const FILES: [&str; 7] = [
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",

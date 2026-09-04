@@ -86,7 +86,7 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
 #[test]
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -119,13 +119,14 @@ fn shipped_spellbook_loads_clean() {
 fn shipped_spellbook_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "ActionBar.xml");
     // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
     // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
@@ -222,7 +223,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -301,7 +302,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
 fn shipped_spellbook_empty_slot_draws_only_the_background() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(640.0, 700.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -338,7 +339,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
 #[test]
 fn set_checked_uses_blizzard_bool_coercion() {
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "SpellBookFrame.xml");
     for (arg, want) in [
         ("1", true),
@@ -408,7 +409,7 @@ fn pet_book() -> benilla_ui::script::PetBookState {
 fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -664,7 +665,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     );
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",
@@ -682,6 +683,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
         // The icon chooser's scroll frame inherits `ClassTrainerListScrollFrameTemplate`.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
         "MicroMenu.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own

@@ -39,7 +39,7 @@ fn bake_strings(s: &UiScript) {
 fn chat_with_menu() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",

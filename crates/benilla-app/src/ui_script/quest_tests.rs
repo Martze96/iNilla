@@ -17,7 +17,7 @@ use super::test_ui::load_ui as load_xml;
 fn questgiver_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -79,7 +79,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
 fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -159,7 +159,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
 fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -245,7 +245,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
 fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -311,7 +311,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
 fn greeting_goodbye_button_closes_the_window() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -355,7 +355,7 @@ fn greeting_goodbye_button_closes_the_window() {
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -470,7 +470,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
 fn write_on_still_fades_when_instant_text_is_off() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -534,7 +534,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
 fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -600,7 +600,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
 fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -687,7 +687,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
 fn reward_rows_preview_and_post_without_selecting_the_choice() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");

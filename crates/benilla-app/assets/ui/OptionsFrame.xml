@@ -240,6 +240,39 @@
         -- reference at typical resolutions reads nearer two-thirds.
         ERA_WINDOW_SCALE = 0.78
 
+        -- ── UpdateNameplates (ref UIOptionsFrame.lua l.768-780, verbatim) ────────────────────
+        -- Its reference home is `UIOptionsFrame.lua` and this file is our stand-in for that window
+        -- (0950/0992), so the function belongs here rather than beside its caller.
+        --
+        -- **Decision 1878 recorded this as "a missing ENGINE verb, and 1203 says build it or leave
+        -- it loudly absent", and named it the thing blocking the UIParent keystone. It is neither.**
+        -- It is FrameXML — `UIOptionsFrame.lua:768`, absent from wow-re's binding-shape table — and
+        -- every verb it calls is already ours: `ShowNameplates`/`HideNameplates`/
+        -- `ShowFriendNameplates`/`HideFriendNameplates` are the four CVar-backed bindings in
+        -- `script/cvars.rs`, all argc=0 arity=0, matching the reference's shapes.
+        --
+        -- `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` are `RegisterForSave` globals the reference drives
+        -- from the keybinding alone (1.12's own options UI has no nameplate row). Nil is a normal
+        -- state for them and the else-branches are the reference's own answer to it, so this needs
+        -- no seeding — which is why the whole thing is twelve lines rather than a build.
+        --
+        -- The reference's odd second arm is kept as it stands: on FRIENDNAMEPLATES_ON it calls
+        -- Show and then Hide, which is a no-op in the real client too. Transcribed, not corrected;
+        -- fixing a reference bug here would be inventing a difference.
+        function UpdateNameplates()
+            if ( NAMEPLATES_ON ) then
+                ShowNameplates()
+            else
+                HideNameplates()
+            end
+            if ( FRIENDNAMEPLATES_ON ) then
+                ShowFriendNameplates()
+                HideFriendNameplates()
+            else
+                HideFriendNameplates()
+            end
+        end
+
         function OptionsFrame_UpdateScale()
             -- The era panel is registered `checkFit = 1`: the panel manager also shrinks it to
             -- fit a small screen (UIPanelUpdateScaleForFit: min over width/height ratios

@@ -40,7 +40,7 @@ fn harness() -> UiScript {
     // GlobalStrings. Our deleted copy carried `X = X or "…"` fallbacks for a harness with no
     // chain; the reference's file has none, and it should not.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT()`, which AutoFollowStatus_OnEvent puts its message through.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");

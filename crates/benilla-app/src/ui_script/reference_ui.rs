@@ -221,19 +221,7 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -356,19 +344,7 @@ mod tests {
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
 
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
@@ -532,19 +508,7 @@ mod tests {
             }
             let mut s = UiScript::new().expect("VM");
             s.set_screen_size(1024.0, 768.0);
-            // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-            // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-            // into its label inside its own OnLoad. A manifest load with no player is a state the client
-            // never reaches (decision 1848).
-            s.set_unit(
-                "player",
-                Some(benilla_ui::script::UnitState {
-                    exists: true,
-                    name: Some("Probefour".into()),
-                    level: 60,
-                    ..Default::default()
-                }),
-            );
+            seat_a_player(&mut s);
             let base = super::super::manifest::load_default_ui(&s);
             assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
             s.resolve();
@@ -697,19 +661,7 @@ mod tests {
         // global our own FrameXML defines.
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
@@ -1028,6 +980,7 @@ mod tests {
             let loads = {
                 let mut probe = UiScript::new().expect("VM");
                 probe.set_screen_size(1024.0, 768.0);
+                seat_a_player(&mut probe);
                 let base = super::super::manifest::load_default_ui(&probe);
                 assert!(base.is_empty(), "the shipped manifest itself: {base:#?}");
                 probe.resolve();
@@ -1457,19 +1410,7 @@ mod tests {
 
         let mut s = UiScript::new().expect("VM");
         s.set_screen_size(1024.0, 768.0);
-        // The in-game UI materializes on world entry (1051), so a player always exists by the time the
-        // manifest loads — and the stock macro window's character tab formats `UnitName("player")`
-        // into its label inside its own OnLoad. A manifest load with no player is a state the client
-        // never reaches (decision 1848).
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probefour".into()),
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        seat_a_player(&mut s);
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
@@ -1687,7 +1628,7 @@ mod tests {
             "Interface/FrameXML/ContainerFrame.xml"
         ));
         assert!(!super::is_chain_entry("BagFrame.xml"));
-        assert!(!super::is_chain_entry("Fonts.xml"));
+        assert!(!super::is_chain_entry("UIParent.xml"));
     }
     /// Every global function and virtual template name a manifest entry declares.
     ///
@@ -2088,6 +2029,13 @@ mod tests {
                 "TextStatusBar.lua — a CVar change does not repaint the bar text",
             ),
             ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
+            (
+                "GMSURVEY_DISPLAY",
+                "HelpFrame.lua — the post-ticket survey. A real 1.12 event (fired at \
+                 `0x5e797b`, id 538) whose whole UI is the LoadOnDemand `Blizzard_GMSurveyUI`; \
+                 we have neither the producer nor the addon on the chain, and the ticket \
+                 flow works without it",
+            ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
             (
                 "PARTY_MEMBER_DISABLE",
@@ -2131,14 +2079,49 @@ mod tests {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    // Split so this file cannot match its own walker (see the sibling gate).
+                    const CALL: &str = concat!("fire_event", "(");
                     let mut from = 0;
-                    while let Some(i) = text[from..].find("fire_event(") {
-                        let at = from + i + "fire_event(".len();
+                    let mut fires_indirectly = false;
+                    while let Some(i) = text[from..].find(CALL) {
+                        let at = from + i + CALL.len();
                         from = at;
                         let rest = text[at..].trim_start();
+                        if !rest.starts_with('"') {
+                            // `fire_event(event, args)` — the name reached the call through a
+                            // variable, so adjacency cannot see it. `ui_cast.rs` does exactly
+                            // this: a `match edge` yields `("SPELLCAST_INTERRUPTED", vec![])` and
+                            // one call site fires whatever it produced. Treated below.
+                            fires_indirectly = true;
+                        }
                         if let Some(body) = rest.strip_prefix('"') {
                             if let Some(end) = body.find('"') {
                                 fired.insert(body[..end].to_string());
+                            }
+                        }
+                    }
+                    if fires_indirectly {
+                        // The name reached `fire_event` through a variable. Rather than guess, we
+                        // match the SHAPE that produced it: `("EVENT_NAME", vec!` — a tuple whose
+                        // second element is the argument vector, which is how `ui_cast.rs`'s
+                        // `match edge` hands a name and its args to one shared call site.
+                        //
+                        // The first attempt at this counted EVERY SCREAMING_CASE literal in such a
+                        // file, and that swept up eighteen names off the UNPRODUCED list — a gate
+                        // made vacuous by its own conservatism, which is the failure mode this
+                        // file has now hit twice. The shape is the discipline: it admits the
+                        // literals that are actually being fired and nothing else.
+                        const SHAPE: &str = "\", vec!";
+                        for (i, _) in text.match_indices(SHAPE) {
+                            let before = &text[..i];
+                            let Some(q) = before.rfind('"') else { continue };
+                            let lit = &before[q + 1..];
+                            if !lit.is_empty()
+                                && lit.chars().all(|c| {
+                                    c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()
+                                })
+                            {
+                                fired.insert(lit.to_string());
                             }
                         }
                     }
@@ -2191,6 +2174,129 @@ mod tests {
             fixed.is_empty(),
             "these now HAVE a producer — take them out of UNPRODUCED so the list keeps meaning \
              what it says:\n  {fixed:?}"
+        );
+    }
+
+    /// Seat a player before a probe loads the manifest — **what the live client always does.**
+    ///
+    /// The in-game UI materializes on world entry (1051), so a player always exists by the time
+    /// the manifest loads, and the stock macro window's character tab formats `UnitName("player")`
+    /// into its label inside its own `OnLoad`. A manifest load with no player is a state the
+    /// client never reaches (decision 1848) — and one a probe reaches by default, where it raises
+    /// `bad argument #2 to 'format'` and looks exactly like a load failure.
+    ///
+    /// This was five identical copies of the same six-line comment and the same seven-line seed,
+    /// inlined at every probe in this file — and the sixth, `chain_gap_report`'s, did not have it,
+    /// which is why that instrument could not run at all. One function is harder to forget.
+    fn seat_a_player(s: &mut UiScript) {
+        s.set_unit(
+            "player",
+            Some(benilla_ui::script::UnitState {
+                exists: true,
+                name: Some("Probefour".into()),
+                level: 60,
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// **Every event benilla fires must be an event the 1.12 client HAS** — the 1818/1819 seam,
+    /// in the one direction nothing was checking.
+    ///
+    /// [`every_event_a_chain_file_registers_has_a_producer`] runs the other way: a stock file
+    /// listens, does anything fire it. This asks whether a name we fire is a 1.12 name at all.
+    /// Firing a Classic Era event is invisible to every other gate — our own halves agree with
+    /// each other, the name is spelled correctly, and Lua that never registers it never notices.
+    /// That is exactly how `UNIT_POWER_UPDATE` (1819) survived, and how the three this test found
+    /// on its first run did: `BAG_UPDATE_DELAYED` (Era-only; 1.12 has `BAG_UPDATE` alone),
+    /// `LOOT_UPDATE` and `UPDATE_LOOT_ROLL` (both invented here), each fired into a room with
+    /// nobody in it. Decision 1883.
+    ///
+    /// **The oracle is the reference binary's own string table.** An event the client can
+    /// dispatch is a NUL-terminated string in `WoW.exe`; a name that is not there is a name the
+    /// client cannot dispatch. That is a stronger oracle than the FrameXML corpus, which only
+    /// shows what the stock UI happens to consume — and which this repo has only four of the
+    /// LoadOnDemand addons of, so a corpus grep alone flags real events like `CRAFT_UPDATE`.
+    ///
+    /// Test files are skipped: `script/tests/events.rs` fires synthetic names (`E3`) at the
+    /// dispatcher on purpose, and a test's own scaffolding is not a product surface.
+    #[test]
+    fn every_event_we_fire_is_an_event_the_reference_has() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let exe = data.parent().expect("install root").join("WoW.exe");
+        let Ok(bytes) = std::fs::read(&exe) else {
+            eprintln!("skipping: no WoW.exe at {exe:?}");
+            return;
+        };
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("crates");
+        let mut fired: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                // A test's own synthetic events are not a surface we ship.
+                if p.to_string_lossy().contains("test") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                // Split so this file cannot match its OWN walker — it did on the first run, and
+                // reported four fragments of this function as ghost events.
+                const CALL: &str = concat!("fire_event", "(");
+                let mut from = 0;
+                while let Some(i) = text[from..].find(CALL) {
+                    let at = from + i + CALL.len();
+                    from = at;
+                    let rest = text[at..].trim_start();
+                    if let Some(body) = rest.strip_prefix('"') {
+                        if let Some(end) = body.find('"') {
+                            fired
+                                .entry(body[..end].to_string())
+                                .or_insert_with(|| p.display().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fired.len() > 100,
+            "the walker found only {} fired events — it stopped matching, which would make this \
+             gate silently vacuous",
+            fired.len()
+        );
+
+        let ghosts: Vec<String> = fired
+            .iter()
+            // A `BENILLA_`-prefixed name declares itself ours and cannot be mistaken for a 1.12
+            // one — the same discipline `BENILLA_ALLOW_OWN_UI` uses. `BENILLA_QUEST_PROGRESS` is
+            // the live example: an engine event our quest log registers, which exists because the
+            // shipped 1.12 auto-watch chain is broken at the `QUEST_WATCH_UPDATE` arg seam. The
+            // prefix is what makes an invented event honest instead of a mistake.
+            .filter(|(ev, _)| !ev.starts_with("BENILLA_"))
+            .filter(|(ev, _)| {
+                let needle: Vec<u8> = ev.bytes().chain(std::iter::once(0)).collect();
+                !bytes.windows(needle.len()).any(|w| w == needle)
+            })
+            .map(|(ev, at)| format!("{ev}  (fired from {at})"))
+            .collect();
+        assert!(
+            ghosts.is_empty(),
+            "benilla fires {} event(s) the 1.12 client does not have — a Classic Era name, or one \
+             invented here. Nothing in the stock UI can ever listen for these:\n  {}",
+            ghosts.len(),
+            ghosts.join("\n  ")
         );
     }
 }

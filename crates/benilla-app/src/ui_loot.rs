@@ -1111,11 +1111,10 @@ fn feed_loot(
                     script.fire_event("LOOT_SLOT_CLEARED", vec![ScriptValue::Int(i as i64 + 1)]);
                 }
             }
-            script.fire_event("LOOT_UPDATE", vec![]);
-            // The reference keeps the two apart: `LOOT_UPDATE` repaints the rows, while a changed
-            // candidate list refreshes the open dropdown in place without re-toggling it
-            // (`LootFrame_OnEvent`'s `UIDropDownMenu_Refresh(GroupLootDropDown)`,
-            // `LootFrame.lua:63`). Firing it only on a real change keeps a closed menu untouched.
+            // A changed candidate list refreshes the open dropdown in place without re-toggling
+            // it — `LootFrame_OnEvent`'s `UIDropDownMenu_Refresh(GroupLootDropDown)`, which the
+            // reference hangs off `UPDATE_MASTER_LOOT_LIST` (`LootFrame.lua:62-64`). Firing it
+            // only on a real change keeps a closed menu untouched.
             if before.master_candidates != after.master_candidates {
                 script.fire_event("UPDATE_MASTER_LOOT_LIST", vec![]);
             }

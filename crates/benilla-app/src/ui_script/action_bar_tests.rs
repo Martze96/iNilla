@@ -14,28 +14,16 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
 fn shipped_action_bar_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
-        if file == "ActionBar.xml" {
-            assert_eq!(
-                report.frames, 59,
-                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
+    super::test_ui::load_ui(&s, "Cooldown.xml");
+    // `load_ui` returns the same `report.frames` the disk reader asserted on, so this
+    // count is the one that always stood here — moved, not re-derived.
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    let frames = super::test_ui::load_ui(&s, "ActionBar.xml");
+    assert_eq!(
+        frames, 59,
+        "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
                  + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223) — and NO ReputationWatchBar: its three frames went home to the reference's own ReputationFrame.xml with 1875"
-            );
-        }
-    }
+    );
 
     // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
     // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
@@ -43,7 +31,7 @@ fn shipped_action_bar_drives_end_to_end() {
     // or the tick raises on its first event.
     // In manifest order: the fonts its check-box labels colour from, the panel templates those
     // boxes inherit through, then the pane.
-    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
@@ -161,21 +149,9 @@ fn shipped_action_bar_drives_end_to_end() {
 }
 
 fn load_action_bar(s: &UiScript) {
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
-    }
+    super::test_ui::load_ui(s, "Cooldown.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(s, "ActionBar.xml");
 
     // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
     // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
@@ -183,7 +159,7 @@ fn load_action_bar(s: &UiScript) {
     // or the tick raises on its first event.
     // In manifest order: the fonts its check-box labels colour from, the panel templates those
     // boxes inherit through, then the pane.
-    super::test_ui::load_ui(s, "Fonts.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Fonts.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.lua");
     super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
@@ -802,6 +778,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     for file in BAG_UI {
         let frames = load_ui(&s, file);
         if *file == "Cooldown.xml" {
+            load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
             load_ui(&s, "ActionBar.xml");
         }
         if *file == "Interface\\FrameXML\\MainMenuBarBagButtons.xml" {
@@ -1298,9 +1275,10 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
@@ -1430,17 +1408,9 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
 fn bonus_bar_slides_up_with_sound_and_down_without() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "ActionBar.xml");
 
     // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
     // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
@@ -1448,7 +1418,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // or the tick raises on its first event.
     // In manifest order: the fonts its check-box labels colour from, the panel templates those
     // boxes inherit through, then the pane.
-    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
@@ -1621,17 +1591,9 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
 fn bonus_bar_turnaround_continues_from_position() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "ActionBar.xml");
 
     // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
     // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
@@ -1639,7 +1601,7 @@ fn bonus_bar_turnaround_continues_from_position() {
     // or the tick raises on its first event.
     // In manifest order: the fonts its check-box labels colour from, the panel templates those
     // boxes inherit through, then the pane.
-    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
@@ -1688,17 +1650,9 @@ fn bonus_bar_turnaround_continues_from_position() {
 fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-    }
+    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
+    super::test_ui::load_ui(&s, "ActionBar.xml");
 
     // `ExhaustionTick_Update` indexes `ReputationWatchBar` UNGUARDED — the reference's own code,
     // safe there because `ReputationFrame.xml` is always loaded and always declares the bar. Since
@@ -1706,7 +1660,7 @@ fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     // or the tick raises on its first event.
     // In manifest order: the fonts its check-box labels colour from, the panel templates those
     // boxes inherit through, then the pane.
-    super::test_ui::load_ui(&s, "Fonts.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");

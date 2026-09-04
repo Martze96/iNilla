@@ -25,7 +25,7 @@ fn harness() -> UiScript {
     // the player's own strings it draws the KEY, which is exactly what a `text=` attribute does
     // with an unknown name.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `SecondsToTime`, which the reference's `QuestTimerFrame_Update` formats every row with, and
     // `UIParent_ManageFramePositions`, which its OnShow/OnHide call.
     load_xml(&s, "UIParent.xml");

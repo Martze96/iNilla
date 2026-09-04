@@ -17,11 +17,12 @@
 //! announcement lines into the chat window once their names resolve. [`drain_loot_rolls`] pulls the
 //! `RollOnLoot` votes back out as [`ClientCommand::LootRoll`].
 //!
-//! ## `UPDATE_LOOT_ROLL` — why a snapshot seam needs an event the real client doesn't have
+//! ## The late item template, and the `?` that outlives it
 //!
-//! The reference's `GetLootRollItemInfo` reads live C state off the roll node, so its
-//! `GroupLootFrame_OnShow` can paint once and be done. Ours reads a **pushed snapshot**, and a
-//! snapshot is always at least one step behind the thing that made it change — twice over:
+//! The reference's `GetLootRollItemInfo` reads live C state off the roll node, so by the time
+//! `START_LOOT_ROLL` fires there is something to paint and `GroupLootFrame_OnShow` can paint once
+//! and be done. Ours reads a **pushed snapshot**, and a snapshot is at least one step behind the
+//! thing that changed it — twice over:
 //!
 //! 1. A roll is added to [`LootRolls::active`] and to `opened` in the same [`LootRolls::start`]
 //!    call, so the *first* snapshot that contains a roll is built in the same pass that announces
@@ -30,12 +31,20 @@
 //!    `None` until the query lands, which is typically several frames after the roll opens.
 //!
 //! (1) is fixed by ordering — the push precedes the events here, as it does in [`crate::ui_loot`].
-//! (2) cannot be, so `UPDATE_LOOT_ROLL(rollID)` fires whenever an open roll's *display identity*
-//! ([`display_identity`]) changes underneath a frame, and the frame repaints. Ordering alone would
-//! be a guarantee resting on system order in a file far from the Lua that depends on it; with the
-//! repair in place the paint is correct either way, and ordering only decides whether there is a
-//! visible blank first. Both halves ship: (1) for the frame you actually see, (2) because it is what
-//! makes the documented in-flight fallback resolve instead of staying a `?` forever.
+//!
+//! **(2) is currently a live defect: a roll whose template lands late paints `?` and keeps it.**
+//! We used to fire an `UPDATE_LOOT_ROLL(rollID)` when an open roll's display identity changed, and
+//! our own `GroupLootFrame` re-entered its paint from it. That frame is the reference's now, and
+//! the reference has no such seam — so the repaint stopped when the window migrated, and the event
+//! went on being fired into a room with nobody in it. 1883 removed it: an event the 1.12 client
+//! does not have, which nothing listened for, was not fixing anything.
+//!
+//! **Decision 1838 already carries the fix**, and it is the reference's own invariant rather than a
+//! re-invented seam: hold the roll until its template resolves, so the snapshot is populated when
+//! the frame first paints, exactly as the reference's C state is. The cost is the roll timer — a
+//! roll announced late is a roll with less time on it — so it wants a deadline (announce anyway
+//! after N ms, with the `?`) rather than an unbounded wait. Not built yet; 1883 only removed the
+//! event that was standing in for it.
 //!
 //! ## Two client-side behaviours, and why
 //!
@@ -510,29 +519,6 @@ fn snapshot(
     LootRollsState { rolls: entries }
 }
 
-/// Everything about a roll a `GroupLootFrame` actually *paints* — deliberately **not**
-/// `time_left_ms`, which ticks every frame and would make "the snapshot changed" mean nothing.
-fn display_identity(e: &LootRollEntry) -> (&Option<String>, &Option<String>, Option<u32>, bool) {
-    (&e.name, &e.texture, e.quality, e.bind_on_pickup)
-}
-
-/// The rolls open in *both* snapshots whose display identity changed — i.e. the ones with a frame
-/// already up that is now painting the wrong thing. A roll only in `fresh` is newly opened and gets
-/// its `START_LOOT_ROLL`; one only in `last` is closed and gets its `CANCEL_LOOT_ROLL`.
-fn repainted(last: &LootRollsState, fresh: &LootRollsState) -> Vec<u32> {
-    fresh
-        .rolls
-        .iter()
-        .filter(|f| {
-            last.rolls
-                .iter()
-                .find(|l| l.roll_id == f.roll_id)
-                .is_some_and(|l| display_identity(l) != display_identity(f))
-        })
-        .map(|f| f.roll_id)
-        .collect()
-}
-
 /// Tick the open rolls, push them into the VM, fire the open/close events, and drain the queued
 /// announcement lines into chat.
 #[allow(clippy::too_many_arguments)]
@@ -580,7 +566,6 @@ fn feed_loot_rolls(
     // same `start()` call that queued `opened`, so pushing after would hand every fresh roll an
     // empty lookup. Same order as ui_loot's window feed, for the same reason.
     let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands, catalogs);
-    let changed = repainted(last, &fresh);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
         *last = fresh;
@@ -599,11 +584,6 @@ fn feed_loot_rolls(
     for roll_id in std::mem::take(&mut rolls.cancelled) {
         debug!("ui_loot_roll: roll {roll_id} cancelled");
         script.fire_event("CANCEL_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
-    }
-    // The late item template landing under a frame that is already up (see the module docs).
-    for roll_id in changed {
-        debug!("ui_loot_roll: roll {roll_id} display identity resolved");
-        script.fire_event("UPDATE_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
     }
 }
 
@@ -1007,56 +987,5 @@ mod tests {
         r.vote(1);
         r.start(start(0xBB, 0, 4306));
         assert_eq!(r.active[0].roll_id, 2);
-    }
-
-    fn entry(roll_id: u32, name: Option<&str>, time_left_ms: u32) -> LootRollEntry {
-        LootRollEntry {
-            roll_id,
-            name: name.map(Into::into),
-            texture: name.map(|_| "Interface\\Icons\\INV_Staff_12".into()),
-            quantity: 1,
-            quality: name.map(|_| 4),
-            bind_on_pickup: name.is_some(),
-            time_left_ms,
-            item_id: 17182,
-            // Lands with the name — one template answer fills both (decision 1059).
-            link: name.map(|n| crate::ui_items::item_link(17182, n, 4)),
-            random_property_id: 0,
-        }
-    }
-
-    fn state(entries: &[LootRollEntry]) -> LootRollsState {
-        LootRollsState {
-            rolls: entries.to_vec(),
-        }
-    }
-
-    /// `UPDATE_LOOT_ROLL` fires only when what a frame *paints* changed. The load-bearing half is
-    /// the negative: `time_left_ms` ticks every single frame, so counting it would fire the repaint
-    /// 60x a second and make the signal worthless (and the timer bar reads the model directly — it
-    /// has never needed an event).
-    #[test]
-    fn only_a_display_change_asks_for_a_repaint() {
-        let flight = state(&[entry(7, None, 60_000)]);
-        let landed = state(&[entry(7, Some("Staff of Jordan"), 59_000)]);
-
-        assert_eq!(repainted(&flight, &landed), vec![7], "the template landed");
-        assert_eq!(repainted(&landed, &landed), Vec::<u32>::new(), "unchanged");
-
-        // The timer alone, which is what changes on almost every frame.
-        let ticked = state(&[entry(7, Some("Staff of Jordan"), 58_000)]);
-        assert_eq!(
-            repainted(&landed, &ticked),
-            Vec::<u32>::new(),
-            "a ticking bar is not a repaint"
-        );
-
-        // Opened and closed rolls are the START/CANCEL events' business, not this one's.
-        let two = state(&[
-            entry(7, Some("Staff of Jordan"), 59_000),
-            entry(8, None, 60_000),
-        ]);
-        assert_eq!(repainted(&landed, &two), Vec::<u32>::new(), "8 is new");
-        assert_eq!(repainted(&two, &landed), Vec::<u32>::new(), "8 closed");
     }
 }

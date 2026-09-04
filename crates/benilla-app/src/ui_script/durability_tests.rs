@@ -15,7 +15,7 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -387,7 +387,7 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

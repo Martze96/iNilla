@@ -1067,16 +1067,14 @@ mod bind_confirm_tests {
     const F_OBJECT_ENTRY: u16 = 3;
 
     fn load_ui(s: &UiScript) {
-        for file in ["Fonts.xml", "MoneyFrame.xml", "UiPanels.xml"] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/ui")
-                    .join(file),
-            )
-            .unwrap();
-            let doc = benilla_ui::framexml::parse(&text).unwrap();
-            let report = benilla_ui::loader::load(s, &doc, &|_| None);
-            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        // Through the chain-aware reader: this list names chain files now, and a
+        // reader that joins `assets/ui` cannot resolve one (1838, 1887, 1888).
+        for file in [
+            "Interface\\FrameXML\\Fonts.xml",
+            "MoneyFrame.xml",
+            "UiPanels.xml",
+        ] {
+            crate::ui_script::load_ui_for_test(s, file);
         }
     }
 

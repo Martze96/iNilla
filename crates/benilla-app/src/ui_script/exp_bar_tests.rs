@@ -15,12 +15,13 @@ fn exp_bar_harness() -> UiScript {
     // is the reference's own since 1751, and a hand-rolled reader here would look for it in the
     // wrong store — and would leave its `<Script file="TextStatusBar.lua"/>` unresolved besides.
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own

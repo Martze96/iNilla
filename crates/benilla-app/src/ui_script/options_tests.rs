@@ -37,7 +37,7 @@ fn harness() -> UiScript {
 fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
         // exist by the time they are read, exactly as it does in the manifest (decision 1734).
         "UIParent.xml",
@@ -716,7 +716,7 @@ fn interface_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
+            "Interface\\FrameXML\\Fonts.xml",
             "MoneyFrame.xml",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -749,6 +749,7 @@ fn interface_harness() -> UiScript {
             // loaded it too.
             "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "ActionBar.xml",
             // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
             // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
@@ -779,7 +780,7 @@ fn chat_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
+            "Interface\\FrameXML\\Fonts.xml",
             "MoneyFrame.xml",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -805,9 +806,10 @@ fn actionbars_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
+            "Interface\\FrameXML\\Fonts.xml",
             "UIParent.xml",
             "Cooldown.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "ActionBar.xml",
             // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
             // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own

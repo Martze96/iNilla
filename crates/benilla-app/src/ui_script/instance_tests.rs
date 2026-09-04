@@ -87,7 +87,7 @@ fn the_self_menu_row_gates_on_the_binding_and_confirms_before_sending() {
     )
     .unwrap();
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",

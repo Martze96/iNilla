@@ -17,7 +17,7 @@ use super::test_ui::load_ui as load_xml;
 fn picker() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",

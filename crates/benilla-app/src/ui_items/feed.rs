@@ -1431,7 +1431,6 @@ fn diff_and_push(
             }
         }
         memory.pushed = fresh;
-        script.fire_event("BAG_UPDATE_DELAYED", vec![]);
         return true;
     }
     // A `BAG_CLOSED` with nothing else to say still went into the VM — two identical bags swapped

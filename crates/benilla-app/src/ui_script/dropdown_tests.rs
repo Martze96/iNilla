@@ -20,7 +20,7 @@ use super::test_ui::load_ui as load_xml;
 /// which GameTooltip.xml declares.
 fn load_dropdown_kit(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",

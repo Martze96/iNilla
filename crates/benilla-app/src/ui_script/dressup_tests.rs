@@ -49,7 +49,7 @@ const ROOM_UI: &[&str] = &[
 /// cannot.
 fn load_room(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",

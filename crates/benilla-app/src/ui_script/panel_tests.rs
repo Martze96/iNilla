@@ -817,7 +817,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
     let order_first = |bank_first: bool| {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
-        load_xml(&s, "Fonts.xml");
+        load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
         load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");

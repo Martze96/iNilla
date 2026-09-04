@@ -20,7 +20,7 @@ use super::test_ui::load_ui as load_xml;
 fn harness(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "GameTooltip.xml");
     for f in extra {
@@ -227,7 +227,11 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 /// table so the pass means what it says.
 #[test]
 fn action_button_hover_takes_the_default_corner() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml"]);
+    let mut s = harness(&[
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "ActionBar.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
@@ -256,7 +260,12 @@ fn action_button_hover_takes_the_default_corner() {
 /// (`script/tooltip/verbs.rs`).
 #[test]
 fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "MultiBars.xml"]);
+    let mut s = harness(&[
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "ActionBar.xml",
+        "MultiBars.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_cvar_engine("UberTooltips", "0");
 
@@ -313,7 +322,12 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 /// un-collapsed with it.
 #[test]
 fn ubertooltips_off_seats_stance_plates_beside_the_button() {
-    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "StanceBar.xml"]);
+    let mut s = harness(&[
+        "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "ActionBar.xml",
+        "StanceBar.xml",
+    ]);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
         spell_id: 5487,
@@ -355,6 +369,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
 fn buff_hover_hangs_below_left_of_the_button() {
     let mut s = harness(&[
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

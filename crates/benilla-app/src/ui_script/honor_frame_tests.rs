@@ -366,7 +366,7 @@ fn shown_inspect_honor_page() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     s.run(RANK_GLOBALS).unwrap();
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         // `TEXT`, the stock level line's formatter.
         "Interface\\FrameXML\\BasicControls.xml",
         "MoneyFrame.xml",

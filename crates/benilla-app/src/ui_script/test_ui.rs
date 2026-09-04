@@ -95,7 +95,7 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
 /// One file's bytes, from whichever store its path names — the chain for a path, this crate's
 /// `assets/ui` for a bare name. Also the `<Include>` / `<Script file=>` provider, which is why it
 /// takes an already-resolved path in either space.
-fn read(req: &str) -> Option<Vec<u8>> {
+pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if super::reference_ui::is_chain_entry(req) {
         return super::reference_ui::read(req);
     }
@@ -142,7 +142,7 @@ fn read(req: &str) -> Option<Vec<u8>> {
 /// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
 pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml", // TEXT()
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
@@ -154,7 +154,7 @@ pub(super) const MERCHANT_UI: &[&str] = &[
 
 pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml", // ITEM_QUALITY_COLORS — the row-name palette
+    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     "MoneyFrame.xml",
     "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
@@ -162,6 +162,11 @@ pub(super) const LOOT_UI: &[&str] = &[
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
+    // `UnitPopup.xml` reads ITEM_QUALITY_COLORS at FILE SCOPE for its three loot-threshold rows,
+    // exactly as the reference's own UnitPopup.lua:47-49 does — so its declarer has to precede it.
+    // That declarer is UIParent (ref UIParent.lua:65); 1888 moved the table there when Fonts.xml
+    // went on the chain, because the reference's Fonts.xml does not declare it.
+    "UIParent.xml",
     "UnitPopup.xml",
     // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
     // `UnitFrame_Initialize`, which lives in UnitFrame.lua and itself calls
@@ -219,7 +224,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // `PaperDollFrame_OnLoad` sets seven labels from them at LOAD, and `PaperDollFrame_SetStats`
     // concatenates `SPELL_STAT0_NAME`..`4` on every repaint.
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     // `GetText` — the reference's gendered-string helper, which stock
     // `ReputationFrame.lua:65` calls for every row's standing label. Manifest line 94
     // (1875).
@@ -253,6 +258,7 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // template and not four party member frames, so it takes the included file directly.
     "Interface\\FrameXML\\PartyFrameTemplates.xml",
     "Interface\\FrameXML\\PetFrame.xml",
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
     "ActionBar.xml",
     "MicroMenu.xml",
     // The two page files these three need before the window can be OPENED, which is not the same
@@ -289,7 +295,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // deleted `BagFrame.xml` carried `X = X or "…"` fallbacks for exactly this gap; the real file
     // is the better answer, and these tests already gate on the install.
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     // `TEXT()` — the reference's own identity-function wrapper, which stock
     // `MainMenuBarBackpackButton`'s OnEnter calls (`GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP)…)`)
     // and `BagSlotButton_OnEnter` calls for `EQUIP_CONTAINER`. Manifest entry 3, and not optional
@@ -308,6 +314,7 @@ pub(super) const BAG_UI: &[&str] = &[
     // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
     // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
     // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
     "ActionBar.xml",
     // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
     // l.137), because in the reference the keyring's existence moves the micro-button row.

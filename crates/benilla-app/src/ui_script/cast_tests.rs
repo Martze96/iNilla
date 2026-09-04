@@ -15,8 +15,12 @@ use super::test_ui::load_ui as load_xml;
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    // The stock file writes `CastingBarText:SetText(FAILED)` rather than a literal, so the window
+    // needs GlobalStrings — which the manifest has above it, and which our own retired
+    // `CastingBar.xml` did not need because it hardcoded "Failed".
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     s
 }
 
@@ -381,9 +385,9 @@ fn bottom(s: &UiScript, name: &str) -> f64 {
 fn managed_positions_track_the_bottom_bar_stack() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
     load_xml(&s, "ChatFrame.xml");
 

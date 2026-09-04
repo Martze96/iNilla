@@ -15,7 +15,7 @@ use super::test_ui::load_ui as load_xml;
 /// live here since window 6 (our ItemRef.xml used to carry a private second copy of both).
 fn load_popup_frames(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         // `SmallMoneyFrame_OnLoad`, which UiPanels' own StaticPopup money rows call at load.
         "MoneyFrame.xml",
@@ -463,7 +463,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
 /// `ActionBar.xml` are the pet bar's own load deps, not this menu's.
 fn load_pet_menu_frames(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
@@ -482,6 +482,7 @@ fn load_pet_menu_frames(s: &UiScript) {
         "Interface\\FrameXML\\TargetFrame.xml",
         "Interface\\FrameXML\\PetFrame.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         "PetActionBar.xml",
     ] {

@@ -200,6 +200,14 @@ pub(super) fn text_emote_event(
 pub(crate) struct ChatLog {
     pending: Vec<Pending>,
     broadcasts: Vec<super::broadcast::Broadcast>,
+    /// The ding's gain tuple, parked for `ui_unit`'s `PLAYER_LEVEL_UP` fire (decision 1884).
+    ///
+    /// The net layer has no `UiScript` — deliberately — so the gains arrive here, on the same
+    /// net-to-UI channel `broadcasts` uses, and the feed that owns the level edge picks them up.
+    /// They are matched BY LEVEL rather than just drained, because the trigger is a descriptor
+    /// diff and the gains are packet-borne: the two land together today, and matching means a
+    /// stale entry can never attach itself to a later ding if they ever stop doing so.
+    level_up_gains: Vec<(LevelUpInfo, u32)>,
 }
 
 impl ChatLog {
@@ -216,6 +224,22 @@ impl ChatLog {
     /// Take the parked broadcasts, leaving the queue empty.
     pub(crate) fn take_broadcasts(&mut self) -> Vec<super::broadcast::Broadcast> {
         std::mem::take(&mut self.broadcasts)
+    }
+
+    /// Park the ding's gains for the `PLAYER_LEVEL_UP` fire (see [`ChatLog::level_up_gains`]).
+    pub(crate) fn push_level_up_gains(&mut self, info: &LevelUpInfo, talent_points: u32) {
+        self.level_up_gains.push((*info, talent_points));
+    }
+
+    /// The parked gains for `level`, removed from the queue. `None` when the level edge came from
+    /// somewhere the packet did not — a GM demotion's descriptor write, or a first observation —
+    /// in which case the caller fires zeros, which is what those gains actually are.
+    pub(crate) fn take_level_up_gains(&mut self, level: u32) -> Option<(LevelUpInfo, u32)> {
+        let i = self
+            .level_up_gains
+            .iter()
+            .position(|(l, _)| l.level == level)?;
+        Some(self.level_up_gains.remove(i))
     }
 }
 

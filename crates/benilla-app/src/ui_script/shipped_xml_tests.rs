@@ -896,17 +896,14 @@ fn every_texture_frame_outranks_its_status_bars() {
 fn the_boot_phase_materializes_no_frames() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml");
-    let text = std::fs::read_to_string(&dir).expect("Fonts.xml");
-    let doc = benilla_ui::framexml::parse(&text).expect("parses");
-    let provider = |_: &str| -> Option<Vec<u8>> { None };
-    let report = benilla_ui::loader::load(&s, &doc, &provider);
+    // The font registry is manifest entry 0 and comes off the chain since 1888, so this reads
+    // through `test_ui::load_ui` rather than joining `assets/ui` — the file is not ours any more.
+    // `load_ui` returns the same `report.frames` this asserted on and fails on any loader error.
+    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
     assert_eq!(
-        report.frames, 0,
-        "the boot-phase load materialized {} frame(s) — the login screen is meant to carry none",
-        report.frames
+        frames, 0,
+        "the boot-phase load materialized {frames} frame(s) — the login screen is meant to carry none"
     );
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
 }
 
 /// **The font registry alone covers the WHOLE glyph-atlas bake plan** — the property that makes
@@ -1039,18 +1036,23 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "loader errors: {failures:?}");
 
-    // Collect the declared names straight out of the shipped XML, so the sweep cannot go stale.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    // Collect the declared names straight out of the MANIFEST's own entries, so the sweep cannot
+    // go stale — and so it follows a file onto the chain. It swept `assets/ui` until 1888 put the
+    // font registry on the chain and the count fell from 51 to 3, which is the failure this shape
+    // prevents: the sweep's subject is what the manifest declares, not what happens to be ours.
     let mut names: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "xml") {
-            let text = std::fs::read_to_string(&path).expect("read");
-            for chunk in text.split("<Font ").skip(1) {
-                if let Some(rest) = chunk.split_once("name=\"") {
-                    if let Some((name, _)) = rest.1.split_once('"') {
-                        names.push(name.to_string());
-                    }
+    for entry in &super::addons::Addon::builtin().toc.files {
+        if !entry.to_ascii_lowercase().ends_with(".xml") {
+            continue;
+        }
+        let Some(bytes) = super::test_ui::read(&entry.replace('\\', "/")) else {
+            continue;
+        };
+        let text = benilla_ui::source::decode(&bytes);
+        for chunk in text.split("<Font ").skip(1) {
+            if let Some(rest) = chunk.split_once("name=\"") {
+                if let Some((name, _)) = rest.1.split_once('"') {
+                    names.push(name.to_string());
                 }
             }
         }

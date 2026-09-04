@@ -1553,15 +1553,50 @@ fn feed_units(
     // Trigger PROVISIONAL (0578's pattern): fired off the descriptor diff, which lands in the
     // same update batch as the ding's XP fields, so consumers read a coherent picture. The
     // real client plausibly fires it from its `SMSG_LEVELUP_INFO` handler instead, with the
-    // packet's gain tuple as arg2+ — unpinned, and no 1.12 FrameXML consumer reads past arg1
-    // (`ReputationWatchBar_Update` takes arg1; the tick's handler takes none), so the extra
-    // args wait for a consumer.
+    // packet's gain tuple as arg2+.
+    //
+    // **THE ARGS ARE NOT OPTIONAL, AND THE CLAIM THAT USED TO STAND HERE WAS WRONG.** It said no
+    // 1.12 FrameXML consumer reads past arg1, citing `ReputationWatchBar_Update` (arg1) and the
+    // tick's handler (none). It missed the main one: `ChatFrame.lua:1283-1320` reads **arg1
+    // through arg9** — the level, the health and mana gains, the talent points, and the five stat
+    // gains, each printed as its own system line. The reference's own fire site says the same,
+    // `%d%d%d%d%d%d%d%d%d` (SignalEvent2). Two consumers were surveyed, the conclusion was drawn
+    // from two, and the third is the one that matters.
+    //
+    // We fire arg1 alone, so the stock ChatFrame's `if ( arg3 > 0 )` would compare nil with a
+    // number and raise — this blocks the ChatFrame window. The gains are on a packet we already
+    // parse (`SMSG_LEVELUP_INFO`, twelve u32) and already spend: `ui_chat/feed.rs` composes those
+    // very lines in Rust because the event could not carry them. Decision 1884 scopes plumbing
+    // the tuple here and retiring the Rust duplicate; this trigger is a descriptor diff and the
+    // gains arrive on the packet, so it is a join, not a one-liner.
     if let Some((store, _)) = self_q.iter().next() {
         if let Some(level) = store.0.unit_level() {
             let prev = memo.last_level.replace(level);
             if prev.is_some_and(|p| level != p) {
                 gate.audit("feed_units", "the level edge");
-                script.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(i64::from(level))]);
+                // All nine, per the reference's own fire site (`%d%d%d%d%d%d%d%d%d`): level,
+                // health gain, mana gain, talent points, then the five stat gains in
+                // `SPELL_STAT0..4` order. Absent gains are ZEROS, not a shorter payload — a
+                // demotion really did gain nothing, and every consumer guards with `if ( argN > 0 )`
+                // so zero reads as "no line" while nil raises.
+                let (info, talent_points) = chat.take_level_up_gains(level).unzip();
+                let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> u32| {
+                    ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
+                };
+                script.fire_event(
+                    "PLAYER_LEVEL_UP",
+                    vec![
+                        ScriptValue::Int(i64::from(level)),
+                        gain(|l| l.health),
+                        gain(|l| l.powers[0]),
+                        ScriptValue::Int(i64::from(talent_points.unwrap_or(0))),
+                        gain(|l| l.stats[0]),
+                        gain(|l| l.stats[1]),
+                        gain(|l| l.stats[2]),
+                        gain(|l| l.stats[3]),
+                        gain(|l| l.stats[4]),
+                    ],
+                );
             }
         }
     }

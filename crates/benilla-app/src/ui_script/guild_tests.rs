@@ -203,12 +203,13 @@ fn setup() -> UiScript {
             ..UnitState::default()
         }),
     );
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "UIParent.xml");
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");

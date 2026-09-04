@@ -20,14 +20,17 @@ mod common;
 /// the `MoneyTypeInfo` table this window registers `AUCTION_DEPOSIT` into, The `MoneyInputFrame_*` money-entry
 /// helpers used to mean loading MerchantFrame.xml as well; 1751 moved that kit to MoneyFrame.xml
 /// on its way to the chain, so the dependency is gone.
-const FILES: [&str; 11] = [
-    "Fonts.xml",
+const FILES: [&str; 12] = [
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     // The four money-entry frames come off the chain since 1882 — `MoneyInputFrameTemplate` and
     // the `MoneyInputFrame_*` verbs, replacing our own verbatim copy of both.
     r"Interface\FrameXML\MoneyInputFrame.lua",
     r"Interface\FrameXML\MoneyInputFrame.xml",
     "UiPanels.xml",
+    // `auctionRowName` colours each row from ITEM_QUALITY_COLORS, whose declarer is
+    // UIParent (ref UIParent.lua:65) since 1888 put the font registry on the chain.
+    "UIParent.xml",
     "GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",

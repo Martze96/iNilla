@@ -26,7 +26,7 @@ fn harness(money: u64) -> UiScript {
     // below is deliberate rather than an artefact of an unfed VM — a flat 8px per digit makes
     // every expected number readable as `digits x 8 + icon`.
     s.set_text_measurer(Box::new(super::FixedWidthFont(8.0)));
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
 
     let doc = benilla_ui::framexml::parse(
@@ -374,7 +374,7 @@ fn the_money_type_table_carries_all_seven_reference_types() {
 fn the_chains_money_input_frame_splits_an_amount_across_its_three_boxes() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "MoneyFrame.xml"); // COPPER_PER_GOLD / COPPER_PER_SILVER live here
                                     // The manifest's own order: the `.lua` brings the ten verbs, the `.xml` the template.
     load_xml(&s, r"Interface\FrameXML\MoneyInputFrame.lua");

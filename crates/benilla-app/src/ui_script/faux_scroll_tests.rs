@@ -40,7 +40,7 @@ fn load_inline(s: &UiScript, xml: &str) {
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
@@ -399,7 +399,7 @@ fn the_reference_on_vertical_scroll_path_runs_once_a_scroll_child_exists() {
 #[test]
 fn scrolling_edit_helpers_answer_bare_calls_from_a_handler() {
     let s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");

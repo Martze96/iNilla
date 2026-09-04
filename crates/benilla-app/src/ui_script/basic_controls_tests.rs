@@ -12,7 +12,7 @@ use super::test_ui::load_ui as load_xml;
 /// Fonts then BasicControls — the manifest's own order, and the whole dependency this file has.
 fn basic_controls() -> UiScript {
     let mut s = UiScript::new().unwrap();
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     s.set_screen_size(1024.0, 768.0);
     s.resolve();

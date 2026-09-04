@@ -22,28 +22,19 @@ fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let files: Vec<&str> = [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         "MicroMenu.xml",
     ]
     .into_iter()
     .chain(extra.iter().copied())
     .collect();
+    // Through `test_ui::load_ui`, not off disk: the list above now names a chain file, and a
+    // reader that joins `assets/ui` cannot resolve one (the wall 1838 hit, and 1887 again).
     for file in files {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        super::test_ui::load_ui(&s, file);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s

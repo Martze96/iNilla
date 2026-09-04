@@ -90,7 +90,7 @@ fn setup() -> UiScript {
     // out of GlobalStrings, with no fallback of its own — `format(nil, …)` raises, and the window
     // never paints.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");

@@ -37,7 +37,7 @@ fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let files: Vec<&str> = [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
         // (decision 1734) — UIParent must already be there, as it is in the manifest.
         "UIParent.xml",
@@ -662,7 +662,11 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     // bar anchors into and seats itself above (`BenillaActionBarArt_SeatAbove`, nil-guarded in
     // BagFrame.xml precisely because most harnesses load no bar).
     let mut s = bag_harness_with(
-        &["Cooldown.xml", "ActionBar.xml"],
+        &[
+            "Cooldown.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
+            "ActionBar.xml",
+        ],
         &["Interface\\FrameXML\\MerchantFrame.xml"],
     );
     s.set_money(0);

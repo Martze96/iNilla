@@ -18,10 +18,11 @@ use super::test_ui::load_ui as load_xml;
 /// `ActionBar.xml` (the anchor target + shared globals both new bars need).
 fn load_action_bar(s: &UiScript) {
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
@@ -432,10 +433,11 @@ fn multibar_hover_renders_the_buttons_own_action() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "ActionBar.xml",
         // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
         // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
@@ -657,7 +659,7 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
     load_xml(&s, "MultiBars.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
 
     // The pass writes the y of a frame row into its anchor; read it back off the anchor rather
     // than off a resolved rect, so a hidden cast bar answers the same as a visible one.

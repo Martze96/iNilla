@@ -41,7 +41,11 @@ fn load_addon_xml(s: &UiScript, text: &str) -> benilla_ui::loader::LoadReport {
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for f in ["Fonts.xml", "UIParent.xml", "GameTooltip.xml"] {
+    for f in [
+        "Interface\\FrameXML\\Fonts.xml",
+        "UIParent.xml",
+        "GameTooltip.xml",
+    ] {
         load_xml(&s, f);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

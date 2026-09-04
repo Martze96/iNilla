@@ -114,7 +114,7 @@ fn armed() -> UiScript {
     // `PLAYER_LEVEL`, the template the stock level line formats through — the reference keeps its
     // strings here, and our retired file had the sentence written into it (1832).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");
@@ -161,7 +161,7 @@ fn shipped_inspect_frame_loads_clean() {
     // `PLAYER_LEVEL`, the template the stock level line formats through — the reference keeps its
     // strings here, and our retired file had the sentence written into it (1832).
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT`, which the stock `InspectPaperDollFrame_SetLevel` formats its level line through.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, "MoneyFrame.xml");

@@ -438,7 +438,7 @@ fn chat_vm() -> benilla_ui::script::UiScript {
     // that would hide a real ordering fault. (The tooltip file is the dropdown kit's own
     // dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         // The UIMenu kit is the reference's own file since 1751 window 21, so this reads both
@@ -2323,4 +2323,39 @@ fn the_posture_emotes_carry_no_swim_suppression_flag() {
             "posture emote {id} passes the emote gate while swimming"
         );
     }
+}
+
+/// **The ding's gains reach `PLAYER_LEVEL_UP` matched BY LEVEL, and a miss is zeros, not absence.**
+///
+/// The net layer has no `UiScript`, so `SMSG_LEVELUP_INFO`'s tuple is parked on `ChatLog` and the
+/// feed that owns the level edge picks it up (decision 1884). Matching on the level is what keeps
+/// a stale entry from attaching to a later ding — the trigger is a descriptor diff and the gains
+/// are packet-borne, so the two are only coincidentally in step.
+///
+/// The miss case is the load-bearing half: a GM demotion writes the descriptor with no packet, and
+/// the event must still carry nine arguments. `ChatFrame.lua` guards every one with
+/// `if ( argN > 0 )`, so a zero reads as "no line" while a nil raises.
+#[test]
+fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
+    use benilla_protocol::messages::LevelUpInfo;
+
+    let mut log = super::feed::ChatLog::default();
+    let ding = LevelUpInfo {
+        level: 10,
+        health: 22,
+        powers: [15, 0, 0, 0, 0],
+        stats: [0, 1, 2, 3, 0],
+    };
+    log.push_level_up_gains(&ding, 1);
+
+    // A level edge that is not this ding's leaves the entry parked...
+    assert!(log.take_level_up_gains(11).is_none(), "wrong level matched");
+    // ...and the right one takes it, exactly once.
+    let (got, talent_points) = log.take_level_up_gains(10).expect("parked for level 10");
+    assert_eq!(got, ding);
+    assert_eq!(talent_points, 1);
+    assert!(
+        log.take_level_up_gains(10).is_none(),
+        "the entry was taken, not copied"
+    );
 }

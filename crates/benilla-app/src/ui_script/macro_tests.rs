@@ -89,7 +89,7 @@ fn harness_with(player: &str) -> UiScript {
     // reader cannot name it (decision 1848).
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
         "MoneyFrame.xml",
         "UiPanels.xml",

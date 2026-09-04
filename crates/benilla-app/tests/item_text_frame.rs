@@ -23,7 +23,7 @@ const FILES: [&str; 9] = [
     // `attempt to concatenate a nil value` kills the handler before it reaches its `ShowUIPanel`,
     // so the window simply never opens. Our deleted copy carried the string as a local fallback.
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Fonts.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "MoneyFrame.xml",
     "UiPanels.xml",
     // `GetMaterialTextColors`, which the reference's own `ItemTextFrame_OnEvent` calls to pick the
