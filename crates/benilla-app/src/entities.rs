@@ -140,6 +140,29 @@ pub(crate) const ATTACH_OVERHEAD: u16 = 18;
 /// mount's bulk). A rider model without it falls back to 18 like the client.
 pub(crate) const ATTACH_OVERHEAD_MOUNTED: u16 = 29;
 
+/// The overhead attachment slot to use for a unit **right now** — the reference's own pick inside
+/// the marker attach `0x6074c0` (VERIFIED, wow-re object-layer `questgiver-marker.md` Q2), always
+/// queried on the unit's *body* model: slot **29** when a mount MODEL exists (`unit+0xdc != 0` —
+/// our [`mount::MountChild`]) *and* the body authors 29, else slot **18**; `None` when the body
+/// authors neither, which is the reference's "marker created but never parented" (invisible) and
+/// this file's bbox fallback for the overhead readers.
+///
+/// **The pick is LIVE, not a bake.** `0x6074c0`'s five call sites include `0x5ffae7` inside
+/// `0x5ffa50` — the `UNIT_FIELD_MOUNTDISPLAYID` field-watch handler (`0x604330 mov edx,0x1fc; mov
+/// ecx,3`), the very handler [`mount::reseat_mounts`] ports — so the reference re-runs the whole
+/// attach, slot choice included, on every mount and dismount. A per-frame *reader*
+/// ([`overhead_anchor`]) gets that for free; a consumer that PARENTS something at the slot
+/// ([`crate::quest_markers`]) has to notice the move and re-parent itself (decision 1871).
+pub(crate) fn overhead_slot(attach: &BoneAttach, mounted: bool) -> Option<u16> {
+    if mounted && attach.points.contains_key(&ATTACH_OVERHEAD_MOUNTED) {
+        Some(ATTACH_OVERHEAD_MOUNTED)
+    } else if attach.points.contains_key(&ATTACH_OVERHEAD) {
+        Some(ATTACH_OVERHEAD)
+    } else {
+        None
+    }
+}
+
 /// The `0x608640` fallback multiplier (`0x80c5d0` = 1.25): a unit whose model has no PlayerName
 /// attachment anchors overhead content at `feet + scale × bbox_z × 1.25`.
 const OVERHEAD_FALLBACK_FACTOR: f32 = 1.25;
@@ -209,13 +232,7 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
         .get(entity)
         .ok()
         .and_then(|a| {
-            let slot = if mounts.contains(entity) && a.points.contains_key(&ATTACH_OVERHEAD_MOUNTED)
-            {
-                ATTACH_OVERHEAD_MOUNTED
-            } else {
-                ATTACH_OVERHEAD
-            };
-            let &(bone, offset) = a.points.get(&slot)?;
+            let &(bone, offset) = a.points.get(&overhead_slot(a, mounts.contains(entity))?)?;
             let pose = poses.get(entity).ok()?;
             let own;
             let root = if pose.joints_root == entity {
@@ -1555,5 +1572,51 @@ mod display_mirror_tests {
         let c = creatures(4449, crate::entities::display::empty_shell());
         assert!(c.display_mirror(4449).is_none(), "parts not built yet");
         assert!(c.display_mirror(1).is_none(), "unknown display");
+    }
+}
+
+#[cfg(test)]
+mod overhead_slot_tests {
+    use super::*;
+
+    /// A body model authoring exactly `slots` (the bone/offset payload is immaterial here).
+    fn body(slots: &[u16]) -> BoneAttach {
+        BoneAttach {
+            points: slots.iter().map(|&s| (s, (0u16, Vec3::ZERO))).collect(),
+            markers: HashMap::new(),
+        }
+    }
+
+    /// `0x6074c0`'s pick and only it: 29 is *preferred*, never required, and never taken by an
+    /// unmounted unit. So a character body — which authors both (wow-re's table: HumanMale 18 at
+    /// z 2.2123, 29 at z 1.4029) — moves 18 ↔ 29 across a mount, a creature that authors only 18
+    /// (AncientOfLore, Kobold) stays at 18 whether or not it is mounted, and a body authoring
+    /// neither anchors nothing: the reference creates the marker and never parents it.
+    #[test]
+    fn twenty_nine_needs_both_a_mount_model_and_the_authored_point() {
+        let both = body(&[ATTACH_OVERHEAD, ATTACH_OVERHEAD_MOUNTED]);
+        assert_eq!(overhead_slot(&both, false), Some(ATTACH_OVERHEAD));
+        assert_eq!(overhead_slot(&both, true), Some(ATTACH_OVERHEAD_MOUNTED));
+
+        let plain = body(&[ATTACH_OVERHEAD]);
+        assert_eq!(overhead_slot(&plain, false), Some(ATTACH_OVERHEAD));
+        assert_eq!(
+            overhead_slot(&plain, true),
+            Some(ATTACH_OVERHEAD),
+            "no 29 on the body ⇒ the mounted leg falls back to 18, like the client"
+        );
+
+        let mounted_only = body(&[ATTACH_OVERHEAD_MOUNTED]);
+        assert_eq!(
+            overhead_slot(&mounted_only, false),
+            None,
+            "29 is never the unmounted fallback — the fallback is 18 or nothing"
+        );
+        assert_eq!(
+            overhead_slot(&mounted_only, true),
+            Some(ATTACH_OVERHEAD_MOUNTED)
+        );
+
+        assert_eq!(overhead_slot(&body(&[]), true), None, "never parented");
     }
 }

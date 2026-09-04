@@ -965,3 +965,66 @@ fn the_combat_log_window_runs_its_own_bottom_button_blink() {
         "window 2's bottom-button flash blinks while it is scrolled up"
     );
 }
+
+/// **The chat menu runs on the REFERENCE's UIMenu kit** — `Interface\FrameXML\UIMenu.xml` and its
+/// own `UIMenu.lua`, not a transcription of them.
+///
+/// Ours kept the reference's ten names in `ChatFrame.xml`, which loads at manifest 939 against the
+/// chain's 194, so our copies overwrote the chain's from the day that entry landed — the reverse of
+/// 1855's direction, and nothing drove this menu in a test, so nothing said so. Decision 1869.
+#[test]
+fn the_chat_menu_builds_its_rows_on_the_references_kit() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in [
+        "Fonts.xml",
+        "MoneyFrame.xml",
+        "UiPanels.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "GameTooltip.xml",
+        r"Interface\FrameXML\UIMenu.xml",
+        "ChatFrame.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    let _ = s.errors();
+
+    // `ChatMenu_OnLoad` calls `UIMenu_Initialize()` bare, relying on `this` — the reference's own
+    // idiom — then `UIMenu_AddButton` per row. If the kit were missing, the rows would not exist.
+    s.run("ChatMenu:Show()").unwrap();
+    assert!(s.errors().is_empty(), "opening it raises: {:?}", s.errors());
+    assert!(
+        s.eval::<i64>("return ChatMenu.numButtons or 0").unwrap() >= 7,
+        "the reference's `UIMenu_AddButton` counted the rows this window adds"
+    );
+    assert_eq!(
+        s.eval::<String>("return ChatMenuButton1:GetText()")
+            .unwrap(),
+        "Say",
+        // The reference labels a row with `button:SetText(text)` — the Button's own text, not a
+        // named FontString, so there is no `…Button1Text` to read.
+        "row 1 is the Say row, built by the chain's kit"
+    );
+
+    // A row click runs the owner's func and closes the menu — `UIMenuButton_OnClick`'s contract.
+    s.run("ChatMenuButton1:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "a row click raises: {:?}",
+        s.errors()
+    );
+    assert!(
+        !s.eval::<bool>("return ChatMenu:IsShown() and true or false")
+            .unwrap(),
+        "the reference's row click hides the menu"
+    );
+    assert!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap()
+            .starts_with("/s"),
+        "and it seeded the edit box with the row's slash"
+    );
+}

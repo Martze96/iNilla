@@ -1948,7 +1948,11 @@ mod tests {
             for chunk in text.split('<').skip(1) {
                 let Some(end) = chunk.find('>') else { continue };
                 let tag = &chunk[..end];
-                if !tag.trim_start().starts_with("Include") {
+                // `<Include>` brings a sibling document; `<Script file=>` brings the code, and
+                // that is where nearly every `RegisterEvent` lives — a reader that follows only
+                // the first sees a window's frames without its handlers.
+                let kind = tag.trim_start();
+                if !kind.starts_with("Include") && !kind.starts_with("Script") {
                     continue;
                 }
                 if let Some(file) = tag_attr(tag, "file") {
@@ -2035,6 +2039,158 @@ mod tests {
             stale.is_empty(),
             "`frame.updateFunc` is our retired kit's field; the reference has none:\n  {}",
             stale.join("\n  ")
+        );
+    }
+
+    /// **A stock file listening for an event nothing produces is silent on both sides.**
+    ///
+    /// This is 1819's shape: `ui_unit.rs` fired the Classic Era power pair while the reference's
+    /// frames registered the 1.12 per-resource names, so no mana bar could live-update — and
+    /// nothing anywhere said so, because an event name is a plain string at both ends. 1818 is the
+    /// same seam one API over. The *arity* half of that class already has an instrument (the shape
+    /// gate, 1842/1843/1845); this is the event half, which had none.
+    ///
+    /// A CENSUS with a declared set, not a hard zero: most of these are features we have not built,
+    /// and listing them is the point. What must not happen is a NEW one appearing — that means a
+    /// window migration just brought a listener nothing feeds, which is exactly how 1819 arrived.
+    ///
+    /// **Constructed names have to be declared**, because a literal scan cannot see them:
+    /// `ui_unit.rs` builds the power events with `format!("UNIT_{}", power_token(...))`, and a gate
+    /// blind to that reports nine false positives — which is what its first run did.
+    #[test]
+    fn every_event_a_chain_file_registers_has_a_producer() {
+        let _data = benilla_formats::wow_data_or_skip!();
+
+        // Names benilla builds at runtime rather than writing as literals. Each is a family, with
+        // the site that constructs it — an entry here is a promise that something fires it.
+        const CONSTRUCTED: &[&str] = &[
+            // `ui_unit.rs`: `format!("UNIT_{}", power_token(ty))` and its `UNIT_MAX…` twin, over
+            // `power_token`'s five resources (`unit/mod.rs`). Decision 1819.
+            "UNIT_MANA",
+            "UNIT_RAGE",
+            "UNIT_FOCUS",
+            "UNIT_ENERGY",
+            "UNIT_HAPPINESS",
+            "UNIT_MAXMANA",
+            "UNIT_MAXRAGE",
+            "UNIT_MAXFOCUS",
+            "UNIT_MAXENERGY",
+            "UNIT_MAXHAPPINESS",
+        ];
+
+        // Registered by a chain file we load, produced by nothing. Each is a feature we have not
+        // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
+        const UNPRODUCED: &[(&str, &str)] = &[
+            ("BAG_OPEN", "ContainerFrame.lua"),
+            ("CHAT_MSG_RAID_WARNING", "RaidWarning.lua"),
+            (
+                "CVAR_UPDATE",
+                "TextStatusBar.lua — a CVar change does not repaint the bar text",
+            ),
+            ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
+            ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
+            (
+                "PARTY_MEMBER_DISABLE",
+                "PartyMemberFrame.lua — the offline grey-out",
+            ),
+            ("PARTY_MEMBER_ENABLE", "PartyMemberFrame.lua"),
+            ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
+            ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
+            ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
+            (
+                "PLAYER_FLAGS_CHANGED",
+                "TargetFrame.lua — the AFK/DND badge",
+            ),
+            (
+                "PLAYER_REGEN_ENABLED",
+                "PlayerFrame.lua — and _DISABLED is unfired too, so the pair is whole",
+            ),
+            ("PLAYTIME_CHANGED", "PlayerFrame.lua"),
+            ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
+            ("SYSMSG", "UIErrorsFrame.lua"),
+            ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
+            (
+                "UNIT_MODEL_CHANGED",
+                "four files — the paperdoll model refresh",
+            ),
+            ("UNIT_PORTRAIT_UPDATE", "three files — the portrait refresh"),
+        ];
+
+        let mut fired: std::collections::HashSet<String> =
+            CONSTRUCTED.iter().map(|s| (*s).to_string()).collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("crates");
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    let mut from = 0;
+                    while let Some(i) = text[from..].find("fire_event(") {
+                        let at = from + i + "fire_event(".len();
+                        from = at;
+                        let rest = text[at..].trim_start();
+                        if let Some(body) = rest.strip_prefix('"') {
+                            if let Some(end) = body.find('"') {
+                                fired.insert(body[..end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let mut dead: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for entry in toc.iter().filter(|f| super::is_chain_entry(f)) {
+            for text in entry_sources(entry) {
+                let mut from = 0;
+                while let Some(i) = text[from..].find("RegisterEvent(") {
+                    let at = from + i + "RegisterEvent(".len();
+                    from = at;
+                    let rest = text[at..].trim_start();
+                    if let Some(body) = rest.strip_prefix('"') {
+                        if let Some(end) = body.find('"') {
+                            let ev = &body[..end];
+                            if !fired.contains(ev) {
+                                dead.entry(ev.to_string()).or_insert_with(|| entry.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let expected: std::collections::HashSet<&str> =
+            UNPRODUCED.iter().map(|(e, _)| *e).collect();
+        let surprises: Vec<String> = dead
+            .iter()
+            .filter(|(e, _)| !expected.contains(e.as_str()))
+            .map(|(e, f)| format!("{e}  (registered in {f})"))
+            .collect();
+        assert!(
+            surprises.is_empty(),
+            "a chain file listens for an event NOTHING fires, and it is not one of the known gaps \
+             — this is 1819 arriving: a window migration brought a listener with no producer:\n  {}",
+            surprises.join("\n  ")
+        );
+
+        let fixed: Vec<&str> = UNPRODUCED
+            .iter()
+            .map(|(e, _)| *e)
+            .filter(|e| !dead.contains_key(*e))
+            .collect();
+        assert!(
+            fixed.is_empty(),
+            "these now HAVE a producer — take them out of UNPRODUCED so the list keeps meaning \
+             what it says:\n  {fixed:?}"
         );
     }
 }

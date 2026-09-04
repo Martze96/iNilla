@@ -185,8 +185,13 @@ Interface\FrameXML\UIDropDownMenu.xml
 # The kit was a block inside our ChatFrame.xml — a transcription that kept the reference's names
 # for the addon surface and said so, and whose own note recorded a divergence it had to make (the
 # row label authored LEFT-anchored, because the reference leans on 1.12's ButtonText default rect
-# and our lazy label slot did not reproduce it). Sourcing the file retires the transcription and
-# the divergence together.
+# and our lazy label slot did not reproduce it).
+#
+# **Sourcing the file retired only the XML half, and this header claimed both for months.** The ten
+# `UIMenu_*`/`UIMenuButton_*` functions stayed in ChatFrame.xml under the reference's own names, and
+# that file loads at 939 — so OURS overwrote the chain's from the day this entry landed, the reverse
+# of 1855's direction and just as silent. They are gone now; the kit is the reference's end to end
+# (1869).
 #
 # THE POSITION is the reference's own (FrameXML.toc l.12, straight after GameTooltip.xml, which it
 # needs for the tooltip backdrop its menu wears). Far above ChatFrame.xml, which is the one thing

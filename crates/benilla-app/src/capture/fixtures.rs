@@ -490,13 +490,16 @@ pub(super) fn seed_ui_fixture(
             };
             // Entry 1 (selected by first-valid auto-selection): in progress, one creature
             // objective at 3/10 (the slot counter below) + one item objective (bags are empty in
-            // capture → 0/5), choice + fixed rewards, money.
+            // capture → 0/5), choice + fixed rewards, money. `quest_type: 1` is QuestInfo.dbc's
+            // "Elite" — the real 783 is a plain quest, but this fixture is the only thing that
+            // puts a row TAG in front of the capture, and the tag and the "(Complete)" state word
+            // are different branches of the same row string (entry 2 covers the other).
             quest_log.insert_template(QuestTemplate {
                 quest_id: 783,
                 method: 2,
                 level: 2,
                 zone_or_sort: 12,
-                quest_type: 0,
+                quest_type: 1,
                 rep_objective_faction: 0,
                 rep_objective_value: 0,
                 next_quest_in_chain: 0,

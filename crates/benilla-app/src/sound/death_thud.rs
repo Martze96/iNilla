@@ -16,9 +16,27 @@
 //!
 //! The terrain leg is **exactly the footstep sound's** ([`super::footsteps`]) — the reference
 //! keeps one cached terrain-type dword per unit (`CGUnit+0xc60`) and the `$DTH` handler reads that
-//! same dword at `0x623749`, as the `$FSD` handler does at `0x62341d`. So a giant that dies on the
-//! Kharanos inn's floorboards thuds on wood for the same reason its steps creaked on it, and
-//! `None` (the client's `−1`) is silence here too, never "ask the other leg".
+//! same dword at `0x623749`, as the `$FSD` handler does at `0x62341d`. `None` (the client's `−1`)
+//! is silence here too, never "ask the other leg".
+//!
+//! ## Indoors is silent, and that is the data
+//!
+//! The two consumers share the terrain id and then **diverge on it**, which is the single most
+//! surprising thing about this system. Both tables are keyed on `TerrainType.SoundID`, and
+//! `TerrainType 10 "None"` — the id a WMO surface takes when its `MOMT+0x20` says nothing — has
+//! `SoundID = 0`. `FootstepTerrainLookup` carries a row at terrain sound **0** for 17 footstep
+//! classes; `DeathThudLookups` carries **none at all**. So the same floor that creaks underfoot
+//! swallows the body that lands on it.
+//!
+//! That is not a rounding error in the content: `benilla-extract thudcensus` measures **10 075 of
+//! the 10 299 shipped MOMT materials (97.8 %) at `TerrainType 10`**, and **694 of the 815 WMO
+//! roots have no surface that can thud at all** — every inn and tavern in the game among them.
+//! What *does* thud indoors is the blacksmiths, barns, barracks, chapels, Stormwind, Ironforge and
+//! most dungeon sets, whose floors carry a real Stone/Metallic/Wood material.
+//!
+//! So "a big corpse hit the ground silently *indoors*" is the **reference's own behaviour**, not a
+//! gap — and the retest for this system has to be run outdoors, or in one of the 121 buildings the
+//! census names.
 //!
 //! **Three gates, and no others.** The handler's early-returns in order (`0x6236e0`):
 //!
@@ -42,10 +60,14 @@
 //! place they differ. (`0x670630`'s own semantics are out at the RE; if the node flag turns out
 //! to already mean "submerged", the two collapse into one.)
 //!
-//! The play is `0x458870` — **bus 0, uncapped, volume 1.0**, 3D at the unit's own position
-//! origin (its feet, `vtbl+0x14`), with no Z lift. That is the same call the armor foley makes,
-//! and deliberately *not* the capped [`Bus::FOOTSTEP`] the step itself takes: a battlefield's
-//! worth of bodies all land.
+//! The play is `0x458870` — **bus 0, uncapped** (`0x458880 xor ecx,ecx`; cap `0x7FFFFFFF`), 3D at
+//! the unit's own position origin (its feet, `vtbl+0x14`), with no Z lift. That is the same call
+//! the armor foley makes, and deliberately *not* the capped [`Bus::FOOTSTEP`] the step itself
+//! takes: a battlefield's worth of bodies all land. The `1.0` it passes is a **multiplier** on the
+//! kit's authored `SoundEntries.Volume`, not the final gain — the shipped rows carry 0.4 for
+//! Small/Medium, 1.0 for Large/Giant/Colossal, 0.3/0.6 in water — and the `-1` beside it is a
+//! **file-variation index** (`variant != -1`), not a channel. Every `DeathThud*` row sets flag
+//! `0x400`, so the kit player's own ±15 % pitch draw applies (`0x458da0`, [`super::math`]).
 
 use bevy::prelude::*;
 
@@ -242,18 +264,44 @@ mod tests {
         assert_eq!(pick(5, 5, None), None);
     }
 
-    /// Wood, indoors — the case the terrain leg exists for. A giant dying on the Kharanos inn's
-    /// floorboards must take `DeathThudGiantWood`, not the dirt under the building.
+    /// **Indoors is silent, and the footstep on the same floor is not** — the asymmetry in the
+    /// module docs, pinned as an executable claim because it is the one a future reader will
+    /// disbelieve and "fix".
+    ///
+    /// `TerrainType 10 "None"` is 97.8 % of shipped WMO material, and it resolves to terrain sound
+    /// `0`. `FootstepTerrainLookup` has a row there; `DeathThudLookups` has none. A building whose
+    /// floor carries a real material (a blacksmith's stone, a barn's wood) thuds normally — that
+    /// is the control, and it must not change.
     #[test]
-    fn a_body_on_floorboards_thuds_on_wood() {
+    fn an_unmaterialed_floor_footsteps_but_never_thuds() {
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let thuds = benilla_formats::load_death_thud_catalog(&mut chain).expect("thud catalog");
         let steps = benilla_formats::load_footstep_catalog(&mut chain).expect("footstep catalog");
+
+        // The unmaterialed floor: a footstep, on every body, at any size.
+        assert_eq!(
+            steps.resolve_terrain(7, 10).map(|(dry, _)| dry),
+            Some(560),
+            r#"a character still steps on TerrainType "None""#
+        );
+        for size in 0..=4 {
+            assert_eq!(
+                pick_kit(&thuds, &steps, size, 10, None),
+                None,
+                "…and no size of body thuds on it"
+            );
+        }
+        // The control — a floor with a real material still thuds, at both ends of the size axis.
         assert_eq!(
             pick_kit(&thuds, &steps, 3, 4, None),
             Some(926),
-            "DeathThudGiantWood"
+            "Giant on wood"
+        );
+        assert_eq!(
+            pick_kit(&thuds, &steps, 0, 2, None),
+            Some(910),
+            "Small on stone"
         );
     }
 }

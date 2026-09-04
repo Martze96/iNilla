@@ -33,6 +33,7 @@ use crate::target::{can_attack, ring_reaction, Factions};
 use super::Spells;
 
 /// Leg 8's caster unit-flag test — the shared bit, declared once ([`crate::player`]).
+use crate::creature_anim::UNIT_FLAG_DISARMED;
 use crate::player::UNIT_FLAG_IN_COMBAT;
 
 /// The implicit-target enums leg 10b forks on (`0x6e3f8a`/`0x6e3fa2`): 6 = single enemy →
@@ -50,6 +51,26 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) cooldowns: &'a Cooldowns,
 }
 
+/// Equipment slots 15/16 — `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`), the
+/// two the disarm ladder can hide.
+const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
+const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+
+/// One equipment slot's item class, through the same guid → entry → template walk
+/// [`equipped_item_fits`] uses. `None` for an empty slot or a template still in flight — and an
+/// unresolved template therefore never triggers the disarm skip, the same benefit-of-the-doubt
+/// this file gives everywhere else.
+fn equipped_class(
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+    slot: u8,
+) -> Option<u8> {
+    let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
+    let entry = items.object(guid).and_then(|o| o.object_entry())?;
+    Some(items.template(entry, guid, commands)?.class as u8)
+}
+
 /// Leg 4's own test (`0x6e40e0`), shared with the spell tooltip's requirement line: does some
 /// WORN item match `EquippedItemClass` + `EquippedItemSubClassMask`? `true` when the spell asks
 /// for nothing (`class < 0`). An equipped item whose template hasn't streamed yet counts as a
@@ -64,7 +85,20 @@ pub(crate) fn equipped_item_fits(
         return true;
     }
     let class = d.equipped_item_class as u32;
-    (0..19).any(|slot| {
+    // The disarm ladder (decision 1863). The reference's own equipped-item test `0x5ea5d0` walks
+    // its three `GetWeapon` slots with `visFlag = 0`, so the hand `UNIT_FLAG_DISARMED` hides does
+    // not count toward the requirement — a disarmed warrior's Heroic Strike greys out and its
+    // tooltip requirement line turns red. Exactly one hand is hidden, main first, so a disarmed
+    // dual-wielder's off-hand weapon still satisfies it.
+    let hidden = (store.0.unit_flags() & UNIT_FLAG_DISARMED != 0)
+        .then(|| {
+            let main = equipped_class(store, items, commands, EQUIPMENT_SLOT_MAINHAND);
+            let off = equipped_class(store, items, commands, EQUIPMENT_SLOT_OFFHAND);
+            crate::creature_anim::disarmed_hand(main, off)
+        })
+        .flatten()
+        .map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8);
+    (0..19).filter(|slot| Some(*slot) != hidden).any(|slot| {
         let Some(guid) = store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
             return false;
         };
@@ -260,6 +294,58 @@ mod tests {
         let mut base = vec![(22u16, 100u32), (23, 500), (46, 1 << 3)];
         base.extend_from_slice(pairs);
         ObjectStore(ObjectFields::from_pairs(&base))
+    }
+
+    /// **The disarm ladder reaches the action bar** (decision 1863). The reference's own
+    /// equipped-item test `0x5ea5d0` walks its three `GetWeapon` slots with `visFlag = 0`, so the
+    /// hand `UNIT_FLAG_DISARMED` hides stops satisfying a weapon requirement — a disarmed
+    /// warrior's Heroic Strike greys out and its tooltip requirement line turns red. Because the
+    /// ladder hides exactly ONE weapon, main hand first, a dual-wielder is still armed enough.
+    #[test]
+    fn a_disarmed_hand_does_not_satisfy_the_equipped_item_requirement() {
+        use crate::items::TestDeps;
+
+        /// `PLAYER_FIELD_INV_SLOT_HEAD + 2×slot` for equipment slots 15 and 16.
+        const INV_MAINHAND: u16 = 486 + 2 * 15;
+        const INV_OFFHAND: u16 = 486 + 2 * 16;
+        const DISARMED: u32 = 0x0020_0000;
+
+        // "Requires a melee weapon" — class 2, any subclass.
+        let needs_a_weapon = SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 0,
+            ..Default::default()
+        };
+        let fits = |disarmed: bool, hands: &[(u16, u64)]| {
+            let mut deps = TestDeps::new();
+            let mut pairs = vec![(46u16, (1 << 3) | if disarmed { DISARMED } else { 0 })];
+            for (i, (field, guid)) in hands.iter().enumerate() {
+                pairs.push((*field, *guid as u32));
+                let entry = 500 + i as u32;
+                deps.items
+                    .insert_object(*guid, ObjectFields::from_pairs(&[(3, entry)]));
+                deps.items.insert_template(
+                    entry,
+                    Some(benilla_protocol::messages::ItemInfo {
+                        class: 2,
+                        subclass: 7,
+                        ..crate::items::test_template("Sword")
+                    }),
+                );
+            }
+            let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+            equipped_item_fits(&needs_a_weapon, &store, &mut deps.items, &deps.commands)
+        };
+
+        // CONTROL — armed, the sword satisfies it.
+        assert!(fits(false, &[(INV_MAINHAND, 0x2a)]));
+        // Disarmed with only a main hand: the one weapon is hidden, nothing satisfies it.
+        assert!(!fits(true, &[(INV_MAINHAND, 0x2a)]));
+        // Disarmed dual-wielder: the main hand's claim cancels the off-hand gate, so the off-hand
+        // weapon is still there and the ability stays usable.
+        assert!(fits(true, &[(INV_MAINHAND, 0x2a), (INV_OFFHAND, 0x2b)]));
+        // Disarmed with an off hand only: that is the hand the ladder hides.
+        assert!(!fits(true, &[(INV_OFFHAND, 0x2b)]));
     }
 
     fn ctx<'a>(

@@ -205,12 +205,10 @@
             --
             -- The insert (l.480) is `gsub(this:GetText(), " *(.*)", "%1")` — the row LABEL with its
             -- leading indent trimmed, i.e. the bare quest name; note it is plain text, NOT a
-            -- hyperlink (1.12 has no |Hquest: link). We read `GetQuestLogTitle(index)` instead of
-            -- the label, because our label is not the ref's: this window appends the Complete/Failed
-            -- tag onto the ONE title string (the v1 simplification in BenillaQuestLogList_Update,
-            -- where the ref keeps a separate right-justified $parentTag FontString), so the ref's
-            -- gsub over our label would post "Quest 1 (Complete)". The API title is exactly the
-            -- string the ref's own trim yields — same result, different expression. `ChatFrameEditBox
+            -- hyperlink (1.12 has no |Hquest: link). We read `GetQuestLogTitle(index)` rather than
+            -- gsub'ing the label: the API title IS the string the ref's trim yields (our label is
+            -- that title behind the same two-space indent, and in both windows the tag lives on its
+            -- own FontString, not on the label) — same result, one fewer expression. `ChatFrameEditBox
             -- and` guards a window test that hasn't loaded ChatFrame.xml (BenillaPaperDollSlot_OnClick's
             -- precedent).
             --
@@ -356,24 +354,52 @@
                         text = "  " .. text
                         button:SetNormalTexture("")
                         button.foldHighlight:SetTexture("")
-                        if isComplete == 1 then
-                            text = text .. " (Complete)"
-                        elseif isComplete == -1 then
-                            text = text .. " (Failed)"
-                        end
                     end
-                    -- pin §2: the ref recolors via a SEPARATE right-side tag FontString; one combined
-                    -- string (title + tag suffix, above) is our v1 simplification — see this widget's
-                    -- own template comment.
+                    -- The TAG, ref l.187-195 verbatim, INCLUDING the precedence: a finished quest's
+                    -- Failed/Complete word OVERWRITES the engine's tag — one row never shows both,
+                    -- and the state word wins. `questTag` is the bare word from the engine
+                    -- (`Elite`, `Dungeon`, `Raid`, `PvP`, `Life`, `World Event`, `Legendary` —
+                    -- QuestInfo.dbc keyed by the quest template's Type); the parentheses are the
+                    -- ref's, added here. Headers arrive with a nil tag and a nil isComplete, so
+                    -- this clears their string without a branch of its own (ref l.187 is likewise
+                    -- outside the isHeader arm).
+                    --
+                    -- KNOWN DEVIATION, and the only one left on this row: the ref also SHRINKS the
+                    -- title to keep it out from under the tag (l.196-203, `275 - 15 - tagWidth`,
+                    -- re-seating the watch check off the capped width at l.205-213). We don't cap:
+                    -- an explicit width on a FontString is a WRAP width here
+                    -- (`RegionData::measure_key`), so capping a 33+ character title would wrap it
+                    -- onto a second line inside a 16px row — worse than the overlap it prevents.
+                    -- Our check needs no reseat either: it anchors off the title's own ink
+                    -- (template comment), which is what the ref's dummy-measure arithmetic
+                    -- reconstructs.
+                    if isComplete and isComplete < 0 then
+                        tag = FAILED
+                    elseif isComplete and isComplete > 0 then
+                        tag = COMPLETE
+                    end
+                    if tag then
+                        button.tag:SetText("(" .. tag .. ")")
+                    else
+                        button.tag:SetText("")
+                    end
                     button.text:SetText(text)
                     button.questIndex = index
+                    -- Ref l.239-246: the tag takes the SAME difficulty colour as the title (the
+                    -- ref colours title, tag and the group-mate count together). What we don't do
+                    -- is the ref's SELECTED-row recolour (l.253-256/l.336: highlight-white on both
+                    -- title and tag) — our title can't take it either, since the ref gets it from
+                    -- LockHighlight on a ButtonText and ours is a plain FontString. Whole-row, not
+                    -- tag-only, so the two stay in step; the selection already reads off
+                    -- QuestLogHighlightFrame.
+                    local c
                     if isHeader then
-                        local c = QuestDifficultyColor["header"]
-                        button.text:SetTextColor(c.r, c.g, c.b)
+                        c = QuestDifficultyColor["header"]
                     else
-                        local c = GetDifficultyColor(level)
-                        button.text:SetTextColor(c.r, c.g, c.b)
+                        c = GetDifficultyColor(level)
                     end
+                    button.text:SetTextColor(c.r, c.g, c.b)
+                    button.tag:SetTextColor(c.r, c.g, c.b)
                     -- pin §2's $parentCheck: the per-row watch checkbox. SetTexture(path)/
                     -- SetTexture(nil) as the show/hide toggle — the icon-slot blanking pattern
                     -- (the icon-clearing every slot repaint does). (Regions DO have Show/Hide these days —
@@ -1310,10 +1336,9 @@
         One list row (pin §2's QuestLogTitleButtonTemplate, QuestLogFrame.xml:4-107, ~300×16). Text
         lives on a NAMED `$parentText` FontString (not the auto ButtonText slot — same convention
         `GossipFrame.xml`'s `GossipTitleButtonTemplate` uses for its `$parentLabel`), so it can carry
-        an explicit LEFT justify. v1 simplification: the ref's Complete/Failed tag rides a SEPARATE
-        right-justified `$parentTag` FontString the client shrinks the title to make room for; we
-        append the tag straight onto the one title string instead (`BenillaQuestLogList_Update`) —
-        simpler, no dynamic width math, costs only the tag not being right-flush.
+        an explicit LEFT justify. The tag rides its own right-flush `$parentTag` string, as the
+        ref's does — see that FontString's own comment, and `BenillaQuestLogList_Update` for the
+        one thing the ref does with it that we don't (the title width cap).
         State art is now ref-verbatim (QuestLogTitleButtonTemplate, ref QuestLogFrame.xml:68-107):
         the 16x16 plus/minus fold icon slot at LEFT+3 is the button's NormalTexture (the Lua swaps
         Plus/Minus per header fold state and CLEARS it on quest rows — SetNormalTexture("")), the
@@ -1333,10 +1358,10 @@
         and with the ref's text inset of 20 that nets to `ink end + 4`. We get the same geometry
         from the anchor graph instead of the Lua dummy-measure hack: the title FontString is
         width-less (its resolved rect hugs its host-measured ink — the measure round-trip), and
-        the check anchors LEFT → the title's RIGHT at +4. Known deviation, unchanged: the ref
-        shrinks the title width to fit the right-justified tag (its `textWidth` cap); our combined
-        title+tag string means a "(Complete)" row seats the check after the tag, not between
-        title and tag.
+        the check anchors LEFT → the title's RIGHT at +4. That IS the ref's seat: its
+        `textWidth+24` off the row's left, with `textWidth` the un-capped title ink, is ink-end + 4
+        given the 20-unit text inset — the ref only computes it because its own `GetWidth` returns
+        whatever width it last capped the title to.
     -->
     <Button name="QuestLogTitleButtonTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="300" y="16"/></Size>
@@ -1344,6 +1369,17 @@
             <Layer level="ARTWORK">
                 <FontString name="$parentText" inherits="GameFontNormal" justifyH="LEFT">
                     <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- The quest TAG (ref QuestLogFrame.xml:10-21, verbatim geometry): a right-flush
+                     GameFontNormal string at RIGHT-2, height 16, width 0 so it hugs its own ink.
+                     It carries "(Elite)"/"(Dungeon)"/"(Raid)"/"(PvP)" — and the Complete/Failed
+                     state, which in the reference rides this same string, not the title. Sits in
+                     ARTWORK beside the title (the ref parks it in BACKGROUND, where its own title
+                     is the Button's ButtonText slot rather than a layer region — ours is a named
+                     FontString, so the two live in one layer). -->
+                <FontString name="$parentTag" inherits="GameFontNormal" justifyH="RIGHT">
+                    <Size><AbsDimension x="0" y="16"/></Size>
+                    <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
                 </FontString>
                 <Texture name="$parentCheck">
                     <Size><AbsDimension x="16" y="16"/></Size>
@@ -1362,6 +1398,7 @@
         <Scripts>
             <OnLoad>
                 self.text = getglobal(self:GetName() .. "Text")
+                self.tag = getglobal(self:GetName() .. "Tag")
                 self.check = getglobal(self:GetName() .. "Check")
                 -- Via the state-texture getter (era API), not getglobal: the loader doesn't yet
                 -- publish a named state texture's `name=` as a global (known gap — Layers regions

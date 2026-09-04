@@ -624,6 +624,84 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
 
 /// The empty-log v1 simplification (this file's XML header comment): zero entries hides every row,
 /// disables Abandon, and shows the centered empty-state message instead of `EmptyQuestLogFrame`.
+/// The quest TAG on the list row (`GetQuestLogTitle`'s third return): it paints on its own
+/// right-flush `$parentTag` string, wrapped in the ref's parentheses, and a finished quest's
+/// Failed/Complete word OVERWRITES it — the ref's own precedence (`QuestLogFrame.lua:187-195`),
+/// which is why one row never shows both. Headers carry no tag. The title keeps the bare quest
+/// name: the state word is NOT appended to it any more.
+#[test]
+fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    // The state word comes from the reference's OWN globals (`COMPLETE`/`FAILED`) as of this row's
+    // ref-verbatim tag handling — the app loads GlobalStrings.lua as `benilla.toc`'s second entry,
+    // so this harness must too or the override silently reads nil.
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+
+    let mut state = eight_entries();
+    // Row 1: a plain elite quest. Row 2: an elite quest that is COMPLETE — the state word wins.
+    // Row 3: no tag at all, in progress. Row 4: a header, which can carry neither.
+    state.entries[0].tag = Some("Elite".into());
+    state.entries[1].tag = Some("Raid".into());
+    state.entries[1].complete = 1;
+    state.entries[2].complete = -1;
+    state.entries[3].is_header = true;
+    state.entries[3].title = "Elwynn Forest".into();
+    state.entries[3].tag = None;
+    s.set_quest_log(state);
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let tag = |s: &mut UiScript, i: u32| {
+        s.eval::<String>(&format!("return QuestLogTitle{i}Tag:GetText()"))
+            .unwrap()
+    };
+    assert_eq!(
+        tag(&mut s, 1),
+        "(Elite)",
+        "the engine's tag, in parentheses"
+    );
+    assert_eq!(
+        tag(&mut s, 2),
+        "(Complete)",
+        "COMPLETE overwrites the quest's own tag — ref l.190-192"
+    );
+    assert_eq!(tag(&mut s, 3), "(Failed)", "FAILED, same override");
+    assert_eq!(tag(&mut s, 4), "", "a header carries no tag");
+
+    // The title is the bare (indented) name — the state word lives on the tag string now, so
+    // appending it here too would double it.
+    let title1 = s
+        .eval::<String>("return QuestLogTitle1Text:GetText()")
+        .unwrap();
+    assert_eq!(title1, "  Quest 1");
+    let title2 = s
+        .eval::<String>("return QuestLogTitle2Text:GetText()")
+        .unwrap();
+    assert_eq!(title2, "  Quest 2", "no \"(Complete)\" on the title");
+
+    // Right-flush at the row's right edge less 2 — the ref's own anchor (its
+    // QuestLogFrame.xml:10-21).
+    let row_right = s.eval::<f32>("return QuestLogTitle1:GetRight()").unwrap();
+    let tag_right = s
+        .eval::<f32>("return QuestLogTitle1Tag:GetRight()")
+        .unwrap();
+    assert!(
+        (row_right - tag_right - 2.0).abs() < 0.5,
+        "tag right-flush at row right -2 (row {row_right}, tag {tag_right})"
+    );
+}
+
 #[test]
 fn empty_quest_log_hides_rows_and_disables_abandon() {
     let _data = benilla_formats::wow_data_or_skip!();

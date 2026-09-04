@@ -39,6 +39,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::number_arg;
 use super::quest::QuestItemView;
 use super::Model;
 
@@ -55,8 +56,15 @@ pub struct QuestLogEntryView {
     pub title: String,
     /// The quest's display level (`GetQuestLogTitle` return 2; the ref colors the row by it).
     pub level: u32,
-    /// The quest tag suffix (elite/dungeon/…) — `None` for a plain quest. v1 pushes `None`
-    /// (the 1.12 wire's giver panels carry no tag; a template-derived tag is a later dressing).
+    /// The quest tag suffix — the bare word, no parentheses: `Elite`, `Dungeon`, `Raid`, `PvP`,
+    /// `Life`, `World Event`, `Legendary`. `None` for a plain quest, which is most of them, and
+    /// always `None` on a header row. The app resolves it from the cached
+    /// `SMSG_QUEST_QUERY_RESPONSE` template's `Type` through `QuestInfo.dbc`
+    /// ([`benilla_formats::QuestTagNames`]); `Type` 0 names no row and takes no tag.
+    ///
+    /// `None`, never `Some("")` — the reference's row Lua branches on the tag's PRESENCE
+    /// (`if ( questTag )`, ref `QuestLogFrame.lua:194`) to decide whether to shrink the title and
+    /// reseat the watch check, so an empty string would take the wrong branch.
     pub tag: Option<String>,
     /// A zone header row (the app synthesizes these from each quest's ZoneOrSort).
     pub is_header: bool,
@@ -286,19 +294,40 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetQuestLogTitle(i) → title, level, tag, isHeader, isCollapsed, isComplete
-    // (the load-bearing 6-tuple — ref QuestLogFrame.lua:144/:272/:321/:571). Out of range → nil.
-    // isCollapsed is always false (no headers in v1); isComplete is 1 / -1 / nil.
+    // (the load-bearing 6-tuple — ref QuestLogFrame.lua:144/:272/:321/:571).
+    // `tag` is the bare word (`Elite`, `Raid`, …) or nil — the ref's Lua wraps it in the
+    // parentheses itself (`"("..questTag..")"`, ref l.195). isComplete is 1 / -1 / nil.
+    //
+    // **The arity is always SIX, and the two failure shapes are different** (wow-re
+    // `ui/scratch/questlog-title-tag.md`, §5-verified at `0x4df930`): a MISSING or non-number
+    // argument raises `Usage:` (shape A — [`number_arg`], truncating toward zero like the
+    // reference's `_ftol`), while an out-of-range NUMBER is not an error at all — it returns
+    // `nil, 0, nil, nil, nil, nil` off `mov eax,6` at all three exits. Return 2 is the NUMBER
+    // `0` there, never nil, and it is `0` for a header row too. We used to answer a single
+    // `Nil` for both, which reads the same through the reference's own
+    // `local t, l, … = GetQuestLogTitle(i)` (Lua pads with nil) but hands an addon doing
+    // arithmetic on the level a nil where the client gives it a zero.
     g.set(
         "GetQuestLogTitle",
-        lua.create_function(|lua, i: usize| {
+        lua.create_function(|lua, i: Value| {
+            let n = number_arg(lua, i, "Usage: GetQuestLogTitle(index)")?;
             let entry = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                i.checked_sub(1)
+                usize::try_from(n)
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
                     .and_then(|n| model.quest_log.entries.get(n))
                     .cloned()
             };
             let Some(e) = entry else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                ]));
             };
             let tag = match &e.tag {
                 Some(t) => Value::String(lua.create_string(t)?),
@@ -871,6 +900,71 @@ mod tests {
                 "local t, _, _, _, _, done = GetQuestLogTitle(2)\n\
                  return t == 'Kobold Camp Cleanup' and done == 1"
             )
+            .unwrap());
+    }
+
+    /// The §5-verified arity contract (wow-re `ui/scratch/questlog-title-tag.md`, `0x4df930`):
+    /// six values ALWAYS, an out-of-range number is not an error, and return 2 is the number `0`
+    /// — while a missing or non-number argument raises `Usage:`.
+    #[test]
+    fn out_of_range_is_six_values_with_a_zero_level_and_a_bad_arg_raises() {
+        let mut s = UiScript::new().unwrap();
+        // Empty log: the first return is still nil (so the ref's `if ( questLogTitleText )`
+        // reads the same), but the tuple is full and the level is a NUMBER.
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetQuestLogTitle(1))")
+                .unwrap(),
+            6
+        );
+        assert!(s
+            .eval::<bool>("local t, l = GetQuestLogTitle(1) return t == nil and l == 0")
+            .unwrap());
+
+        s.set_quest_log(two_quests());
+        // Index 0 and a negative index are out of range, not errors — same six values.
+        for i in ["0", "-1", "99"] {
+            assert!(
+                s.eval::<bool>(&format!(
+                    "local t, l = GetQuestLogTitle({i}) return t == nil and l == 0"
+                ))
+                .unwrap(),
+                "index {i} is out of range, not an error"
+            );
+        }
+        // `_ftol` truncates toward zero, so 1.9 addresses entry 1.
+        assert!(s
+            .eval::<bool>("return GetQuestLogTitle(1.9) == 'A Threat Within'")
+            .unwrap());
+
+        // A missing / non-number argument is the other shape.
+        for bad in ["", "nil", "{}", "print"] {
+            let e = format!(
+                "{:?}",
+                s.eval::<mlua::Value>(&format!("return GetQuestLogTitle({bad})"))
+                    .unwrap_err()
+            );
+            assert!(
+                e.contains("Usage: GetQuestLogTitle(index)"),
+                "arg `{bad}` must raise Usage:, got {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_is_the_bare_word_and_nil_when_absent() {
+        // The third return is the BARE word — the ref's own Lua adds the parentheses
+        // (`"("..questTag..")"`, ref QuestLogFrame.lua:195), so pushing "(Elite)" here would
+        // paint "((Elite))". An untagged quest pushes nil, not "", because the ref branches on
+        // presence (`if ( questTag )`, ref l.194).
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries[1].tag = Some("Elite".into());
+        s.set_quest_log(state);
+        assert!(s
+            .eval::<bool>("return select(3, GetQuestLogTitle(1)) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return select(3, GetQuestLogTitle(2)) == 'Elite'")
             .unwrap());
     }
 

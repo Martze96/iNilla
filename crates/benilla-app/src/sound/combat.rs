@@ -257,7 +257,15 @@ fn swing_weapon(
     offhand: bool,
     materials: Option<&benilla_formats::MaterialCatalog>,
 ) -> (u32, bool) {
-    let hand = wielded.and_then(|w| if offhand { w.off } else { w.main });
+    // `0x625400`/`0x625460` pass `visFlag = 0`, so a disarmed hand's weapon is not here to be
+    // heard either — the punch a disarmed unit throws must not clang like a sword (1863).
+    let hand = wielded.and_then(|w| {
+        if offhand {
+            w.armed_off()
+        } else {
+            w.armed_main()
+        }
+    });
     match hand {
         // class 2 = weapon; anything else in hand (held misc) swings as unarmed.
         Some((2, subclass)) => {
@@ -328,7 +336,15 @@ fn swing_weight(
     offhand: bool,
     sub_classes: &benilla_formats::ItemSubClassCatalog,
 ) -> Option<u32> {
-    match wielded.and_then(|w| if offhand { w.off } else { w.main }) {
+    // `0x623870`, `visFlag = 0` again: the disarmed hand whooshes with the small unarmed
+    // samples, by this function's own empty-hand leg (1863).
+    match wielded.and_then(|w| {
+        if offhand {
+            w.armed_off()
+        } else {
+            w.armed_main()
+        }
+    }) {
         None => Some(0),
         Some((class, subclass)) if u32::from(class) == ITEM_CLASS_WEAPON => {
             sub_classes.weapon_swing_size(ITEM_CLASS_WEAPON, u32::from(subclass))
@@ -362,12 +378,14 @@ fn defended(victim_state: u32) -> bool {
 /// (`0x623690 test eax,eax; je`), which is what an unarmed parry sounds like.
 fn defending_item(wielded: Option<&Wielded>, block: bool) -> Option<(u8, u8)> {
     let w = wielded?;
+    // Both probes are `0x625400(sel)` with `visFlag = 0` (1863): a disarmed parry finds no
+    // mainhand weapon and falls through, and an unarmed parry rings nothing at all.
     if !block {
-        if let Some((2, _)) = w.main {
+        if let Some((2, _)) = w.armed_main() {
             return Some((2, w.materials[0]));
         }
     }
-    let (class, _) = w.off?;
+    let (class, _) = w.armed_off()?;
     matches!(class, 2 | 4).then_some((class, w.materials[1]))
 }
 

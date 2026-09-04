@@ -7,7 +7,7 @@
 //! Unlike the questgiver panels (a transient NPC-session window), the quest log is **durable
 //! player state**: [`feed_quest_log`] reads the self player's `PLAYER_QUEST_LOG` descriptor slots
 //! every frame (the wire pin's field 198 + 3·slot) rather than reacting to one wire event, and
-//! resolves EVERY occupied slot's title/level/objectives from the `SMSG_QUEST_QUERY_RESPONSE`
+//! resolves EVERY occupied slot's title/level/tag/objectives from the `SMSG_QUEST_QUERY_RESPONSE`
 //! template cache ([`QuestLog`] — the exact ask-once twin of [`crate::items::Items`]'s template
 //! cache): [`build_objectives`] turns the template's fixed objective quads + the slot's counters
 //! (creature/GO objectives) or the live bag count (item objectives; the wire pin: item-objective
@@ -138,7 +138,8 @@ impl Plugin for UiQuestLogPlugin {
         app.init_resource::<QuestLog>()
             .add_systems(
                 Startup,
-                load_quest_header_names.after(benilla_assets::AssetSet::Open),
+                (load_quest_header_names, load_quest_tag_names)
+                    .after(benilla_assets::AssetSet::Open),
             )
             .add_systems(
                 Update,
@@ -423,6 +424,7 @@ fn feed_quest_log(
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     header_names: Option<Res<QuestHeaderNamesRes>>,
+    tag_names: Option<Res<QuestTagNamesRes>>,
     states: Res<crate::world_state::WorldStates>,
     mut last: Local<crate::ui_script::VmMemo<QuestLogState>>,
     mut prior_quest_ids: Local<crate::ui_script::VmMemo<Option<HashSet<u32>>>>,
@@ -501,7 +503,7 @@ fn feed_quest_log(
             quest_id: 0,
             title: name.clone(),
             level: 0,
-            tag: None,
+            tag: None, // a header names a zone/sort, never a quest — it can carry no tag
             is_header: true,
             collapsed,
             complete: 0,
@@ -516,12 +518,20 @@ fn feed_quest_log(
             if collapsed {
                 continue; // folded: the quest stays in the log, just not in the visible list
             }
-            let (title, level, pushable, objectives) = match quest_log
+            let (title, level, tag, pushable, objectives) = match quest_log
                 .template(r.quest_id, &commands)
             {
                 Some(t) => (
                     t.title.clone(),
                     t.level,
+                    // The `(Elite)`/`(Dungeon)`/`(Raid)`/`(PvP)` suffix: the template's `Type` is
+                    // a `QuestInfo.dbc` row id ([`benilla_formats::QuestTagNames`]), and `Type`
+                    // 0 — the untagged majority — names no row. Absent table (no client data) =
+                    // no tag, never an empty string: the row Lua branches on presence.
+                    tag_names
+                        .as_ref()
+                        .and_then(|tags| tags.0.resolve(t.quest_type))
+                        .map(str::to_string),
                     // `QUEST_FLAGS_SHARABLE` (vmangos `QuestDef.h:153`) — the whole of the
                     // shareable test, and it is the CLIENT's alone: vmangos's
                     // `HandlePushQuestToParty` never checks the bit, it only re-tests it on the
@@ -535,7 +545,7 @@ fn feed_quest_log(
                 // QUEST_LOG_UPDATE refresh on landing fills the row in. `pushable` false with it:
                 // the reference reads the same cache, so its button is dark until the answer lands
                 // too.
-                None => ("...".to_string(), 0, false, Vec::new()),
+                None => ("...".to_string(), 0, None, false, Vec::new()),
             };
             let complete = if r.log_slot.state & quest_slot_state::COMPLETE != 0 {
                 1
@@ -548,7 +558,7 @@ fn feed_quest_log(
                 quest_id: r.quest_id,
                 title,
                 level,
-                tag: None,
+                tag,
                 is_header: false,
                 collapsed: false,
                 complete,
@@ -764,6 +774,27 @@ fn load_quest_header_names(
     match loaded {
         Ok(names) => commands.insert_resource(QuestHeaderNamesRes(names)),
         Err(e) => warn!("ui_quest_log: quest header names failed to load: {e:#}"),
+    }
+}
+
+/// The quest `Type → tag name` lookup ([`benilla_formats::QuestTagNames`] — `QuestInfo.dbc`),
+/// loaded once at startup. Absent when the client data didn't load; the feed then pushes no tag,
+/// which is what an untagged quest pushes anyway.
+#[derive(Resource)]
+pub(crate) struct QuestTagNamesRes(pub benilla_formats::QuestTagNames);
+
+/// Startup: read the `QuestInfo.dbc` tag names through the patch chain (the header-names load's
+/// exact shape).
+fn load_quest_tag_names(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_quest_tag_names(&mut chain)
+    };
+    match loaded {
+        Ok(names) => commands.insert_resource(QuestTagNamesRes(names)),
+        Err(e) => warn!("ui_quest_log: quest tag names failed to load: {e:#}"),
     }
 }
 

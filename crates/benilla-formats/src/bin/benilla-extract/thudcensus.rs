@@ -60,6 +60,7 @@ pub fn thudcensus(chain: &mut Chain) -> Result<()> {
     }
     let axis: Vec<u32> = thuds.terrain_sounds().collect();
     let classes: BTreeSet<u32> = thuds.size_classes();
+    let classes_all = classes.clone();
 
     println!(
         "DeathThudLookups.dbc — {} rows over {} size class(es) × {} TerrainTypeSounds id(s)\n",
@@ -202,5 +203,91 @@ pub fn thudcensus(chain: &mut Chain) -> Result<()> {
         dangling.len(),
         off_axis.len()
     );
+
+    // ── 3 · where a corpse is SILENT ─────────────────────────────────────────────────────────
+    // The asymmetry the table half implies and only this sweep sizes. Both lookups are keyed on
+    // `TerrainType.SoundID`, and `TerrainType 10 "None"` — the unauthored default a WMO surface
+    // takes when its `MOMT+0x20` says nothing — has `SoundID = 0`. `FootstepTerrainLookup` has a
+    // **row at terrain sound 0** for 17 footstep classes; `DeathThudLookups` has **none at all**.
+    // So the same floor that creaks underfoot swallows the body that lands on it, and that is
+    // authored data in both directions, not a gap on either side.
+    //
+    // What this section measures is how much of the shipped building stock that covers, because
+    // "a corpse landed silently indoors" is a *correct* observation that looks exactly like a bug.
+    let ftl_at_zero: Vec<u32> = (0..256)
+        .filter(|c| steps.resolve_terrain(*c, 10).is_some())
+        .collect();
+    let dtl_at_zero = classes_all
+        .iter()
+        .filter(|c| thuds.resolve(**c, 0).is_some())
+        .count();
+    println!(
+        "\nSilence indoors — TerrainType 10 \"None\" (SoundID 0): {} footstep class(es) have a \
+         lookup row, {dtl_at_zero} size class(es) have a thud row",
+        ftl_at_zero.len()
+    );
+
+    let mut wmo_roots = 0u32;
+    let mut materials = 0u32;
+    let mut by_terrain: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut silent_roots = 0u32;
+    let mut thudding: Vec<String> = Vec::new();
+    for path in crate::scan::wmo_roots(chain, None)? {
+        let Ok(bytes) = chain.read_file(&path) else {
+            continue;
+        };
+        let Ok(root) = benilla_formats::parse_wmo_root(&bytes) else {
+            continue;
+        };
+        wmo_roots += 1;
+        let mut any_thud = false;
+        for ground_type in root.material_ground_types() {
+            materials += 1;
+            *by_terrain.entry(ground_type).or_default() += 1;
+            // A material thuds iff its terrain id reaches a nonzero TerrainTypeSounds class that
+            // the thud table has a row for. Size class is irrelevant to *whether* — every class
+            // 0..=4 is populated on the same terrain axis.
+            if steps
+                .sound_class_of(ground_type)
+                .is_some_and(|ts| thuds.resolve(0, ts).is_some())
+            {
+                any_thud = true;
+            }
+        }
+        if any_thud {
+            thudding.push(path);
+        } else {
+            silent_roots += 1;
+        }
+    }
+    println!(
+        "\n{wmo_roots} WMO root(s), {materials} MOMT material(s) — the `MOMT+0x20` TerrainType each \
+         surface carries\n"
+    );
+    for (terrain, n) in &by_terrain {
+        let sound = steps.sound_class_of(*terrain);
+        let verdict = match sound {
+            Some(0) | None => "SILENT — no thud row".to_string(),
+            Some(ts) => match thuds.resolve(0, ts) {
+                Some(_) => format!("thuds (terrain sound {ts})"),
+                None => format!("SILENT — no thud row (terrain sound {ts})"),
+            },
+        };
+        println!(
+            "  TerrainType {:>3}  {:>6} material(s)  {:>5.1}%  {verdict}",
+            terrain,
+            n,
+            100.0 * f64::from(*n) / f64::from(materials.max(1)),
+        );
+    }
+    println!(
+        "\n{silent_roots} of {wmo_roots} WMO roots have NO surface that can thud; {} do",
+        thudding.len()
+    );
+    // All of them, not a head: the question this list answers is "does THIS building thud", and a
+    // truncated list cannot answer it. 121 lines is a census, not a flood.
+    for p in &thudding {
+        println!("  thuds somewhere: {p}");
+    }
     Ok(())
 }
