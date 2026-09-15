@@ -1,4 +1,4 @@
-//! The Set* entry points: the shift-compare seats and their CURRENTLY_EQUIPPED shape,
+//! The Set* entry points: the vendor compare's CURRENTLY_EQUIPPED shape,
 //! SetInventoryItem outside compare, and SetHyperlink's item-link filter.
 
 use std::collections::HashMap;
@@ -6,14 +6,17 @@ use std::collections::HashMap;
 use super::script;
 use crate::script::*;
 
-/// The shopping-compare pipeline end-to-end (0274 P4, re-based by 2202): a bag-ring hover on the
-/// main GameTooltip with shift held seats ShoppingTooltip1/2 **beside the tooltip**, at
-/// `MerchantFrame.xml:63-80`'s own geometry, and their ARMED render carries the byte law's compare
-/// shape — the gray CURRENTLY_EQUIPPED header, WHITE name, the compact cut (the description never
-/// prints). Two finger slots fill both plates. Releasing shift hides the pair; nothing shows until
-/// the rising edge, and no `SHOW_COMPARE_TOOLTIP` is ever fired (that event is dead in 5875).
+/// The compare SHAPE, driven the only way 1.12.1 drives it: the vendor row's
+/// `SetMerchantCompareItem` (`MerchantFrame.xml:63-80`). The armed render carries the byte law's
+/// compare mode — the gray CURRENTLY_EQUIPPED header, the name WHITE instead of quality-colored,
+/// and the compact cut at `0x52e14c` (the description never prints).
+///
+/// **And the negative control that keeps this engine out of it** (2210): a bag hover seats
+/// nothing, with shift or without, because the reference has no hover compare at all —
+/// `SHOW_COMPARE_TOOLTIP` has zero fire sites in 5875, so nothing may reach a listener for it
+/// either. The plates belong to whatever FrameXML raises them, and this engine raises none.
 #[test]
-fn shift_compare_seats_beside_the_tooltip_and_renders_the_compare_shape() {
+fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     let mut inv: InventorySlots = Default::default();
@@ -91,9 +94,11 @@ fn shift_compare_seats_beside_the_tooltip_and_renders_the_compare_shape() {
             slots,
         }),
     );
+    // The plates are ordinary GameTooltip frames the FrameXML owns — the engine knows nothing
+    // about them (`ShoppingTooltip` does not occur in the image at all).
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("LEFT", 0, 0); a:SetWidth(10); a:SetHeight(10)
         -- CreateFrame'd frames start SHOWN; the shipped XML instances are hidden="true".
         CreateFrame("GameTooltip", "GameTooltip"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
@@ -110,37 +115,55 @@ fn shift_compare_seats_beside_the_tooltip_and_renders_the_compare_shape() {
     "#,
     )
     .unwrap();
-    // Shift up: the hover renders the main tooltip, no compare fires.
+
+    // ── A hover is not a compare, with shift or without ────────────────────────────────────
     s.run(
         r#"
         GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
         GameTooltip:SetBagItem(0, 1)
-        assert(table.getn(compare_calls) == 0, "the dead event never fires")
-        assert(not ShoppingTooltip1:IsShown(), "no compare while shift is up")
+        assert(not ShoppingTooltip1:IsShown(), "a bag hover seats no plate")
     "#,
     )
     .unwrap();
-    // The rising edge fires both ring slots in order.
     s.set_modifiers(true, false, false);
     s.run(
         r#"
-        assert(table.getn(compare_calls) == 0, "the dead event still never fires")
-        assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
+        assert(table.getn(compare_calls) == 0, "the dead event never fires")
+        assert(not ShoppingTooltip1:IsShown() and not ShoppingTooltip2:IsShown(),
+               "shift over a hover seats no plate either — 1.12 has no hover compare")
+        assert(GameTooltip:IsShown(), "and the hover itself is untouched")
+    "#,
+    )
+    .unwrap();
+    s.set_modifiers(false, false, false);
+
+    // ── The vendor row, which is where the compare actually lives ──────────────────────────
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            name: Some("New Loop".into()),
+            item_id: 7002,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    s.run(
+        r#"
+        -- MerchantFrame.xml:67-78, in miniature: fill as the predicate, seat, fill again, show.
+        assert(ShoppingTooltip1:SetMerchantCompareItem(1, 1), "the worn ring is a candidate")
+        ShoppingTooltip1:SetOwner(GameTooltip, "ANCHOR_NONE")
+        ShoppingTooltip1:ClearAllPoints()
+        ShoppingTooltip1:SetPoint("TOPLEFT", "GameTooltip", "TOPRIGHT", 0, -10)
+        ShoppingTooltip1:SetMerchantCompareItem(1, 1)
+        ShoppingTooltip1:Show()
+        assert(ShoppingTooltip1:IsShown())
         assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
         assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
-        assert(ShoppingTooltip2TextLeft2:GetText() == "Older Loop")
         -- The compact cut at 0x52e14c: the description never prints on a compare.
         for i = 1, ShoppingTooltip1:NumLines() do
             assert(getglobal("ShoppingTooltip1TextLeft" .. i):GetText() ~= "\"Round.\"",
                    "compact cut dropped the description")
         end
-        -- The pair rides BESIDE the tooltip, at MerchantFrame.xml:68-78's own seats.
-        local p1, r1, rp1, x1, y1 = ShoppingTooltip1:GetPoint()
-        local p2, r2, rp2, x2, y2 = ShoppingTooltip2:GetPoint()
-        assert(p1 == "TOPLEFT" and r1:GetName() == "GameTooltip" and rp1 == "TOPRIGHT"
-               and x1 == 0 and y1 == -10, "plate 1 hangs off the tooltip's TOPRIGHT")
-        assert(p2 == "TOPLEFT" and r2:GetName() == "ShoppingTooltip1" and rp2 == "TOPRIGHT"
-               and x2 == 0 and y2 == 0, "plate 2 hangs off plate 1")
+        assert(table.getn(compare_calls) == 0, "and still no dead event")
     "#,
     )
     .unwrap();
@@ -167,44 +190,6 @@ fn shift_compare_seats_beside_the_tooltip_and_renders_the_compare_shape() {
     );
     let name = color_of("Old Loop");
     assert_eq!(name, [1.0, 1.0, 1.0, 1.0], "compare name is WHITE");
-    // A ONE-slot hover after a two-slot one takes plate 2 down with it — the selection is
-    // monotone, so plate 2's miss is the only thing that can clear what the rings left there.
-    s.set_item_template(
-        7003,
-        ItemTemplateView {
-            name: "New Band".into(),
-            quality: 2,
-            inventory_type: 2, // neck: one candidate slot, and nothing worn in it
-            ..Default::default()
-        },
-    );
-    s.run(
-        r#"
-        GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
-        GameTooltip:BenillaSetItemById(7003)
-        assert(not ShoppingTooltip1:IsShown(), "an empty neck slot shows no plate")
-        assert(not ShoppingTooltip2:IsShown(), "and plate 2 does not survive the ring hover")
-    "#,
-    )
-    .unwrap();
-    // Back to the rings, so the release assertions below have a live pair to take down.
-    s.run(
-        r#"
-        GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
-        GameTooltip:SetBagItem(0, 1)
-        assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
-    "#,
-    )
-    .unwrap();
-    // Releasing shift hides the pair; the main tooltip stays.
-    s.set_modifiers(false, false, false);
-    s.run(
-        r#"
-        assert(not ShoppingTooltip1:IsShown() and not ShoppingTooltip2:IsShown(), "release hides")
-        assert(GameTooltip:IsShown(), "the item hover itself stays")
-    "#,
-    )
-    .unwrap();
     assert!(s.take_errors().is_empty());
 }
 

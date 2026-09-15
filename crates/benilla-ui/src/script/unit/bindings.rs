@@ -494,6 +494,36 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             unit_predicate(lua, &token, |u| u.is_player)
         })?,
     )?;
+    // UnitIsPlusMob(unit) → 1 if this unit is a "plus" mob, else nil (`0x516d40`, extent
+    // `[0x516d40,0x516d8f)`). One bit of the SAME `UNIT_FIELD_FLAGS` word `UnitPlayerControlled`
+    // reads: `shr ecx,6; test cl,1` — bit 6, `UNIT_FLAG_PLUS_MOB 0x40`.
+    //
+    // **It is not a rank read**, which is the trap the name sets. `UnitClassification` is its
+    // table neighbour and answers off the gated creature rank (decision 0782), so the obvious
+    // implementation is `rank > 0` — but `0x516d40` never calls the rank getter `0x605620` (whose
+    // six callers are enumerated) and never touches the creature cache. The two agree in practice
+    // because the SERVER derives the bit from the rank — vmangos `Creature::UpdateEntry` sets it
+    // on `!IsPet() && rank > 0` (`Creature.cpp:634`, INFERRED from source) — so **rare** answers 1
+    // here alongside elite, rare-elite and world boss, while a player, a pet and a normal mob
+    // answer nil. Where they part is the unstreamed unit: a creature whose cache record has not
+    // arrived still carries its own flags, so this answers truthfully where a rank read would say
+    // "normal". No client code writes the bit (zero bitwise RMWs at `+0xa0` image-wide), so it is
+    // the server's word verbatim.
+    //
+    // No stock FrameXML file calls it, which is why nothing shipped ever raised on its absence;
+    // addons do (`FuBar_DakSmak` colours its tooltip with it), and calling the nil global is what
+    // B385 reported. Last of the three verbs decision 1834 left loudly absent.
+    // Decision 2209 (wow-re `9f84e7e4`,
+    // `system/ui/scratch/unit-verbs-controlled-charmed-creaturetype.md` §4.2).
+    g.set(
+        "UnitIsPlusMob",
+        lua.create_function(|lua, token: Option<String>| {
+            // One of 1834's quiet thirteen: no `lua_isstring` gate and no `Usage:` arm, so a nil
+            // or absent token is a quiet nil. An UNRECOGNISED one still raises — the body reaches
+            // the shared resolver through `0x515940`, and that is `unit_predicate`'s own gate.
+            unit_predicate(lua, &token, |u| u.flags & 0x40 != 0)
+        })?,
+    )?;
 
     // The identity predicates (decision 0434 §5 — the unit popup's menu pick + gating). Same-token
     // is trivially the same unit; otherwise both snapshots must carry a real (nonzero) guid.

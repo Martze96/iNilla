@@ -177,6 +177,155 @@ mod loader_tests {
         );
     }
 
+    /// **A `parent=` that resolves to nothing leaves the frame PARENTLESS** — it does not fall back
+    /// to the enclosing frame (decision 2213). `0x6ee280` seeds `[ebp-0x8]` with the incoming
+    /// default parent and then writes the lookup's result back **unconditionally** at
+    /// `0x6ee3ef`, so a miss stores 0 over the seed and `0x6ee408` constructs with `ecx = 0`
+    /// (wow-re `xml-parent-attach-order.md`, VERIFIED). And an **empty** `parent=""` short-circuits
+    /// at `0x6ee3c7` before any of that: the default parent is kept, silently.
+    ///
+    /// Only the nested case can tell these apart — at top level there is no enclosing frame to
+    /// fall back to, which is why
+    /// [`Self::a_top_level_parent_attribute_attaches_and_anchors`] passed either way.
+    #[test]
+    fn a_parent_attribute_that_misses_leaves_the_frame_parentless() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Enclosing">
+                    <Size><AbsDimension x="200" y="100"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <Frames>
+                        <Frame name="$parentMissed" parent="NotLoadedYet">
+                            <Size><AbsDimension x="10" y="10"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                        </Frame>
+                        <Frame name="$parentEmpty" parent="">
+                            <Size><AbsDimension x="10" y="10"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                        </Frame>
+                    </Frames>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+
+        // The miss: parentless, NOT re-attached to Enclosing.
+        assert!(s.eval::<bool>("return TopMissed ~= nil").unwrap());
+        assert!(
+            s.eval::<bool>("return TopMissed:GetParent() == nil")
+                .unwrap(),
+            "a parent= that names nothing nulls the parent; it does not fall back"
+        );
+        // …and with no parent, the `$parent` chain walk finds nothing, so the "Top" seed survives
+        // (rf27 §5) — hence `TopMissed`, not `EnclosingMissed`.
+        assert!(s.eval::<bool>("return EnclosingMissed == nil").unwrap());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Couldn't find frame parent: NotLoadedYet"),
+            "logged in the reference's own words (0x8710f0): {:?}",
+            report.warnings
+        );
+
+        // The empty attribute: the enclosing frame is kept, and nothing is logged.
+        assert_eq!(
+            s.eval::<String>("return EnclosingEmpty:GetParent():GetName()")
+                .unwrap(),
+            "Enclosing",
+            "parent=\"\" keeps the enclosing parent"
+        );
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("Empty")),
+            "and says nothing about it: {:?}",
+            report.warnings
+        );
+    }
+
+    /// **A top-level `name="$parent…"` resolves against the `parent=` attribute** (B387) — the
+    /// reference attaches the parent *first* (`0x6ee280` resolves it at `0x6ee3e8` and passes it to
+    /// the constructor at `0x6ee408`) and only then runs the node-apply step that reads `name=` and
+    /// calls `SetName` (`0x6ee4d6`), whose expander walks the frame's **actual** parent chain
+    /// (rf27 `0x76c5b0`). We resolved the name first, against the lexical ancestor, so ClassIcons'
+    /// `<Frame name="$parentClassIcon" parent="PlayerFrame"/>` was published as `TopClassIcon` and
+    /// every `PlayerFrameClassIcon` lookup in the addon indexed a nil.
+    ///
+    /// Four claims: the name takes the attribute parent's name; that frame's own children compose
+    /// off the corrected name; a top-level `$parent` with no attribute still falls to the `"Top"`
+    /// seed; and the `parent=` attribute itself is NOT expanded (`0x6ee3e8` calls the by-name
+    /// resolver direct, bypassing `0x76c5b0` — rf27 §2).
+    #[test]
+    fn a_dollar_parent_name_resolves_against_the_parent_attribute() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="PlayerFrame">
+                    <Size><AbsDimension x="200" y="100"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Frame>
+                <Frame name="$parentClassIcon" parent="PlayerFrame">
+                    <Size><AbsDimension x="20" y="20"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                    <Frames>
+                        <Frame name="$parentDot">
+                            <Size><AbsDimension x="4" y="4"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                        </Frame>
+                    </Frames>
+                </Frame>
+                <Frame name="$parentLoose">
+                    <Size><AbsDimension x="10" y="10"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Frame>
+                <Frame name="Literal" parent="$parentPlayerFrame">
+                    <Size><AbsDimension x="10" y="10"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+
+        assert!(
+            s.eval::<bool>("return PlayerFrameClassIcon ~= nil")
+                .unwrap(),
+            "the top-level $parent name took the parent= frame's name, not the lexical \"Top\""
+        );
+        assert!(s.eval::<bool>("return TopClassIcon == nil").unwrap());
+        assert_eq!(
+            s.eval::<String>("return PlayerFrameClassIcon:GetParent():GetName()")
+                .unwrap(),
+            "PlayerFrame",
+            "and it is really attached there"
+        );
+        assert!(
+            s.eval::<bool>("return PlayerFrameClassIconDot ~= nil")
+                .unwrap(),
+            "a nested child composes off the CORRECTED name"
+        );
+
+        // No attribute, no lexical parent: the expander's `"Top"` seed survives (rf27 §5).
+        assert!(s.eval::<bool>("return TopLoose ~= nil").unwrap());
+
+        // `parent="$parentPlayerFrame"` is taken LITERALLY — `0x6ee3e8` hands the raw string to
+        // `0x76c760`, so no frame of that name exists and the element falls back (and warns).
+        assert!(s.eval::<bool>("return Literal:GetParent() == nil").unwrap());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("$parentPlayerFrame")),
+            "the unexpanded attribute is named verbatim in the warning: {:?}",
+            report.warnings
+        );
+    }
+
     /// End-to-end: a virtual template, an instance inheriting it (with `<Size>`, screen `<Anchors>`,
     /// a `<Layers>` coloured `<Texture>`, a nested child `<Frame>` in `<Frames>`, and `<OnLoad>`
     /// handlers on both) — proving name publication, bottom-up OnLoad, `$parent`, and that

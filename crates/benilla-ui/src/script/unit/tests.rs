@@ -923,6 +923,94 @@ fn unit_is_charmed_answers_one_or_nil_and_only_for_the_charmed_side() {
     );
 }
 
+/// **`UnitIsPlusMob` reads a FLAG BIT, not the creature rank** (B385; `0x516d40`).
+///
+/// Decision 2209. The name says "elite" and its table neighbour `UnitClassification` answers off
+/// the gated rank, so the natural implementation is `rank > 0`. The binary's is not: it takes
+/// `UNIT_FIELD_FLAGS` and tests bit 6 (`UNIT_FLAG_PLUS_MOB 0x40`), never calling the rank getter
+/// `0x605620` (wow-re `9f84e7e4`,
+/// `system/ui/scratch/unit-verbs-controlled-charmed-creaturetype.md` §4.2). The two normally
+/// agree because the server derives the bit from the rank — so **rare** answers 1 here, not just
+/// elite — and they part on the unit whose creature-cache record has not arrived, which still
+/// carries its own flags while its rank reads 0.
+///
+/// That divergence is the whole reason this is a test and not a reading: a `rank > 0`
+/// implementation passes every ordinary case and is wrong exactly where the flag is the only
+/// thing the client has.
+#[test]
+fn unit_is_plus_mob_reads_the_flag_bit_and_not_the_rank() {
+    let with = |flags: u32, rank: u32| UnitState {
+        exists: true,
+        has_object: true,
+        flags,
+        rank,
+        ..Default::default()
+    };
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+
+    // The ordinary agreeing cases: the server sets the bit on `!IsPet() && rank > 0`, so elite,
+    // rare-elite, world boss AND rare all carry it, and a normal mob does not.
+    for (rank, word) in [
+        (1u32, "elite"),
+        (2, "rareelite"),
+        (3, "worldboss"),
+        (4, "rare"),
+    ] {
+        s.set_unit("target", Some(with(0x40, rank)));
+        assert_eq!(
+            s.eval::<i64>(r#"return UnitIsPlusMob("target")"#).unwrap(),
+            1,
+            "a {word} carries UNIT_FLAG_PLUS_MOB, so the answer is the number 1"
+        );
+    }
+    s.set_unit("target", Some(with(0, 0)));
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitIsPlusMob("target")"#)
+            .unwrap()
+            .is_none(),
+        "a normal mob answers nil"
+    );
+
+    // ── The two legs a rank read gets wrong ──
+    // The flag WITHOUT a rank: an unstreamed creature, whose cache record has not arrived, still
+    // has its own descriptor. `rank > 0` would call it normal; the client says 1.
+    s.set_unit("target", Some(with(0x40, 0)));
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsPlusMob("target")"#).unwrap(),
+        1,
+        "the bit alone decides — no creature-cache rank is consulted"
+    );
+    // A rank WITHOUT the flag — a player's pet, which the server excludes (`!IsPet()`).
+    s.set_unit("target", Some(with(0x8, 2)));
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitIsPlusMob("target")"#)
+            .unwrap()
+            .is_none(),
+        "no bit, no plus mob — a neighbouring flag (player-controlled) must not read as one"
+    );
+
+    // The token grammar: quiet on nil/absent (one of 1834's thirteen with no `lua_isstring`
+    // gate), quiet on a recognised token naming nothing, and a raise on an unrecognised one —
+    // the body reaches the shared resolver through `0x515940`.
+    assert!(s.run("UnitIsPlusMob()").is_ok(), "nil token stays quiet");
+    assert!(
+        s.run("UnitIsPlusMob(nil)").is_ok(),
+        "…and so does an explicit nil"
+    );
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitIsPlusMob("party5")"#)
+            .unwrap()
+            .is_none(),
+        "recognised but naming nothing — nil, not a raise"
+    );
+    let err = s.run(r#"UnitIsPlusMob("bogus")"#).unwrap_err().to_string();
+    assert!(
+        err.contains("Unknown unit name: bogus"),
+        "an unrecognised token raises the resolver's own text: {err}"
+    );
+}
+
 /// **Unit tokens fold case, because the client's resolver does.**
 ///
 /// `0x515970` compares every one of its literals with `SStrCmpI` → `_strnicmp`, whose fold is
@@ -1634,6 +1722,15 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
             UnitState {
                 exists: true,
                 player_controlled: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitIsPlusMob",
+            r#"UnitIsPlusMob("target")"#,
+            UnitState {
+                exists: true,
+                flags: 0x40,
                 ..Default::default()
             },
         ),

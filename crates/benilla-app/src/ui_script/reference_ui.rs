@@ -2371,9 +2371,11 @@ mod tests {
                 "PaperDollFrame.lua — the second `TRADE_REQUEST` (decision 1764): event 377 is \
                  registered in 5875 and signalled from NOWHERE (zero fire sites in wow-re's own \
                  census, `merchant-compare-item-law.md` §8), so this listener is dead code THERE \
-                 too. benilla fired it from 0283 until 2202 and took it back out — decision 2202; the \
-                 shopping plates are driven the way the reference's one LIVE caller drives them, \
-                 `MerchantFrame.xml:63-80`. Producing this would be a divergence, not a fix",
+                 too. benilla fired it from 0283 until 2202, then drove the plates itself on a \
+                 shift-held hover until 2210; both were supersets. Nothing in this engine seats a \
+                 shopping plate now — the reference's own callers do (`MerchantFrame.xml:63-80`, \
+                 the auction rows), which is the whole of the compare in 1.12.1. Producing this \
+                 event would be a divergence, not a fix",
             ),
             ("SYSMSG", "UIErrorsFrame.lua"),
             ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),

@@ -14,15 +14,17 @@
 //! Residual INTERIMs cited inline: the dual-wield/off-hand proficiency exception
 //! (`0x5eab70`), the type cell's override red, the set-owned count source.
 //!
-//! **Compare mode** (0274 P4, re-based by 2202): `SetInventoryItem` on an ARMED shopping tooltip
-//! renders the byte law's compare shape — gray "Currently Equipped" first (`[arg+0x18]≠0`), the
-//! NAME white instead of quality-colored, and the compact early-return at `0x52e14c`
-//! (`[arg+0x14]≠0`): nothing after the charges/cooldown block. **What seats the plates is
-//! [`drive_compare`]**, transcribed from `MerchantFrame.xml:63-80` — the only LIVE compare caller
-//! in 1.12.1, since `SHOW_COMPARE_TOOLTIP` has no fire site in the whole image and the paper-doll
-//! listener is dead code there (wow-re `merchant-compare-item-law.md` §8). So a compare rides
-//! beside the tooltip it compares to, needs no window open, and is driven by SHIFT — the one
-//! named departure from the vendor row, which compares unconditionally.
+//! **Compare mode** (0274 P4, re-based by 2202, scoped back to the reference by 2210):
+//! `SetInventoryItem` on an ARMED shopping tooltip renders the byte law's compare shape — gray
+//! "Currently Equipped" first (`[arg+0x18]≠0`), the NAME white instead of quality-colored, and
+//! the compact early-return at `0x52e14c` (`[arg+0x14]≠0`): nothing after the charges/cooldown
+//! block. **Nothing in this engine seats a shopping plate**: the two callers that arm this mode
+//! are [`compare_against_worn`]'s own bindings — `SetMerchantCompareItem` and
+//! `SetAuctionCompareItem` — and the FrameXML that calls them (`MerchantFrame.xml:63-80`,
+//! `AuctionFrame`) owns the plates' geometry and lifetime, exactly as in 1.12.1. There is no
+//! hover compare in the reference at all: `SHOW_COMPARE_TOOLTIP` has zero fire sites in the whole
+//! image, so `PaperDollFrame.lua`'s slot listener is dead code there (wow-re
+//! `merchant-compare-item-law.md` §8).
 //!
 //! **The red "you can't use this" law** (the director's explicit ask) — byte-verified §1-RED:
 //! red is the AddLine color `0xffff2020`, applied to requirement lines the ACTIVE player fails
@@ -42,7 +44,6 @@ use mlua::{Lua, MultiValue, Table, Value};
 use super::object::frame_handle_of;
 use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empty};
 use super::{ItemTemplateView, Model};
-use crate::widget::CompareOffer;
 
 mod names;
 mod render;
@@ -50,16 +51,14 @@ mod render;
 use names::{quality_color, GRAY, WHITE};
 use render::render_view;
 
-/// Look up the store; a miss records the ask (the app sends `CMSG_ITEM_QUERY` and pushes back —
-/// the hover's re-enter loop repaints on arrival).
 /// The compare tooltips' shared body — what `SetMerchantCompareItem 0x536080` and
 /// `SetAuctionCompareItem 0x535d70` both run once their wrapper has an offered template and a
 /// re-based `offset` (wow-re `merchant-compare-item-law.md`): walk the offered type's candidate
 /// slots (`0x809200[InventoryType]`), skipping EMPTY slots without decrementing and slots whose
 /// worn item's CLASS differs, until `offset` occupied matches have been passed; then fill the
 /// ordinary EQUIPPED-item tooltip with the compare header on — the FULL body (`p4 = 0`) plus one
-/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the same `compare_armed` latch the
-/// shift-compare path uses and running `SetInventoryItem`, which is what the reference does too:
+/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the `compare_armed` latch and running
+/// `SetInventoryItem`, which is what the reference does too:
 /// `0x536080` calls the ordinary item builder `0x52b650` with the header flag set. The NUMBER 1 on
 /// success; nil on a miss, which does NOT clear the tooltip (the reference's nil exit touches
 /// nothing else).
@@ -67,7 +66,7 @@ fn compare_against_worn(
     lua: &Lua,
     this: &Table,
     h: crate::widget::FrameHandle,
-    offered: CompareOffer,
+    offered: &ItemTemplateView,
     mut left: f64,
 ) -> mlua::Result<Value> {
     let found = {
@@ -109,6 +108,8 @@ fn compare_against_worn(
     Ok(Value::Integer(1))
 }
 
+/// Look up the store; a miss records the ask (the app sends `CMSG_ITEM_QUERY` and pushes back —
+/// the hover's re-enter loop repaints on arrival).
 fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let v = model.item_templates.get(&item_id).cloned();
@@ -208,7 +209,6 @@ fn render_by_id(
     match view_of(lua, item_id) {
         Some(v) => {
             render_view(lua, this, &v, false, None)?;
-            arm_compare(lua, h, &v);
         }
         None => {
             if let Some(name) = fb_name {
@@ -279,162 +279,6 @@ fn equip_slots_for(inventory_type: u32) -> &'static [u32] {
         17 => &[16],
         15 | 25 | 26 | 28 => &[18], // bow / thrown / wand-gun / relic
         _ => &[],
-    }
-}
-
-/// The two fields the compare selection law reads, out of a rendered template.
-fn offer_of(v: &ItemTemplateView) -> CompareOffer {
-    CompareOffer {
-        class: v.class,
-        inventory_type: v.inventory_type,
-    }
-}
-
-/// After an item render on the MAIN GameTooltip: remember what the hover is OFFERING, and when
-/// shift is already held, seat the compare plates now. Other tooltip frames — the shopping plates
-/// themselves, ItemRef — never arm. An item with no equip slot arms nothing, so the drive's own
-/// gate (`compare_offer`) stays `None` and it never touches a plate somebody else is showing.
-fn arm_compare(lua: &Lua, h: crate::widget::FrameHandle, v: &ItemTemplateView) {
-    let (is_main, shift) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let is_main = model.arena.lookup("GameTooltip") == Some(h);
-        let shift = model.modifiers.0;
-        if is_main {
-            let offer = (!equip_slots_for(v.inventory_type).is_empty()).then(|| offer_of(v));
-            if let Ok(t) = super::tooltip::tip_mut(&mut model, h) {
-                t.compare_offer = offer;
-            }
-        }
-        (is_main, shift)
-    };
-    if is_main && shift {
-        drive_compare(lua, h);
-    }
-}
-
-/// Seat and fill `ShoppingTooltip1/2` beside the main tooltip for the item it is offering — the
-/// **live** 1.12.1 compare, transcribed from its one reference caller.
-///
-/// The paper-doll path this used to drive is **dead in 5875**: `SHOW_COMPARE_TOOLTIP` (event 377)
-/// has zero fire sites in the whole image, so `PaperDollFrame.lua:621-640` never runs there and
-/// the vendor row is the only live consumer of the shopping plates (wow-re
-/// `merchant-compare-item-law.md` §8, `system/ui/ui.md`). Firing a registered-but-never-signalled
-/// event is a divergence, not a fidelity win — the `TRADE_REQUEST` precedent, decision 1764 — and
-/// driving the compare through a listener that answers only while the character window is open is
-/// what left a stale plate from an earlier hover sitting over an unrelated tooltip.
-///
-/// So the geometry and the sequence here are `MerchantFrame.xml:63-80`'s, verbatim: plate 1 owned
-/// by the tooltip at `TOPLEFT`/`GameTooltip` `TOPRIGHT` (0, −10), plate 2 hanging off plate 1's
-/// `TOPRIGHT`, each **filled, re-seated, filled again** (the reference's own double build — the
-/// `SetOwner` between the two clears the first one) and shown only on a hit. What differs from the
-/// vendor row, deliberately and namedly, is *when*: the vendor compares unconditionally, this
-/// compares while SHIFT is held. 1.12 has no `COMPAREITEMS` modified click to inherit — the token
-/// does not occur anywhere in its FrameXML — so the modifier is benilla's, and the director's ask.
-///
-/// A `compare_offer` of `None` returns without touching either plate: the vendor row's own
-/// `SetMerchantCompareItem` pair is not ours to hide.
-fn drive_compare(lua: &Lua, h: crate::widget::FrameHandle) {
-    let Some(offer) = ({
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        super::tooltip::tip_mut(&mut model, h)
-            .ok()
-            .and_then(|t| t.compare_offer)
-    }) else {
-        return;
-    };
-    if let Err(e) = seat_compare_plates(lua, offer) {
-        lua.app_data_mut::<Model>()
-            .expect("model app_data")
-            .errors
-            .push(e.to_string());
-    }
-}
-
-/// [`drive_compare`]'s body, split out so its Lua calls can use `?`.
-fn seat_compare_plates(lua: &Lua, offer: CompareOffer) -> mlua::Result<()> {
-    let globals = lua.globals();
-    let Ok(main) = globals.get::<Table>("GameTooltip") else {
-        return Ok(());
-    };
-    // Plate 2 anchors to plate 1, so the loop carries the previous plate as the next one's owner.
-    let mut owner = main;
-    let mut dy = -10.0;
-    for n in 1..=2u32 {
-        let Ok(plate) = globals.get::<Table>(format!("ShoppingTooltip{n}")) else {
-            return Ok(());
-        };
-        let ph = frame_handle_of(lua, &plate)?;
-        let hit = compare_against_worn(lua, &plate, ph, offer, f64::from(n - 1))? != Value::Nil;
-        if !hit {
-            // A miss leaves the plate's content alone (the selection's own nil contract), so the
-            // hide is what keeps an earlier hover's plate from riding under this one. **Both**
-            // plates are walked even after a miss: the selection is monotone, so plate 1 missing
-            // means plate 2 misses too, but a two-slot hover (a ring) leaves plate 2 shown and the
-            // one-slot hover after it has to take it down.
-            super::tooltip::hide_tooltip(lua, ph);
-            continue;
-        }
-        plate.get::<mlua::Function>("SetOwner")?.call::<()>((
-            plate.clone(),
-            owner.clone(),
-            "ANCHOR_NONE",
-        ))?;
-        plate
-            .get::<mlua::Function>("ClearAllPoints")?
-            .call::<()>(plate.clone())?;
-        plate.get::<mlua::Function>("SetPoint")?.call::<()>((
-            plate.clone(),
-            "TOPLEFT",
-            owner.clone(),
-            "TOPRIGHT",
-            0.0,
-            dy,
-        ))?;
-        compare_against_worn(lua, &plate, ph, offer, f64::from(n - 1))?;
-        plate
-            .get::<mlua::Function>("Show")?
-            .call::<()>(plate.clone())?;
-        owner = plate;
-        dy = 0.0;
-    }
-    Ok(())
-}
-
-/// The shift-edge compare drive (called from `UiScript::set_modifiers` on a shift transition):
-/// pressing shift over a live equippable item-hover seats the compare plates; releasing hides
-/// them. Both edges are gated on the main tooltip actually OFFERING something, so neither one
-/// reaches a plate the stock vendor row is driving. (The real engine has no shift-compare at all —
-/// see [`drive_compare`] — so this lifecycle is benilla's, not an INTERIM reading of a trace.)
-pub(super) fn on_shift_edge(lua: &Lua, down: bool) {
-    let (main, shown, offering) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let Some(h) = model.arena.lookup("GameTooltip") else {
-            return;
-        };
-        let shown = model.arena.frame(h).map(|f| f.shown).unwrap_or(false);
-        let offering = match super::tooltip::tip_mut(&mut model, h) {
-            Ok(t) => t.compare_offer.is_some(),
-            Err(_) => false,
-        };
-        (h, shown, offering)
-    };
-    if !offering {
-        return;
-    }
-    if down {
-        if shown {
-            drive_compare(lua, main);
-        }
-    } else {
-        for n in 1..=2 {
-            let plate = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.arena.lookup(&format!("ShoppingTooltip{n}"))
-            };
-            if let Some(plate) = plate {
-                super::tooltip::hide_tooltip(lua, plate);
-            }
-        }
     }
 }
 
@@ -551,8 +395,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Some(v) => {
                     render_view(lua, &this, &v, false, Some(&inst))?;
                     // Unchanged from the `render_by_id` this leg used to share: a link dropped on
-                    // the MAIN tooltip still arms the shopping compare (`arm_compare`'s own gate).
-                    arm_compare(lua, h, &v);
                 }
                 None => {
                     if let Some(name) = link_name(&link) {
@@ -785,7 +627,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             append_line(lua, &this, (t, WHITE), None, false)?;
                         }
                     }
-                    arm_compare(lua, h, &v);
                 }
                 None => {
                     // Template in flight. The real client early-outs to an EMPTY tooltip here
@@ -1064,7 +905,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     return Ok(Value::Nil);
                 };
 
-                compare_against_worn(lua, &this, h, offer_of(&offered), left)
+                compare_against_worn(lua, &this, h, &offered, left)
             },
         )?,
     )?;
@@ -1135,7 +976,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let Some(offered) = view_of(lua, item_id) else {
                     return Ok(Value::Nil);
                 };
-                compare_against_worn(lua, &this, h, offer_of(&offered), left)
+                compare_against_worn(lua, &this, h, &offered, left)
             },
         )?,
     )?;
@@ -1177,9 +1018,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         // release edge would then hide a compare the player never asked it to.
                         // The BUYBACK tab is the other branch of the same button and seats
                         // nothing, so it arms like any other hover.
-                        if buyback {
-                            arm_compare(lua, h, &v);
-                        }
+                        if buyback {}
                     }
                     None => {
                         // Template in flight: the row's own stat head as a minimal view.
@@ -1244,7 +1083,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             if let Some(v) = view_of(lua, item_id) {
                 render_view(lua, &this, &v, false, Some(&inst))?;
-                arm_compare(lua, h, &v);
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1294,7 +1132,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             if let Some(v) = view_of(lua, item_id) {
                 render_view(lua, &this, &v, false, Some(&inst))?;
-                arm_compare(lua, h, &v);
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1331,7 +1168,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
                 render_view(lua, &this, &v, false, None)?;
-                arm_compare(lua, h, &v);
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1363,7 +1199,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
                 render_view(lua, &this, &v, false, None)?;
-                arm_compare(lua, h, &v);
             }
             show_or_hide_empty(lua, h);
             Ok(())

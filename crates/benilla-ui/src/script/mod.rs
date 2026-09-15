@@ -831,18 +831,8 @@ impl UiScript {
     /// a click handler's modifier fork (the reference's shift-split / ctrl-dressup /
     /// shift-pickup) reads the state as of the click.
     pub fn set_modifiers(&mut self, shift: bool, ctrl: bool, alt: bool) {
-        let shift_was = {
-            let mut model = self.model_mut();
-            let was = model.modifiers.0;
-            model.modifiers = (shift, ctrl, alt);
-            was
-        };
-        // The shift EDGE drives the shopping-compare tooltips (0274 P4, re-based by 2202): press
-        // over a live equippable item hover seats the plates beside the tooltip, release hides
-        // them.
-        if shift_was != shift {
-            tooltip_item::on_shift_edge(&self.lua, shift);
-        }
+        let mut model = self.model_mut();
+        model.modifiers = (shift, ctrl, alt);
     }
 
     /// Push the player's WMO-containment state onto every Minimap widget (the client's `0xceaa60`).

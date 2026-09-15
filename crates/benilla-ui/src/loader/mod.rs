@@ -748,9 +748,10 @@ impl Loader<'_> {
     /// Materialize one (already template-expanded) frame element into a live frame, then recurse its
     /// nested `<Frames>` and fire its `OnLoad` **after** them (bottom-up, rf26).
     ///
-    /// `parent` is the enclosing frame's wrapper (`None` at top level). `parent_name` is the
-    /// already-resolved name of the nearest named ancestor (or `"Top"`), used to substitute `$parent`
-    /// in this frame's name and in its anchors' `relativeTo` (rf27).
+    /// `parent` is the **lexically** enclosing frame's wrapper (`None` at top level) and
+    /// `parent_name` its already-resolved name (or `"Top"`). A `parent=` attribute overrides both,
+    /// and it is the *effective* parent that `$parent` substitutes against — in this frame's name
+    /// and in its anchors' `relativeTo` (rf27).
     /// Returns the created frame's wrapper — `None` when `CreateFrame` refused (an unknown frame
     /// type, rf24 `0x6ee280`'s factory-table miss), which also skips the whole subtree. The
     /// `<ScrollChild>` pass is the one caller that needs the handle back.
@@ -760,14 +761,10 @@ impl Loader<'_> {
         parent: Option<&Table>,
         parent_name: &str,
     ) -> Option<Table> {
-        // ─ Step 1 and ONLY step 1 lives here: resolve the name and call CreateFrame. Everything
-        //   after it is `decorate`, because the runtime template path enters at exactly that seam
-        //   (`apply_template`) — its frame already exists, and re-entering here would recurse.
-        // Name (with $parent substitution) — the resolved name is what CreateFrame publishes and what
-        // this frame's own children substitute `$parent` against.
-        let resolved_name: Option<String> = el
-            .name()
-            .map(|raw| framexml::resolve_name(raw, parent_name));
+        // ─ Step 1 and ONLY step 1 lives here: resolve the parent, resolve the name against it,
+        //   and call CreateFrame. Everything after it is `decorate`, because the runtime template
+        //   path enters at exactly that seam (`apply_template`) — its frame already exists, and
+        //   re-entering here would recurse.
 
         // 0 · **The type lookup, and its XML miss LOGS and skips the node** (decision 2191).
         //
@@ -800,39 +797,98 @@ impl Loader<'_> {
         //
         //      The attribute WINS over the lexical parent when both are present, which is the
         //      reference's rule and is what lets an addon nest an element for authoring
-        //      convenience and still attach it elsewhere. An unresolvable name warns and falls back
-        //      to the lexical parent rather than erroring — the frame is real and usable either
-        //      way, and 0068's log-and-continue is the house rule for a name lookup.
-        let attr_parent: Option<Table> = el.attr("parent").and_then(|raw| {
-            let name = framexml::resolve_name(raw, parent_name);
-            // A FRAME, not merely a global of that name. `_G` is one namespace: an addon's own
-            // `MyAddon = {}` sits in it beside every frame, and the corpus really does write
-            // `parent="TheoryCraft"` where the addon owns that name. Handing a plain table to
-            // `CreateFrame` would raise and take the element's whole subtree with it — a name
-            // collision costing a window. The identity test is RF-0023's own: a frame wrapper
-            // carries its handle at `T[0]` as lightuserdata, and nothing else does.
-            let hit = self
-                .lua()
-                .globals()
-                .get::<Table>(name.as_str())
-                .ok()
-                .filter(|t| matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(_))));
-            if hit.is_none() {
-                self.report.warnings.push(format!(
-                    "{}: parent=\"{name}\" names no frame — falling back to the enclosing one",
-                    resolved_name.as_deref().unwrap_or(&el.tag)
-                ));
-            }
-            hit
-        });
-        // `$parent` in THIS element's own anchors means its parent — so when the attribute supplied
-        // one, that is the name to substitute against (rf27's rule, applied to rf27's other input).
-        let attr_parent_name = attr_parent.as_ref().and_then(|_| {
+        //      convenience and still attach it elsewhere.
+        //
+        //      **The attribute is NOT `$parent`-expanded.** `0x6ee280` hands the raw string to the
+        //      by-name resolver `0x76c760` **directly** at `0x6ee3e8`, bypassing the expander that
+        //      `name=` and `relativeTo=` reach through `SetName`/`0x76c700` (rf27 §2 and
+        //      `name-string-widget-resolution.md` §9, both VERIFIED). Nothing in ~1100 corpus XML
+        //      files writes `parent="$parent…"`, so expanding it was a dead deviation — but a dead
+        //      deviation on this line is exactly what made 2208's live one hard to see.
+        //
+        //      **Three outcomes, not two** (decision 2213, wow-re `xml-parent-attach-order.md`):
+        //      the slot `[ebp-0x8]` is seeded at `0x6ee28b` with the incoming default parent, and
+        //      `0x6ee3ef mov [ebp-0x8],eax` writes the lookup's result back **unconditionally** —
+        //      so a *miss* stores 0 over that seed and the frame is constructed **parentless**
+        //      (`0x6ee408 mov ecx,[ebp-0x8]`), after logging `0x8710f0`. It does NOT fall back to
+        //      the enclosing frame, which is what we used to do; the divergence is invisible at
+        //      top level (there is no enclosing frame to fall back to) and only shows on a nested
+        //      element naming a parent that is not loaded yet. And an **empty** `parent=""`
+        //      short-circuits earlier still, at `0x6ee3c7`: the default parent is kept, silently,
+        //      and the `inherits` chain is not consulted for one — only an *absent* attribute
+        //      walks it (which for us happens in template expansion, upstream of here).
+        //
+        //      `None` = no attribute, or an empty one: keep the enclosing parent.
+        //      `Some(None)` = named a parent that does not resolve: parentless, and logged.
+        let attr_parent: Option<Option<Table>> =
             el.attr("parent")
-                .map(|raw| framexml::resolve_name(raw, parent_name))
-        });
+                .filter(|name| !name.is_empty())
+                .map(|name| {
+                    // A FRAME, not merely a global of that name. `_G` is one namespace: an addon's own
+                    // `MyAddon = {}` sits in it beside every frame, and the corpus really does write
+                    // `parent="TheoryCraft"` where the addon owns that name. Handing a plain table to
+                    // `CreateFrame` would raise and take the element's whole subtree with it — a name
+                    // collision costing a window. The identity test is RF-0023's own: a frame wrapper
+                    // carries its handle at `T[0]` as lightuserdata, and nothing else does. The
+                    // reference's own `0x76c760` reads the frame registry, so a non-frame global of
+                    // the right name is the same miss, with the same message.
+                    let hit =
+                        self.lua().globals().get::<Table>(name).ok().filter(|t| {
+                            matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(_)))
+                        });
+                    if hit.is_none() {
+                        // The reference's own wording (`0x8710f0`), like the frame-type miss above.
+                        self.report
+                            .warnings
+                            .push(format!("Couldn't find frame parent: {name}"));
+                    }
+                    hit
+                });
+        let parent = match &attr_parent {
+            Some(resolved) => resolved.as_ref(),
+            None => parent,
+        };
+
+        // 1b · **The name, resolved AFTER the parent — and against it** (B387). `$parent` is not a
+        //      lexical token: `SetName 0x76c650` expands it in `0x76c5b0` by walking the frame's
+        //      **actual** parent chain (`this+0x9c`) to the nearest non-empty name, seeded `"Top"`
+        //      (rf27, VERIFIED). And in `Instantiate 0x6ee280` the parent is attached *first* —
+        //      resolved at `0x6ee3e8` into `[ebp-0x8]` and passed as `ecx` to the factory's
+        //      constructor at `0x6ee408 call [ebx+0x18]` — while the node-apply step that reads
+        //      `name=` and calls `SetName` runs only afterwards, at `0x6ee4d6 call [edx+0x20]`
+        //      (read off `system/ui/scratch/disasm-full.txt`, the whole body linear between the
+        //      two). So a **top-level** element whose name leans on `$parent` and whose parent
+        //      comes from the attribute resolves against that attribute's frame.
+        //
+        //      We did it the other way round: the name was substituted against the *lexical*
+        //      ancestor — `"Top"` for a top-level element — and never recomputed once the
+        //      attribute rebound the parent. ClassIcons' `<Frame name="$parentClassIcon"
+        //      inherits="UnitFrameClassIconTemplate" parent="PlayerFrame"/>` was therefore
+        //      published as `TopClassIcon`, and the addon's `PlayerFrameClassIcon:SetPoint` at
+        //      `ClassIcons.lua:228` indexed a nil.
+        //
+        //      The base name comes from the parent FRAME, not from the attribute text — the
+        //      reference reads `p->GetName()`, so a `parent="playerframe"` that resolves
+        //      case-insensitively still yields `PlayerFrame…`; and a parent that is itself
+        //      nameless walks on up, which is what [`Self::frame_names`] already does for the
+        //      runtime template path.
+        //      A parent the attribute nulled leaves the chain walk with nothing to find, so the
+        //      seed survives and `$parent` is `"Top"` — the same answer, by the same route, as a
+        //      top-level element with no parent at all.
+        let attr_parent_name: Option<String> =
+            attr_parent.as_ref().map(|resolved| match resolved {
+                Some(p) => {
+                    let (own, ancestor) = self.frame_names(p);
+                    own.filter(|n| !n.is_empty()).unwrap_or(ancestor)
+                }
+                None => framexml::DEFAULT_PARENT_NAME.to_string(),
+            });
         let parent_name = attr_parent_name.as_deref().unwrap_or(parent_name);
-        let parent = attr_parent.as_ref().or(parent);
+        // The resolved name is what CreateFrame publishes and what this frame's own children
+        // substitute `$parent` against.
+        let resolved_name: Option<String> = el
+            .name()
+            .map(|raw| framexml::resolve_name(raw, parent_name));
 
         // 1 · CreateFrame(kind = element tag, name, parent). The type is already known to resolve
         //     (step 0), so an error here is something else the call raised — record it and skip
