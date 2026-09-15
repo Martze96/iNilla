@@ -126,7 +126,7 @@ pub(super) fn render_view(
     lua: &Lua,
     this: &Table,
     v: &ItemTemplateView,
-    compare: bool,
+    currently_equipped: bool,
     // `None` = a template/link source (the ref's no-object path).
     inst: Option<&ItemInstance>,
 ) -> mlua::Result<()> {
@@ -176,20 +176,23 @@ pub(super) fn render_view(
         }
     };
 
-    // Compare mode (the shopping tooltips): the gray CURRENTLY_EQUIPPED header (`[arg+0x18]≠0`)
-    // and a WHITE name instead of the quality color (`[arg+0x14]≠0`) — both byte-verified.
-    if compare {
+    // The gray CURRENTLY_EQUIPPED header (`[arg+0x18]≠0`, color ptr `0xc0d3c4`) — and it is the
+    // ONLY thing a shopping-tooltip fill adds. **Against a plain `SetInventoryItem` of the same
+    // equipped item, one extra line, first, is the whole difference**: the two callers that set
+    // the header (`SetMerchantCompareItem`'s arg vector at `0x5362d4`, `SetAuctionCompareItem`'s
+    // at `0x53603e`) pass **p4 = 0**, so compact/compare mode is OFF — the NAME keeps its quality
+    // color, the stat body is not jumped, and nothing is cut at `0x52e14c`. wow-re
+    // `merchant-compare-item-law.md` §6 says it in as many words ("a downstream client that
+    // renders a 'compare mode' abbreviated tooltip here is wrong"), and `tooltip-content-law.md`
+    // §1's per-call-site census over all 31 sites of `0x52b650` is what settles it: those two are
+    // the only sites in the image passing a literal non-zero p5, and both pass p4 zero.
+    if currently_equipped {
         keyed("CURRENTLY_EQUIPPED", &[], GRAY, false)?;
     }
-    let name_color = if compare {
-        WHITE
-    } else {
-        quality_color(v.quality)
-    };
     let name = inst
         .and_then(|i| i.name.clone())
         .unwrap_or_else(|| v.name.clone());
-    add((name, name_color))?;
+    add((name, quality_color(v.quality)))?;
     // Line 3 — the petition block, ABOVE the green line and below the name: "Guild Name: X" then
     // "Guild Master: Y" for a charter, "Petition: X" / "Created by Y" for a plain petition. The
     // keys are picked by the record's own charter bit, the same bit `GetPetitionInfo`'s first
@@ -726,7 +729,7 @@ pub(super) fn render_view(
     if let Some(charges) = charges_phrase(v.charges.max(0) as u32, &get) {
         add((charges, WHITE))?;
     }
-    // The item-SET block (§22, ABOVE the compact cut), byte-read at the builder's
+    // The item-SET block (§22, above the binary's p4 cut at `0x52e14c`), byte-read at the builder's
     // `0x52d8a0..0x52e0f5`: a blank gold line ([`SET_SPACER`]), the gold "name (owned/total)"
     // header, the set-level skill line (white, red when short), the member ladder ("  name" —
     // pale-cream `0xc0d368` when equipped, gray otherwise; a member whose template is still in
@@ -789,11 +792,6 @@ pub(super) fn render_view(
                 keyed("ITEM_SET_BONUS_GRAY", &args, GRAY, true)?;
             }
         }
-    }
-    // The compact/compare early-return (`0x52e14c`, `[arg+0x14]≠0`): everything below —
-    // description, made-by, openable/readable, money — is skipped on a shopping tooltip.
-    if compare {
-        return Ok(());
     }
     // The quoted flavor text — gold, wrapped, literal quotes (all three byte-verified).
     if !v.description.is_empty() {

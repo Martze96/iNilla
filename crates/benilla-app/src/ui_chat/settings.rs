@@ -803,7 +803,7 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ChatWindowFile>()
         // **The restore is not here.** `UPDATE_CHAT_WINDOWS`/`UPDATE_CHAT_COLOR` have to precede
         // the session's first chat line and `PLAYER_LOGIN` respectively, and no `run_if` can buy
-        // that: 1978's `not(ingame_ui_pending)` gate put the restore on exactly the frame the
+        // that: 1978's UI-is-up gate (`ingame_ui_up`) puts the restore on exactly the frame the
         // parked VM comes back and `feed_chat` drains the whole queued login burst, with nothing
         // ordering the two. It is called from `ui_script::lifecycle`'s world-entry load instead —
         // [`restore_chat_looks`], decision 2119. Only the watcher belongs in `Update`.

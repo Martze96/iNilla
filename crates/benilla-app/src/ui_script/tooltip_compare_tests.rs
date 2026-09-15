@@ -299,21 +299,37 @@ fn doll_hover_renders_the_live_instance() {
 /// off plate 1 at (0, 0). The engine supplies only the two bindings and the compare render; the
 /// geometry, the second fill and both `Show`s are the reference's Lua. Two worn rings against a
 /// ring on the shelf, so BOTH plates answer — the case that pins the offset walk.
+///
+/// And it pins the CONTENT the plate carries, because that is where we were wrong (2216): the
+/// compare call sites pass p4 = 0, so a plate is the worn item's ordinary tooltip with one gray
+/// line on top — an EPIC ring's name reads purple, not white, and its flavour text is not cut.
 #[test]
 fn shipped_merchant_row_raises_the_compare_plates() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // Two worn rings, a third on the shelf: offset 1 and 2 both find a candidate.
     let mut inv: InventorySlots = Default::default();
-    for (slot, id, name) in [(11usize, 7000u32, "Old Loop"), (12, 7001, "Older Loop")] {
+    // The worn ring under plate 1 is EPIC and carries flavour text — the two things the old
+    // conflated compare flag took away.
+    for (slot, id, name, quality) in [
+        (11usize, 7000u32, "Old Loop", 4u32),
+        (12, 7001, "Older Loop", 1),
+    ] {
         inv[slot] = Some(InvSlotView {
             item_id: id,
             count: 1,
-            quality: 1,
+            quality: quality as i32,
             name: Some(name.into()),
             ..Default::default()
         });
-        s.set_item_template(id, armor_template(name, 11));
+        s.set_item_template(
+            id,
+            ItemTemplateView {
+                quality,
+                description: "Round.".into(),
+                ..armor_template(name, 11)
+            },
+        );
     }
     s.set_inventory_slots(inv);
     s.set_item_template(8000, armor_template("Shiny Loop", 11));
@@ -354,6 +370,22 @@ fn shipped_merchant_row_raises_the_compare_plates() {
     assert!(
         ok,
         "the vendor row raises both plates at the stock geometry"
+    );
+    // p4 = 0 over the stock file: the plate is the FULL tooltip, in the worn item's own colours.
+    let ok: bool = s
+        .eval(
+            "local r, g, b = ShoppingTooltip1TextLeft2:GetTextColor() \
+             local flavour = nil \
+             for i = 1, ShoppingTooltip1:NumLines() do \
+               if getglobal(\"ShoppingTooltip1TextLeft\"..i):GetText() == \"\\\"Round.\\\"\" then flavour = i end \
+             end \
+             return flavour ~= nil and math.abs(r - 0.639) < 0.01 \
+               and math.abs(g - 0.208) < 0.01 and math.abs(b - 0.933) < 0.01",
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "the epic ring's plate reads purple and keeps its flavour text — no compact cut"
     );
     // The plate wears the template's own small-font ladder (10px), the main tooltip its header face.
     let ok: bool = s

@@ -118,6 +118,7 @@ mod sound;
 mod swing_refusal;
 mod target;
 mod text_filter;
+mod text_reshape;
 mod textinput;
 mod transport;
 mod tutorial;
@@ -672,6 +673,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldPositionsPlugin)
     .add_plugins(crate::game_tip::GameTipPlugin)
     .add_plugins(crate::text_filter::TextFilterPlugin)
+    // The re-shape a `bevy_ui` text root loses when its last span is despawned
+    // (decision 2212, B383): an upstream change-detection hole whose only symptom is a
+    // panic inside `bevy_text` on the next window resize.
+    .add_plugins(crate::text_reshape::TextReshapePlugin)
     .add_plugins(TutorialPlugin)
     // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
     // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an

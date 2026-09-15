@@ -14,11 +14,14 @@
 //! Residual INTERIMs cited inline: the dual-wield/off-hand proficiency exception
 //! (`0x5eab70`), the type cell's override red, the set-owned count source.
 //!
-//! **Compare mode** (0274 P4, re-based by 2202, scoped back to the reference by 2210):
-//! `SetInventoryItem` on an ARMED shopping tooltip renders the byte law's compare shape — gray
-//! "Currently Equipped" first (`[arg+0x18]≠0`), the NAME white instead of quality-colored, and
-//! the compact early-return at `0x52e14c` (`[arg+0x14]≠0`): nothing after the charges/cooldown
-//! block. **Nothing in this engine seats a shopping plate**: the two callers that arm this mode
+//! **Compare mode** (0274 P4, re-based by 2202, scoped back to the reference by 2210, and
+//! corrected to the census by 2216): `SetInventoryItem` on an ARMED shopping tooltip renders the
+//! equipped item's ORDINARY tooltip plus ONE extra line, first — the gray "Currently Equipped"
+//! (`[arg+0x18]≠0`). That is the entire difference. The builder's other flag, p4 `[arg+0x14]`,
+//! *is* a compact mode (white name, stat body jumped, early-return at `0x52e14c`) — but the two
+//! compare call sites pass it **zero**, so a shopping plate shows a quality-colored name and the
+//! full body, and a client that abbreviates here is wrong (wow-re `merchant-compare-item-law.md`
+//! §6). **Nothing in this engine seats a shopping plate**: the two callers that arm this mode
 //! are [`compare_against_worn`]'s own bindings — `SetMerchantCompareItem` and
 //! `SetAuctionCompareItem` — and the FrameXML that calls them (`MerchantFrame.xml:63-80`,
 //! `AuctionFrame`) owns the plates' geometry and lifetime, exactly as in 1.12.1. There is no
@@ -57,7 +60,7 @@ use render::render_view;
 /// slots (`0x809200[InventoryType]`), skipping EMPTY slots without decrementing and slots whose
 /// worn item's CLASS differs, until `offset` occupied matches have been passed; then fill the
 /// ordinary EQUIPPED-item tooltip with the compare header on — the FULL body (`p4 = 0`) plus one
-/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the `compare_armed` latch and running
+/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the `equipped_header_armed` latch and running
 /// `SetInventoryItem`, which is what the reference does too:
 /// `0x536080` calls the ordinary item builder `0x52b650` with the header flag set. The NUMBER 1 on
 /// success; nil on a miss, which does NOT clear the tooltip (the reference's nil exit touches
@@ -100,7 +103,7 @@ fn compare_against_worn(
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         if let Ok(t) = super::tooltip::tip_mut(&mut model, h) {
-            t.compare_armed = true;
+            t.equipped_header_armed = true;
         }
     }
     this.get::<mlua::Function>("SetInventoryItem")?
@@ -446,10 +449,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetInventoryItem",
         lua.create_function(|lua, (this, unit, slot): (Table, String, usize)| {
             let h = frame_handle_of(lua, &this)?;
-            let (item_id, name, quality, inst, compare) = {
+            let (item_id, name, quality, inst, currently_equipped) = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let armed = match super::tooltip::tip_mut(&mut model, h) {
-                    Ok(t) => std::mem::take(&mut t.compare_armed),
+                    Ok(t) => std::mem::take(&mut t.equipped_header_armed),
                     Err(_) => false,
                 };
                 let view = model
@@ -508,23 +511,19 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             fire_cleared(lua, h);
             match view_of(lua, item_id) {
-                Some(v) => render_view(lua, &this, &v, compare, Some(&inst))?,
+                Some(v) => render_view(lua, &this, &v, currently_equipped, Some(&inst))?,
                 None => {
                     // Template in flight — the slot view's own name holds the plate (the same
                     // 0138 posture as SetBagItem's miss path).
                     // The compare header is a key like every other sentence (2045); this
                     // fallback path shows it for exactly the reason the full render does.
-                    if compare {
+                    if currently_equipped {
                         if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
                             append_line(lua, &this, (t, GRAY), None, false)?;
                         }
                     }
                     if let Some(name) = name {
-                        let color = if compare {
-                            WHITE
-                        } else {
-                            quality_color(quality.max(0) as u32)
-                        };
+                        let color = quality_color(quality.max(0) as u32);
                         append_line(lua, &this, (name, color), None, false)?;
                     }
                 }

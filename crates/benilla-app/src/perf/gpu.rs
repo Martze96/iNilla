@@ -176,6 +176,15 @@ struct GpuStamp {
     sentinel_view: wgpu::TextureView,
     resolve: Buffer,
     ring: Vec<(Buffer, Arc<AtomicU8>)>,
+    /// Frames this resource has seen a `readback` for. **Zero means the stamps have never been
+    /// written**: `init_stamp` inserts the resource in `Cleanup`, the scheduler's sync point
+    /// applies it before `readback` runs in the same set, and the sentinel nodes that write —
+    /// and, in wgpu, reset — the two queries only run in the NEXT frame's graph. A resolve on
+    /// that first pass reads a query pool no command has ever reset, which Vulkan forbids
+    /// (`VUID-vkCmdCopyQueryPoolResults-None-09402`) and answers, on NVIDIA's driver, by
+    /// waiting on it forever — a GPU hang, the TDR, and the lost device 2205 met at the
+    /// swapchain acquire. Metal hands back zeros for the same read, which is why the meter's
+    /// first live runs (1389) saw "zeros" and never a hang. Decision 2211.
     frame: usize,
     period: f32,
     shared: Arc<AtomicU64>,
@@ -304,6 +313,12 @@ fn init_stamp(
 /// command buffer — the 1389 trap), kick the map, and publish the oldest mapped delta.
 fn readback(stamp: Option<ResMut<GpuStamp>>, device: Res<RenderDevice>, queue: Res<RenderQueue>) {
     let Some(mut stamp) = stamp else { return };
+    // The first cleanup after creation precedes the first stamped frame: nothing to resolve
+    // yet, and resolving anyway is the Vulkan device loss above (see `frame`).
+    if stamp.frame == 0 {
+        stamp.frame = 1;
+        return;
+    }
     // Copy into a FREE slot only (none free → skip this frame's sample; the meter is a meter).
     if let Some(i) = (0..RING).find(|&i| stamp.ring[i].1.load(Ordering::Relaxed) == FREE) {
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {

@@ -759,7 +759,20 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
             .expect("probe global")
     };
 
-    // …but the in-game UI is still owed. Three frames inside the deferral window.
+    // **The frame the latch cannot see** (B376): the descriptor above came off the same drain as
+    // `Connected`, so the wire is in-world while the state still says glue and no load is armed
+    // yet — `OnEnter(InWorld)` runs next frame. A feed gated only on the latch runs here.
+    app.insert_resource(State::new(crate::char_select::ClientState::CharSelect));
+    app.update();
+    assert_eq!(
+        seen(&app),
+        0,
+        "the drain's own frame: in-world wire, a boot VM, and no latch yet"
+    );
+
+    // …the transition ran, and the in-game UI is still owed. Three frames inside the deferral
+    // window.
+    app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     app.insert_resource(super::PendingEntryUiLoad);
     for frame in 1..=3 {
         app.update();
@@ -1226,4 +1239,59 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
         unexpected.is_empty(),
         "a stock world entry warned about something new — fix it or name it here: {unexpected:#?}"
     );
+}
+
+// ─────────────────── The predicate every in-world feed runs on (B376) ───────────────────
+
+/// **`not(ingame_ui_pending)` was only half the gate**, and the missing half is a whole frame
+/// wide.
+///
+/// [`super::lifecycle::PendingEntryUiLoad`] is armed at `OnEnter(InWorld)`, and that edge trails
+/// the wire by one frame: `apply_net_updates` drains `Connected` and the login burst behind it in
+/// a single `try_iter`, `enter_on_connected` sets `NextState` out of that same drain, and the
+/// transition — with it the park (1978) and this latch — does not run until the next frame's
+/// `StateTransition`. So there is exactly one frame holding in-world wire state and a live *boot*
+/// VM, and a feed gated only on the latch runs straight through it: B376's `GUILD_MOTD` fired
+/// into a VM with no `ChatFrame1`, spent its `VmMemo` edge, and the login line never printed.
+///
+/// The `InWorld` term is what closes it — the state flips on the same edge that arms the latch,
+/// so the pair is shut at both ends.
+#[test]
+fn the_ui_is_not_up_in_the_frame_between_the_wire_and_the_state() {
+    let mut world = World::new();
+
+    // **THE FRAME.** A live boot VM, no load owed — and the state still says glue, because
+    // `Connected` has only just been drained (so the guild/unit burst is already in ECS state)
+    // and the transition it queued runs next frame. The latch alone reads this as "the UI is up".
+    world.insert_resource(State::new(crate::char_select::ClientState::CharSelect));
+    assert!(
+        !run_ingame_ui_up(&mut world),
+        "the wire is in-world a frame before the state is — the boot VM must stay out of reach"
+    );
+
+    // The transition ran: `OnEnter` parked the VM and armed the latch.
+    world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+    world.insert_resource(super::PendingEntryUiLoad);
+    assert!(
+        !run_ingame_ui_up(&mut world),
+        "the deferral window — 1978's parked VM, and nothing to receive an event"
+    );
+
+    // The deferred load ran: the frame tree exists.
+    world.remove_resource::<super::PendingEntryUiLoad>();
+    assert!(
+        run_ingame_ui_up(&mut world),
+        "in the world with the in-game UI up — the first frame a feed may push"
+    );
+
+    // Leaving drops it again, before `end_ui_session`'s fresh boot VM can be fed anything.
+    world.insert_resource(State::new(crate::char_select::ClientState::CharSelect));
+    assert!(!run_ingame_ui_up(&mut world), "the world is gone with it");
+}
+
+fn run_ingame_ui_up(world: &mut World) -> bool {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(super::lifecycle::ingame_ui_up)
+        .expect("the condition runs")
 }

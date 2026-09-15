@@ -142,7 +142,21 @@ impl Plugin for UiChatPlugin {
             // so an alarm or a shutdown countdown lands on the frame it decodes like every other
             // chat source.
             .add_systems(Update, broadcast::feed_broadcasts.before(feed::feed_chat))
-            .add_systems(Update, feed::feed_chat.before(UiInput))
+            // **Never against the boot VM** (B376's second half). `feed_chat` takes the whole
+            // queue with `mem::take` and fires each line as a real `CHAT_MSG_*` — so a drain
+            // against a VM with no ChatFrame does not defer the lines, it DESTROYS them, with no
+            // memo and no error. The window is the one frame `not(ingame_ui_pending)` cannot see
+            // (`ui_script::ingame_ui_up`): `apply_net_updates` drains `Connected` and the login
+            // burst behind it in one `try_iter` while the state — and with it 1978's park — is
+            // still a frame away. Measured: one login in six drained the burst there and ate a
+            // line of the realm's own welcome. The early return above `mem::take` is what holds
+            // the queue for the frames after it, and this is what holds it for that one.
+            .add_systems(
+                Update,
+                feed::feed_chat
+                    .before(UiInput)
+                    .run_if(crate::ui_script::ingame_ui_up),
+            )
             // The last-input stamp `[0xcf0bc8]`. Deliberately NOT in-world-gated and
             // deliberately ahead of the UI pass: the reference stores it on the raw input bus,
             // before dispatch, so a keystroke the chat box swallows still counts as input.

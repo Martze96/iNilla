@@ -176,10 +176,8 @@ impl Plugin for UiUnitPlugin {
                 // …and never before the in-game UI exists (1348). The whole SET, not just
                 // `feed_units`: every feed in it either fires a login one-shot or latches a
                 // per-VM memo, and both are lost forever against the boot VM. The window and
-                // the reference's own ordering: `ui_script::ingame_ui_pending`.
-                .run_if(bevy::ecs::schedule::common_conditions::not(
-                    crate::ui_script::ingame_ui_pending,
-                )),
+                // the reference's own ordering: `ui_script::ingame_ui_up`.
+                .run_if(crate::ui_script::ingame_ui_up),
         )
         .init_resource::<UnitFeedState>()
         // [`feed_units`] shows catalog messages (the rest-state pair, the PvP toggle) through

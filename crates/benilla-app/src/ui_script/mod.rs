@@ -565,7 +565,7 @@ fn arbitrate_pointer_over_ui(
 /// lives there; this module keeps the per-frame bridge. See its header.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_pending, run_pending_reload, setup_script, AddOnIdentity,
+    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity,
     PendingEntryUiLoad, ReloadUiPending,
 };
 // Consumed only from other modules' test code (the emote-table checks, the harness's UI-init

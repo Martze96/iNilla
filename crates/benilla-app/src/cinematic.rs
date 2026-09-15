@@ -238,7 +238,7 @@ impl Plugin for CinematicPlugin {
                 feed_ui
                     .in_set(WorldStage::Input)
                     .after(drive)
-                    .run_if(not(crate::ui_script::ingame_ui_pending)),
+                    .run_if(crate::ui_script::ingame_ui_up),
             )
             // A cinematic cannot outlive the world it was flying over: leaving drops it silently,
             // with no ack, exactly as the reference's own leave-world teardown does (`0x490a80`

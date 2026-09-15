@@ -379,14 +379,16 @@ pub struct TooltipState {
     /// corpse) — the fade-on-loss gate (`world_tooltip_fade`); a window hover never fades.
     /// Dropped with the content.
     pub world_owned: bool,
-    /// ARMED for a shopping-compare render: the next `SetInventoryItem` on this frame renders in
-    /// the byte law's compare mode (`[arg+0x14]≠0` compact + `[arg+0x18]≠0` "Currently Equipped"
-    /// — wow-re tooltip-content-law.md). Set by the engine right before it fills a shopping
-    /// plate, and consumed by that render. Survives `SetOwner`'s content clear, because the
-    /// reference's own compare caller (`MerchantFrame.xml:67-72`) SetOwners *between* the arm and
-    /// the render; how the real engine plumbs the flag to `0x52b650` is unrecorded, so
-    /// this seam is the INTERIM model of it.
-    pub compare_armed: bool,
+    /// ARMED for a shopping-compare render: the next `SetInventoryItem` on this frame prepends the
+    /// gray "Currently Equipped" line — the builder's p5 `[arg+0x18]≠0` and NOTHING else. It is
+    /// deliberately not the neighbouring p4 `[arg+0x14]` (compact: white name, stat body jumped,
+    /// cut at `0x52e14c`), which both compare call sites pass as zero; conflating the two is what
+    /// made our shopping plates paint an epic's name white and drop its description (2216). Set by
+    /// the engine right before it fills a shopping plate, and consumed by that render. Survives
+    /// `SetOwner`'s content clear, because the reference's own compare caller
+    /// (`MerchantFrame.xml:67-72`) SetOwners *between* the arm and the render; how the real engine
+    /// plumbs the flag to `0x52b650` is unrecorded, so this seam is the INTERIM model of it.
+    pub equipped_header_armed: bool,
     /// `SetPadding(w)` — extra width beyond the measured content (ref ItemRefTooltip's
     /// OnLoad `SetPadding(16)`: room for the corner close button). 0 for ordinary tooltips.
     pub padding: f32,

@@ -7,9 +7,11 @@ use super::script;
 use crate::script::*;
 
 /// The compare SHAPE, driven the only way 1.12.1 drives it: the vendor row's
-/// `SetMerchantCompareItem` (`MerchantFrame.xml:63-80`). The armed render carries the byte law's
-/// compare mode — the gray CURRENTLY_EQUIPPED header, the name WHITE instead of quality-colored,
-/// and the compact cut at `0x52e14c` (the description never prints).
+/// `SetMerchantCompareItem` (`MerchantFrame.xml:63-80`). The armed render is the equipped item's
+/// ORDINARY tooltip plus ONE line, first — the gray CURRENTLY_EQUIPPED header (p5). Both compare
+/// call sites pass p4 (compact) ZERO, so the two things that are easy to get wrong here are
+/// pinned as negatives: the name keeps its QUALITY color (this worn ring is epic, so the assert
+/// bites), and nothing is cut at `0x52e14c` — the description still prints (2216).
 ///
 /// **And the negative control that keeps this engine out of it** (2210): a bag hover seats
 /// nothing, with shift or without, because the reference has no hover compare at all —
@@ -24,7 +26,9 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
         durability: None,
         item_id: 7000,
         name: Some("Old Loop".into()),
-        quality: 1,
+        // EPIC — a white name and a quality name are the same pixel at quality 1, which is how
+        // the conflated flag survived a green test for as long as it did.
+        quality: 4,
         ..Default::default()
     });
     inv[12] = Some(InvSlotView {
@@ -39,7 +43,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
         7000,
         ItemTemplateView {
             name: "Old Loop".into(),
-            quality: 1,
+            quality: 4,
             inventory_type: 11,
             description: "Round.".into(),
             ..Default::default()
@@ -158,16 +162,20 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
         assert(ShoppingTooltip1:IsShown())
         assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
         assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
-        -- The compact cut at 0x52e14c: the description never prints on a compare.
+        -- p4 = 0: there is NO compact cut here. The description prints, exactly as it does on a
+        -- plain SetInventoryItem of the same ring.
+        local described = nil
         for i = 1, ShoppingTooltip1:NumLines() do
-            assert(getglobal("ShoppingTooltip1TextLeft" .. i):GetText() ~= "\"Round.\"",
-                   "compact cut dropped the description")
+            if getglobal("ShoppingTooltip1TextLeft" .. i):GetText() == "\"Round.\"" then
+                described = i
+            end
         end
+        assert(described, "the compare tooltip is the FULL tooltip — the description prints")
         assert(table.getn(compare_calls) == 0, "and still no dead event")
     "#,
     )
     .unwrap();
-    // The compare colors: gray header, WHITE name (never the quality color) — the byte law.
+    // The compare colors: gray header, and the name in its own QUALITY color — the byte law.
     s.resolve();
     let quads = s.extract();
     let color_of = |txt: &str| {
@@ -189,7 +197,12 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
         "CURRENTLY_EQUIPPED is gray, got {gray:?}"
     );
     let name = color_of("Old Loop");
-    assert_eq!(name, [1.0, 1.0, 1.0, 1.0], "compare name is WHITE");
+    assert!(
+        (name[0] - 0.639).abs() < 0.01
+            && (name[1] - 0.208).abs() < 0.01
+            && (name[2] - 0.933).abs() < 0.01,
+        "the compare name wears the item's own quality color (epic purple), got {name:?}"
+    );
     assert!(s.take_errors().is_empty());
 }
 

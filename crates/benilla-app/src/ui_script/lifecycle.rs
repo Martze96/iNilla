@@ -239,28 +239,39 @@ fn unpark_boot_vm(world: &mut World) {
     }
 }
 
-/// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
-/// [`run_pending_entry_load`] has built the frame tree — the window in which the VM is still the
-/// *boot* VM: strings, emote tokens and fonts, and not one frame.
+/// **Is the in-game UI up on the VM that is in the world?** The run condition every in-world feed
+/// wants — nothing is pushed and nothing is fired until there is an interface to receive it.
 ///
-/// The run condition on [`crate::ui_unit::UnitFeed`], and the reason it exists (1348): the feeds
-/// fire the login **one-shots** — `PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE`, the first
-/// `UPDATE_EXHAUSTION` — and every one of them is latched by a [`super::VmMemo`] keyed on the VM's
-/// *session*, which the entry load does not change (it loads files ONTO this VM). So an event
-/// fired in this window is delivered to nobody and then never fires again for the whole session:
-/// the frames built moments later do their first paint with no first paint. That is not a
-/// hypothetical ordering — it is a RACE against the wire, which is why it took some logins and not
-/// others, and why the symptom moved between characters. The self descriptor arriving inside the
-/// deferral window is all it takes.
+/// The reason it exists (1348): the feeds fire the login **one-shots** —
+/// `PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE`, the first `UPDATE_EXHAUSTION` — and
+/// every one of them is latched by a [`super::VmMemo`] keyed on the VM's *session*, which the
+/// entry load does not change (it loads files ONTO this VM). So an event fired against the boot
+/// VM is delivered to nobody and then never fires again for the whole session: the frames built
+/// moments later do their first paint with no first paint. That is not a hypothetical ordering —
+/// it is a RACE against the wire, which is why it took some logins and not others, and why the
+/// symptom moved between characters. The self descriptor arriving inside the deferral window is
+/// all it takes.
 ///
 /// The reference has no such window: `UI_Init 0x48fbf0` loads all of FrameXML and *then* fires the
 /// world-enter cascade (`PLAYER_LOGIN` at `0x49094b`, `PLAYER_ENTERING_WORLD` at `0x490965`) from
-/// inside itself, so a UI-less client never sees a unit event at all. Gating the feed here is that
-/// same ordering, expressed against our deferred load: nothing is pushed and nothing is fired until
-/// there is a UI to receive it, and the very next frame's feed — running against a fresh, unlatched
-/// world — delivers the full set in order.
-pub(crate) fn ingame_ui_pending(pending: Option<Res<PendingEntryUiLoad>>) -> bool {
-    pending.is_some()
+/// inside itself, so a UI-less client never sees a unit event at all. This is that same ordering,
+/// expressed against our deferred load: the first frame that answers true is a fresh, unlatched
+/// world, and the feed delivers the full set in order.
+///
+/// **TWO terms, because `not(ingame_ui_pending)` is only half of it** (B376). The latch is armed
+/// at `OnEnter(InWorld)`, and that edge trails the wire by a frame: `apply_net_updates` drains
+/// `Connected` and the whole login burst behind it in one `try_iter`, `enter_on_connected` sets
+/// `NextState` from that same drain, and the transition — with it the park and the latch — does
+/// not run until the NEXT frame's `StateTransition`. So for exactly one frame the client has
+/// in-world wire state and a live *boot* VM, and 1978's park does not cover it. `InWorld` is the
+/// term that does: the state flips on the same edge that arms the latch, so the pair is closed at
+/// both ends. B376's guild MOTD was fired into that one frame (observed live, 1 login in 3);
+/// the unit feed and the cinematic's UI edge sat on the same hole, unobserved.
+pub(crate) fn ingame_ui_up(
+    pending: Option<Res<PendingEntryUiLoad>>,
+    state: Option<Res<State<crate::char_select::ClientState>>>,
+) -> bool {
+    pending.is_none() && state.is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld)
 }
 
 /// `PreUpdate` (chained after [`run_pending_reload`] — same exclusive slot, and a reload must

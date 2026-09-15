@@ -74,6 +74,7 @@
 //! drawn as one string.
 
 use benilla_ui::markup::{self, TokenKind};
+use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 
 use benilla_formats::GameTipsCatalog;
@@ -287,6 +288,26 @@ impl Plugin for GameTipPlugin {
     }
 }
 
+/// **Putting the tip line away — one path, because there were two and they had drifted.**
+///
+/// Two callers empty this node and both want the same end state: hidden, childless, and holding no
+/// text. Only the second of them used to clear the ROOT's own run, and that difference crashed the
+/// client (B383, decision 2212). Despawning a `Text` root's last `TextSpan` child does not *change*
+/// `Children` — it REMOVES the component — and bevy 0.18's `detect_text_needs_rerender` watches
+/// `Changed<Children>`, which a removal cannot satisfy. So the dismiss left a two-run shaped buffer
+/// behind a one-run span list, and the first window resize after world entry re-laid-out that
+/// buffer and indexed a run that no longer existed: an out-of-bounds panic inside `bevy_text`, on
+/// a node nobody could see. Re-inserting `Text` is what tells the pipeline the block moved.
+///
+/// [`crate::text_reshape`] nets the same hole app-wide; this is the site being coherent on its own
+/// rather than leaning on the net, and it is the half that also keeps a hidden tip from holding a
+/// stale sentence.
+fn empty_tip(e: &mut EntityCommands, vis: &mut Visibility) {
+    *vis = Visibility::Hidden;
+    e.despawn_related::<Children>();
+    e.insert(Text::new(String::new()));
+}
+
 /// Take the raise's tip edge, then paint whatever the screen is showing.
 ///
 /// Two jobs in one system because they are one mechanism seen at two moments: the reference picks
@@ -351,8 +372,7 @@ fn drive_game_tip(
         return;
     };
     let Some(tip) = tips.shown() else {
-        *vis = Visibility::Hidden;
-        commands.entity(entity).despawn_related::<Children>();
+        empty_tip(&mut commands.entity(entity), &mut vis);
         return;
     };
     // The 4:3 content box is `100vh` tall and `100vh · 4/3` wide, so the window's height is the
@@ -373,9 +393,9 @@ fn drive_game_tip(
     let runs = spans(tip, base_color());
     let painted = !runs.is_empty();
     let mut e = commands.entity(entity);
-    e.despawn_related::<Children>();
     match runs.split_first() {
         Some(((head, head_color), rest)) => {
+            e.despawn_related::<Children>();
             e.insert((Text::new(head.clone()), TextColor(*head_color)));
             let (rest, tf) = (rest.to_vec(), font.clone());
             e.with_children(|c| {
@@ -384,10 +404,7 @@ fn drive_game_tip(
                 }
             });
         }
-        None => {
-            e.insert(Text::new(String::new()));
-            *vis = Visibility::Hidden;
-        }
+        None => empty_tip(&mut e, &mut vis),
     }
 
     // The run's own evidence — and it sits HERE, past the query, the layout and the runs, because
@@ -549,11 +566,14 @@ mod tests {
         );
     }
 
-    /// An app holding the real node and the real system, one tip in the table.
+    /// An app holding the real node and the real system, one tip in the table — plus the text
+    /// stack and the real `detect_text_needs_rerender`, so what the paint and the dismiss do to
+    /// the node's `ComputedTextBlock` is observable (B383, decision 2212).
     fn tip_app() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
-        app.init_asset::<bevy::text::Font>();
+        crate::text_reshape::harness::add_text_plugins(&mut app);
+        app.add_systems(PostUpdate, bevy::text::detect_text_needs_rerender::<Text>);
         app.init_resource::<crate::cvars::CvarPersist>();
         app.init_resource::<GameTipSetting>();
         app.insert_resource(GameTips {
@@ -667,5 +687,46 @@ mod tests {
             .world()
             .get::<Children>(tip)
             .is_none_or(|c| c.is_empty()));
+    }
+
+    /// **B383 — the dismiss must leave the tip node re-shapeable.** The loading screen's root is
+    /// never despawned, only hidden, so the tip node outlives every load and every later window
+    /// resize re-lays-out its text block. Emptying it by despawning the spans alone left the
+    /// block's shaped buffer pointing at a run that no longer existed, and the first maximize
+    /// after world entry panicked inside `bevy_text`. The observable: after the dismiss the root
+    /// holds no text and the block is marked for a re-shape.
+    ///
+    /// The mechanism's own end — that the re-shape is what stops the panic — is
+    /// [`crate::text_reshape`]'s, which drives the real pipeline over the same shape.
+    #[test]
+    fn the_dismiss_leaves_the_node_reshapeable() {
+        let (mut app, tip) = tip_app();
+        set_edge(&mut app, crate::loading_screen::TipEdge::Pick);
+        app.update();
+        // The state a painted frame leaves behind: a two-run block, shaped, nothing pending.
+        crate::text_reshape::harness::shape(&mut app, tip);
+        assert_eq!(
+            app.world()
+                .get::<bevy::text::ComputedTextBlock>(tip)
+                .map(|b| b.entities().len()),
+            Some(2),
+            "the gold prefix and the sentence are two runs"
+        );
+
+        set_edge(&mut app, crate::loading_screen::TipEdge::Clear);
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Text>(tip).map(|t| t.0.as_str()),
+            Some(""),
+            "the dismissed tip holds no sentence — a hidden node with stale text is the bug"
+        );
+        assert!(
+            app.world()
+                .get::<bevy::text::ComputedTextBlock>(tip)
+                .expect("the block")
+                .needs_rerender(),
+            "and the block is marked for the re-shape a later resize would otherwise skip"
+        );
     }
 }

@@ -224,10 +224,20 @@ impl GuildState {
         if (self.guild_id, self.rank_index) == (guild_id, rank_index) {
             return false;
         }
-        let left = self.guild_id != guild_id;
+        // **`0` here is "the descriptor has not told us yet", not "a guild we were in"** (B376).
+        // The mirror's id starts at 0 and only moves when our own avatar streams, which at a
+        // login is a whole packet burst AFTER the server has already sent the guild's MOTD
+        // (`SMSG_GUILD_EVENT 0x02`, vmangos `CharacterHandler.cpp` at the top of the login
+        // handler). Reading that first 0 → N as a guild *change* threw the MOTD away as the
+        // property of a guild we had left — and since the wipe happens here, at the top of the
+        // feed, it landed in the same call that would have fired `GUILD_MOTD` further down, so
+        // the login line was destroyed before it could ever be taken. A move OUT of a real
+        // guild (N → 0, or N → M) is the edge that genuinely invalidates the mirror.
+        let known = self.guild_id != 0;
+        let moved = self.guild_id != guild_id;
         self.guild_id = guild_id;
         self.rank_index = rank_index;
-        if left {
+        if moved && known {
             // A different guild (or none): everything the old roster said is about a guild we are
             // no longer in. The identity cache survives — it is keyed by id and still true.
             self.motd.clear();
@@ -235,6 +245,8 @@ impl GuildState {
             self.rank_rights.clear();
             self.members.clear();
             self.selection = 0;
+        }
+        if moved {
             self.note_roster_update(RosterUpdate::Applied);
         }
         self.dirty = true;
@@ -769,7 +781,13 @@ impl Plugin for UiGuildPlugin {
                 (
                     feed::feed_guild.before(UiInput),
                     feed::drain_guild.after(UiInput),
-                ),
+                )
+                    // **Never against the boot VM** (1348/1978, and B376's half of it): the feed
+                    // takes the MOTD and the roster edges through a [`crate::ui_script::VmMemo`]
+                    // that the entry load does not reset, so an edge spent on a VM with no frames
+                    // is spent for the whole login — the "Guild Message of the Day:" line fired
+                    // into nothing and never fired again. `ingame_ui_up`'s doc has the window.
+                    .run_if(crate::ui_script::ingame_ui_up),
             );
     }
 }
@@ -1085,6 +1103,39 @@ mod tests {
         assert!(guild.identities.contains_key(&7), "identities survive");
 
         assert!(!guild.mirror_self(0, 0), "no edge when nothing moved");
+    }
+
+    /// **B376, at the line that caused it.** At a login the server sends `SMSG_GUILD_EVENT 0x02`
+    /// (the MOTD) a whole packet burst before our own avatar's descriptor carries
+    /// `PLAYER_GUILDID`, so the mirror's first sight of our guild id is `0 -> N` — and that is us
+    /// being TOLD which guild we are in, not us moving between two. Reading it as a move wiped the
+    /// MOTD that had already arrived, in the same `feed_guild` call that would have fired
+    /// `GUILD_MOTD` a few lines further down: the login line was destroyed before the edge could
+    /// be taken, and the text only came back when the guild pane asked for a roster — the report.
+    #[test]
+    fn learning_our_own_guild_id_is_not_leaving_a_guild() {
+        let mut guild = GuildState::default();
+        guild.apply_event(&event(
+            guild_event::MOTD,
+            &["Raid Wednesday at eight."],
+            None,
+        ));
+        assert!(!guild.in_guild(), "the descriptor has not said yet");
+
+        assert!(
+            guild.mirror_self(1, 3),
+            "the descriptor finally names the guild"
+        );
+        assert_eq!(
+            guild.motd, "Raid Wednesday at eight.",
+            "the MOTD is about the guild we have just been told we are in"
+        );
+        assert_eq!(
+            guild.roster_event,
+            Some(RosterUpdate::Stale),
+            "the pane still learns the snapshot moved — the MOTD packet's own stale signal, \
+             which outranks the `Applied` this edge notes"
+        );
     }
 
     /// Our own rank's rights word is read out of the roster's array by our own descriptor rank,
