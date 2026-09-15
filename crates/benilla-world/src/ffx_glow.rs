@@ -1366,14 +1366,16 @@ impl ViewNode for FfxTransparent2dNode {
                     render_pass.set_camera_viewport(viewport);
                 }
                 if let Some((combine, bind)) = ground.as_ref() {
-                    // Its own span inside the pass, so the per-pass split (`WOW_GPU_PASSES`)
-                    // still reads one `ffx_glow_combine` a frame on a device that times inside
-                    // a pass; on one that does not, the transparent pass carries it.
-                    let ground_span = diagnostics.pass_span(&mut render_pass, "ffx_glow_combine");
+                    // No span of its own. A `pass_span` is a pipeline-statistics query as well
+                    // as a timestamp pair, and wgpu allows ONE such query active at a time: a
+                    // second one opened inside the pass's own was the validation error that
+                    // aborted every Vulkan build of the 09-15 sync on its first world frame
+                    // (B390, 2258) — and only Vulkan exposes the feature, so Metal and DX12
+                    // never nested anything and no gate saw it. The transparent pass's number
+                    // carries the combine; the journal never read a nested span.
                     render_pass.set_render_pipeline(combine);
                     render_pass.set_bind_group(0, bind, &[]);
                     render_pass.draw(0..3, 0..1);
-                    ground_span.end(&mut render_pass);
                 }
                 if !transparent_phase.items.is_empty() {
                     if let Err(err) = transparent_phase.render(&mut render_pass, world, view_entity)

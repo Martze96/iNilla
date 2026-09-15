@@ -120,7 +120,8 @@ enum GpuBucket {
     Transparent,
     /// The `ffx_glow` chain: the quarter-res downsample, the two Gauss taps — and a bake's
     /// combine. The world's combine is the first draw of the UI camera's main pass since 2234,
-    /// nested under `main_transparent_pass_2d`, so it lands in [`Self::Ui`] with that pass.
+    /// inside `main_transparent_pass_2d`'s own span (it has none of its own — 2258), so it lands
+    /// in [`Self::Ui`] with that pass.
     Glow,
     /// The full-screen tail on every camera: tonemapping, upscaling, the MSAA writeback.
     Post,
