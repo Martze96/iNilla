@@ -18,8 +18,15 @@
 //! reference runs its FFX pass inside the WorldFrame's paint, with every UI frame compositing
 //! afterwards. [`FfxGlow::state_scale`] is that whole class in one field, `0` on every bake
 //! (decision 1481).
+//!
+//! **Two nodes since decision 2234.** The world view's node runs the three filter passes and,
+//! for a view nobody claims, the combine where [`crate::final_pass`] says. The player-UI camera
+//! claims the world view ([`FfxBackdrop`]) and draws the combine itself, first in its own main
+//! pass, straight into its byte target: the world enters the interface's buffer with no picture
+//! in between — no full-window float image written by one camera and read back by the next.
 
-use bevy::camera::CameraOutputMode;
+use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
+use bevy::core_pipeline::core_2d::Transparent2d;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
@@ -31,11 +38,13 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
+use bevy::render::render_phase::{TrackedRenderPass, ViewSortedRenderPhases};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::{CachedTexture, TextureCache};
-use bevy::render::view::ViewTarget;
+use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::final_pass::FinalPassTarget;
@@ -150,6 +159,37 @@ impl Default for FfxGlow {
     fn default() -> Self {
         Self::WORLD
     }
+}
+
+/// **A 2D camera whose ground is the world's FFX combine** (decision 2234) — the player-UI
+/// camera.
+///
+/// The world reaches the interface's byte buffer as the FIRST DRAW of this camera's main pass:
+/// the combine of the view `source` names, rendered straight into this view's main texture in
+/// the UI lane's terms — the gamma byte, no decode ([`FfxCombineKey::gamma_out`]) — before
+/// anything the camera draws itself, inside the same pass ([`FfxTransparent2dNode`]). What that replaces is a picture: the combine used to write a full-window float
+/// image that the UI pass then drew as its first quad, one write and one read of every pixel at
+/// eight bytes each, for a value the quad re-encoded straight back to the byte the combine had
+/// computed.
+///
+/// `source` is the world camera drawing this frame — its main-world entity — or `None` when
+/// none is (the glue screens, the loading screen, a gated camera): the pass then does nothing
+/// and the camera's own clear is the ground, exactly as the quad's absence was. The render world
+/// resolves it to the view that actually rendered this frame ([`prepare_backdrops`]): a camera
+/// that is active but was not extracted — its target's image not prepared yet, a spawn frame —
+/// is not a source, so the pass never samples a main texture older than the frame. The component
+/// itself stays on the camera so its pair of combine pipelines is specialised on the camera's
+/// first frame, before any world exists to hitch on their compile.
+///
+/// The world view it names keeps its three filter passes — the ¼-res blur this combine samples
+/// — and runs no combine of its own: nothing writes its camera's target, which is a size-carrier
+/// only (`benilla_app::world_backdrop`). Its main texture is read unflipped, so a claimed camera
+/// runs `CameraOutputMode::Skip`.
+#[derive(Component, Clone, Copy, Default, ExtractComponent)]
+pub struct FfxBackdrop {
+    /// The world camera whose combine this camera runs — a main-world entity — or `None` while
+    /// no world is drawing.
+    pub source: Option<Entity>,
 }
 
 /// The per-zone glow weight `w` (`LightParams.glow` — authored data, synced from
@@ -426,22 +466,23 @@ fn sync_gain(
 fn ensure_ffx_glow(
     mut commands: Commands,
     cam: Query<Entity, (With<WorldCamera>, Without<FfxGlow>)>,
-    mut with: Query<(Entity, &mut Camera), With<FfxGlow>>,
+    mut with: Query<&mut FfxGlow>,
 ) {
-    // Perf-bisect kill-switch: $WOW_NO_FFX strips the pass from every camera (the frame then shows
-    // undecoded gamma — ~2.2× bright — which is fine: this is a measurement mode, not a look mode).
+    // Perf-bisect kill-switch: $WOW_NO_FFX strips the GLOW from every camera — the three filter
+    // passes and the blur term, [`FfxGlow::UI_PANE`]'s shape — and keeps the combine, because in
+    // the gamma lane the combine is not an effect: it is the frame's one decode on a `Write`
+    // view and the UI camera's ground pass on a claimed one (decision 2234), and a frame
+    // without it has no world in it. The frame shows the world un-glowed at its right
+    // brightness; what the lever prices is the blur chain and the glow add.
     static NO_FFX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *NO_FFX.get_or_init(|| std::env::var_os("WOW_NO_FFX").is_some()) {
-        for (e, mut camera) in &mut with {
-            commands.entity(e).remove::<FfxGlow>();
-            // With no combine left to write the output, the view goes back to bevy's blit — a
-            // `Skip` camera (2206, `final_pass`) would otherwise present a target nothing wrote.
-            if matches!(camera.output_mode, CameraOutputMode::Skip) {
-                camera.output_mode = CameraOutputMode::Write {
-                    blend_state: None,
-                    clear_color: ClearColorConfig::Default,
-                };
+        for mut glow in &mut with {
+            if glow.gain_scale != 0.0 || glow.state != FfxState::None {
+                *glow = FfxGlow::UI_PANE;
             }
+        }
+        for e in &cam {
+            commands.entity(e).insert(FfxGlow::UI_PANE);
         }
         return;
     }
@@ -480,8 +521,9 @@ struct FfxGlowPipelines {
 
 /// The combine — specialised on the **format it renders in** (decision 2206, [`crate::final_pass`]):
 /// a view whose camera runs `CameraOutputMode::Skip` gets it rendered straight into the output
-/// texture (the backdrop image, for the world camera), a `Write` view into the HDR main texture
-/// for bevy's blit to copy out, as before. The three filter passes never leave the ¼-res chain
+/// texture (a bake's image), a `Write` view into the HDR main texture for bevy's blit to copy
+/// out, as before — and the world view's combine is the UI camera's own pass, keyed on the UI
+/// target (decision 2234, [`FfxBackdrop`]). The three filter passes never leave the ¼-res chain
 /// and stay unspecialised.
 struct FfxCombinePipeline {
     layout: BindGroupLayoutDescriptor,
@@ -492,6 +534,16 @@ struct FfxCombinePipeline {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct FfxCombineKey {
     format: TextureFormat,
+    /// The combine as a **gamma-lane** pass (decision 2234): it stores the gamma byte it computed
+    /// and leaves the frame's one decode to the lane that owns it — the UI camera's, at its end,
+    /// for a view this combine grounds ([`FfxBackdrop`]). `false` is the world lane's own exit,
+    /// the decode here (0161).
+    gamma_out: bool,
+    /// The combine drawn INSIDE a 2D main pass — the first draw of a backdrop camera's
+    /// transparent pass — which carries the `Core2d` depth attachment and the view's sample
+    /// count, and a pipeline in that pass must say so (wgpu validates the pair). `None` is the
+    /// combine's own pass: colour only, one sample.
+    inside_2d: Option<u32>,
     /// The underwater combine (`fs_combine_wave`). A SEPARATE pipeline rather than a branch inside
     /// `fs_combine`: a dry frame then binds byte-for-byte the pipeline it bound before the warp
     /// existed and pays nothing at all for it — no extra pass, no extra target, not even a uniform
@@ -514,7 +566,11 @@ impl SpecializedRenderPipeline for FfxCombinePipeline {
             vertex: self.fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
-                shader_defs: vec![],
+                shader_defs: if key.gamma_out {
+                    vec!["GAMMA_OUT".into()]
+                } else {
+                    vec![]
+                },
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format: key.format,
@@ -522,6 +578,20 @@ impl SpecializedRenderPipeline for FfxCombinePipeline {
                     write_mask: ColorWrites::ALL,
                 })],
             }),
+            // Inside a 2D main pass the depth attachment is bound but never consulted: the
+            // ground writes every pixel under everything, and the phase's own items decide
+            // their order among themselves as they always did.
+            depth_stencil: key.inside_2d.map(|_| DepthStencilState {
+                format: bevy::core_pipeline::core_2d::CORE_2D_DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::Always,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
+            multisample: MultisampleState {
+                count: key.inside_2d.unwrap_or(1),
+                ..default()
+            },
             ..default()
         }
     }
@@ -671,21 +741,89 @@ struct FfxGlowTextures {
     /// `run`.
     gauss_h_bind: BindGroup,
     gauss_v_bind: BindGroup,
-    /// The combine pipelines for this view — dry and wave — specialised on the format the
-    /// combine renders in for THIS camera's output mode (`FinalPassTarget::format`).
-    combine: CachedRenderPipelineId,
-    combine_wave: CachedRenderPipelineId,
-    /// The format those were keyed on: the freshness gate beside the two textures'.
-    combine_format: TextureFormat,
+    /// The combine pipelines for this view, specialised on the format the combine renders in
+    /// for THIS camera's output mode (`FinalPassTarget::format`) — or `None` for a view some
+    /// [`FfxBackdrop`] claims, whose combine is that camera's own pass and not this node's.
+    combine: Option<FfxCombinePair>,
+}
+
+/// One view's combine pipelines — dry and underwater (`fs_combine_wave`) — and the format they
+/// were keyed on: the freshness gate beside the two textures'.
+#[derive(Clone, Copy)]
+struct FfxCombinePair {
+    dry: CachedRenderPipelineId,
+    wave: CachedRenderPipelineId,
+    format: TextureFormat,
+    /// The sample count the pair was keyed on — 1 for a combine's own pass, the view's for a
+    /// backdrop draw inside a 2D main pass.
+    samples: u32,
+}
+
+impl FfxCombinePair {
+    /// The pipeline the pass-list swap selects: the underwater entry while the wave is armed.
+    fn armed(&self, wave: bool) -> CachedRenderPipelineId {
+        if wave {
+            self.wave
+        } else {
+            self.dry
+        }
+    }
+}
+
+/// What specialising a combine pair takes — the one hand the two prepare systems reach for it
+/// with, so neither carries the three resources separately.
+#[derive(bevy::ecs::system::SystemParam)]
+struct CombineSpecializer<'w> {
+    pipeline_cache: Res<'w, PipelineCache>,
+    pipelines: Res<'w, FfxGlowPipelines>,
+    cache: ResMut<'w, SpecializedRenderPipelines<FfxCombinePipeline>>,
+}
+
+impl CombineSpecializer<'_> {
+    /// The combine's own pass: colour only, the decode at its exit.
+    fn pair(&mut self, format: TextureFormat) -> FfxCombinePair {
+        self.pair_for(format, false, None)
+    }
+
+    /// The backdrop draw inside a 2D main pass of `samples` samples: the gamma-lane exit, the
+    /// pass's depth attachment declared.
+    fn backdrop_pair(&mut self, format: TextureFormat, samples: u32) -> FfxCombinePair {
+        self.pair_for(format, true, Some(samples))
+    }
+
+    fn pair_for(
+        &mut self,
+        format: TextureFormat,
+        gamma_out: bool,
+        inside_2d: Option<u32>,
+    ) -> FfxCombinePair {
+        let mut key = |wave| {
+            self.cache.specialize(
+                &self.pipeline_cache,
+                &self.pipelines.combine,
+                FfxCombineKey {
+                    format,
+                    wave,
+                    gamma_out,
+                    inside_2d,
+                },
+            )
+        };
+        FfxCombinePair {
+            dry: key(false),
+            wave: key(true),
+            format,
+            samples: inside_2d.unwrap_or(1),
+        }
+    }
 }
 
 fn prepare_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    pipeline_cache: Res<PipelineCache>,
-    pipelines: Res<FfxGlowPipelines>,
-    mut combine_pipelines: ResMut<SpecializedRenderPipelines<FfxCombinePipeline>>,
+    mut specializer: CombineSpecializer,
+    claims: Res<FfxBackdropClaims>,
     views: Query<
         (
             Entity,
@@ -700,7 +838,11 @@ fn prepare_textures(
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
-        let combine_format = FinalPassTarget::format(&camera.output_mode, target);
+        // A claimed view (some [`FfxBackdrop`] names it) has no combine of its own — the UI
+        // camera's ground pass is it, keyed on THAT camera's target — so it carries none rather
+        // than a pair keyed on a target nothing writes.
+        let combine_format = (!claims.0.contains(&entity))
+            .then(|| FinalPassTarget::format(&camera.output_mode, target));
         // The reference's RT-dim chain: ½ and ¼, floored (clamp ≥8 — `ffx_compute_rt_dims`).
         let mut tex = |label: &'static str, w: u32, h: u32| {
             texture_cache.get(
@@ -729,27 +871,15 @@ fn prepare_textures(
         if existing.is_some_and(|t| {
             t.quarter_a.texture.id() == quarter_a.texture.id()
                 && t.quarter_b.texture.id() == quarter_b.texture.id()
-                && t.combine_format == combine_format
+                && t.combine.as_ref().map(|c| c.format) == combine_format
         }) {
             continue;
         }
-        let combine = combine_pipelines.specialize(
-            &pipeline_cache,
-            &pipelines.combine,
-            FfxCombineKey {
-                format: combine_format,
-                wave: false,
-            },
-        );
-        let combine_wave = combine_pipelines.specialize(
-            &pipeline_cache,
-            &pipelines.combine,
-            FfxCombineKey {
-                format: combine_format,
-                wave: true,
-            },
-        );
-        let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
+        let combine = combine_format.map(|format| specializer.pair(format));
+        let pipelines = &specializer.pipelines;
+        let layout_filter = specializer
+            .pipeline_cache
+            .get_bind_group_layout(&pipelines.layout_filter);
         let gauss_h_bind = render_device.create_bind_group(
             "ffx_glow_gauss_h",
             &layout_filter,
@@ -773,8 +903,6 @@ fn prepare_textures(
             gauss_h_bind,
             gauss_v_bind,
             combine,
-            combine_wave,
-            combine_format,
         });
     }
 }
@@ -891,41 +1019,36 @@ impl ViewNode for FfxGlowNode {
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FfxGlowPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let death = world.resource::<FfxDeathFade>().0;
-        let wave = *world.resource::<FfxWave>();
-        let uniform = combine_uniform(
-            world.resource::<FfxGlowGain>().0,
-            FfxPassState::world(death, world.resource::<FfxHazeMix>().0),
-            FfxPassState::glue(world.resource::<GlueFfx>().death()),
-            glow,
-            wave,
-        );
-        // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
-        // pipeline, which is the same fork — the first two passes are identical in both lists.
-        let combine_id = if wave_armed(glow.state, wave, death) {
-            textures.combine_wave
-        } else {
-            textures.combine
-        };
-        let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
+        let (uniform, wave) = live_combine(world, glow);
+        let (Some(downsample), Some(gauss_h), Some(gauss_v)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
             pipeline_cache.get_render_pipeline(pipelines.gauss_v),
-            pipeline_cache.get_render_pipeline(combine_id),
         ) else {
             return Ok(()); // pipelines still compiling — draw the frame un-glowed
         };
-        let render_device = render_context.render_device().clone();
-        world.resource::<RenderQueue>().write_buffer(
-            &textures.gain_buf,
-            0,
-            bytemuck::cast_slice(&uniform),
-        );
         // Where this view's combine lands (2206, `final_pass`): a `Skip` camera's output texture
-        // itself, a `Write` camera's ping-pong for bevy's blit to copy out. The downsample reads
-        // the same finished main texture either way.
-        let out = FinalPassTarget::resolve(camera, view_target);
-        let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
+        // itself, a `Write` camera's ping-pong for bevy's blit to copy out. A CLAIMED view
+        // (decision 2234, [`FfxBackdrop`]) has no combine here at all: the UI camera's ground
+        // pass is its combine, and samples this view's finished main texture — unflipped, which
+        // is why a claimed camera runs `Skip` — once the filter passes below have built the
+        // blur it reads beside it.
+        let out = match textures.combine.as_ref() {
+            None => None,
+            Some(pair) => {
+                // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we
+                // fork one pipeline, which is the same fork — the first two passes are identical
+                // in both lists.
+                let Some(combine) = pipeline_cache.get_render_pipeline(pair.armed(wave)) else {
+                    return Ok(());
+                };
+                Some((combine, FinalPassTarget::resolve(camera, view_target)))
+            }
+        };
+        let source = out
+            .as_ref()
+            .map_or(view_target.main_texture_view(), |(_, out)| out.source);
+        let render_device = render_context.render_device().clone();
         let diagnostics = render_context.diagnostic_recorder();
 
         // The combine reads the blur through exactly two terms — `w·blur²` (`lane.x`) and the
@@ -940,14 +1063,14 @@ impl ViewNode for FfxGlowNode {
         let blur_read = uniform[0] != 0.0 || uniform[2] != 0.0;
         if blur_read {
             let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
-            // The downsample binds `out.source`, which a `Write` view's `post_process_write`
-            // flips per call — this bind group is not cached (it would sample last frame's
-            // texture); the two Gauss ones bind only the stable ¼-res ping-pong and ride
-            // prepared on [`FfxGlowTextures`].
+            // The downsample binds the finished main texture, which a `Write` view's
+            // `post_process_write` flips per call — this bind group is not cached (it would
+            // sample last frame's texture); the two Gauss ones bind only the stable ¼-res
+            // ping-pong and ride prepared on [`FfxGlowTextures`].
             let down_bind = render_device.create_bind_group(
                 "ffx_glow_down_quarter",
                 &layout_filter,
-                &BindGroupEntries::sequential((out.source, &pipelines.sampler)),
+                &BindGroupEntries::sequential((source, &pipelines.sampler)),
             );
 
             // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
@@ -997,8 +1120,19 @@ impl ViewNode for FfxGlowNode {
             }
         }
 
+        let Some((combine, out)) = out else {
+            return Ok(()); // claimed: the combine is the UI camera's pass
+        };
+        // The uniform is the combine's alone (the filter shaders never bind it), written by
+        // whichever node runs the combine — this one here, the backdrop node for a claimed view.
+        world.resource::<RenderQueue>().write_buffer(
+            &textures.gain_buf,
+            0,
+            bytemuck::cast_slice(&uniform),
+        );
         // Combine: screen + w·blur² (gamma-space byte math in the shader) → the view's output.
         // Also binds the flipping `out.source` — per-frame for the downsample's reason.
+        let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
         let bind = render_device.create_bind_group(
             "ffx_glow_combine",
             &layout_combine,
@@ -1033,6 +1167,230 @@ impl ViewNode for FfxGlowNode {
     }
 }
 
+/// The live inputs of one view's combine, read off the render world: its uniform, and whether
+/// the underwater entry is armed. One reading for the two nodes that can run a combine.
+fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; 8], bool) {
+    let death = world.resource::<FfxDeathFade>().0;
+    let wave = *world.resource::<FfxWave>();
+    let uniform = combine_uniform(
+        world.resource::<FfxGlowGain>().0,
+        FfxPassState::world(death, world.resource::<FfxHazeMix>().0),
+        FfxPassState::glue(world.resource::<GlueFfx>().death()),
+        glow,
+        wave,
+    );
+    (uniform, wave_armed(glow.state, wave, death))
+}
+
+/// Every view an [`FfxBackdrop`] names this frame: the render-world entities whose combine is
+/// somebody else's pass. Rebuilt in prepare, read by [`prepare_textures`] (no combine pair for a
+/// claimed view) and by the world node (no combine pass).
+#[derive(Resource, Default)]
+struct FfxBackdropClaims(Vec<Entity>);
+
+/// A backdrop camera's view, as the render world resolved it this frame: its own combine pair —
+/// specialised on ITS main texture's format with the gamma-lane exit
+/// ([`FfxCombineKey::gamma_out`]), where a world view's pair is keyed on the world's target and
+/// decodes — and the world view it grounds on, a render-world entity whose `ViewTarget` was
+/// prepared THIS frame, or `None`.
+#[derive(Component)]
+struct FfxBackdropView {
+    pair: FfxCombinePair,
+    source: Option<Entity>,
+}
+
+/// The world views bevy prepared a `ViewTarget` for this frame — the ones that rendered — by
+/// their main-world entity.
+type RenderedWorldViews<'w, 's> =
+    Query<'w, 's, (Entity, &'static MainEntity), (With<FfxGlow>, Changed<ViewTarget>)>;
+
+/// Resolve every [`FfxBackdrop`]: the claims, and each claiming view's pair and source.
+///
+/// The source is looked up among the views whose `ViewTarget` bevy prepared this frame
+/// (`Changed<ViewTarget>`: `prepare_view_targets` re-inserts it for every view it extracted),
+/// by the main-world entity the camera named. A world camera that is active in the main world
+/// but was not rendered this frame — its target's image not yet prepared, the frame it spawned
+/// — resolves to nothing, so the backdrop pass never samples a main texture older than the
+/// frame; and a world view is claimed from its very first rendered frame, so it never builds a
+/// combine pair it would drop a frame later.
+///
+/// The pair is keyed on the view's main texture, which exists from the view's first frame — so
+/// a player-UI camera spawned before the world has its pipelines compiling before there is a
+/// world to hitch on them (`pipe_warm`'s pre-world cover), whether or not it has a source yet.
+fn prepare_backdrops(
+    mut commands: Commands,
+    mut claims: ResMut<FfxBackdropClaims>,
+    mut specializer: CombineSpecializer,
+    views: Query<(
+        Entity,
+        &FfxBackdrop,
+        &ViewTarget,
+        &Msaa,
+        Option<&FfxBackdropView>,
+    )>,
+    rendered: RenderedWorldViews,
+) {
+    claims.0.clear();
+    for (entity, backdrop, target, msaa, existing) in &views {
+        let source = backdrop.source.and_then(|main| {
+            rendered
+                .iter()
+                .find(|(_, m)| m.id() == main)
+                .map(|(view, _)| view)
+        });
+        claims.0.extend(source);
+        let (format, samples) = (target.main_texture_format(), msaa.samples());
+        let fresh =
+            |view: &FfxBackdropView| view.pair.format == format && view.pair.samples == samples;
+        let pair = match existing {
+            Some(view) if fresh(view) => view.pair,
+            _ => specializer.backdrop_pair(format, samples),
+        };
+        if existing.is_some_and(|view| view.source == source && fresh(view)) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(FfxBackdropView { pair, source });
+    }
+}
+
+/// **The 2D main pass with the world as its first draw** (decision 2234) — bevy's
+/// `MainTransparentPass2dNode` with one addition, registered under bevy's own label
+/// (`RenderGraph::add_node` is a map insert; the graph's edges, keyed by label, carry over — the
+/// same replacement `benilla_app::opaque2d` makes of the opaque node).
+///
+/// On a view carrying an [`FfxBackdrop`] whose source rendered this frame
+/// ([`FfxBackdropView`]), the pass opens on the view's main texture — taking its first-call clear
+/// — and the world view's combine is drawn before any item of the transparent phase: the
+/// finished world main texture and the blur the world's own node just built, through the
+/// gamma-lane exit, into every pixel. Then the interface, over it, exactly as before.
+///
+/// **Inside the pass, not a pass of its own**, and that is the point on a tile GPU: a render
+/// pass boundary on a full-window target is a store of every tile to memory and a load of every
+/// tile back, so a separate ground pass before this one cost the Air 0.9 ms a frame it did not
+/// cost the RTX (2234's measurement). A draw inside the pass costs the tile nothing but the
+/// fragment work. On any other view — no source, a world that has not drawn yet, a camera that
+/// is not a backdrop camera at all — this is bevy's node to the letter, and the camera's own
+/// clear is the ground, as the backdrop quad's absence was.
+#[derive(Default)]
+struct FfxTransparent2dNode;
+
+impl ViewNode for FfxTransparent2dNode {
+    type ViewQuery = (
+        &'static ExtractedCamera,
+        &'static ExtractedView,
+        &'static ViewTarget,
+        &'static ViewDepthTexture,
+        Option<&'static FfxBackdropView>,
+    );
+
+    fn run<'w>(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        (camera, view, target, depth, backdrop): QueryItem<'w, '_, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let Some(transparent_phases) =
+            world.get_resource::<ViewSortedRenderPhases<Transparent2d>>()
+        else {
+            return Ok(());
+        };
+        let view_entity = graph.view_entity();
+        let Some(transparent_phase) = transparent_phases.get(&view.retained_view_entity) else {
+            return Ok(());
+        };
+
+        // The ground: resolved and bound here, drawn inside the pass below. Everything it needs
+        // is read before the pass so the task closure owns only handles.
+        let ground = backdrop
+            .and_then(|view| view.source.map(|source| (view, source)))
+            .and_then(|(view, source)| {
+                let (Some(world_target), Some(textures), Some(glow)) = (
+                    world.get::<ViewTarget>(source),
+                    world.get::<FfxGlowTextures>(source),
+                    world.get::<FfxGlow>(source),
+                ) else {
+                    return None;
+                };
+                let pipelines = world.resource::<FfxGlowPipelines>();
+                let pipeline_cache = world.resource::<PipelineCache>();
+                let (uniform, wave) = live_combine(world, glow);
+                // Still compiling: the frame has no world in it for a frame.
+                let combine = pipeline_cache.get_render_pipeline(view.pair.armed(wave))?;
+                world.resource::<RenderQueue>().write_buffer(
+                    &textures.gain_buf,
+                    0,
+                    bytemuck::cast_slice(&uniform),
+                );
+                let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
+                // The world view's finished main texture — the very texture its own node would
+                // have combined from — and the ¼-res blur its filter passes built this frame.
+                // Per-frame, as the world node's own combine bind group is.
+                let bind = render_context.render_device().create_bind_group(
+                    "ffx_glow_combine",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        world_target.main_texture_view(),
+                        &pipelines.sampler,
+                        &textures.quarter_a.default_view,
+                        textures.gain_buf.as_entire_binding(),
+                        &pipelines.wave_view,
+                        &pipelines.wave_sampler,
+                    )),
+                );
+                Some((combine, bind))
+            });
+
+        let diagnostics = render_context.diagnostic_recorder();
+        let color_attachments = [Some(target.get_color_attachment())];
+        let depth_stencil_attachment = Some(depth.get_attachment(StoreOp::Store));
+
+        render_context.add_command_buffer_generation_task(move |render_device| {
+            let mut command_encoder =
+                render_device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("main_transparent_pass_2d_command_encoder"),
+                });
+            {
+                let render_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("main_transparent_pass_2d"),
+                    color_attachments: &color_attachments,
+                    depth_stencil_attachment,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
+                let pass_span = diagnostics.pass_span(&mut render_pass, "main_transparent_pass_2d");
+                if let Some(viewport) = camera.viewport.as_ref() {
+                    render_pass.set_camera_viewport(viewport);
+                }
+                if let Some((combine, bind)) = ground.as_ref() {
+                    // Its own span inside the pass, so the per-pass split (`WOW_GPU_PASSES`)
+                    // still reads one `ffx_glow_combine` a frame on a device that times inside
+                    // a pass; on one that does not, the transparent pass carries it.
+                    let ground_span = diagnostics.pass_span(&mut render_pass, "ffx_glow_combine");
+                    render_pass.set_render_pipeline(combine);
+                    render_pass.set_bind_group(0, bind, &[]);
+                    render_pass.draw(0..3, 0..1);
+                    ground_span.end(&mut render_pass);
+                }
+                if !transparent_phase.items.is_empty() {
+                    if let Err(err) = transparent_phase.render(&mut render_pass, world, view_entity)
+                    {
+                        error!(
+                            "Error encountered while rendering the transparent 2D phase {err:?}"
+                        );
+                    }
+                }
+                pass_span.end(&mut render_pass);
+            }
+            command_encoder.finish()
+        });
+        Ok(())
+    }
+}
+
 pub struct FfxGlowPlugin;
 
 impl Plugin for FfxGlowPlugin {
@@ -1044,6 +1402,7 @@ impl Plugin for FfxGlowPlugin {
             .init_resource::<FfxWave>()
             .add_plugins((
                 ExtractComponentPlugin::<FfxGlow>::default(),
+                ExtractComponentPlugin::<FfxBackdrop>::default(),
                 ExtractResourcePlugin::<FfxGlowGain>::default(),
                 ExtractResourcePlugin::<FfxDeathFade>::default(),
                 ExtractResourcePlugin::<GlueFfx>::default(),
@@ -1068,10 +1427,14 @@ impl Plugin for FfxGlowPlugin {
         };
         render_app
             .init_resource::<SpecializedRenderPipelines<FfxCombinePipeline>>()
+            .init_resource::<FfxBackdropClaims>()
             .add_systems(RenderStartup, init_pipelines)
             .add_systems(
                 Render,
-                prepare_textures.in_set(RenderSystems::PrepareResources),
+                // The claims first: a claimed world view builds no combine pair of its own.
+                (prepare_backdrops, prepare_textures)
+                    .chain()
+                    .in_set(RenderSystems::PrepareResources),
             )
             .add_render_graph_node::<ViewNodeRunner<FfxGlowNode>>(Core3d, FfxGlowLabel)
             .add_render_graph_edges(
@@ -1081,6 +1444,14 @@ impl Plugin for FfxGlowPlugin {
                     FfxGlowLabel,
                     Node3d::Bloom,
                 ),
+            )
+            // The 2D main pass with the world as its first draw, replacing bevy's transparent
+            // node under bevy's own label (the edges survive; `benilla_app::opaque2d` does the
+            // same to the opaque node, which is skipped when empty so this pass takes the
+            // target's first-call clear under the ground draw).
+            .add_render_graph_node::<ViewNodeRunner<FfxTransparent2dNode>>(
+                Core2d,
+                Node2d::MainTransparentPass,
             );
     }
 }

@@ -580,7 +580,27 @@ impl Plugin for TutorialPlugin {
                     run_world_enter_cascade.before(feed_tutorials),
                     watch_windows.before(feed_tutorials),
                     watch_self.after(on_world_enter).before(feed_tutorials),
-                    feed_tutorials.before(UiInput),
+                    // **Not before the in-game UI exists** (decision 2232). This is the one feed
+                    // in 2226's 29-system audit that could still lose a login's own payload:
+                    // `run_world_enter_cascade` triggers WELCOME and QUESTGIVERS the moment
+                    // `SelfPlayer` exists, a 0-delay `trigger` pushes straight into `fired`, and
+                    // the `mem::take(&mut tutorials.fired)` below fires `TUTORIAL_TRIGGER` at
+                    // whatever VM is in the world. No `VmMemo` sits behind that publication, so
+                    // 2226's fresh session cannot bring it back.
+                    //
+                    // The VM guard already covers the *park* — it sits above the take, so a
+                    // parked frame returns with `fired` intact. What it does not cover is the
+                    // one-frame window where the wire is in-world and the boot VM is still live
+                    // (2214): `on_world_enter` reads `EnteredWorldMessage` out of the same drain
+                    // that writes it, so the arm, the trigger and the take can all land in that
+                    // one frame — the coin flip being whether `apply_net_updates`' spawn command
+                    // has applied yet, which nothing here declares an edge against.
+                    //
+                    // The gate costs nothing: the cascade still arms and still triggers, `fired`
+                    // simply waits, and the first frame with an interface delivers the set.
+                    feed_tutorials
+                        .before(UiInput)
+                        .run_if(crate::ui_script::ingame_ui_up),
                     drain_tutorials.after(UiInput),
                 ),
             )
@@ -782,5 +802,64 @@ mod tests {
             .acknowledge(id::CHATTING);
         app.update();
         assert!(enabled(&mut app), "a moved bank reaches the live VM");
+    }
+
+    /// **The login's own tutorials wait for an interface** (decision 2232) — built on the REAL
+    /// plugin, so it fails if the gate is taken off the registration rather than off a copy of it.
+    ///
+    /// `TUTORIAL_TRIGGER` has no [`crate::ui_script::VmMemo`] behind it: `trigger` sets the bank
+    /// bit and pushes the id into `fired`, and the feed's `mem::take` fires it once at whatever VM
+    /// is in the world. So unlike every one-shot 2226 covers, a firing lost to a frameless VM
+    /// cannot be recovered by the entry load minting a new session — there is nothing left to
+    /// re-spend. `run_world_enter_cascade` puts WELCOME and QUESTGIVERS into exactly that position
+    /// on every login.
+    ///
+    /// Against the ungated shape the first assertion reads *"`fired` is empty — the login's two
+    /// tutorials were published to a VM with no frames and are gone for the session"*.
+    #[test]
+    fn the_world_enter_tutorials_are_not_fired_into_a_ui_less_vm() {
+        let mut app = App::new();
+        app.add_plugins(TutorialPlugin)
+            .init_resource::<crate::items::Items>()
+            .init_resource::<crate::sound::MessageSounds>()
+            // The plugin's other watchers' inputs — none of them is the subject here; they are
+            // present so the REAL plugin can be driven rather than a copy of one of its systems.
+            .init_resource::<crate::ui_trainer::TrainerOpen>()
+            .init_resource::<crate::ui_merchant::MerchantOpen>()
+            .init_resource::<crate::ui_taxi::TaxiState>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<Player>()
+            .add_message::<EnteredWorldMessage>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+
+        // The deferral window (1978/2214): in the world on the wire, the entry load still owed,
+        // and a live boot VM that has strings and fonts but not one frame.
+        app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        app.insert_resource(crate::ui_script::PendingEntryUiLoad);
+        app.insert_non_send_resource(UiScript::new().expect("the boot VM"));
+
+        {
+            let mut t = app.world_mut().resource_mut::<Tutorials>();
+            t.apply_flags(&[0u8; 32]);
+            t.trigger(id::WELCOME, 0, Instant::now());
+        }
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<Tutorials>().fired,
+            vec![id::WELCOME + 1],
+            "the window must not publish: there is no frame registered for TUTORIAL_TRIGGER, and \
+             the take is one-way"
+        );
+
+        // The interface comes up; the same frame delivers what was waiting.
+        app.world_mut()
+            .remove_resource::<crate::ui_script::PendingEntryUiLoad>();
+        app.update();
+        assert!(
+            app.world().resource::<Tutorials>().fired.is_empty(),
+            "…and once there is an interface, it is published exactly once"
+        );
     }
 }

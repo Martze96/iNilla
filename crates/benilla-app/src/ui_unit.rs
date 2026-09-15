@@ -93,6 +93,85 @@ pub(crate) struct CombatTextEvent {
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
 ///
+/// **`PLAYER_LEAVING_WORLD` on a cross-map worldport** (decision 2235, corrected by 2238).
+///
+/// The reference fires event `0x111` at `0x490b48`, inside `0x490a80`. wow-re's census of both
+/// signal helpers puts the id at exactly one site image-wide — 336/336 ids resolved through
+/// `0x703e50`, 149/149 through `0x703f50`, and the encoding `b9 11 01 00 00` occurs once in the
+/// binary — so that is the whole of the FIRE, and it is what this doc used to conflate with the
+/// whole of the event.
+///
+/// **One fire site, three callers, and this system is one of them** (2238; wow-re `5ad31a12`).
+/// `0x490a80` is reached from the local player object's own destructor (`0x401bc0` → `0x467700`
+/// → `0x467800` → the per-object `[vtbl+0]` → `0x5dd500` → `0x5dd600` → `0x5dd72c` → `0x5dd543`)
+/// — **this system's occasion** — and also from `0x490c20` inside the shutdown tail `0x490bd0`,
+/// which is where an in-world `/reload`, a logout, a quit and a disconnect reach it, and from
+/// `0x5e9b5a`, vtable slot 1, on a DESTROY / OUT_OF_RANGE of the local player object.
+/// 2235 read `5ce96437`'s "three gates" as three gates on the event and its subject line as a
+/// census of the callers; neither is what they were. Two of those gates (`0x5dd71c`/`0x5dd721`/
+/// `0x5dd725` and `0x5dd539`/`0x5dd53e`/`0x5dd541`) sit in the destructor chain and gate only the
+/// caller below; `0x490a80`'s own only gate is the latch at `[0xb4b424]`.
+///
+/// **The tail's occasions are already ours**, and were years before this system existed:
+/// [`crate::ui_script::shutdown_ui_state`] fires `PLAYER_LEAVING_WORLD` then `PLAYER_LOGOUT` as
+/// the head of the same `0x490bd0` tail, from `end_ui_session` (logout, disconnect, and
+/// `run_pending_reload`'s `/reload`) and from `shutdown_on_exit` (quit). So the two producers are
+/// complements, not duplicates — a fact worth writing down precisely because nothing in either
+/// file said so, and a reader of this doc alone would take the tail's fire for a bug.
+///
+/// **Cross-map only *for this occasion*, and that falls out of the gate rather than being a rule
+/// on top of it.** The first gate (`0x5dd728`) admits only the local player's destructor, and a
+/// same-map teleport never destroys the object — including the >30 yd variant that forces a
+/// blocking terrain reload, which reloads tiles rather than `CGObject`s. So
+/// [`crate::net::WorldportMessage`] is the right edge and `needs_ack` is the right discriminator:
+/// the one worldport that does NOT need an ack is the initial-login map, where nothing is being
+/// left.
+///
+/// **Nothing shipped listens to it.** Zero of the 232 extracted reference interface files
+/// register `PLAYER_LEAVING_WORLD` (controls, same sweep: `PLAYER_ENTERING_WORLD` 22 files,
+/// `VARIABLES_LOADED` 7, `PLAYER_LOGIN` 1). This is an addon-facing event, which is exactly why
+/// it went missing here for so long — no stock window breaks without it, and only the corpus
+/// notices. It is also why this stays a bare fire and promises nothing more: in the reference the
+/// handler runs *during* teardown, after the three manager unlinks and ~35 of `0x490a80`'s 37
+/// teardown calls, so a real addon's handler already sees a substantially dismantled UI.
+///
+/// **What "dismantled" costs there is the opposite of what 2235 guessed** (2238; wow-re
+/// `20210d32`). The GUID hash's link is `obj+0x1c` and the destructor splices the object out
+/// (`0x467887 call 0x468680`) *before* `call [vtbl+0]`, so on THIS occasion — and only this one —
+/// a hash lookup misses. But `UnitName("player")` never asks the hash: `0x517020` short-circuits
+/// at `0x51707d` and answers from the cached character record `[0xc27d88]`, which has one writer
+/// (`CGlueMgr::EnterWorld`) and no clearer; `UnitRace`, `UnitClass` and `0x517ee0` take the same
+/// fast path. The binding that *does* go nil is `UnitExists("player")`, whose `0x515970` resolves
+/// through `0x468460` and takes `0x5159c9 je 0x515a39` → `0:0` on the miss. We reproduce none of
+/// that ordering and are not trying to: ours fires with the descriptor still present, so every
+/// unit binding answers. That is a divergence in our favour, recorded rather than closed —
+/// closing it would mean deliberately breaking `UnitExists` to match a teardown artifact no
+/// stock file observes.
+fn fire_leaving_world_on_worldport(
+    script: Option<NonSendMut<UiScript>>,
+    mut armed: ResMut<crate::ui_script::LeavingWorldArmed>,
+    mut ports: MessageReader<crate::net::WorldportMessage>,
+) {
+    // `needs_ack` false is the initial-login map (`player::wire_in`'s own split): an entry, not a
+    // departure. Read the whole iterator either way so the cursor never carries one over.
+    let leaving = ports.read().filter(|w| w.needs_ack).count() > 0;
+    if !leaving {
+        return;
+    }
+    // **The world latch, spent here** (2239): this producer and the shutdown tail are the
+    // reference's `0x5dd543` and `0x490c20`, two callers of one fire site, and `[0xb4b424]` is
+    // what keeps them from both claiming one departure. Spent even if the VM turns out to be
+    // absent below — the reference clears it at `0x490a8d`, ahead of the fire and of every
+    // teardown call after it, so a departure nobody could be told about is still a departure.
+    if !armed.spend() {
+        return;
+    }
+    let Some(mut script) = script else {
+        return;
+    };
+    script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
+}
+
 /// The VM half lives behind a [`crate::ui_script::VmMemo`], **inside the resource** — the same
 /// law 1290 wrote for `Local` memos, reached the way a `ResMut` system has to reach it: a memory
 /// about what THIS VM was told is unreadable against the next VM, so a `/reload` (1291) — which
@@ -188,9 +267,23 @@ impl Plugin for UiUnitPlugin {
         .init_resource::<crate::sound::MessageSounds>()
         .add_message::<UnitCombatFeedback>()
         .add_message::<CombatTextEvent>()
+        // …and the worldport edge [`fire_leaving_world_on_worldport`] reads, for exactly the
+        // reason above: the message belongs to `crate::net`, which a UI-only harness does not
+        // stand up, and an unregistered `MessageReader` is a system-validation panic rather than
+        // an empty read. `add_message` is idempotent, so the net plugin declaring it too costs
+        // nothing. (1348's own `the_login_one_shots_wait_for_the_in_game_ui` is the harness that
+        // found this — it builds this plugin alone.)
+        .add_message::<crate::net::WorldportMessage>()
+        // The world latch (2239): this plugin owns one of its two producers, so it declares the
+        // resource as well as the message — same reason, and `init_resource` is idempotent
+        // against `UiScriptPlugin`'s own.
+        .init_resource::<crate::ui_script::LeavingWorldArmed>()
         .add_systems(
             Update,
             (
+                // FIRST in the chain, so a worldport's leaving edge precedes the entering edge
+                // the same port raises in `feed_units` once the new descriptor lands.
+                fire_leaving_world_on_worldport,
                 feed_units,
                 feed_unit_reach,
                 feed_player_control,
@@ -3286,5 +3379,88 @@ mod tests {
             !exists(&mut app),
             "the window closed, yet UnitExists(\"npc\")"
         );
+    }
+
+    /// **`PLAYER_LEAVING_WORLD` fires on a cross-map worldport, and only on one** (decision 2235).
+    ///
+    /// Measured live before this existed: an addon counting all three world events across a real
+    /// mapId 0 → 1 port read `enter=2 leave=0 login=1`. Two of those already matched the
+    /// reference — `PLAYER_ENTERING_WORLD` re-fires because the port destroys and re-creates the
+    /// descriptor, and `PLAYER_LOGIN` correctly does not, being armed only by a UI load. The
+    /// leaving half was simply never wired.
+    ///
+    /// The `needs_ack` split is the reference's own: `0x111` is fired from the local player
+    /// object's destructor, which a same-map teleport never reaches, and the one worldport that
+    /// owes no ack is the initial-login map — an arrival, with nothing behind it to leave.
+    #[test]
+    fn a_cross_map_worldport_fires_leaving_world_and_the_login_map_does_not() {
+        let mut app = App::new();
+        app.add_message::<crate::net::WorldportMessage>()
+            .init_resource::<crate::ui_script::LeavingWorldArmed>()
+            .add_systems(Update, fire_leaving_world_on_worldport);
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .run(
+                "Left = 0 \
+                 local f = CreateFrame(\"Frame\") \
+                 f:RegisterEvent(\"PLAYER_LEAVING_WORLD\") \
+                 f:SetScript(\"OnEvent\", function() Left = Left + 1 end)",
+            )
+            .expect("probe frame");
+        let left = |app: &mut App| -> i64 {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<i64>("return Left")
+                .unwrap()
+        };
+        let port = |needs_ack: bool| crate::net::WorldportMessage {
+            map_id: 1,
+            position: [0.0; 3],
+            orientation: 0.0,
+            needs_ack,
+            transport_entry: None,
+        };
+
+        let arm = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<crate::ui_script::LeavingWorldArmed>()
+                .arm();
+        };
+
+        // A world began (2239's latch — the reference arms it from the local player's create).
+        arm(&mut app);
+        app.world_mut().write_message(port(false));
+        app.update();
+        assert_eq!(left(&mut app), 0, "the initial-login map is an arrival");
+
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(left(&mut app), 1, "a cross-map port leaves a world");
+
+        app.update();
+        assert_eq!(
+            left(&mut app),
+            1,
+            "once per port, not once per frame after it"
+        );
+
+        // **And once per WORLD, which is the latch's own law** (2239): the port above spent it,
+        // and nothing here re-armed — no new avatar was created. A second departure off the same
+        // world is the window a quit on the loading screen lands in, and the reference fires
+        // nothing there.
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(
+            left(&mut app),
+            1,
+            "a second departure with the latch spent fired again — [0xb4b424] is per world"
+        );
+
+        // Re-armed, as the new world's create does: the next departure is its own.
+        arm(&mut app);
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(left(&mut app), 2, "the next world's departure fires again");
     }
 }

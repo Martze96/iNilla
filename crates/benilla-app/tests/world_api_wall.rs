@@ -422,7 +422,15 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// It could not go the other way: moving the UI decode into the engine would put the UI lane's
 /// colour law on the wrong side of the wall. So the engine publishes the rule as one type with
 /// two associated functions, and the game names it once.
-const CEILING: usize = 181;
+/// And 181 → 182: `ffx_glow::FfxBackdrop`, a PUBLISH — the component that makes the world's
+/// FFX combine the first draw of the player-UI camera's main pass (decision 2234). The combine is engine-side
+/// (the world lane's byte math, 0161); the camera it now runs on is the game's (the interface,
+/// 0254); so the engine publishes the claim as one component the game puts on its camera and
+/// points at the world camera it owns, and the two nodes behind it stay private. It retires a
+/// full-window float image that one camera wrote and the next read back — the seam 1603 built
+/// and 2215 measured — and it could not go the other way for 2206's reason: the UI camera cannot
+/// move into the engine.
+const CEILING: usize = 182;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

@@ -25,11 +25,13 @@ use super::{
 /// the character controller is in.)
 const DEFAULT_MOVE_SPEED: f32 = 7.0;
 
-/// The world camera's `Camera` — output mode `Skip` (decision 2206,
-/// [`benilla_world::final_pass`]): the FFXGlow combine, the world lane's final pass, renders
-/// straight into the camera's target — the backdrop image ([`crate::world_backdrop`]) — and
-/// bevy's `upscaling` blit, a pure copy of the finished frame, is skipped. `$WOW_NO_FFX` strips
-/// the combine and flips this back to `Write` itself.
+/// The world camera's `Camera` — output mode `Skip` (decisions 2206 and 2234,
+/// [`benilla_world::final_pass`]): nothing writes this camera's target, and bevy's `upscaling`
+/// blit — a pure copy of the finished frame into it — is skipped. The world's final pass, the
+/// FFXGlow combine, is the first draw of the player-UI camera's main pass now
+/// (`benilla_world::ffx_glow::FfxBackdrop`), reading this view's finished main texture straight
+/// into the interface's byte buffer; the target the camera carries is a size-carrier only
+/// ([`crate::world_backdrop`]).
 fn world_camera_output() -> Camera {
     Camera {
         output_mode: CameraOutputMode::Skip,
@@ -131,9 +133,8 @@ pub(super) fn setup_player(
         // tonemapper + scene-referred lighting for a modern look.)
         Hdr,
         Tonemapping::None,
-        // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`
-        // — and, in the gamma lane, the owner of the frame's single output decode, which it now
-        // writes straight into the backdrop (2206).
+        // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`.
+        // This view runs its blur; its combine is the UI camera's own ground pass (2234).
         benilla_world::ffx_glow::FfxGlow::WORLD,
         world_camera_output(),
         Transform::from_translation(spawn + Vec3::new(0.0, 60.0, 60.0)).looking_at(spawn, Vec3::Y),

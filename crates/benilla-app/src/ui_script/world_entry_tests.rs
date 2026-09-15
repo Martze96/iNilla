@@ -79,16 +79,28 @@ fn roster_named(name: &str, guid: u64) -> Roster {
 /// A hermetic state folder holding one addon — the probe — and the guards that point the whole
 /// client at it. Every guard must outlive the world.
 fn hermetic_probe(tag: &str) -> (std::path::PathBuf, EnvGuard, EnvGuard) {
+    hermetic_addon(tag, "SwitchProbe", PROBE_TOC, PROBE_LUA)
+}
+
+/// [`hermetic_probe`] for any one-file addon: the folder, its `.toc` and its Lua, and the guards.
+/// The whole point of every test here is what an addon sees **while its file scope runs**, and
+/// that differs per question — so the probe's body is a parameter.
+fn hermetic_addon(
+    tag: &str,
+    name: &str,
+    toc: &str,
+    lua: &str,
+) -> (std::path::PathBuf, EnvGuard, EnvGuard) {
     // The pid keeps two concurrent `benilla_app` test binaries out of each other's tree, the same
     // reason `addons::tests::hermetic_root` carries one.
     let tmp =
         std::env::temp_dir().join(format!("benilla-world-entry-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let home = tmp.join("benilla-config");
-    let dir = home.join("AddOns").join("SwitchProbe");
+    let dir = home.join("AddOns").join(name);
     std::fs::create_dir_all(&dir).expect("probe addon dir");
-    std::fs::write(dir.join("SwitchProbe.toc"), PROBE_TOC).expect("probe toc");
-    std::fs::write(dir.join("SwitchProbe.lua"), PROBE_LUA).expect("probe lua");
+    std::fs::write(dir.join(format!("{name}.toc")), toc).expect("probe toc");
+    std::fs::write(dir.join(format!("{name}.lua")), lua).expect("probe lua");
     let capture = EnvGuard::unset("WOW_CAPTURE");
     let benilla_home = EnvGuard::set("BENILLA_HOME", home.to_str().expect("utf-8 temp path"));
     (tmp, capture, benilla_home)
@@ -257,12 +269,130 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
     let mut script = world
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("a boot VM is live at the character screen");
-    super::shutdown_ui_state(&mut script, identity.as_ref());
+    // `false`: this models `shutdown_on_exit` at the CHARACTER SCREEN, and that is the one root
+    // the reference reaches with no active player — see the test below.
+    super::shutdown_ui_state(&mut script, identity.as_ref(), false);
 
     assert_eq!(
         std::fs::read_to_string(&saved).ok().as_deref(),
         Some(after_logout.as_str()),
         "the quit pass wrote nothing — the session's file is byte-identical"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The login arms the world latch, and the logout spends it** (decision 2239) — the chain that
+/// makes `PLAYER_LEAVING_WORLD` fire on the commonest root of all.
+///
+/// This is the regression the latch design could most easily have caused, so it is pinned rather
+/// than argued. The obvious guard for the tail — "is there a player object?" — reads FALSE on a
+/// `/logout` by the time the tail runs: `net::apply::session::logged_out` despawns our avatar in
+/// the same drain that writes `LoggedOutMessage`, `back_on_logout` sets `NextState` off that same
+/// message, and `OnExit(InWorld)` does not run until the next frame's `StateTransition`. A
+/// predicate would have silenced the event on every logout to fix a quit on a loading screen.
+///
+/// The latch does not care: it was armed by the entry load (the reference's `0x490168 call
+/// 0x4908c0`) and nothing between there and here spends it.
+#[test]
+fn the_login_arms_the_world_latch_and_the_logout_spends_it() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("latch");
+    let mut world = booted_world();
+    // `booted_world` seats the VM and the state this file needs, not the whole `UiScriptPlugin`,
+    // so the latch is declared here the way the plugin declares it.
+    world.init_resource::<super::LeavingWorldArmed>();
+
+    assert!(
+        !world.resource::<super::LeavingWorldArmed>().is_armed(),
+        "the character screen is not a world — nothing has armed the latch yet"
+    );
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        world.resource::<super::LeavingWorldArmed>().is_armed(),
+        "the entry UI load must arm the latch, or no logout ever fires PLAYER_LEAVING_WORLD"
+    );
+
+    super::end_ui_session(&mut world);
+    assert!(
+        !world.resource::<super::LeavingWorldArmed>().is_armed(),
+        "the shutdown tail must SPEND it — an unspent latch lets the following quit fire again"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **A quit from the character screen fires `PLAYER_LOGOUT` and NOT `PLAYER_LEAVING_WORLD`** —
+/// the reference's one guard inside the shutdown tail (decision 2238).
+///
+/// `0x490bd0` tests the object manager's active-player GUID pair (`0x490bee call 0x468550` /
+/// `0x490bf3 or eax,edx` / `0x490bf5 je 0x490c25`) and the taken side skips exactly one
+/// instruction — `0x490c20 call 0x490a80`, the `PLAYER_LEAVING_WORLD` fire — landing on the
+/// `PLAYER_LOGOUT` block. Every in-world root takes the other side and fires both.
+///
+/// Ours fired both from every root, which was invisible: the only root that reaches the tail
+/// without a player is this one, and its VM has no frames and no addon files, so nothing was
+/// listening. The test exists because that is an argument about *today's* boot VM, not about the
+/// split — and the day a glue addon loads, an unguarded fire would be a bug with no trail back.
+///
+/// Both directions in one test on purpose: asserting only the absence would pass against a
+/// `shutdown_ui_state` that had stopped firing the event at all.
+#[test]
+fn a_quit_from_the_character_screen_fires_logout_without_leaving_world() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("quitsplit");
+    let mut world = booted_world();
+    let mut script = world
+        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("a boot VM is live at the character screen");
+
+    script
+        .run(
+            r#"
+            SeenLeaving = 0 SeenLogout = 0
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_LEAVING_WORLD")
+            f:RegisterEvent("PLAYER_LOGOUT")
+            f:SetScript("OnEvent", function()
+                if event == "PLAYER_LEAVING_WORLD" then
+                    SeenLeaving = SeenLeaving + 1
+                else
+                    SeenLogout = SeenLogout + 1
+                end
+            end)
+            "#,
+        )
+        .expect("the probe frame registers");
+
+    super::shutdown_ui_state(&mut script, None, false);
+    assert_eq!(
+        script.eval::<i64>("return SeenLeaving").unwrap(),
+        0,
+        "the glue-screen quit fired PLAYER_LEAVING_WORLD — the reference's 0x490bf5 skips it"
+    );
+    assert_eq!(
+        script.eval::<i64>("return SeenLogout").unwrap(),
+        1,
+        "…and it must still fire PLAYER_LOGOUT, which is the whole of the taken side"
+    );
+
+    super::shutdown_ui_state(&mut script, None, true);
+    assert_eq!(
+        script.eval::<i64>("return SeenLeaving").unwrap(),
+        1,
+        "an in-world root must fire PLAYER_LEAVING_WORLD — the control for the assertion above"
+    );
+    assert_eq!(
+        script.eval::<i64>("return SeenLogout").unwrap(),
+        2,
+        "…and PLAYER_LOGOUT on every root, guarded or not"
     );
 
     drop(world);
@@ -1294,4 +1424,75 @@ fn run_ingame_ui_up(world: &mut World) -> bool {
     world
         .run_system_once(super::lifecycle::ingame_ui_up)
         .expect("the condition runs")
+}
+
+/// **The map catalog is in the VM before the first addon file runs** (decision 2240) — Questie's
+/// `Astrolabe.lua:62: attempt to index local 'zoneData' (a nil value)`, from the side that causes
+/// it.
+///
+/// `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus reads them at **file
+/// scope**: Astrolabe — the positioning library under Questie and Cartographer — builds its whole
+/// continent → zone table inside `AceLibrary:Register`'s synchronous `activate`, and every icon it
+/// ever places indexes that table. Pushed from an `Update` system, the catalog landed ~210 ms after
+/// this edge returned (measured live, both logins of a round trip: `conts=0 zones(1)=0`), so the
+/// table was built from two empty lists and every placement afterwards indexed a nil zone.
+///
+/// The catalog is planted rather than built: the question here is the ORDER, and the build itself
+/// stands against the real chain in
+/// [`super::world_map_tests::the_real_feralas_catalog_names_dire_maul_under_the_cursor`].
+#[test]
+fn an_addon_reads_the_map_catalog_at_file_scope() {
+    const MAP_PROBE_TOC: &str = "\
+## Interface: 11200
+MapProbe.lua
+";
+    // Astrolabe's own two calls, in its own idiom — a list constructor around a multi-return.
+    const MAP_PROBE_LUA: &str = "\
+MapProbeContinents = table.getn({ GetMapContinents() })
+MapProbeZones = table.getn({ GetMapZones(1) })
+";
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon("mapcatalog", "MapProbe", MAP_PROBE_TOC, MAP_PROBE_LUA);
+    let mut world = booted_world();
+    world.insert_resource(crate::ui_world_map::WorldMapCatalog(vec![
+        benilla_ui::script::WorldMapContinentView {
+            name: "Kalimdor".into(),
+            zones: vec![
+                benilla_ui::script::WorldMapZoneView {
+                    name: "Durotar".into(),
+                    ..Default::default()
+                },
+                benilla_ui::script::WorldMapZoneView {
+                    name: "Mulgore".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    ]));
+
+    log_in_as(&mut world, "Onewarrior", 1);
+
+    let read = |expr: &str| {
+        world
+            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .and_then(|s| s.eval::<Option<u32>>(expr).ok())
+            .flatten()
+    };
+    assert_eq!(
+        read("MapProbeContinents"),
+        Some(1),
+        "an addon's file scope must see the continent list — it is DBC data the reference has held \
+         since load, not a feed that arrives later"
+    );
+    assert_eq!(
+        read("MapProbeZones"),
+        Some(2),
+        "…and the zone list with it: this is the one Astrolabe builds its whole table from"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -34,7 +34,9 @@ pub(crate) struct TaxiCatalogs {
 }
 
 /// Load [`TaxiCatalogs`] once the patch chain exists. Never re-runs past the first success/failure
-/// (`Local<bool>`) — same shape as [`crate::ui_world_map::load_world_map_ui`].
+/// (`Local<bool>`), and that is right *here* where it was wrong for the map catalog (2240): this
+/// inserts a Bevy resource and pushes nothing into the VM, so no Lua caller can be early for it —
+/// nothing asks until a flight master opens the window.
 pub(super) fn load_taxi_catalogs(
     mut done: Local<bool>,
     world_assets: Option<Res<WorldAssets>>,

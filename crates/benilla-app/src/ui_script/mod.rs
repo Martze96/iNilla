@@ -454,6 +454,11 @@ impl Plugin for UiScriptPlugin {
                 OnExit(crate::char_select::ClientState::InWorld),
                 end_ui_session,
             )
+            // The world latch (2239) and its create-side arm. The resource is `init_` rather than
+            // `insert_` here and in [`crate::ui_unit::UiUnitPlugin`], because both of that law's
+            // producers live in different plugins and either may be built alone in a test.
+            .init_resource::<LeavingWorldArmed>()
+            .add_systems(Update, lifecycle::arm_leaving_world_on_self_create)
             // A queued `ReloadUI()` runs in `PreUpdate` — one whole frame after the drain that
             // queued it (the reference's own deferral, `0x495590`), and BEFORE every `Update`
             // system, so no per-VM seed or feed can run against the dying VM in the reload frame
@@ -566,7 +571,7 @@ fn arbitrate_pointer_over_ui(
 mod lifecycle;
 pub(crate) use lifecycle::{
     end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity,
-    PendingEntryUiLoad, ReloadUiPending,
+    LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
 };
 // Consumed only from other modules' test code (the emote-table checks, the harness's UI-init
 // tail, the quit-once pin) — a plain re-export would warn unused in a non-test build.

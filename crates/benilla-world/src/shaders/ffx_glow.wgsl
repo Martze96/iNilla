@@ -125,14 +125,23 @@ fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
 }
 
 // The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
-// rounds in — then the frame's single decode.
+// rounds in — then the frame's single decode, or, under `GAMMA_OUT`, no decode at all.
 fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
     let dithered = clamp(
         outg + screen_space_dither(frag_coord) * step(0.5, ffx.lane.w),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
+#ifdef GAMMA_OUT
+    // The gamma-lane exit (decision 2234): this combine is the UI camera's own ground pass, so it
+    // stores the byte it computed the way that lane's quads store theirs (`ui_quad.wgsl`: colour
+    // premultiplied by its own alpha, alpha as coverage) and leaves the frame's decode to the
+    // lane's end. It is exactly the value the backdrop quad used to re-encode from the float
+    // image, minus the image.
+    return vec4<f32>(dithered * alpha, alpha);
+#else
     return vec4<f32>(srgb_to_linear(dithered), alpha);
+#endif
 }
 
 // The combine both entries run — the dry one at the fragment's own UV, the underwater one at the

@@ -311,6 +311,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE").as_deref() == Ok("guardpoi") {
                 app.add_plugins(crate::capture::ProbeGuardPoiPlugin);
             }
+            // The battleground-queue live probe: `WOW_PROBE_BGQUEUE=1` levels past the bracket
+            // floor, greets Stormwind's Warsong Gulch battlemaster on the real wire and queues
+            // through the guid his list carried — the fixture that makes "log in while queued"
+            // reproducible (decision 2232's unexercised shape; see `capture::ProbeBgQueuePlugin`).
+            if std::env::var("WOW_PROBE_BGQUEUE").is_ok() {
+                app.add_plugins(crate::capture::ProbeBgQueuePlugin);
+            }
             // The mail-arc live probe: `WOW_PROBE_MAIL=1` GM-mails the probe's own character, opens the
             // Goldshire mailbox on the real wire, and drives the inbox/take/send/delete surface through
             // the live Lua VM — decisions 0544/0548's end-to-end instrument (see `capture::ProbeMailPlugin`).

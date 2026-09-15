@@ -118,7 +118,9 @@ enum GpuBucket {
     Static,
     /// bevy's transparent (and transmissive) 3D passes — water, glow cards, particles.
     Transparent,
-    /// The `ffx_glow` chain: the quarter-res downsample, the two Gauss taps, the combine.
+    /// The `ffx_glow` chain: the quarter-res downsample, the two Gauss taps — and a bake's
+    /// combine. The world's combine is the first draw of the UI camera's main pass since 2234,
+    /// nested under `main_transparent_pass_2d`, so it lands in [`Self::Ui`] with that pass.
     Glow,
     /// The full-screen tail on every camera: tonemapping, upscaling, the MSAA writeback.
     Post,

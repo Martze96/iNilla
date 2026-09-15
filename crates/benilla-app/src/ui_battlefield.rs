@@ -98,6 +98,13 @@ impl Battlefield {
         self.players.clear();
     }
 
+    /// The guid the last `SMSG_BATTLEFIELD_LIST` came from — the join's opcode choice reads it,
+    /// and [`crate::capture::ProbeBgQueuePlugin`] waits on it to know the list actually landed
+    /// (a body under the bracket floor is refused at the HELLO, so the list never arrives).
+    pub(crate) fn battlemaster(&self) -> Option<u64> {
+        self.list.as_ref().map(|l| l.battlemaster)
+    }
+
     /// The listed map — `[0xb6eba4]`, which is 0 (a real Map.dbc row) with nothing listed.
     fn map_id(&self) -> u32 {
         self.list.as_ref().map_or(0, |l| l.map_id)

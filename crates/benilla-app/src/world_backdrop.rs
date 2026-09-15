@@ -30,41 +30,44 @@
 //!
 //! ## The fix: put the world *inside* the UI's byte buffer
 //!
-//! Not a third lane. The world camera renders to an off-screen image instead of the swapchain, and
-//! that image is drawn as the **first quad of the UI pass** — the ground everything else is painted
-//! on. Every UI blend over the world is then the same blend as every UI blend over UI: the one
-//! 0254 already verified, in the target it already verified it in. The output blit stops blending
-//! entirely (it now carries an opaque frame), which retires the `rgb·a²` hazard 0254 had to patch
+//! Not a third lane. The world camera renders off-screen, and the **first draw of the UI
+//! camera's main pass** is the world's own final pass — the FFXGlow combine ([`FfxBackdrop`],
+//! decision 2234) — rendered straight into the UI's byte target as the ground everything else is
+//! painted on, inside the very pass that paints it (a pass of its own would cost a tile GPU a
+//! load and a store of the whole target). Every UI blend
+//! over the world is then the same blend as every UI blend over UI: the one 0254 already
+//! verified, in the target it already verified it in. The output blit stops blending entirely (it
+//! now carries an opaque frame), which retires the `rgb·a²` hazard 0254 had to patch
 //! `PREMULTIPLIED_ALPHA_BLENDING` around.
 //!
-//! **The image is un-encoded float, and both halves of that are borrowed rather than invented** —
-//! it is the portrait booths' own target format, chosen there for the same two reasons
-//! ([`crate::portrait`]'s `new_target_image`). Un-encoded, because the UI arc composites in gamma
-//! and takes its one decode at the end: a backdrop that pre-encoded would land a second encode in
-//! that chain. `ui_quad.wgsl`'s ordinary arm re-encodes what it samples (`linear_to_srgb`), which
-//! turns FFXGlow's linear output back into the client's byte — the same round trip a booth image
-//! takes, and exact in f32. Float rather than `Rgba8Unorm`, because quantizing *un-encoded* values
-//! to 8 bits is B126's banding collapse (decision 0804): below display byte 100 an un-encoded 8-bit
-//! grid reaches ~25 levels where the gamma backbuffer has 100.
+//! **It was a picture first** (1603): the combine wrote a full-window un-encoded float image that
+//! this pass drew as its first quad, the quad re-encoding what it sampled back to the byte the
+//! combine had computed. That is one write and one read of every pixel at eight bytes each, and
+//! on a bandwidth-bound GPU it is a third of the full-screen chain (2234's rig). The combine now
+//! stores that byte itself, in the UI lane's own terms (`ui_quad.wgsl`'s premultiply, no decode),
+//! and the picture is gone. What the world camera still carries as a target is a **size-carrier**:
+//! a one-byte image at the world's render size that nothing writes, kept because bevy sizes a
+//! view's main texture from its target and the camera's logical viewport is held through it
+//! ([`retarget_world_camera`]).
 //!
-//! Nothing about the world lane changes: FFXGlow keeps its decode, the frame still holds exactly
-//! one, and an opaque world pixel must come out byte-identical to before. That identity is the
-//! regression test, the same one 0161 used.
+//! Nothing about the world lane's arithmetic changes: the combine's byte math is the same, the
+//! frame still holds exactly one decode — the UI lane's, at its end — and an opaque world pixel
+//! comes out the byte it came out before, minus the float image's own rounding on the way.
 //!
 //! ## …and that seam turned out to be a dial: **render scale** (decision 1639)
 //!
 //! Once the world is a picture the UI paints on, the picture does not have to be the window's size.
-//! [`RenderScale`] sizes it — the world renders at `window × scale`, the quad still covers the
-//! window, and **the UI is untouched at native resolution**, because [`emit_backdrop_quad`]
-//! measures the quad in the window's LOGICAL size and nothing here can move that. That is the whole
-//! reason this is worth having rather than "run the game in a smaller window": text, icons and
-//! frame art stay exactly as sharp as they were, and only the 3D pays.
+//! [`RenderScale`] sizes it — the world renders at `window × scale`, the combine still covers the
+//! window, and **the UI is untouched at native resolution**, because the combine runs at the UI
+//! camera's own size and only *samples* the scaled world, and nothing here can move that. That is
+//! the whole reason this is worth having rather than "run the game in a smaller window": text,
+//! icons and frame art stay exactly as sharp as they were, and only the 3D pays.
 //!
 //! **Below 1 it buys frames; above 1 it is supersampling** — and above 1 is the half this machine
 //! can measure, since `gxMultisample` defaults to off (1629) and the client therefore ships with no
-//! antialiasing of any kind. At exactly 2.0 the plain bilinear resolve *is* a 2×2 box average (the
-//! destination pixel centre lands on the corner four texels share, weighting each 0.25), so SSAA×2
-//! needs no filter of its own.
+//! antialiasing of any kind. At exactly 2.0 the combine's plain bilinear read of the scene *is* a
+//! 2×2 box average (the destination pixel centre lands on the corner four texels share, weighting
+//! each 0.25), so SSAA×2 needs no filter of its own.
 //!
 //! **The one number that must not move is the camera's LOGICAL viewport**, and
 //! [`render_target_for`] is built around holding it fixed — [`retarget_world_camera`] says what
@@ -77,7 +80,8 @@ use bevy::render::camera::MipBias;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::window::PrimaryWindow;
 
-use crate::ui_pass::{UiQuad, UiQuads};
+use crate::ui_pass::PlayerUiCamera;
+use benilla_world::ffx_glow::FfxBackdrop;
 use benilla_world::view::WorldCamera;
 
 /// The **render scale** — benilla's own CVar `renderScale`, no 1.12 counterpart.
@@ -185,13 +189,17 @@ fn mip_bias(effective: f32) -> f32 {
     effective.log2().min(0.0)
 }
 
-/// The off-screen image the world camera renders into, and which the UI pass draws first.
+/// The world camera's target — the size-carrier (see the module doc) — and the claim that makes
+/// the world the first draw of the UI camera's main pass.
 ///
 /// Sized in physical pixels **× [`RenderScale`]**; at the default 1.0 that matches the swapchain 1:1
-/// and the UI pass's sample is an identity resample, which is the property the composite lane was
-/// built on and the reason the scale ships off.
+/// and the combine's read of the world is an identity resample, which is the property the
+/// composite lane was built on and the reason the scale ships off.
 #[derive(Resource)]
 pub(crate) struct WorldBackdrop {
+    /// The image the world camera targets. Nothing writes it (the camera runs `Skip`, its final
+    /// pass is the UI camera's — [`FfxBackdrop`]) and nothing samples it; it exists to give the
+    /// view its render size and its logical viewport.
     pub(crate) image: Handle<Image>,
     /// The size the image was last built at, in physical px — the resize gate.
     size: UVec2,
@@ -211,8 +219,11 @@ impl WorldBackdrop {
     }
 }
 
-/// A fresh backdrop image at `size` physical px. See the module doc for the format's two halves.
-fn new_backdrop_image(size: UVec2) -> Image {
+/// A fresh world-camera target at `size` physical px: the size-carrier of the module doc. One
+/// byte a pixel and a render attachment only — nothing writes it and nothing samples it, so the
+/// cheapest format a camera target may have is the honest one, and the CPU copy is dropped once
+/// the render world has it.
+fn new_world_target(size: UVec2) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
             width: size.x.max(1),
@@ -220,12 +231,11 @@ fn new_backdrop_image(size: UVec2) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 8],
-        TextureFormat::Rgba16Float,
-        RenderAssetUsages::default(),
+        &[0],
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+    image.texture_descriptor.usage = TextureUsages::RENDER_ATTACHMENT;
     image
 }
 
@@ -249,7 +259,7 @@ fn setup_backdrop(
             scale.0,
         )
     });
-    let image = images.add(new_backdrop_image(size));
+    let image = images.add(new_world_target(size));
     commands.insert_resource(WorldBackdrop {
         image,
         size,
@@ -259,10 +269,11 @@ fn setup_backdrop(
     });
 }
 
-/// Keep the backdrop at `window × `[`RenderScale`]. A stale-sized backdrop would still *work* (the
-/// quad covers the window either way) — what it would break is the pairing: the size and the
-/// factor [`retarget_world_camera`] stamps are two halves of one number, and a size that moved
-/// without the factor following it is exactly the B169 defect with a different constant.
+/// Keep the target at `window × `[`RenderScale`]. A stale-sized target would still *work* (the
+/// combine samples whatever size the world rendered at) — what it would break is the pairing: the
+/// size and the factor [`retarget_world_camera`] stamps are two halves of one number, and a size
+/// that moved without the factor following it is exactly the B169 defect with a different
+/// constant.
 ///
 /// Runs before the stamp (the plugin's `.chain()`), so the factor is always computed against the
 /// image that now exists.
@@ -270,41 +281,19 @@ fn setup_backdrop(
 /// ## The rebuild publishes a NEW asset — it does not write through the old handle (decision 1647)
 ///
 /// It used to do exactly that (`*images.get_mut(&handle) = new_backdrop_image(size)`), and **the
-/// world froze**: change any graphics setting or resize the window while in the world and the 3D
-/// stopped dead at the frame of the change, stretched over the new window, while the interface
-/// carried on. That is the director's report of 2026-08-27, and it reproduces on the bench (see the
-/// decision record's measurement).
+/// world froze**: change any graphics setting or resize the window in the world and the 3D stopped
+/// dead at the frame of the change while the interface carried on — the director's report of
+/// 2026-08-27. Mutating an `Image` behind its handle makes a whole new GPU texture, and the UI
+/// pass's material cache, keyed on `AssetId<Image>`, kept its bind group on the texture just
+/// thrown away, sampling it forever.
 ///
-/// The mechanism is a **texture-identity lie**, and it is Bevy's prepared-bind-group model meeting
-/// our material cache:
-///
-/// - Mutating an `Image` behind its handle makes a whole new GPU texture — `GpuImage`'s
-///   `prepare_asset` (`bevy_render/texture/gpu_image.rs`) calls `create_texture` afresh on every
-///   `AssetEvent::Modified`.
-/// - A material's bind group, by contrast, is captured **once**: `PreparedMaterial2d::prepare_asset`
-///   (`bevy_sprite_render/mesh2d/material.rs`) calls `as_bind_group` when the *material* asset is
-///   added or modified, and nothing re-prepares it when a texture it named is re-created.
-/// - [`crate::ui_pass`] keys its material cache on `AssetId<Image>`. Same id ⇒ same material ⇒ the
-///   same bind group, still holding the `TextureView` of the texture we just threw away.
-///
-/// So the world camera drew into the new texture and the UI kept sampling the old one, forever.
-///
-/// A new handle fixes it at the identity rather than by invalidating a cache: **`AssetId<Image>` is
-/// the tree's name for a GPU texture, so a new GPU texture gets a new name.** Every consumer then
-/// reacts on its own — the cache misses and builds a fresh material, [`emit_backdrop_quad`]'s quad
-/// differs and flags a rebuild, and [`retarget_world_camera`] re-points the camera.
-///
-/// It is also the only version that is safe against prepare *order*. `Material2dPlugin` registers
-/// `RenderAssetPlugin::<PreparedMaterial2d<M>>::default()` — `AFTER = ()`, i.e. **not** ordered
-/// after `prepare_assets::<GpuImage>` — so the "touch the material so its bind group rebuilds"
-/// remedy (which `benilla_world::clouds` uses, and whose comment already named this whole hazard)
-/// can re-bind the *previous* `GpuImage` if the material happens to prepare first. A fresh
-/// `AssetId` cannot: it either finds its own `GpuImage` or `as_bind_group` returns
-/// `RetryNextUpdate` and Bevy retries next frame.
-///
-/// The retired asset is **removed**, not merely dropped, because the stale cache entry is still
-/// holding a strong handle to it; `ui_pass`'s rebuild forgets materials whose image was removed,
-/// which is what keeps a window drag from retiring tens of megabytes a frame into a live cache.
+/// Since 2234 no material samples this image at all, so that door is closed; the rule stays
+/// because it was never that cache's rule but the tree's: **`AssetId<Image>` is the name of a GPU
+/// texture, so a new GPU texture gets a new name.** Every consumer then reacts on its own — here
+/// [`retarget_world_camera`] re-points the camera — and nothing anywhere can hold a stale view by
+/// a name that did not change. The retired asset is **removed**, not merely dropped, for the same
+/// reason: a name that goes away is one nothing can keep by mistake, and `ui_pass`'s rebuild
+/// forgets materials on exactly that event.
 fn track_render_size(
     mut backdrop: ResMut<WorldBackdrop>,
     mut images: ResMut<Assets<Image>>,
@@ -322,7 +311,7 @@ fn track_render_size(
     if size == backdrop.size {
         return;
     }
-    let retired = std::mem::replace(&mut backdrop.image, images.add(new_backdrop_image(size)));
+    let retired = std::mem::replace(&mut backdrop.image, images.add(new_world_target(size)));
     images.remove(&retired);
     backdrop.size = size;
     // Said out loud on every change, because a measurement taken at the wrong scale looks
@@ -411,39 +400,32 @@ fn retarget_world_camera(
     }
 }
 
-/// Publish the backdrop quad for this frame — full-window, opaque, ahead of every other quad.
+/// Point the player-UI camera's ground pass at the world camera drawing this frame
+/// ([`FfxBackdrop`]): the active one, `None` when there is none.
 ///
-/// Emitted only while the world camera is actually drawing. With no world (the glue screens, the
-/// loading screen, a gated camera) the image holds a stale or never-written frame, and painting it
-/// would be worse than the transparent clear the UI pass falls back to.
-fn emit_backdrop_quad(
-    backdrop: Res<WorldBackdrop>,
-    mut quads: ResMut<UiQuads>,
-    cameras: Query<&Camera, With<WorldCamera>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+/// With no world (the glue screens, the loading screen, a gated camera) the world view's main
+/// texture holds a stale or never-written frame, and grounding the interface on it would be
+/// worse than the transparent clear the UI camera falls back to. Whether the camera named here
+/// actually rendered this frame is the render world's to know, and it checks
+/// (`ffx_glow::prepare_backdrops`).
+fn claim_backdrop(
+    cameras: Query<(Entity, &Camera), With<WorldCamera>>,
+    mut ui: Query<&mut FfxBackdrop, With<PlayerUiCamera>>,
 ) {
-    let drawing = cameras.iter().any(|c| c.is_active);
-    let next = windows.single().ok().filter(|_| drawing).map(|window| {
-        // Logical px, y-down from the top-left — `rebuild_ui_mesh`'s own rect space.
-        UiQuad {
-            rect: Rect::from_corners(Vec2::ZERO, Vec2::new(window.width(), window.height())),
-            texture: Some(backdrop.image.clone()),
-            ..UiQuad::default()
+    let source = cameras
+        .iter()
+        .find_map(|(entity, camera)| camera.is_active.then_some(entity));
+    for mut backdrop in &mut ui {
+        // Compare first: the component is extracted every frame regardless, and a write here
+        // would trip change detection for nothing.
+        if backdrop.source != source {
+            backdrop.source = source;
         }
-    });
-    // **Flag the rebuild only when the quad itself changes** — its arrival, its departure, a
-    // resize. Its CONTENTS change every frame and must not: the mesh batch holds the image handle
-    // and the material samples whatever the world camera just rendered into it, so a per-frame
-    // `dirty` here would drag every batch in the pass through a full rebuild for a picture that
-    // did not move — the 0365 live-city churn, re-introduced from the one producer that runs every
-    // single frame.
-    if quads.backdrop != next {
-        quads.backdrop = next;
-        quads.dirty = true;
     }
 }
 
-/// Owns the backdrop image, the world camera's target, and the quad. See the module doc.
+/// Owns the world camera's target (the size-carrier) and the UI camera's claim on the world.
+/// See the module doc.
 pub(crate) struct WorldBackdropPlugin;
 
 impl Plugin for WorldBackdropPlugin {
@@ -452,9 +434,7 @@ impl Plugin for WorldBackdropPlugin {
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,
-                (track_render_size, retarget_world_camera, emit_backdrop_quad)
-                    .chain()
-                    .before(crate::ui_pass::UiQuadAppend),
+                (track_render_size, retarget_world_camera, claim_backdrop).chain(),
             );
     }
 }
@@ -464,31 +444,59 @@ mod tests {
     use super::*;
     use bevy::image::TextureFormatPixelInfo as _;
 
-    /// The backdrop is float and un-encoded — the two halves the module doc argues for, and the
-    /// pair a future "make it 8-bit, it's only a backdrop" edit would quietly break (an sRGB label
-    /// double-encodes through `ui_quad`; an 8-bit un-encoded grid is B126's banding).
+    /// **The world camera's target is a size-carrier and nothing else** (decision 2234): one byte
+    /// a pixel, a render attachment because a camera target must be one, and NOT a texture —
+    /// nothing samples it. The float image this used to be (1603) carried the world to the UI
+    /// pass's first quad; the combine carries it now, straight into the UI target, and a future
+    /// "make the target samplable again" edit is a second copy of the world coming back.
     #[test]
-    fn the_backdrop_is_unencoded_float() {
-        let image = new_backdrop_image(UVec2::new(320, 200));
-        assert_eq!(image.texture_descriptor.format, TextureFormat::Rgba16Float);
+    fn the_world_target_is_a_size_carrier_only() {
+        let image = new_world_target(UVec2::new(320, 200));
+        assert_eq!(image.texture_descriptor.format, TextureFormat::R8Unorm);
+        let usage = image.texture_descriptor.usage;
+        assert!(usage.contains(TextureUsages::RENDER_ATTACHMENT));
         assert!(
-            !image.texture_descriptor.format.is_srgb(),
-            "an sRGB label would land a second encode in a chain that decodes once, at the end"
+            !usage.contains(TextureUsages::TEXTURE_BINDING),
+            "nothing samples the world's target: the UI camera's ground pass reads the view's \
+             main texture, not this image"
         );
-        assert!(
-            !TextureFormat::Rgba16Float.is_srgb(),
-            "the swapchain's own view is sRGB — the backdrop deliberately is not"
+        assert_eq!(
+            image.asset_usage,
+            RenderAssetUsages::RENDER_WORLD,
+            "the CPU copy of a texture nothing reads is dropped once the render world has it"
         );
     }
 
-    /// It must be usable as a camera target AND samplable by the UI pass. Dropping either usage
-    /// bit fails at device level, far from here.
+    /// The UI camera's ground pass follows the world camera that is drawing: the active one,
+    /// `None` while there is none.
     #[test]
-    fn the_backdrop_is_both_a_target_and_a_texture() {
-        let image = new_backdrop_image(UVec2::new(320, 200));
-        let usage = image.texture_descriptor.usage;
-        assert!(usage.contains(TextureUsages::RENDER_ATTACHMENT));
-        assert!(usage.contains(TextureUsages::TEXTURE_BINDING));
+    fn the_ui_camera_claims_the_drawing_world_camera() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, claim_backdrop);
+        let ui = app
+            .world_mut()
+            .spawn((PlayerUiCamera, FfxBackdrop::default()))
+            .id();
+        let world_cam = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Camera {
+                    is_active: true,
+                    ..default()
+                },
+            ))
+            .id();
+        let source = |app: &mut App| app.world().get::<FfxBackdrop>(ui).unwrap().source;
+        app.update();
+        assert_eq!(source(&mut app), Some(world_cam), "active: claimed");
+        app.world_mut()
+            .get_mut::<Camera>(world_cam)
+            .unwrap()
+            .is_active = false;
+        app.update();
+        assert_eq!(source(&mut app), None, "gated: the claim goes with it");
     }
 
     /// **The world camera's target carries the WINDOW's scale factor, not `1.0`** — the pick
@@ -552,17 +560,16 @@ mod tests {
         );
     }
 
-    /// Physical, not logical: the backdrop matches the swapchain 1:1 so the UI pass's sample is an
-    /// identity resample. A zero-size window (minimised on some platforms) must still produce a
-    /// legal texture rather than a device error.
+    /// Physical, not logical: the target is the world's render size. A zero-size window (minimised
+    /// on some platforms) must still produce a legal texture rather than a device error.
     #[test]
     fn a_degenerate_size_still_builds_a_legal_texture() {
-        let image = new_backdrop_image(UVec2::ZERO);
+        let image = new_world_target(UVec2::ZERO);
         assert_eq!(image.texture_descriptor.size.width, 1);
         assert_eq!(image.texture_descriptor.size.height, 1);
         assert_eq!(
             image.data.as_ref().map(Vec::len),
-            TextureFormat::Rgba16Float.pixel_size().ok()
+            TextureFormat::R8Unorm.pixel_size().ok()
         );
     }
 

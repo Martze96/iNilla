@@ -1,10 +1,10 @@
 //! The world-map data feed (decision 0203 phase 2) — the app half behind
 //! stock `Interface\FrameXML\WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
 //!
-//! Two systems, the quest-log seam shape:
-//! - [`load_world_map_ui`] (once, when the chain + VM + Map.dbc catalog all exist): builds the
-//!   static **catalog** from `WorldMapArea` × `AreaTable` × `WorldMapContinent` × `Map` ×
-//!   the `.zmp` bitmaps and pushes it into the engine. Every ordering/naming rule is the
+//! A seed and a feed, the quest-log seam shape:
+//! - [`seed_world_map_catalog`] (at the world-entry edge, before any interface file runs — 2240):
+//!   builds the static **catalog** from `WorldMapArea` × `AreaTable` × `WorldMapContinent` ×
+//!   `Map` × the `.zmp` bitmaps and pushes it into the engine. Every ordering/naming rule is the
 //!   wow-re-verified one (Q1/Q3 verdicts, 2026-07-07): continents in WorldMapArea **file
 //!   order** (Kalimdor, then EK — the `0x4a5d00` builder's walk), displayed under their
 //!   `Map.dbc` localized names ("Eastern Kingdoms", not the art folder's "Azeroth"); zones
@@ -73,7 +73,7 @@ fn zone_rect(a: &WorldMapArea) -> ZoneRect {
     }
 }
 
-/// Build the catalog off the patch chain — the pure half of [`load_world_map_ui`], split out
+/// Build the catalog off the patch chain — the pure half of [`seed_world_map_catalog`], split out
 /// so a test can drive the REAL `WorldMapArea` × `AreaTable` × `WorldMapContinent` × `Map` ×
 /// `.zmp` build rather than a hand-written stand-in. A fixture catalog can only ever prove the
 /// engine's arithmetic; what the player hovers is this, and the two were never joined before
@@ -238,44 +238,68 @@ pub(crate) fn build_catalog(
     Some((views, entries))
 }
 
-/// Build + push the static catalog once the patch chain, the VM, and the Map.dbc catalog all
-/// exist (Update-gated rather than Startup-ordered, like every feed that needs the script).
-fn load_world_map_ui(
-    mut done: Local<crate::ui_script::VmMemo<bool>>,
-    script: Option<NonSendMut<UiScript>>,
-    world_assets: Option<ResMut<WorldAssets>>,
-    maps: Option<Res<MapCatalogRes>>,
-    areas: Option<Res<crate::area::AreaTableRes>>,
-    mut commands: Commands,
-) {
-    let (Some(mut script), Some(assets), Some(maps), Some(areas)) =
-        (script, world_assets, maps, areas)
-    else {
-        return;
-    };
-    // Once per **VM** (1290), not once per process: the catalog is static, the VM it is pushed
-    // into is not — a login builds a fresh one, and without this the map window has no continents.
-    if !done.claim(&script) {
-        return;
+/// The built catalog, kept for the life of the process. A static `WorldMapArea` × `AreaTable` ×
+/// `WorldMapContinent` × `Map` × `.zmp` walk whose answer cannot change, so the second login
+/// re-seeds its VM from here rather than reading the chain again.
+///
+/// `pub(crate)` because the seam it feeds is what
+/// [`crate::ui_script::world_entry_tests::an_addon_reads_the_map_catalog_at_file_scope`] asserts:
+/// the test plants a catalog and drives the entry edge, which is the ordering question without
+/// the DBC walk (the walk itself is covered against the real chain by
+/// `world_map_tests::the_real_feralas_catalog_names_dire_maul_under_the_cursor`).
+#[derive(Resource)]
+pub(crate) struct WorldMapCatalog(pub(crate) Vec<WorldMapContinentView>);
+
+/// **The map catalog goes into the VM before a single interface file runs** (decision 2240).
+///
+/// Called from [`crate::ui_script::load_ingame_ui_on_world_entry`], beside the CVar table, the
+/// realm name and the addon-info array, and for exactly their reason: that edge mints a fresh VM
+/// and runs FrameXML and every addon inside ONE call, so anything pushed from an `Update` system
+/// lands after the whole interface has already asked its questions. This one was pushed there —
+/// measured live, the addon file scope read `conts=0 zones(1)=0 zones(2)=0` and the catalog
+/// arrived 210 ms later, on both logins of a round trip.
+///
+/// `GetMapContinents`/`GetMapZones` are answered off this catalog, and they are **file-scope**
+/// reads in the corpus: Astrolabe — Questie's and Cartographer's positioning library — builds its
+/// whole continent → zone table inside `AceLibrary:Register`'s synchronous `activate`, from those
+/// two calls. Built from nothing, that table has no numeric zone entries at all, and every icon
+/// placement afterwards indexes a nil zone (`attempt to index local 'zoneData'`).
+///
+/// In the reference the question has no timing: the catalog is DBC data the client has held since
+/// load, and the getters read it whenever they are asked.
+pub(crate) fn seed_world_map_catalog(world: &mut World, script: &mut UiScript) {
+    if !world.contains_resource::<WorldMapCatalog>() {
+        let Some((views, entries)) = build_catalog_from_world(world) else {
+            return;
+        };
+        info!(
+            "world map: catalog — {} continents, {} zones",
+            views.len(),
+            views.iter().map(|c| c.zones.len()).sum::<usize>()
+        );
+        world.insert_resource(WorldMapUiData {
+            continents: entries,
+        });
+        world.insert_resource(WorldMapCatalog(views));
     }
-    let areas = &areas.0;
-
-    let mut chain = assets.chain.lock_recover();
-    let built = build_catalog(&mut chain, areas, &maps);
-    drop(chain);
-    let Some((views, entries)) = built else {
+    let Some(catalog) = world.get_resource::<WorldMapCatalog>() else {
         return;
     };
+    script.set_world_map_catalog(catalog.0.clone());
+}
 
-    info!(
-        "world map: catalog — {} continents, {} zones",
-        views.len(),
-        views.iter().map(|c| c.zones.len()).sum::<usize>()
-    );
-    script.set_world_map_catalog(views);
-    commands.insert_resource(WorldMapUiData {
-        continents: entries,
-    });
+/// [`build_catalog`] over the resources the app holds — `None` when the patch chain or either DBC
+/// catalog is missing, which in a real run cannot happen at this edge: all three are `Startup`
+/// systems and the initial state transition is after `PostStartup` (decision 1038). A bare test
+/// world takes the `None`.
+fn build_catalog_from_world(
+    world: &World,
+) -> Option<(Vec<WorldMapContinentView>, Vec<ContinentEntry>)> {
+    let assets = world.get_resource::<WorldAssets>()?;
+    let maps = world.get_resource::<MapCatalogRes>()?;
+    let areas = world.get_resource::<crate::area::AreaTableRes>()?;
+    let mut chain = assets.chain.lock_recover();
+    build_catalog(&mut chain, &areas.0, maps)
 }
 
 /// Which of the map's three levels is displayed — the reference's `(continent, zone)` globals
@@ -863,7 +887,6 @@ impl Plugin for WorldMapUiPlugin {
         app.add_systems(
             Update,
             (
-                load_world_map_ui,
                 // After the script tick (UiInput), like the minimap's zone feed: the projection
                 // for a selection changed THIS tick lands next tick — invisible at frame rate.
                 feed_world_map.after(UiInput),

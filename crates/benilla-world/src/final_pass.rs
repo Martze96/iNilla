@@ -10,10 +10,12 @@
 //! full-screen pass on the render thread 1975 called the floor.
 //!
 //! With the camera set to [`CameraOutputMode::Skip`] the blit is off, and the lane's final pass
-//! renders **straight into the target** — the world camera's combine into the backdrop image, the
-//! UI camera's decode into the swapchain. Same shader, same values, one full-screen pass fewer per
-//! camera; the pipeline is specialised on the target's format because that is now the format it
-//! writes. The first use of the output in a frame is a clear rather than a load: a fast clear on an
+//! renders **straight into the target** — a `Skip` bake's combine into its image, the UI camera's
+//! decode into the swapchain. Same shader, same values, one full-screen pass fewer per camera;
+//! the pipeline is specialised on the target's format because that is now the format it writes.
+//! (The world camera's combine no longer lands anywhere of its own: since decision 2234 it is
+//! the first draw of the UI camera's main pass, `ffx_glow::FfxBackdrop`, and the world's target is a size-carrier
+//! nothing writes — so a claimed world view never resolves a destination at all.) The first use of the output in a frame is a clear rather than a load: a fast clear on an
 //! immediate-mode GPU, and on a tile GPU the difference between not reading the old contents and
 //! reading them — the fullscreen triangle covers every pixel of the viewport either way.
 //!
@@ -22,7 +24,7 @@
 //! blit's to honour, and `benilla-worldview` has no reason to change. So the choice is the camera's
 //! — made where the camera is spawned — and a node only reads it. **The one hazard is the
 //! half-way state:** a `Skip` camera whose final pass never ran presents a target nothing wrote.
-//! `ffx_glow::ensure_ffx_glow`'s `$WOW_NO_FFX` arm therefore flips a stripped camera back to `Write`.
+//! That is why `$WOW_NO_FFX` (`ffx_glow::ensure_ffx_glow`) strips the glow and keeps the combine.
 
 use bevy::camera::{CameraOutputMode, Viewport};
 use bevy::color::LinearRgba;

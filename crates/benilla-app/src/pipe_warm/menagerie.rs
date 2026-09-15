@@ -804,7 +804,9 @@ mod tests {
         //   after, so no later variant exists. Not a timing race like `UiQuadMaterial`'s: the
         //   view exists from frame one, and the pipeline is what bevy's own output blit was.
         //   (Its world-lane twin, benilla-world's `FfxCombinePipeline`, is outside this scan
-        //   and compiles under the same cover, keyed on the backdrop image's fixed format.)
+        //   and compiles under the same cover: the player-UI camera's backdrop pair is keyed on
+        //   that camera's own main texture and specialised on its first frame, pre-world, and a
+        //   bake's pair on the bake image's fixed format.)
         let exempt = ["UiGammaPipeline"];
         let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let warm_src = std::fs::read_to_string(src_root.join("pipe_warm/mod.rs")).unwrap()

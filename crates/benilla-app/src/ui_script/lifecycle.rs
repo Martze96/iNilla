@@ -499,6 +499,14 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // **The world map's catalog, before the first addon file runs** (decision 2240). The continent
+    // and zone lists behind `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus
+    // reads them at file scope: Astrolabe — the positioning library under Questie and Cartographer
+    // — builds its entire continent → zone table inside `AceLibrary:Register`'s synchronous
+    // `activate`. Pushed from an `Update` system it landed ~210 ms after this whole call returned,
+    // so that table was built from two empty lists and every icon placement afterwards indexed a
+    // nil zone. Same shape as the four seeds above, and the reference has no timing here at all.
+    crate::ui_world_map::seed_world_map_catalog(world, &mut script);
     // **The VM's font engine, before the first `<OnLoad>` runs** (decision 2028). Every file the
     // walk below loads may measure the text it just set — the era's own tab law is
     // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
@@ -593,6 +601,18 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     script.clear_instruction_budget();
     world.insert_non_send_resource(script);
     world.insert_resource(AddOnIdentity(identity));
+    // **The UI load's own arm of the world latch** (2239) — the reference's `0x490168 call
+    // 0x4908c0`, `UI_Init`'s conditional leg into the world-enter cascade. It is what makes a
+    // SECOND `/reload` fire `PLAYER_LEAVING_WORLD` again after the first spent the latch: no
+    // entity is created or destroyed by a reload, so nothing else here would re-arm it.
+    //
+    // Unconditional, where the reference guards on the active-player GUID pair (`0x490166 je`)
+    // and therefore *skips* this leg on a fresh login, arming from the player's create instead.
+    // The outcome is the same byte either way — both roots reach "armed" — and reproducing which
+    // of the two did it would buy nothing observable.
+    if let Some(mut armed) = world.get_resource_mut::<LeavingWorldArmed>() {
+        armed.arm();
+    }
 }
 
 /// The `"player"` snapshot the UI loads **under**, built from the roster row of the pick in
@@ -656,6 +676,68 @@ pub(crate) fn seat_from_roster(
 #[derive(Resource, Default)]
 pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 
+/// **The world latch — `[0xb4b424]`, ours** (decision 2239).
+///
+/// `PLAYER_LEAVING_WORLD` has one fire site (`0x490b4d`) and three callers (2238), and the
+/// reference does not keep them apart by asking each one "is this your occasion?". It keeps a
+/// single byte: **set at `0x4908ce` inside the world-enter cascade `0x4908c0`, cleared at
+/// `0x490a8d` by the fire itself**, so whichever caller runs first in a world fires and the rest
+/// are no-ops until the next world entry re-arms it.
+///
+/// We have two producers — [`shutdown_ui_state`]'s tail and
+/// [`crate::ui_unit::fire_leaving_world_on_worldport`] — and 2238 gated the tail on a *predicate*
+/// instead (was the client `InWorld`), which is the shape this replaces. The predicate was wrong
+/// in the one window that matters: a cross-map worldport despawns our avatar and re-streams it
+/// (`net::apply`'s `tag_self_player`) **without leaving `InWorld`**, so a quit on the loading
+/// screen fired the event a second time where the reference fires none. Enumerating occasions
+/// found three of four; the latch is the mechanism, and the fourth falls out of it.
+///
+/// Reading the enumeration back through the latch, every case is one rule:
+///
+/// | occasion | latch | fires |
+/// |---|---|---|
+/// | `/logout`, disconnect | armed since the login | yes — and our avatar is already despawned by then, which is why a "is there a player?" predicate would have broken this, the commonest root |
+/// | cross-map worldport | armed | yes, and spends it |
+/// | quit *during* that port's loading screen | spent, not yet re-armed | **no** — the port's fire was this departure's |
+/// | quit at the character screen | spent by the logout that got there | **no** |
+/// | in-world `/reload` | armed | yes; the rebuild re-arms, so a second `/reload` fires again |
+#[derive(Resource, Default)]
+pub(crate) struct LeavingWorldArmed(bool);
+
+impl LeavingWorldArmed {
+    /// Arm it — a world began. Idempotent, like the reference's `mov byte [0xb4b424],1`.
+    pub(crate) fn arm(&mut self) {
+        self.0 = true;
+    }
+
+    /// Take the one-shot: `true` at most once per world, `0x490a8d`'s clear folded in.
+    pub(crate) fn spend(&mut self) -> bool {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Read without taking — tests only, so the arm and the spend can be asserted separately.
+    #[cfg(test)]
+    pub(crate) fn is_armed(&self) -> bool {
+        self.0
+    }
+}
+
+/// Arm the latch when the local player's entity appears — the reference's `0x5deb60` entry into
+/// the world-enter cascade, which is the one a fresh login and a worldport's new-world create
+/// block both take (`0x5deb49 call 0x468570` / `0x5deb50 jne 0x5deb6a`).
+///
+/// `Added<SelfPlayer>` rather than a hook inside `net::apply::tag_self_player`, so the net layer
+/// keeps knowing nothing about the UI's event law; the edge is the same one, read from the other
+/// side.
+pub(crate) fn arm_leaving_world_on_self_create(
+    created: Query<(), Added<crate::net::SelfPlayer>>,
+    mut armed: ResMut<LeavingWorldArmed>,
+) {
+    if !created.is_empty() {
+        armed.arm();
+    }
+}
+
 /// **The UI shutdown, in the reference's own order** — `0x490bd0`, whose ordered tail wow-5875-re
 /// carves as (`system/ui/ui.md`):
 ///
@@ -696,8 +778,24 @@ pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 /// **There is no autosave**, deliberately: the reference has none (decision 1128, and
 /// `ds:0xb4b3f4` has three references image-wide). These are a handful of scalars a player toggles
 /// a few times a session, and every file is written whole from the live globals.
-pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
-    script.fire_event("PLAYER_LEAVING_WORLD", vec![]);
+pub(crate) fn shutdown_ui_state(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    leaving_world: bool,
+) {
+    // **`PLAYER_LEAVING_WORLD` is the one step of this tail that is conditional** (2238/2239).
+    // The reference reaches the fire through `0x490c20 call 0x490a80` and gets there past two
+    // independent tests: `0x490bd0`'s own active-player guard (`0x490bee call 0x468550` /
+    // `0x490bf3 or eax,edx` / `0x490bf5 je 0x490c25`, whose taken side skips exactly that one
+    // instruction and lands on the `PLAYER_LOGOUT` block) and then `0x490a80`'s world latch.
+    // `PLAYER_LOGOUT` at `0x490c2a` is outside both and fires on every root.
+    //
+    // `leaving_world` is [`LeavingWorldArmed::spend`]'s answer, and the caller spends it rather
+    // than this function so that the one-shot is visibly *taken* at the root — there are two
+    // producers, and a latch read in the callee would let a second root take it again.
+    if leaving_world {
+        script.fire_event("PLAYER_LEAVING_WORLD", vec![]);
+    }
     script.fire_event("PLAYER_LOGOUT", vec![]);
     crate::ui_layout::save_now(script, identity);
     crate::ui_saved::save(script);
@@ -732,9 +830,14 @@ pub(crate) fn end_ui_session(world: &mut World) {
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
+    // Spent before the tail, at the root, because there are two producers (2239): this edge and
+    // the worldport's. Whichever reaches a departure first owns it.
+    let leaving_world = world
+        .get_resource_mut::<LeavingWorldArmed>()
+        .is_some_and(|mut l| l.spend());
     if !ui_never_loaded {
         if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
-            shutdown_ui_state(&mut script, identity.as_ref());
+            shutdown_ui_state(&mut script, identity.as_ref(), leaving_world);
         }
     }
     // The CVar bridge (decision 1291): the dying VM's table folds into the persist state — after
@@ -831,10 +934,16 @@ pub(crate) fn run_pending_reload(world: &mut World) {
 
 /// `AppExit`: quitting the client — the quit / application-exit roots. Reads the message rather
 /// than a state edge because a quit from in-world never leaves `InWorld`.
+///
+/// **The root that can reach the tail with nothing to leave** — a quit from the character screen,
+/// and a quit on a worldport's loading screen, where the port already fired. Both fall out of
+/// [`LeavingWorldArmed`] rather than being tested for (2239): the first has never been re-armed,
+/// the second was spent minutes ago by the port.
 pub(crate) fn shutdown_on_exit(
     script: Option<NonSendMut<UiScript>>,
     id: Res<AddOnIdentity>,
     pending_entry: Option<Res<PendingEntryUiLoad>>,
+    mut armed: ResMut<LeavingWorldArmed>,
     mut exits: MessageReader<AppExit>,
 ) {
     if exits.read().next().is_none() {
@@ -844,8 +953,9 @@ pub(crate) fn shutdown_on_exit(
     if pending_entry.is_some() {
         return;
     }
+    let leaving_world = armed.spend();
     if let Some(mut script) = script {
-        shutdown_ui_state(&mut script, id.0.as_ref());
+        shutdown_ui_state(&mut script, id.0.as_ref(), leaving_world);
     }
 }
 

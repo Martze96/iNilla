@@ -608,9 +608,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The player-UI quad pass (decision 0068 §2): its own composited-above-the-world,
     // below-the-egui-dev-overlays camera + sorted-quad renderer. `$WOW_UI_DEMO=1` seeds a proof scene.
     .add_plugins(PlayerUiPlugin)
-    // The world's frame, rendered off-screen and handed to the UI pass as its first quad — the
-    // seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece).
-    // Registered AFTER the UI pass: it writes `UiQuads`, which that plugin owns.
+    // The world's frame, rendered off-screen and drawn first in the UI camera's main pass —
+    // the seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece,
+    // a pass rather than a quad since 2234). Registered AFTER the UI pass: it points that
+    // plugin's camera at the world camera.
     .add_plugins(WorldBackdropPlugin)
     // The HUD minimap (decision 0203 phase 1): fills the `<Minimap>` widget's extracted hole with
     // the streamed tile window + mask + player arrow, and feeds the zone text.

@@ -15,9 +15,10 @@
 //! ordering exactly where 0025 already reserved it ("where player-UI arbitration will live later") —
 //! **dev overlays stay on top of the player UI, which stays on top of the world.** The camera renders
 //! nothing from the 3D world (its own [`RenderLayers`] layer, disjoint from the world camera's default
-//! layer 0); the world reaches it as its first quad ([`crate::world_backdrop`]), and its finished
-//! frame reaches the swapchain through [`crate::ui_gamma`]'s decode directly — output mode `Skip`,
-//! no blit (decision 2206).
+//! layer 0); the world reaches it as the first DRAW of its main pass — the FFXGlow combine,
+//! `benilla_world::ffx_glow::FfxBackdrop` ([`crate::world_backdrop`], decision 2234) — and its
+//! finished frame reaches the swapchain through [`crate::ui_gamma`]'s decode directly — output
+//! mode `Skip`, no blit (decision 2206).
 //!
 //! ## Colour space: the UI gamma composite lane (decision 0254)
 //! The reference draws its whole UI through the fixed-function device into an 8-bit backbuffer, so
@@ -297,17 +298,6 @@ impl Default for UiQuad {
 ///   whole UI re-batched every frame (the 0365 live-city churn).
 #[derive(Resource, Default)]
 pub(crate) struct UiQuads {
-    /// The **world backdrop** ([`crate::world_backdrop`]): the frame the world camera rendered,
-    /// drawn before every other quad so the UI blends over it in the same gamma bytes it blends
-    /// over itself in. Not part of either lane and not sorted with them — it is not content
-    /// competing for a `z_key`, it is the ground. `None` whenever there is no world to paint (the
-    /// glue screens, the loading screen, a gated camera).
-    ///
-    /// It changes no batching decision beyond being first, and it flags [`Self::dirty`] only when
-    /// the QUAD changes — arrival, departure, a resize. Its image's contents change every frame and
-    /// deliberately do not flag anything: the batch holds the handle and the material samples
-    /// whatever the world camera just rendered into it.
-    pub backdrop: Option<UiQuad>,
     pub quads: Vec<UiQuad>,
     /// The append lane — see the struct doc. Compared by the rebuild, never flagged.
     pub overlays: Vec<UiQuad>,
@@ -371,9 +361,10 @@ fn ui_render_layers() -> RenderLayers {
 /// camera (bumped to order 2 in `debug_panel::spawn_egui_camera`). See the module doc's arbitration note.
 const UI_CAMERA_ORDER: isize = 1;
 
-/// Marker on the player-UI camera.
+/// Marker on the player-UI camera. `pub(crate)` for one writer: [`crate::world_backdrop`], which
+/// points the camera's ground pass at the world camera drawing this frame.
 #[derive(Component)]
-struct PlayerUiCamera;
+pub(crate) struct PlayerUiCamera;
 
 /// Marker on each rebuilt batch mesh entity, so [`rebuild_ui_mesh`] can despawn last frame's batches
 /// before spawning the new ones. `pub(crate)` for one reader: `FPS_PROBE`'s `ui_batches=`, the
@@ -624,9 +615,10 @@ fn spawn_ui_camera(mut commands: Commands) {
         // (the portrait booths, the minimap composite); this one simply never did, and paid for it.
         //
         // There is nothing here for multisampling to resolve. The world arrives already resolved —
-        // since decision 1603 the world camera renders offscreen and this pass draws the finished
-        // image as its first quad ([`crate::world_backdrop`]), so this camera's samples only
-        // re-average an image whose own MSAA is long since done. What it draws itself is
+        // since decision 1603 the world camera renders offscreen, and since 2234 this camera's main
+        // pass draws that finished image straight in first ([`crate::world_backdrop`]), so this
+        // camera's samples would only re-average a picture whose own MSAA is long since done. What
+        // it draws itself is
         // axis-aligned rects, and the Bevy UI trees riding this camera (decision 0541) antialias
         // their own edges analytically in-shader. What it *costs* is a full-window 4× sampled
         // colour texture, a full-window 4× multisampled Core2d depth texture (Bevy sizes that one
@@ -637,6 +629,10 @@ fn spawn_ui_camera(mut commands: Commands) {
         // The gamma composite lane's mandatory decode (decision 0254) — without it the UI presents
         // ~2.2× bright, since the quad pass leaves gamma values in the target.
         crate::ui_gamma::UiGammaLane::default(),
+        // The world is the first draw of this camera's main pass (decision 2234): the FFXGlow
+        // combine of the world camera [`crate::world_backdrop`] points it at, rendered into this
+        // target ahead of the quads. `source` is `None` until a world camera draws.
+        benilla_world::ffx_glow::FfxBackdrop::default(),
         // Every Bevy UI tree renders HERE (decision 0541) — the glue screens and the loading screen.
         // Without the marker, Bevy UI picks the highest-order camera targeting the window, which is
         // the egui dev overlay (order 2): the glue screens rode the dev camera, outside the gamma
@@ -655,7 +651,7 @@ fn spawn_ui_camera(mut commands: Commands) {
             // the point of the backdrop: the blend that used to happen HERE, against the sRGB
             // swapchain view, was the frame's one linear composite, and the only one that mixed
             // UI with world; moving the world into the UI's own byte buffer moved that blend
-            // into `ui_quad.wgsl`'s gamma target, where every other UI blend already lives. It
+            // into this camera's gamma target, where every other UI blend already lives. It
             // also retired the hazard 0254 patched around here: `ui_quad.wgsl` writes
             // PREMULTIPLIED colour, so the original `ALPHA_BLENDING`'s `SrcAlpha` factor
             // weighted it by alpha twice (`rgb·a²`), and a pure-additive quad (a = 0) over the
@@ -1039,13 +1035,16 @@ fn rebuild_ui_mesh(
     //
     // A cached material holds a strong `Handle<Image>`, and its PREPARED form holds the whole GPU
     // texture behind a bind group Bevy never re-prepares. So an entry keyed on a retired asset
-    // pins that texture for as long as the cache holds the key — and the world backdrop retires a
-    // full-window `Rgba16Float` image (46 MB at 3200×1800) on every resize and every render-scale
-    // change, which is once a frame while a window is being dragged (decision 1647).
+    // pins that texture for as long as the cache holds the key. The producer that taught this was
+    // the world backdrop — a full-window `Rgba16Float` image (46 MB at 3200×1800) retired on every
+    // resize, once a frame while a window is being dragged (decision 1647); since 2234 no quad
+    // samples the world's target at all, and the hygiene stays for every other image a quad names
+    // and then loses.
     //
     // `Removed` only, not `Unused`: `Unused` fires when the last strong handle drops, and this
-    // cache IS a strong handle, so for a cached texture it can never fire. The producer removes
-    // the asset explicitly (`world_backdrop::track_render_size`) precisely so this can hear it.
+    // cache IS a strong handle, so for a cached texture it can never fire. A producer that retires
+    // an image removes the asset explicitly (`world_backdrop::track_render_size` still does)
+    // precisely so this can hear it.
     let retired: Vec<AssetId<Image>> = stores
         .2
         .read()
@@ -1087,21 +1086,24 @@ fn rebuild_ui_mesh(
     // TOGGLEUI hides at the *draw*, not at the producers: both lanes keep filling, so the UI comes
     // back exactly as it was (see [`crate::ui_hide::UiHidden`]).
     //
-    // **It hides the two LANES, never the backdrop.** The world reaches the screen as this pass's
-    // own first quad now ([`crate::world_backdrop`]), so the older "retire every batch while
-    // hidden" would black the screen — the exact inverse of a binding whose stated point is to
-    // leave "the world and nothing else". While dark we still swallow each frame's change flag and
-    // keep the append-lane mirror current, so neither lane can hand the rebuild a stale "nothing
-    // changed" the moment the UI returns. The edge is the resource's own change tick (`UiHidden` is
-    // written only by the binding and the world-exit reset), not a `Local` mirror.
+    // **It hides the two LANES, and the world is in neither.** The world reaches the screen as
+    // the first draw of this camera's main pass ([`crate::world_backdrop`], decision 2234), not
+    // as a batch, so
+    // retiring every batch while hidden leaves exactly what the binding's stated point is: "the
+    // world and nothing else". (Between 1603 and 2234 the world was this pass's first QUAD, and
+    // the dark path had to keep one batch alive to keep the screen from going black.) While dark
+    // we still swallow each frame's change flag and keep the append-lane mirror current, so
+    // neither lane can hand the rebuild a stale "nothing changed" the moment the UI returns. The
+    // edge is the resource's own change tick (`UiHidden` is written only by the binding and the
+    // world-exit reset), not a `Local` mirror.
     if hidden.is_changed() {
         q.dirty = true;
     }
     let lanes_hidden = hidden.0;
     if lanes_hidden {
         q.last_overlays.clone_from(&q.overlays);
-        // Nothing either lane produces can move a pixel while dark, so only the toggle edge and
-        // the backdrop's own arrival/departure (which sets `dirty`) reach the rebuild below.
+        // Nothing either lane produces can move a pixel while dark, so only the toggle edge
+        // reaches the rebuild below.
         if !q.dirty {
             return;
         }
@@ -1153,7 +1155,7 @@ fn rebuild_ui_mesh(
         return;
     };
     let lanes_empty = lanes_hidden || (q.quads.is_empty() && q.overlays.is_empty());
-    if q.backdrop.is_none() && lanes_empty {
+    if lanes_empty {
         retire_batches(&mut pools, &mut commands);
         q.dirty = false;
         q.last_overlays.clone_from(&q.overlays);
@@ -1177,13 +1179,6 @@ fn rebuild_ui_mesh(
     sorted.sort_by_key(|q| q.z_key);
     let n_sorted = sorted.len();
     let us_sort = lap();
-    // The backdrop is PREPENDED, not sorted in. Giving it a `z_key` would mean picking a number
-    // below every other producer's and trusting all of them to stay above it — and the append
-    // lane's lowest band is already 0 (`overlay_z::WORLD_TEXT`), so there is no room under it
-    // without renumbering a total order that encodes fidelity facts. Position, not arithmetic.
-    if let Some(backdrop) = q.backdrop.as_ref() {
-        sorted.insert(0, backdrop);
-    }
 
     // Geometry probe (`WOW_UI_PROBE=1`): dump each textured quad's screen rect once — the
     // capture-harness companion for diagnosing extracted-vs-rendered geometry by data instead of
@@ -1767,8 +1762,8 @@ mod tests {
     /// The cache holds a strong `Handle<Image>` per entry and its prepared form holds the whole GPU
     /// texture behind a bind group Bevy never re-prepares — so an entry keyed on an asset that no
     /// longer exists pins that texture indefinitely. Nothing here notices until something retires
-    /// images in bulk, and the world backdrop does exactly that: one full-window `Rgba16Float`
-    /// image per resize, which is once a frame while a window is being dragged.
+    /// images in bulk, and the world backdrop did exactly that while it was a quad (1603–2234):
+    /// one full-window `Rgba16Float` image per resize, once a frame while a window was dragged.
     ///
     /// The removal is seen a few frames late by construction (the loop below names the three
     /// lags). That is fine for memory hygiene and would NOT be fine for correctness — which is
@@ -1842,26 +1837,18 @@ mod tests {
             .any(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == id))
     }
 
-    /// **TOGGLEUI hides the UI, not the world.** Since the world arrives as this pass's own
-    /// backdrop quad ([`crate::world_backdrop`]), the dark path can no longer mean "retire every
-    /// batch" — that would black the screen, which is the exact inverse of what the binding is
-    /// for. One batch survives while dark (the backdrop's), and the lanes come back on top of it.
+    /// **TOGGLEUI hides the UI, not the world — and the world is not a batch.** The world is the
+    /// first draw of the UI camera's main pass (`benilla_world::ffx_glow::FfxBackdrop`, 2234), not a
+    /// quad in either lane, so the dark path is what it was before 1603 put a backdrop quad in
+    /// here: retire every batch. That leaves "the world and nothing else", which is the binding's
+    /// stated point, and the lanes come back on top of it exactly as they were.
     ///
-    /// This is the regression the change itself created: every earlier version of the hidden path
-    /// asserted zero batches, and zero batches is now a black screen.
+    /// (Between 1603 and 2234 this test held ONE batch alive while dark — the backdrop's — because
+    /// zero batches was then a black screen. A future version that keeps a batch alive while dark
+    /// is drawing something the binding says must not be drawn.)
     #[test]
-    fn toggleui_keeps_the_world_backdrop() {
+    fn toggleui_retires_every_batch_and_the_world_is_none_of_them() {
         let mut app = rebuild_app();
-        let backdrop = UiQuad {
-            rect: Rect::from_corners(Vec2::ZERO, Vec2::new(800.0, 600.0)),
-            texture: None,
-            ..UiQuad::default()
-        };
-        {
-            let mut q = app.world_mut().resource_mut::<UiQuads>();
-            q.backdrop = Some(backdrop);
-            q.dirty = true;
-        }
         app.update();
         let lit = batches(&mut app);
         assert!(lit >= 1, "content drawn to begin with");
@@ -1870,8 +1857,8 @@ mod tests {
         app.update();
         assert_eq!(
             batches(&mut app),
-            1,
-            "dark ⇒ the backdrop alone; anything less is a black screen"
+            0,
+            "dark ⇒ nothing drawn: the world is this camera's own pass, not a batch"
         );
 
         set_hidden(&mut app, false);
@@ -1881,19 +1868,6 @@ mod tests {
             lit,
             "the UI comes back over the same world"
         );
-    }
-
-    /// With no world to paint (the glue screens, the loading screen, a gated camera) the dark path
-    /// is the old one: nothing at all. The backdrop earns an exemption because it IS the world,
-    /// not because it is first in the list.
-    #[test]
-    fn toggleui_with_no_backdrop_still_retires_everything() {
-        let mut app = rebuild_app();
-        app.update();
-        assert_eq!(batches(&mut app), 1, "one batch drawn to begin with");
-        set_hidden(&mut app, true);
-        app.update();
-        assert_eq!(batches(&mut app), 0, "no world, no backdrop, nothing drawn");
     }
 
     /// **The desaturation flag reaches the MATERIAL, and splits the run** (decision 1327).
