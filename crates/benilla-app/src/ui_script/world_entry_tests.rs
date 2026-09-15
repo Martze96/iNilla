@@ -1496,3 +1496,164 @@ MapProbeZones = table.getn({ GetMapZones(1) })
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **The keybinding table is in the VM before the first addon file runs** (decision 2241).
+///
+/// Stock `ActionButton_OnLoad` paints its hotkey corner from `GetBindingText(GetBindingKey(action))`
+/// at OnLoad, and an addon that rebinds a stock command needs that command to exist. Seeded from an
+/// `Update` system, the table held only the addons' own `Bindings.xml` rows for the whole load edge:
+/// `GetBindingKey("TOGGLEWORLDMAP")` answered nothing and `SetBinding` on a stock command was a
+/// silent nil.
+///
+/// No fixture: the registry is a compile-time table, which is exactly why its absence during the
+/// burst was a timing bug and nothing else.
+#[test]
+fn an_addon_reads_the_keybinding_table_at_file_scope() {
+    const TOC: &str = "\
+## Interface: 11200
+BindProbe.lua
+";
+    const LUA: &str = "\
+BindProbeKey = GetBindingKey(\"TOGGLEWORLDMAP\")
+BindProbeSet = SetBinding(\"J\", \"TOGGLEWORLDMAP\")
+";
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon("bindprobe", "BindProbe", TOC, LUA);
+    // No `BindingFiles` planted on purpose: the seed takes it optionally, which is what keeps
+    // every other harness in this file working.
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onewarrior", 1);
+
+    let script = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+    assert_eq!(
+        script
+            .eval::<Option<String>>("BindProbeKey")
+            .ok()
+            .flatten()
+            .as_deref(),
+        Some("M"),
+        "an addon's file scope must read the stock binding — `M` is TOGGLEWORLDMAP's own default"
+    );
+    assert_eq!(
+        script.eval::<Option<u32>>("BindProbeSet").ok().flatten(),
+        Some(1),
+        "…and a rebind of a stock command must take, not answer the empty table's silent nil"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The zone-channel catalog is in the VM before the first addon file runs** (decision 2241) —
+/// and this one puts a packet on the wire when it is not.
+///
+/// An empty catalog is not "no zone yet" to `JoinChannelByName`: it is *"no such built-in
+/// channel"*, so `JoinChannelByName("General")` takes the custom-channel leg and queues a real
+/// `CMSG_JOIN_CHANNEL("General")` — a custom channel of that name on the server, and the chat
+/// cache damage `ui_chat::channels` documents. Seeded zone-less, the same call matches the row,
+/// finds `resolved: None`, and does nothing — the reference's own answer while there is no zone
+/// text.
+#[test]
+fn an_addon_that_joins_general_at_file_scope_puts_nothing_on_the_wire() {
+    const TOC: &str = "\
+## Interface: 11200
+JoinProbe.lua
+";
+    const LUA: &str = "JoinChannelByName(\"General\")\n";
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon("joinprobe", "JoinProbe", TOC, LUA);
+    let mut world = booted_world();
+    world.insert_resource(crate::ui_chat::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            // Row 1 as the shipped table has it: auto-joined, and its `%s` is the zone's name —
+            // which is what makes it unanswerable before a zone and answerable after.
+            benilla_formats::ChatChannelRow {
+                id: 1,
+                flags: benilla_formats::chat_channel_flags::INITIAL
+                    | benilla_formats::chat_channel_flags::ZONE_DEP,
+                pattern: "General - %s".into(),
+                shortcut: "General".into(),
+            },
+        ]),
+        ..Default::default()
+    });
+
+    log_in_as(&mut world, "Onewarrior", 1);
+
+    let queued = world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("VM")
+        .take_channel_commands();
+    assert!(
+        queued.is_empty(),
+        "a built-in shortcut with no zone text yet is a no-op, not a custom channel on the \
+         server — queued {queued:?}"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The screen size is in the VM before the first `<OnLoad>` runs** (decision 2242) — the
+/// director's "the map is missing the bg again", from the side that causes it.
+///
+/// A fresh `Model` starts at 1024×768 and only `tick_script` (an `Update` system) corrects it, so
+/// since 2226 gave the entry its own VM, every OnLoad and every addon file scope read that default.
+/// Anchored frames survive it — the first frame's resize re-solves them — but a number a file
+/// *computes once* does not, and the stock `WorldMapFrame_OnLoad` computes exactly one: the size of
+/// `BlackoutWorld`, the quad that hides the world behind the map. At 1024×768 units on a wider
+/// window it stops short of the edges and the world shows through.
+#[test]
+fn an_addon_reads_the_real_screen_size_at_file_scope() {
+    const TOC: &str = "\
+## Interface: 11200
+ScreenProbe.lua
+";
+    const LUA: &str = "\
+ScreenProbeWidth = GetScreenWidth()
+ScreenProbeHeight = GetScreenHeight()
+";
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon("screenprobe", "ScreenProbe", TOC, LUA);
+    let mut world = booted_world();
+    // 2560×1440 with no `UiScaleCvar` planted (so the dial is 1): the seam scale is 1440/768 =
+    // 1.875, which puts the VM's screen at 1365.33 × 768 units. The WIDTH is the discriminator —
+    // 768 is what the height reads under any window, and 1024 is what the width read before this.
+    world.spawn((
+        Window {
+            resolution: bevy::window::WindowResolution::new(2560, 1440),
+            ..Default::default()
+        },
+        bevy::window::PrimaryWindow,
+    ));
+
+    log_in_as(&mut world, "Onewarrior", 1);
+
+    let script = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+    let read = |expr: &str| script.eval::<Option<f32>>(expr).ok().flatten();
+    let width = read("ScreenProbeWidth").expect("the probe ran at file scope");
+    assert!(
+        (width - 2560.0 * 768.0 / 1440.0).abs() < 0.01,
+        "an addon's file scope must read the REAL screen width in UI units — got {width}, and \
+         1024 is the fresh model's default, i.e. the bug"
+    );
+    assert_eq!(
+        read("ScreenProbeHeight"),
+        Some(768.0),
+        "…and the height is the 768-tall virtual base (decision 0582)"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

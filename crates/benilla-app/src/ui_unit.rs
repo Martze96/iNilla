@@ -449,6 +449,35 @@ fn load_default_languages(
     }
 }
 
+/// **The player's default language goes into the VM at its birth** (decision 2241, through the
+/// seam 2240 established) — because `GetDefaultLanguage()` is read *inside* the load burst, and
+/// until now the answer during that burst was `nil` and then a race.
+///
+/// Two readers, both stock: `ChatEdit_OnLoad` takes it at OnLoad (dead in 1.12, but it is the
+/// era's idiom), and `ChatFrame_OnEvent`'s `PLAYER_ENTERING_WORLD` arm stores it as
+/// `this.defaultLanguage`, which gates the `[Common]`/`[Orcish]` prefix on every readable chat
+/// line for the session. We fire `PLAYER_ENTERING_WORLD` from [`feed_units`] — an `Update` system
+/// in the same set as [`feed_default_language`], with no ordering between them — so whether that
+/// gate was seeded when the event arrived was Bevy's intra-set order to decide, per run.
+///
+/// The race comes from the **roster row** rather than the object store, because the avatar does not
+/// exist yet at this edge; it is the same value from the same login, and it is the row
+/// [`crate::ui_script::seat_from_roster`] builds the player seat from a few lines earlier in the
+/// same call. [`feed_default_language`] still runs and still owns the live answer — this only
+/// makes sure the burst does not read a nil.
+pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
+    let (Some(langs), Some(roster)) = (
+        world.get_resource::<DefaultLanguagesRes>(),
+        world.get_resource::<crate::char_select::Roster>(),
+    ) else {
+        return;
+    };
+    let Some(row) = roster.pending_row() else {
+        return;
+    };
+    script.set_default_language(langs.0.name(u32::from(row.race), 0).map(str::to_string));
+}
+
 /// Push `GetDefaultLanguage()`'s one string, on change only.
 ///
 /// The reference resolves it per call from the live player object; we resolve it once per race

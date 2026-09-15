@@ -578,7 +578,8 @@ impl Plugin for PlayerUiPlugin {
                 UiQuadAppend.after(benilla_world::schedule::WorldStage::Input),
             )
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
-            .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend));
+            .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
+            .add_systems(Last, count_material_events);
 
         // Dev-only demo feeder (mirrors the repo's env-var dev-instrument gating — e.g. `$WOW_CAPTURE`,
         // `$WOW_TILE_RADIUS` — since the compile-time `dev` cargo feature decision 0026 sets as the
@@ -819,6 +820,53 @@ impl Run {
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+/// `WOW_UI_COST=1` also counts the frame's [`UiQuadMaterial`] asset events. bevy re-extracts and
+/// re-prepares a material — one bind group and one uniform buffer, created on the render thread —
+/// for exactly each `Added`/`Modified` event, and nothing else re-prepares one (2236: two or three
+/// such events a frame at a parked pin cost 9.5 traced ms on Intel's DX12 driver, which prices one
+/// re-prepared material in milliseconds there). So this count is the render side's material work
+/// for the frame, read where it is caused.
+fn count_material_events(
+    mut events: MessageReader<AssetEvent<UiQuadMaterial>>,
+    materials: Res<Assets<UiQuadMaterial>>,
+    server: Res<AssetServer>,
+    mut named: Local<u32>,
+) {
+    if !crate::ui_script::extract::ui_cost_enabled() {
+        events.clear();
+        return;
+    }
+    let (mut added, mut modified, mut unused) = (0usize, 0usize, 0usize);
+    for event in events.read() {
+        match event {
+            AssetEvent::Added { .. } => added += 1,
+            AssetEvent::Modified { id } => {
+                modified += 1;
+                // The first hundred name themselves: the texture and the tint the write left.
+                if *named < 100 {
+                    *named += 1;
+                    if let Some(m) = materials.get(*id) {
+                        let path = m
+                            .texture
+                            .as_ref()
+                            .and_then(|t| server.get_path(t.id()))
+                            .map(|p| p.to_string());
+                        info!(
+                            "[ui-mat] modified {id:?} texture={path:?} tint={:?}",
+                            m.tint
+                        );
+                    }
+                }
+            }
+            AssetEvent::Removed { .. } | AssetEvent::Unused { .. } => unused += 1,
+            AssetEvent::LoadedWithDependencies { .. } => {}
+        }
+    }
+    if added + modified + unused > 0 {
+        info!("[ui-mat] added={added} modified={modified} unused={unused}");
     }
 }
 

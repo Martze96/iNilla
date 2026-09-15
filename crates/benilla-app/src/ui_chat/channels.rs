@@ -635,6 +635,39 @@ pub(super) fn auto_join_zone_channels(
     walk.at = Some(zone_id);
 }
 
+/// **The zone-channel catalog goes into the VM before a single interface file runs** (decision
+/// 2241, through the seam 2240 established).
+///
+/// The walk above already feeds it "before any of those gates" — but its gates are the *zone's*,
+/// and the load edge is earlier than all of them: since 2226 the entry mints a fresh VM and runs
+/// FrameXML, every addon's file scope, `ADDON_LOADED`, `VARIABLES_LOADED` and `PLAYER_LOGIN` inside
+/// one exclusive call, and this system's first `Update` tick is after that whole burst. An empty
+/// catalog is not "no zone yet" to the three verbs that read it — it is *"no such built-in
+/// channel"*, the leg whose damage is documented at length above: a `General` filed as a **custom**
+/// channel in the chat cache, and a real `CMSG_JOIN_CHANNEL("General")` on the wire.
+///
+/// Zone-less on purpose: at this edge the zone is unknowable by construction (the walk is not armed
+/// — `EnteredWorldMessage` is read in `Update` — and the body is still settling), and zone-less is
+/// the right content rather than a degraded one, for the reason [`auto_join_zone_channels`] gives.
+/// The walk re-feeds with the resolved names the moment a zone lands, and pays one redundant
+/// identical push per login for it: its memo is a `VmMemo` on its own `Local`, which this call
+/// cannot reach, and a resource it could reach would not survive a `/reload` correctly.
+pub(crate) fn seed_zone_channel_catalog(
+    world: &mut World,
+    script: &mut benilla_ui::script::UiScript,
+) {
+    let Some(channels) = world.get_resource::<ChannelState>() else {
+        return;
+    };
+    if channels.channels.is_empty() {
+        return; // no `ChatChannels.dbc` — the no-install case, a no-op exactly as in the walk
+    }
+    let city = world
+        .get_resource::<AreaTableRes>()
+        .and_then(|a| city_word(&a.0));
+    script.set_zone_channel_catalog(zone_channel_catalog(&channels.channels, "", false, city));
+}
+
 /// Every `ChatChannels.dbc` row as the VM needs it (decision 1908; wow-re chat-cache-grammar.md
 /// §5-6): the id, the Shortcut the verbs compare a typed name against, the name composed for
 /// `zone_name` — `None` when the composition has nothing to substitute (a zone-dependent row with

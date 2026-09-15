@@ -607,6 +607,29 @@ fn selected_row(model: &Model) -> Option<usize> {
 /// getters were carved to share (`0x4d89b0`, bounded by the total); these two bindings' own gate was
 /// **not** carved, and the difference is unobservable through the stock window, which only ever
 /// passes a visible header's index or `0`.
+/// Queue `TRAINER_UPDATE` — **the repaint the reference fires from the mask-commit thunk itself**,
+/// not from Lua (decision 2244).
+///
+/// `SetTrainerServiceTypeFilter`'s four legs all commit through `0x4d8c90`, whose whole body is
+/// `mov ds:0xb73a1c,ecx; call 0x4d8410; mov ecx,0x136; jmp 0x703e50` — write the mask, re-run the
+/// finalizer, **fire event `0x136` = `TRAINER_UPDATE`** (wow-re `system/ui/ledger.tsv`'s `0x4d8c90`
+/// row; the id is `ui.md`'s own event table). Its siblings `0x4d8cb0` (the skill-line mask) and
+/// `0x4d8cd0` (the expand mask, which is what Collapse/ExpandTrainerSkillLine commit) are recorded
+/// there as the same shape.
+///
+/// That matters because **nothing in the stock window repaints after a filter click**:
+/// `ClassTrainerFrameFilterDropDown_OnClick` sets the saved global, calls the filter verb, and then
+/// only does `ClassTrainerListScrollFrameScrollBar:SetValue(0)` — a no-op when the bar is already at
+/// zero. The list is repainted by `ClassTrainerFrame_OnEvent`'s `TRAINER_UPDATE` arm, and by nothing
+/// else. While our own `TrainerFrame.xml` ran (before 1957) its click handler repainted explicitly,
+/// which is why this only became visible when the window went stock: the checkboxes moved and the
+/// list underneath did not.
+fn queue_trainer_update(model: &mut Model) {
+    model
+        .pending_events
+        .push(("TRAINER_UPDATE".to_string(), Vec::new()));
+}
+
 fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
     if id == 0 && !collapse {
         model.trainer_collapsed.clear();
@@ -913,6 +936,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // Era passes 1 / 0 (or true/nil); anything truthy-but-not-0 enables.
                 let enable = !matches!(on, Value::Nil | Value::Integer(0) | Value::Boolean(false));
                 model.trainer_filter[c.filter_slot()] = enable;
+                // …and the repaint, from here rather than from Lua ([`queue_trainer_update`]).
+                // Unconditional, like the thunk: it fires whether or not the bit moved.
+                queue_trainer_update(&mut model);
             }
             Ok(())
         })?,
@@ -925,6 +951,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, id: usize| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             set_collapsed(&mut model, id, true);
+            queue_trainer_update(&mut model);
             Ok(())
         })?,
     )?;
@@ -933,6 +960,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, id: usize| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             set_collapsed(&mut model, id, false);
+            queue_trainer_update(&mut model);
             Ok(())
         })?,
     )?;

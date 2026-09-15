@@ -363,24 +363,49 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     );
 }
 
-/// Install the host's font engine into `script` for the CURRENT raster seam, if the glyph atlas
-/// exists yet — the load edge's half of [`super::extract::seat_text_measurer`].
+/// **The raster seam, at the load edge**: the VM's screen size and its font engine, both under the
+/// CURRENT window and `uiScale` — the load-edge half of [`super::extract::tick_script`]'s own
+/// per-frame pair.
+///
+/// **The screen size is the half that had been missing, and it is a real screen bug** (decision
+/// 2242). A fresh `Model` starts at **1024×768** and `set_screen_size` is called from
+/// `tick_script`, an `Update` system — so between 2226 (the entry mints its own VM) and this, every
+/// `<OnLoad>` in FrameXML and every addon's file scope read `GetScreenWidth()/GetScreenHeight()` as
+/// 1024×768 no matter what window the player had. Verified live with a probe addon: `SCREENPROBE
+/// file-scope … 1024x768`, on both logins of a round trip.
+///
+/// Almost everything survives that, because almost everything is *anchored* and the first `Update`
+/// resize re-solves it. What does not survive is a number a file **computed once** from those
+/// getters — and the stock world map is exactly that: `WorldMapFrame_OnLoad` sizes `BlackoutWorld`,
+/// the full-screen quad that hides the world behind the map, with `GetScreenWidth()`/
+/// `GetScreenHeight()` and never touches it again. Sized 1024×768 UI units on a wider window, it
+/// leaves the world showing along the right and bottom edges — the director's report.
 ///
 /// No atlas means no measure to be had (it bakes on the first `Update`, from the patch chain and
 /// the window's real `scale_factor`); the per-frame pass seats one on the first frame it appears,
-/// exactly as before.
-fn seat_text_measurer_for_load(world: &mut World, script: &mut UiScript) {
+/// exactly as before. The screen size goes in either way, and only when the window has a real size
+/// — a bare test world has none, and `0` would be worse than the default it already carries.
+fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
     let ui_scale = world
         .get_resource::<super::UiScaleCvar>()
         .map_or(1.0, |c| c.0);
-    let h = {
+    let (w, h) = {
         let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world).map_or(0.0, Window::height)
+        q.single(world)
+            .map_or((0.0, 0.0), |win| (win.width(), win.height()))
     };
+    let s = super::seam_scale(h, ui_scale);
+    if w > 0.0 && h > 0.0 {
+        // `tick_script`'s own line, with its own units: the VM lives in 768-tall virtual space
+        // (decision 0582), so the window's logical size divided by the seam scale IS the screen
+        // the getters answer. No `UIParent_ManageFramePositions` beside it, unlike there: nothing
+        // is laid out yet, and the first tick will see no resize to re-run it for.
+        script.set_screen_size(w / s, h / s);
+    }
     let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
         return;
     };
-    super::extract::seat_text_measurer(script, atlas, super::seam_scale(h, ui_scale));
+    super::extract::seat_text_measurer(script, atlas, s);
 }
 
 /// Materialize the in-game UI for **this** session.
@@ -499,6 +524,20 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // **…and the rest of the same class** (decision 2241). Each of these was a per-VM claim in
+    // `Update`, which answers *which* VM and not *when inside its life* — and every one of them
+    // backs a Lua getter the load burst below reads:
+    //
+    // - the **zone-channel catalog**, whose empty state is not "no zone yet" to its three verbs
+    //   but *"no such built-in channel"* — the leg that files `General` as a custom channel in the
+    //   chat cache and puts a real `CMSG_JOIN_CHANNEL` on the wire;
+    // - the **keybinding table**, without which stock `ActionButton_OnLoad` paints a blank hotkey
+    //   corner and an addon's `SetBinding` on a stock command is a silent nil;
+    // - the **default language**, which `ChatFrame_OnEvent`'s `PLAYER_ENTERING_WORLD` arm turns
+    //   into the `[Language]` prefix gate for every chat line of the session.
+    crate::ui_chat::seed_zone_channel_catalog(world, &mut script);
+    crate::bindings::seed_bindings_for_vm(world, &mut script);
+    crate::ui_unit::seed_default_language(world, &mut script);
     // **The world map's catalog, before the first addon file runs** (decision 2240). The continent
     // and zone lists behind `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus
     // reads them at file scope: Astrolabe — the positioning library under Questie and Cartographer
@@ -507,7 +546,13 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // so that table was built from two empty lists and every icon placement afterwards indexed a
     // nil zone. Same shape as the four seeds above, and the reference has no timing here at all.
     crate::ui_world_map::seed_world_map_catalog(world, &mut script);
-    // **The VM's font engine, before the first `<OnLoad>` runs** (decision 2028). Every file the
+    // **The raster seam — the screen size and the font engine — before the first `<OnLoad>` runs**
+    // (decisions 2242 and 2028). The screen size is 2242's: a fresh VM starts at 1024×768 and the
+    // feed that corrects it is an `Update` system, so every OnLoad that *computes* from
+    // `GetScreenWidth()`/`GetScreenHeight()` baked the wrong number for the session — the stock
+    // world map's full-screen blackout quad among them.
+    //
+    // The font engine is 2028's. Every file the
     // walk below loads may measure the text it just set — the era's own tab law is
     // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
     // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
@@ -516,7 +561,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
     // through its whole load edge and only converged a frame later off whatever poll the caller
     // had written to survive it.
-    seat_text_measurer_for_load(world, &mut script);
+    seat_raster_seam_for_load(world, &mut script);
     let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own

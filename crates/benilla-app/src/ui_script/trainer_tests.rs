@@ -1252,3 +1252,49 @@ fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_
     assert_eq!(pane(&mut s), (true, "Cleave".into()));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The filter click has to repaint the LIST, not just the engine** (decision 2244) — the
+/// director's "filter no longer work", with the dropdown showing Available only and red rows still
+/// under it.
+///
+/// Every other test in this file asserts `GetNumTrainerServices()`, which is the engine's own
+/// answer and moves the instant the mask does. What the player looks at is the row buttons, and
+/// those are painted by `ClassTrainerFrame_Update` — which after a filter click is reached from
+/// exactly one place: `ClassTrainerFrame_OnEvent`'s `TRAINER_UPDATE` arm. The stock click handler
+/// fires no event and calls no update (its `ScrollBar:SetValue(0)` is a no-op at zero), because in
+/// the reference the **engine** fires it from the mask-commit thunk `0x4d8c90`
+/// (`mov ecx,0x136; jmp 0x703e50`). Ours did not, so the checkbox moved and the list did not.
+#[test]
+fn a_filter_click_repaints_the_rows_the_player_is_looking_at() {
+    let mut s = trainer_script();
+    s.set_money(50);
+    s.set_trainer(Some(menu()));
+    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+
+    // What the player sees: the painted row buttons, counted the way the eye does.
+    let painted = "\
+local n = 0
+for i = 1, 11 do
+    local b = getglobal(\"ClassTrainerSkill\"..i)
+    if b and b:IsVisible() then n = n + 1 end
+end
+return n";
+    let count = |s: &mut UiScript| s.eval::<i64>(painted).unwrap();
+    assert_eq!(count(&mut s), 6, "six rows on screen before any filtering");
+
+    s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
+        .unwrap();
+    s.run("this = DropDownList1Button3; UIDropDownMenuButton_OnClick()")
+        .unwrap();
+    // The engine's queued `TRAINER_UPDATE` lands on the next tick (a binding cannot re-enter the
+    // handler dispatch from inside Lua — the queue's own contract).
+    s.tick(0.016);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    assert_eq!(
+        count(&mut s),
+        5,
+        "the already-known row must LEAVE THE SCREEN, not just the engine's count — this is the \
+         director's report: the checkbox moved and the list underneath did not"
+    );
+}

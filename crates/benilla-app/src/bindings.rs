@@ -183,13 +183,14 @@ impl BindingsState {
 }
 
 /// Which files this session's bindings live in — the macros-files pattern
-/// ([`crate::ui_macro::MacroFiles`]), resolved once the character is known.
+/// ([`crate::ui_macro::MacroFiles`]), written by [`seed_bindings_for_vm`] and read by the save
+/// verb. It carried a session-keyed `identity` memo while the character set was loaded from a
+/// per-frame system and had to recognise "same character, new VM"; the seed runs exactly once per
+/// VM by construction, so there is nothing left to dedupe (decision 2241).
 #[derive(Resource, Default)]
 struct BindingFiles {
     account: Option<std::path::PathBuf>,
     character: Option<std::path::PathBuf>,
-    /// Whose set 2 is loaded — **in the VM that is live now**. See [`load_character_bindings`].
-    identity: crate::ui_script::VmMemo<Option<(String, String)>>,
 }
 
 /// Label for this module's systems inside [`crate::ui_script::UiInput`] — the UI key feed is
@@ -208,20 +209,21 @@ impl Plugin for BindingsPlugin {
             .add_systems(
                 Update,
                 (
-                    // Once per **VM**, not once per process (decision 1290): a login builds a
-                    // fresh one, and an unseeded VM has no command registry at all —
-                    // `sync_dispatch` would build an empty map and every keybind in the session
-                    // would be dead. Hence `Update` with a session-keyed claim rather than
-                    // `PostStartup`, ordered ahead of the pair that reads what it registers.
-                    seed_bindings.before(sync_dispatch),
+                    // **The registry and both sets are seeded at the VM's birth, not here**
+                    // (decision 2241): [`seed_bindings_for_vm`] runs inside
+                    // `load_ingame_ui_on_world_entry`, before FrameXML and every addon. A
+                    // session-keyed `Update` claim answered *which* VM but not *when* inside its
+                    // life — and this table's readers are load-edge readers: stock
+                    // `ActionButton_OnLoad` paints its hotkey corner from `GetBindingKey` at
+                    // OnLoad, and an addon's `SetBinding` on a stock command needs the command to
+                    // exist.
                     (sync_dispatch, latch_and_dispatch)
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
                         .before(benilla_world::schedule::WorldStage::Input)
                         .run_if(in_state(ClientState::InWorld)),
-                    load_character_bindings.run_if(in_state(ClientState::InWorld)),
-                    drain_binding_requests.after(load_character_bindings),
+                    drain_binding_requests,
                 ),
             );
     }
@@ -242,24 +244,32 @@ pub(crate) fn registry_commands() -> Vec<KeybindCommand> {
         .collect()
 }
 
-/// Register the command registry with the engine table and seed the account set from disk — once
-/// per VM, before any window opens.
-fn seed_bindings(
-    script: Option<NonSendMut<UiScript>>,
-    mut files: ResMut<BindingFiles>,
-    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
-) {
-    let Some(mut script) = script else { return };
-    if !seeded.claim(&script) {
-        return;
-    }
+/// **The keybinding table goes into the VM before a single interface file runs** (decision 2241,
+/// through the seam 2240 established): the command registry, the account set, and the character's
+/// own set if it has one — all of it in one call at the VM's birth.
+///
+/// This was two `Update` systems with session-keyed claims. That answered *which* VM the memory was
+/// about (1290) and not *when inside its life* it ran, and since 2226 the whole interface load —
+/// FrameXML, every addon's file scope, `ADDON_LOADED`, `VARIABLES_LOADED`, `PLAYER_LOGIN` — happens
+/// inside one exclusive call that precedes the first `Update`. Two readers that costs:
+///
+/// - stock `ActionButton_OnLoad` ends in `ActionButton_UpdateHotkeys`, which paints the corner from
+///   `GetBindingText(GetBindingKey(action), …)`. With no registry every hotkey corner painted blank
+///   and only recovered on the `UPDATE_BINDINGS` `sync_dispatch` fires a frame later;
+/// - an addon's own `Bindings.xml` rows ARE registered during the walk, so the table held *only*
+///   those during the burst: `GetBindingKey("TOGGLEWORLDMAP")` answered nothing, `SetBinding` on a
+///   stock command was a silent nil, and the addons' rows occupied the low indices the Key Bindings
+///   window walks.
+///
+/// Seeding before the walk is also the reference's own order, and the engine was already built for
+/// it: `seed_binding_set` keeps the diff by NAME as well as positionally precisely so a set can be
+/// seeded before a command exists (1201), and `register_bindings` is idempotent per name, so the
+/// addon rows the walk registers afterwards still land.
+pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
     script.register_bindings(&registry_commands());
-    files.account = crate::local_state::bindings_account_path();
-    if let Some(overrides) = read_diff(&files.account) {
-        script.seed_binding_set(1, Some(store::resolve(&overrides)));
-    } else {
-        script.seed_binding_set(1, Some(store::resolve(&[])));
-    }
+    let account = crate::local_state::bindings_account_path();
+    let overrides = read_diff(&account).unwrap_or_default();
+    script.seed_binding_set(1, Some(store::resolve(&overrides)));
     script.load_binding_set(1);
     // The pair, not just the first half: `SPECS` ∪ `ABSENT` is the client's whole 1.12 command
     // surface, and a log line that says only how many landed cannot say how much is left
@@ -270,6 +280,32 @@ fn seed_bindings(
         SPECS.len() + commands::ABSENT.len(),
         commands::ABSENT.len()
     );
+
+    // The character's own set, if the roster names one — its file existing makes it the active set,
+    // the reference's own rule. The identity is the same one the edge resolves for the AddOn enable
+    // state a few lines above this call; absent (a rigged or capture run) leaves set 2 unseeded,
+    // exactly as the old per-frame system's early return did.
+    let id = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(crate::ui_macro::identity);
+    let character = id
+        .as_ref()
+        .and_then(|(realm, name)| crate::local_state::bindings_character_path(realm, name));
+    match read_diff(&character) {
+        Some(overrides) => {
+            script.seed_binding_set(2, Some(store::resolve(&overrides)));
+            script.load_binding_set(2);
+            info!("bindings: character-specific set loaded");
+        }
+        None => {
+            script.seed_binding_set(2, None);
+            script.load_binding_set(1);
+        }
+    }
+    if let Some(mut files) = world.get_resource_mut::<BindingFiles>() {
+        files.account = account;
+        files.character = character;
+    }
 }
 
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
@@ -281,37 +317,6 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
         Err(e) => {
             warn!("bindings: reading {}: {e}", path.display());
             None
-        }
-    }
-}
-
-/// Load the character-specific set once the roster names the character (the macros-load
-/// pattern); its file existing makes it the active set, the reference's own rule.
-fn load_character_bindings(
-    script: Option<NonSendMut<UiScript>>,
-    roster: Res<crate::char_select::Roster>,
-    mut files: ResMut<BindingFiles>,
-) {
-    let Some(mut script) = script else { return };
-    let Some(id) = crate::ui_macro::identity(&roster) else {
-        return;
-    };
-    // Session-keyed (1290): re-entering the world as the SAME character still meets a fresh VM
-    // with no set 2 in it, so "same identity" is only a reason to skip within one VM.
-    if files.identity.get(&script).as_ref() == Some(&id) {
-        return;
-    }
-    files.character = crate::local_state::bindings_character_path(&id.0, &id.1);
-    *files.identity.get(&script) = Some(id);
-    match read_diff(&files.character) {
-        Some(overrides) => {
-            script.seed_binding_set(2, Some(store::resolve(&overrides)));
-            script.load_binding_set(2);
-            info!("bindings: character-specific set loaded");
-        }
-        None => {
-            script.seed_binding_set(2, None);
-            script.load_binding_set(1);
         }
     }
 }

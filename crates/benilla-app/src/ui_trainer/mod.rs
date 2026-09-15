@@ -235,20 +235,17 @@ fn resolve_service(
     // and INDEPENDENT of the service's overall category — so a spell gated only by LEVEL still shows
     // its already-learned prev-rank prerequisite WHITE, not red. The req id is a real ability id (not
     // a learn wrapper — verified there too), so there's no hop: look it up directly. The name carries
-    // its rank exactly as the client does — `"Name (Rank)"` when the spell has a rank subtext, else
-    // the bare name (the client's `"%s (%s)"`). The client also ORs `KnownHigherRank`; benilla has no
-    // rank chain, and sequential trainer ranks never reach that clause, so the direct known-check
-    // covers every real case.
+    // its rank exactly as the client does — `SpellDisplay::ranked_name`, the shared composer for the
+    // client's `"%s (%s)"` literal (decision 2243). The client also ORs `KnownHigherRank`; benilla
+    // has no rank chain, and sequential trainer ranks never reach that clause, so the direct
+    // known-check covers every real case.
     let ability_reqs = wire
         .req_spells
         .iter()
         .filter(|&&s| s != 0)
         .map(|&s| {
             let name = match spells.get(s) {
-                Some(d) => match d.rank.as_deref() {
-                    Some(rank) if !rank.is_empty() => format!("{} ({})", d.name, rank),
-                    _ => d.name.clone(),
-                },
+                Some(d) => d.ranked_name(),
                 None => format!("Spell {s}"),
             };
             TrainerAbilityReq {

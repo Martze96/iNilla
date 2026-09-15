@@ -51,6 +51,10 @@ mod tests;
 
 pub(crate) use away::AfkMirror;
 pub(crate) use broadcast::Broadcast;
+/// The zone-channel catalog's seed. Called from the world-entry UI load, like the restore below
+/// and for the neighbouring reason: the verbs that read it are read at addon file scope, and an
+/// `Update` push lands after the whole burst — decision 2241.
+pub(crate) use channels::seed_zone_channel_catalog;
 /// The joined-channel roster + the `ChatChannels.dbc` catalog. Read outside this module by the
 /// world-state readout ([`crate::world_state_ui`]), whose `Type == 1` gate is "has the player
 /// joined a zone-dependent defense channel".

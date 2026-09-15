@@ -122,7 +122,7 @@ mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
 pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
-pub use display::{FormRefusal, OpenLock, SpellDisplay};
+pub use display::{FormRefusal, LearnAnnouncement, OpenLock, SpellDisplay};
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
 mod immunity;
@@ -426,6 +426,11 @@ const ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS: u32 = 0x20000;
 /// (decision 0216 §8, `benilla-ui/src/script/spellbook.rs`) refuses it outright rather than
 /// sending a doomed cast the server would just reject.
 const ATTR_PASSIVE: u32 = 0x40;
+/// `Attributes` bit `0x10` — `SPELL_ATTR_ABILITY` (cmangos `SpellDefines.h`). The **only** thing
+/// the 1.12 client reads it for is the learn announcement's wording: `0x4b29a9 setne al` /
+/// `0x4b29b3 add eax,0x37` picks message id `0x37` `ERR_LEARN_SPELL_S` when the bit is clear and
+/// `0x38` `ERR_LEARN_ABILITY_S` when it is set. See [`SpellDisplay::learn_announcement`].
+const ATTR_ABILITY: u32 = 0x10;
 /// `Attributes` bit `0x80` — `SPELL_ATTR_DO_NOT_DISPLAY` (cmangos `SpellDefines.h`: "Hidden in
 /// Spellbook, Aura Icon, Combat Log"): THE spellbook add-gate (decision 0227) AND the `Attributes`
 /// half of the aura-bar display filter ([`SpellDisplay::hidden_from_aura_bar`] — the cache

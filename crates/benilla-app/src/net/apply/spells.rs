@@ -5,12 +5,13 @@
 
 use std::time::{Duration, Instant};
 
+use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
 use crate::cooldowns::Cooldowns;
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
-use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells};
+use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
 use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
 
@@ -50,11 +51,51 @@ pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerAct
 /// a level-up rank gain; decision 0237). The spellbook feed diffs `spells` each frame, so the insert
 /// is all it needs to surface (the add-gate that decides which known spells are *book* entries is
 /// the feed's, decision 0227). No action-bar change — learning a spell does not bar it.
-pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
+///
+/// It also **announces the learn in chat**, which is the reference's own tail on this packet and
+/// not a nicety: `0x5e61c0` -> `AddSpell(id, slot, 1, 1)` -> the registrar `0x4b25b0` with its
+/// announce flag set (decision 2243, [`announce_learn`]).
+pub(super) fn learned_spell(
+    spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+) {
     debug!("net: learned spell {spell_id}");
     if actions.spells.insert(spell_id) {
         actions.dirty = true;
     }
+    announce_learn(spell_id, spells, errors);
+}
+
+/// **The learn announcement** — the `ERR_LEARN_*` chat line the registrar `0x4b25b0` prints at
+/// `0x4b2909` for a spell learned *mid-session* (decision 2243).
+///
+/// Which of the three lines, and whether the argText carries the rank, is
+/// [`benilla_formats::SpellDisplay::learn_announcement`]'s — it is a `Spell.dbc` `Attributes` read
+/// and its byte trail lives with the record. What is this side's is the mapping to catalog keys:
+/// ids `0x37`/`0x38`/`0x39` are `MsgKind::Chat` rows carrying chat type `10`, so
+/// [`crate::ui_action::UiErrorKeys`] puts all three on the chat window's system channel without
+/// this call site naming a surface (decision 1770).
+///
+/// A missing catalog (`Spells` absent, a DBC that failed to load) says nothing at all, like every
+/// other display path here — and so does an unknown id, which is the reference's own bounds/null
+/// bail on the `Spell.dbc` store at the registrar's head (`0x4b25c6` / `0x4b25d2` / `0x4b25e0`,
+/// all three jumping straight to the epilogue).
+fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+    let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
+        return;
+    };
+    let Some(kind) = display.learn_announcement() else {
+        return;
+    };
+    let (key, arg) = match kind {
+        LearnAnnouncement::Spell => ("ERR_LEARN_SPELL_S", display.ranked_name()),
+        LearnAnnouncement::Ability => ("ERR_LEARN_ABILITY_S", display.ranked_name()),
+        // The recipe arm pushes the bare name — it returns before the rank composer.
+        LearnAnnouncement::Recipe => ("ERR_LEARN_RECIPE_S", display.name.clone()),
+    };
+    errors.0.push(UiError::s(key, arg));
 }
 
 /// A spell taken back out of the book (`SMSG_REMOVED_SPELL`, decision 1584) — the inverse of
@@ -64,16 +105,48 @@ pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
 /// only visible effect was the points coming back — the talent window went on drawing the ranks it
 /// had, because [`crate::ui_talent`] derives rank from exactly this set.
 ///
+/// It **announces the unlearn in chat** — *"You have unlearned %s."* — under
+/// [`benilla_formats::SpellDisplay::announces_unlearn`]'s four gates (decision 2246). 2243 claimed
+/// the opposite here, on a byte citation, and was wrong: it bounded `RemoveSpell 0x5e9fe0` at the
+/// `ret 0x8` at `0x5ea28f` and so never read the block at `0x5ea292`, which is a live branch
+/// target past that `ret`. `0x5ea2ab push 0x14a` is that block, and `SMSG_REMOVED_SPELL`'s arm
+/// (`0x5e43e3`) is the caller that reaches it with the flag set.
+///
 /// The insert's mirror image, and deliberately no more than that: the spellbook, talent and pet
 /// feeds all diff `spells` and fire their own refresh events, and
 /// [`crate::ui_action::LearnedAbilities`] re-derives off the same change (the reference's own
 /// unlearn write site, `0x4b2c50`). What happens to a **bar button** still pointing at the removed
 /// spell is a separate law this arm deliberately does not invent — see 1584's scope note.
-pub(super) fn removed_spell(spell_id: u32, actions: &mut PlayerActions) {
+pub(super) fn removed_spell(
+    spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+) {
     debug!("net: removed spell {spell_id}");
     if actions.spells.remove(&spell_id) {
         actions.dirty = true;
     }
+    announce_unlearn(spell_id, spells, errors);
+}
+
+/// **The unlearn announcement** — `ERR_SPELL_UNLEARNED_S` (`0x5ea2ab`), the counterpart to
+/// [`announce_learn`] and deliberately not a mirror of it (decision 2246).
+///
+/// The argText is the **bare** name: `0x5ea2a3` pushes `SpellRec+0x1e0` and there is no rank
+/// composer on this path at all, so a respec'd talent rank reads "You have unlearned Improved
+/// Fireball." with no "(Rank 3)". Which spells say it is
+/// [`benilla_formats::SpellDisplay::announces_unlearn`]'s — the bytes live with the record.
+fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+    let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
+        return;
+    };
+    if !display.announces_unlearn() {
+        return;
+    }
+    errors
+        .0
+        .push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
 }
 
 /// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old **in the book** (decision
@@ -83,11 +156,21 @@ pub(super) fn removed_spell(spell_id: u32, actions: &mut PlayerActions) {
 /// *here* as well would be a second, weaker copy of that law — weaker because this packet doesn't
 /// arrive at all when the rank was gained while the character was loading (vmangos suppresses it
 /// with `IsInWorld()`), which is exactly the case that shipped a dead rank-1 button.
-pub(super) fn superceded_spell(old_spell_id: u32, new_spell_id: u32, actions: &mut PlayerActions) {
+pub(super) fn superceded_spell(
+    old_spell_id: u32,
+    new_spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
     actions.spells.remove(&old_spell_id);
     actions.spells.insert(new_spell_id);
     actions.dirty = true;
+    // A rank-up announces exactly like a first learn, and only once: the supersede pair `0x4b2f50`
+    // calls the unlearn `0x4b2c50` and then the registrar `0x4b25b0` with `mov edx,0x1`
+    // (`0x4b2f61`), and the unlearn half holds no `DisplayError` call at all (decision 2243).
+    announce_learn(new_spell_id, spells, errors);
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
@@ -1014,15 +1097,167 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::ACTION_KIND_SPELL;
 
+    /// A catalog holding one row, so the announce tests can name a real `Attributes` value.
+    fn catalog_with(id: u32, display: benilla_formats::SpellDisplay) -> Spells {
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog =
+            benilla_formats::SpellCatalog::from_displays([(id, display)].into_iter().collect());
+        spells
+    }
+
+    /// The report this arm was missing entirely: training at a class trainer printed nothing in
+    /// chat. Heroic Strike carries `SPELL_ATTR_ABILITY`, so the reference's `0x4b29b3 add eax,0x37`
+    /// lands on `0x38` — the *ability* wording — and the argText is the client's `"%s (%s)"`.
+    #[test]
+    fn a_learned_ability_announces_the_ability_line_with_its_rank() {
+        let spells = catalog_with(
+            78,
+            benilla_formats::SpellDisplay {
+                name: "Heroic Strike".to_string(),
+                rank: Some("Rank 1".to_string()),
+                attributes: 0x10,
+                ..Default::default()
+            },
+        );
+        let mut actions = PlayerActions::default();
+        let mut errors = UiErrorKeys::default();
+        learned_spell(78, &mut actions, Some(&spells), &mut errors);
+
+        assert_eq!(errors.0.len(), 1, "one line, once");
+        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 1)"));
+    }
+
+    /// The other two arms of the same block, from the same entry point: a plain row is a *spell*,
+    /// and a tradeskill row is a *recipe* whose argText drops the rank (the reference returns from
+    /// `0x4b2944` without ever reaching the subtext composer).
+    #[test]
+    fn the_spell_and_recipe_arms_pick_their_own_key_and_argument() {
+        let spells = catalog_with(
+            133,
+            benilla_formats::SpellDisplay {
+                name: "Fireball".to_string(),
+                rank: Some("Rank 1".to_string()),
+                attributes: 0x10000,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            133,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Fireball (Rank 1)"));
+
+        let spells = catalog_with(
+            2550,
+            benilla_formats::SpellDisplay {
+                name: "Cooking".to_string(),
+                rank: Some("Apprentice".to_string()),
+                attributes: 0x20,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            2550,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert_eq!(errors.0[0].key, "ERR_LEARN_RECIPE_S");
+        assert_eq!(
+            errors.0[0].arg_s(),
+            Some("Cooking"),
+            "the recipe arm pushes the bare name"
+        );
+    }
+
+    /// A rank-up is `SMSG_SUPERCEDED_SPELL`, and the supersede pair `0x4b2f50` reaches the
+    /// registrar with `edx = 1` — so it announces, naming the NEW rank, and exactly once (the
+    /// unlearn half holds no `DisplayError` call).
+    #[test]
+    fn a_rank_up_announces_the_new_rank_once() {
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(
+            [
+                (
+                    78,
+                    benilla_formats::SpellDisplay {
+                        name: "Heroic Strike".to_string(),
+                        rank: Some("Rank 1".to_string()),
+                        attributes: 0x10,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    284,
+                    benilla_formats::SpellDisplay {
+                        name: "Heroic Strike".to_string(),
+                        rank: Some("Rank 2".to_string()),
+                        attributes: 0x10,
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut actions = PlayerActions::default();
+        actions.spells.insert(78);
+        let mut errors = UiErrorKeys::default();
+        superceded_spell(78, 284, &mut actions, Some(&spells), &mut errors);
+
+        assert_eq!(errors.0.len(), 1, "one line for a rank-up, not two");
+        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 2)"));
+    }
+
+    /// The silent cases, which are the ones a naive "print on every learn" would get wrong: a
+    /// `DO_NOT_DISPLAY` row (every language, every weapon proficiency — the packets a fresh
+    /// character receives in bulk), and a spell the catalog does not know at all.
+    #[test]
+    fn a_do_not_display_spell_and_an_unknown_id_announce_nothing() {
+        let spells = catalog_with(
+            668,
+            benilla_formats::SpellDisplay {
+                name: "Language: Common".to_string(),
+                attributes: 0xC0,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            668,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        learned_spell(
+            99999,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert!(
+            errors.0.is_empty(),
+            "PASSIVE|DO_NOT_DISPLAY is silent, and so is an id with no record"
+        );
+    }
+
     #[test]
     fn learned_spell_adds_to_the_book_once() {
         let mut actions = PlayerActions::default();
-        learned_spell(6603, &mut actions);
+        let mut errors = UiErrorKeys::default();
+        learned_spell(6603, &mut actions, None, &mut errors);
         assert!(actions.spells.contains(&6603));
         assert!(actions.dirty, "a new spell dirties the feed");
 
         actions.dirty = false;
-        learned_spell(6603, &mut actions);
+        learned_spell(6603, &mut actions, None, &mut errors);
         assert!(
             !actions.dirty,
             "re-learning a known spell is a no-op (insert returns false)"
@@ -1044,7 +1279,7 @@ mod tests {
             },
         );
 
-        superceded_spell(78, 284, &mut actions);
+        superceded_spell(78, 284, &mut actions, None, &mut UiErrorKeys::default());
 
         assert!(
             !actions.spells.contains(&78),
@@ -1799,13 +2034,113 @@ mod tests {
         let mut actions = PlayerActions::default();
         actions.spells.extend([14522, 14788, 14789]);
 
-        removed_spell(14788, &mut actions);
+        let mut errors = UiErrorKeys::default();
+        removed_spell(14788, &mut actions, None, &mut errors);
         assert!(!actions.spells.contains(&14788));
         assert!(actions.dirty);
 
         actions.dirty = false;
-        removed_spell(14788, &mut actions);
+        removed_spell(14788, &mut actions, None, &mut errors);
         assert!(!actions.dirty, "a spell we never knew is not a repaint");
+    }
+
+    /// The unlearn line and its four silent gates (decision 2246) — the behaviour decision 2243
+    /// asserted, with a byte citation, did not exist. The argText is the BARE name: there is no
+    /// rank composer on this path, so a respec'd rank says "Improved Fireball", never
+    /// "Improved Fireball (Rank 3)".
+    #[test]
+    fn an_unlearn_announces_the_bare_name_and_four_things_silence_it() {
+        let row = |attributes: u32, cast_ui: u32| benilla_formats::SpellDisplay {
+            name: "Improved Fireball".to_string(),
+            rank: Some("Rank 3".to_string()),
+            attributes,
+            cast_ui,
+            ..Default::default()
+        };
+
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            11069,
+            &mut PlayerActions::default(),
+            Some(&catalog_with(11069, row(0, 0))),
+            &mut errors,
+        );
+        assert_eq!(errors.0.len(), 1);
+        assert_eq!(errors.0[0].key, "ERR_SPELL_UNLEARNED_S");
+        assert_eq!(
+            errors.0[0].arg_s(),
+            Some("Improved Fireball"),
+            "no rank on the unlearn path"
+        );
+
+        // …and each gate on its own, every one of them silent.
+        for (attributes, cast_ui, why) in [
+            (
+                0x20,
+                0,
+                "IS_TRADESKILL — the container join zeroes the flag at 0x5ea170",
+            ),
+            (
+                0,
+                1,
+                "castUI > 0 takes the container walk and never reaches 0x5ea292",
+            ),
+            (0x80, 0, "DO_NOT_DISPLAY — the sign test at 0x5ea29b"),
+        ] {
+            let mut errors = UiErrorKeys::default();
+            removed_spell(
+                11069,
+                &mut PlayerActions::default(),
+                Some(&catalog_with(11069, row(attributes, cast_ui))),
+                &mut errors,
+            );
+            assert!(errors.0.is_empty(), "{why}");
+        }
+
+        // An unknown id says nothing, like every other display path here.
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            99999,
+            &mut PlayerActions::default(),
+            Some(&catalog_with(11069, row(0, 0))),
+            &mut errors,
+        );
+        assert!(errors.0.is_empty());
+    }
+
+    /// `castUI` gates the unlearn line and NOT the learn line — the reference tests it only
+    /// afterwards, at `0x4b29bf`, to decide the book slot. So a `castUI > 0` spell announces when
+    /// it arrives and is silent when it goes. Asserted because the two methods reading the same
+    /// field for different answers is exactly the kind of asymmetry a later edit "tidies" away.
+    #[test]
+    fn cast_ui_silences_the_unlearn_but_not_the_learn() {
+        let spells = catalog_with(
+            1234,
+            benilla_formats::SpellDisplay {
+                name: "Some Castbar Spell".to_string(),
+                cast_ui: 2,
+                ..Default::default()
+            },
+        );
+
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            1234,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert_eq!(errors.0.len(), 1, "the learn block never reads castUI");
+        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            1234,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert!(errors.0.is_empty(), "…but the unlearn block does");
     }
     /// **The GO-deferred auto-attack start** (`HandleSpellGo` @ `0x6e83c0`, decision 1593) — the
     /// half of `combat-feel-law.md` §A3 benilla shipped without, because ten hand-picked warrior

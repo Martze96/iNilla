@@ -1141,12 +1141,28 @@ pub(crate) fn apply_net_updates(
                 cooldowns,
             } => spell_book(spell_ids, cooldowns, &mut ui_actions.0, &mut ui_actions.9),
             SessionEvent::ActionButtons { buttons } => action_buttons(buttons, &mut ui_actions.0),
-            SessionEvent::SpellLearned { spell_id } => learned_spell(spell_id, &mut ui_actions.0),
-            SessionEvent::SpellRemoved { spell_id } => removed_spell(spell_id, &mut ui_actions.0),
+            SessionEvent::SpellLearned { spell_id } => learned_spell(
+                spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+            ),
+            SessionEvent::SpellRemoved { spell_id } => removed_spell(
+                spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+            ),
             SessionEvent::SpellSuperceded {
                 old_spell_id,
                 new_spell_id,
-            } => superceded_spell(old_spell_id, new_spell_id, &mut ui_actions.0),
+            } => superceded_spell(
+                old_spell_id,
+                new_spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+            ),
             SessionEvent::CastResult {
                 spell_id,
                 success,
