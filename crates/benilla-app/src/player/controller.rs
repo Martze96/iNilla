@@ -1076,7 +1076,7 @@ pub(super) fn control(
         // turn jittery") needs the input cadence and the output cadence on the same timeline: a
         // bursty `dx` under a steady `dt` convicts event delivery; a steady `dx` with an uneven
         // realized pose convicts everything downstream.
-        if std::env::var_os("WOW_CAM_DUMP").is_some() {
+        if crate::player::camera::cam_dump_enabled() {
             eprintln!(
                 "[turn] t={:.6} dt={:.6} dx={:.3} dy={:.3} look={} face={:.6} model={:.6} \
                  pos [{:.4},{:.4},{:.4}] pivot={:.4}->{:.4}",

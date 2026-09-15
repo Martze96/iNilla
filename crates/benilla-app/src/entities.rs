@@ -1283,6 +1283,17 @@ fn update_display_models(
             // `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display, which is the
             // reference's own lookup at `0x5d6759`.
             EntityKind::Unit | EntityKind::Player | EntityKind::Corpse => {
+                // Peek through `&` first: `Option<ResMut<T>>::as_deref_mut` marks the resource
+                // changed whether or not a byte is written, and `resolve_equipment`'s skip gate
+                // reads `Creatures::is_changed()` — so an every-frame `&mut` here re-resolved
+                // every rigged unit's equipment every frame (1697 item 1). A display that is
+                // present and built asks nothing of the cache.
+                if creatures
+                    .as_deref()
+                    .is_some_and(|cr| cr.models.get(&disp).is_some_and(|dm| dm.parts.is_some()))
+                {
+                    continue;
+                }
                 let Some(cr) = creatures.as_deref_mut() else {
                     continue;
                 };
@@ -1305,6 +1316,14 @@ fn update_display_models(
                 }
             }
             EntityKind::GameObject => {
+                // The same peek, for the same reason (no gate reads this tick today; the census
+                // that finds the next one should not have to look past it).
+                if gameobjects
+                    .as_deref()
+                    .is_some_and(|go| go.models.get(&disp).is_some_and(|dm| dm.parts.is_some()))
+                {
+                    continue;
+                }
                 let Some(go) = gameobjects.as_deref_mut() else {
                     continue;
                 };
@@ -1355,54 +1374,66 @@ fn update_display_models(
 
     // Held-item displays (decision 0072): entries are created by `resolve_equipment`; build each
     // one's parts once its M2 loads. Items are static meshes — no collider, unit lighting.
-    if let Some(held) = held.as_deref_mut() {
-        for dm in held.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: held items — unit lighting, no collider
-                );
+    // Each of the three path-keyed caches below is `&mut`-borrowed only when it holds an
+    // unbuilt entry — the read-side scan is a few hundred `Option` tests, the write-side tick
+    // would have read as "changed" on every frame of every run.
+    fn unbuilt<K>(models: &HashMap<K, DisplayModel>) -> bool {
+        models.values().any(|dm| dm.parts.is_none())
+    }
+    if held.as_deref().is_some_and(|h| unbuilt(&h.models)) {
+        if let Some(held) = held.as_deref_mut() {
+            for dm in held.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        false, // gameobject: held items — unit lighting, no collider
+                    );
+                }
             }
         }
     }
 
     // Spell-effect displays (decision 0099 phase 3): entries are created by
     // `spell_fx::resolve_spell_fx`; the same build, keyed by model path instead of display id.
-    if let Some(fx) = spell_fx.as_deref_mut() {
-        for dm in fx.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: effects — unit lighting, no collider
-                );
+    if spell_fx.as_deref().is_some_and(|f| unbuilt(&f.models)) {
+        if let Some(fx) = spell_fx.as_deref_mut() {
+            for dm in fx.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        false, // gameobject: effects — unit lighting, no collider
+                    );
+                }
             }
         }
     }
 
     // Item/enchant glow models (decision 0805): path-keyed like the effect cache above, entries
     // created by `resolve_equipment`'s glow resolve.
-    if let Some(glows) = glows.as_deref_mut() {
-        for dm in glows.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: effects — unit lighting, no collider
-                );
+    if glows.as_deref().is_some_and(|g| unbuilt(&g.models)) {
+        if let Some(glows) = glows.as_deref_mut() {
+            for dm in glows.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        false, // gameobject: effects — unit lighting, no collider
+                    );
+                }
             }
         }
     }

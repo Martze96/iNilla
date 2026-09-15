@@ -387,8 +387,14 @@ fn build_light_data(
     // alternate frame to frame, which a 1 Hz sample cannot see at all. Reading a per-second dump as
     // evidence of per-frame stability is how that light was cleared once already (0665's parked
     // culling test made the same mistake with a different instrument).
-    if let Some(mode) = std::env::var_os("WOW_POINTS_DUMP") {
-        let every = if mode == *"frame" { 0.0 } else { 1.0 };
+    static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
+        std::sync::OnceLock::new();
+    if let Some(mode) = POINTS_DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) {
+        let every = if mode.as_os_str() == "frame" {
+            0.0
+        } else {
+            1.0
+        };
         let now = time.elapsed_secs_f64();
         if now - *last_dump >= every {
             *last_dump = now;
@@ -432,8 +438,13 @@ fn build_light_data(
     // can still be moving. A dump of selected rows would answer "did ambient move?"; only the full
     // set answers "did ANY shading input move?", and that is the question worth a run. Rows are
     // printed as raw f32 bits, so a change far below a printed decimal cannot hide.
-    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
-        let every = if mode == *"frame" { 0.0 } else { 1.0 };
+    static LIGHT_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    if let Some(mode) = LIGHT_DUMP.get_or_init(|| std::env::var_os("WOW_LIGHT_DUMP")) {
+        let every = if mode.as_os_str() == "frame" {
+            0.0
+        } else {
+            1.0
+        };
         let now = time.elapsed_secs_f64();
         if now - *last_rows_dump >= every {
             *last_rows_dump = now;

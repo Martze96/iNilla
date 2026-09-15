@@ -427,8 +427,9 @@ pub(super) fn update_time_lighting(
     // the committed fog frame to frame, and a once-a-second sample simply lands on whichever side it
     // lands on. Rows 18/19 are read by WMO materials *alone*, which is exactly the footprint B38 shows
     // (decision 0670: one WMO re-lit, terrain and sky untouched).
-    if let Some(mode) = std::env::var_os("WOW_FOG_DUMP") {
-        let sec = (mode != *"frame").then(|| time.elapsed_secs() as u32);
+    static FOG_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    if let Some(mode) = FOG_DUMP.get_or_init(|| std::env::var_os("WOW_FOG_DUMP")) {
+        let sec = (mode.as_os_str() != "frame").then(|| time.elapsed_secs() as u32);
         if sec.is_none() || *last_fog_dump != sec {
             *last_fog_dump = sec;
             let b = |c: [f32; 3]| c.map(|v| (v * 255.0).round() as i32);
@@ -462,8 +463,9 @@ pub(super) fn update_time_lighting(
     // them land in the first moments after world entry — before the submersion verdict has settled,
     // so the line reports `Dry` at a position that is plainly underwater (1829, chasing exactly
     // that contradiction).
-    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
-        let key = (mode != *"frame").then_some(minute);
+    static LIGHT_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    if let Some(mode) = LIGHT_DUMP.get_or_init(|| std::env::var_os("WOW_LIGHT_DUMP")) {
+        let key = (mode.as_os_str() != "frame").then_some(minute);
         if key.is_some() && *last_dump == key {
             return;
         }

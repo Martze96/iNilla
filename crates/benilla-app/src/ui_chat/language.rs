@@ -145,7 +145,7 @@ pub(super) fn feed_language_skills(
     actions: Option<Res<PlayerActions>>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
 ) {
     let Ok(store) = self_q.single() else {
         // No body — the reference's "no local player" edge, which copies verbatim.
@@ -156,6 +156,16 @@ pub(super) fn feed_language_skills(
         }
         return;
     };
+    // The gate the doc above promises: the map is a function of the spell book, the two
+    // catalogs and our own descriptor, so a frame with all four still — and a player already
+    // folded in — has nothing to rebuild.
+    let inputs_moved = store.is_changed()
+        || actions.as_ref().is_some_and(|a| a.is_changed())
+        || spells.as_ref().is_some_and(|s| s.is_changed())
+        || skill_lines.as_ref().is_some_and(|l| l.is_changed());
+    if !inputs_moved && langs.have_player {
+        return;
+    }
     let gm = store.0.player_flags() & PLAYER_FLAGS_GM != 0;
 
     let mut skill = HashMap::new();
@@ -172,7 +182,7 @@ pub(super) fn feed_language_skills(
             };
             // Ascending spell id, and the later write wins — the reference's `[0xb700ac][lang] =
             // spellId` is a plain store, and the initial spell batch arrives sorted.
-            skill.insert(language, skill_value(store, line));
+            skill.insert(language, skill_value(&store, line));
         }
     }
 

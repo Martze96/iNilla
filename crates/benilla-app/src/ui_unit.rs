@@ -295,7 +295,7 @@ fn feed_known_languages(
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     languages: Option<Res<LanguagesRes>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     mut pushed: Local<crate::ui_script::VmMemo<Option<Vec<String>>>>,
 ) {
     let Some(mut script) = script else {
@@ -306,6 +306,18 @@ fn feed_known_languages(
     };
     let pushed = pushed.get(&script);
     let store = self_q.iter().next();
+    // A pure function of the spell book, the three catalogs and our descriptor — with all still
+    // and a push already made on this VM, the rebuild (a skill-slot scan per language, a
+    // `Vec<String>`) can only reproduce the memo.
+    let inputs_moved = store.as_ref().is_some_and(|s| s.is_changed())
+        || actions.is_changed()
+        || spells.is_changed()
+        || languages.is_changed()
+        || skill_lines.as_ref().is_some_and(|l| l.is_changed());
+    if pushed.is_some() && !inputs_moved {
+        return;
+    }
+    let store: Option<&ObjectStore> = store.as_deref();
     let has_skill_line = |line: u32| {
         store.is_some_and(|s| {
             (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)

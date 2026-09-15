@@ -187,6 +187,13 @@ impl Plugin for PerfPlugin {
             app.insert_resource(c);
             app.add_systems(Update, census::cpu_census::cpu_census);
         }
+        // `WOW_RES_CENSUS=<at>:<secs>` — the resource change census (see its module doc): on how
+        // many of the window's frames each resource read as changed, noisiest first — the
+        // finder for the dead-gate class 1982's `noisy=` counted five of by hand.
+        if let Some(c) = census::res_census::ResCensus::from_env() {
+            app.insert_resource(c);
+            app.add_systems(Last, census::res_census::res_census);
+        }
         #[cfg(target_os = "macos")]
         stall::plugin(app);
         // `WOW_FRAME_PHASES=<ms>` — which PHASE of a slow frame spent it (see the module doc).

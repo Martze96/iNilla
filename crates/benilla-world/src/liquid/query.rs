@@ -1006,7 +1006,8 @@ pub(super) fn detect_submersion(
     // committed fog is whichever submerged atmosphere the verdict names, so a fog line alone cannot
     // say whether an atmosphere that reads wrong is the wrong record or the right record never
     // selected. Reports the eye, the verdict, and every candidate surface over the eye's XY.
-    if std::env::var_os("WOW_FOG_DUMP").is_some() {
+    static FOG_DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *FOG_DUMP.get_or_init(|| std::env::var_os("WOW_FOG_DUMP").is_some()) {
         let sec = time.elapsed_secs() as u32;
         if last_dump.replace(sec) != Some(sec) {
             // Every surface over the eye's XY, whether or not the eye's claim admits it — a

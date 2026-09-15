@@ -430,6 +430,12 @@ fn draw_weapon_trails(
     let scene = lighting.as_deref().map_or([1.0; 3], |l| l.ambient);
     let now_ms = time.elapsed().as_millis() as u32;
     for (entity, mut trail, prop, vis, wearer) in &mut trails {
+        // No swing, no work — asked through `&` first: every drawn weapon carries a trail, and
+        // reaching the swing through `as_mut()` below marked each one changed every frame while
+        // paying the ambient lookup and two transforms for a strip that was never built.
+        if trail.swing.is_none() {
+            continue;
+        }
         // Indoors the wearer's node carries a committed ambient word of its own — the ramped chase
         // toward `cap96(MOCV)`, the room's own light rather than the sky's. Its ABSENCE is the
         // exterior lane. A Goldshire-inn character's word is ≈ (0.30, 0.22, 0.14) warm against a

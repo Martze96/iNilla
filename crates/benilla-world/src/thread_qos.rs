@@ -61,6 +61,12 @@ pub fn promote_current_thread(class: QosClass) {
 /// bare `std::thread::spawn` and no hook. An exclusive system runs on whichever thread drives the
 /// render schedule — the main thread during startup, the render thread once pipelined rendering
 /// takes over — so it re-runs each frame behind a thread-local latch instead of `run_once`.
+///
+/// It sits in `ExtractCommands`, the schedule's first set, beside bevy's own exclusive
+/// `apply_extract_commands`: an exclusive system is a barrier (the executor drains every running
+/// system before it and restarts the fan-out after), and at that point nothing is in flight to
+/// drain. Until 1697's scan named it, it lived in `Prepare` and cut that set's parallel
+/// prepare fan-out in two on every frame of every run — for a latch that fires once.
 pub struct ThreadQosPlugin;
 
 impl Plugin for ThreadQosPlugin {
@@ -68,7 +74,10 @@ impl Plugin for ThreadQosPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.add_systems(Render, promote_render_thread.in_set(RenderSystems::Prepare));
+        render_app.add_systems(
+            Render,
+            promote_render_thread.in_set(RenderSystems::ExtractCommands),
+        );
     }
 }
 

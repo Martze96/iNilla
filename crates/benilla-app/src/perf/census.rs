@@ -549,3 +549,132 @@ pub(super) fn mesh_touch(
 /// When [`mesh_touch`] starts touching (seconds of `Time<Real>`).
 #[derive(Resource)]
 pub(super) struct MeshTouchAt(pub f32);
+
+/// `WOW_RES_CENSUS=<at>:<secs>` — the resource change census: over a window opening at `at`
+/// seconds and `secs` long, on how many of its frames each resource read as CHANGED, printed
+/// once at the window's end, noisiest first.
+///
+/// The premise-checker behind every still-frame gate, generalised from 1982's five hand-picked
+/// `noisy=` counters to every registered resource. Bevy marks a resource changed on every `&mut`
+/// borrow, not on every write: one system that takes `ResMut<T>` — or `as_deref_mut()`s an
+/// `Option<ResMut<T>>` — each frame to *test* something makes `T.is_changed()` true on every
+/// frame of every run, and silently disarms every gate that asks it. 1982 found `DebugState`
+/// that way (299 of 300 frames); 1697's item 1 (`Creatures`, every frame, the equipment gate)
+/// sat unfound for a fortnight after being named because nothing walked the rest. On a parked
+/// leg the honest list is short — the clocks, the input state, the probe's own bookkeeping —
+/// and anything else near 100 % is a writer to find with `grep -rn 'ResMut<Name>'`.
+///
+/// Exclusive (`&mut World`) in `Last`; dev-only and env-gated, so it costs nothing unarmed and
+/// a few microseconds a frame armed. `NonSend` resources (the UI script VM) are not walked: the
+/// world exposes no iterator over that storage.
+pub(super) mod res_census {
+    use std::collections::HashMap;
+
+    use bevy::ecs::change_detection::Tick;
+    use bevy::ecs::component::ComponentId;
+    use bevy::prelude::*;
+    use bevy::time::Real;
+
+    #[derive(Resource)]
+    pub(in crate::perf) struct ResCensus {
+        at: f32,
+        window: f32,
+        /// The world tick this census last counted at — `is_changed(last_run, this_run)`'s
+        /// "when the system last ran", so a touch counts once per frame, never twice.
+        last_run: Option<Tick>,
+        frames: u32,
+        counts: HashMap<ComponentId, u32>,
+        done: bool,
+    }
+
+    impl ResCensus {
+        /// Parse `WOW_RES_CENSUS=<at>:<secs>`.
+        pub(in crate::perf) fn from_env() -> Option<Self> {
+            let v = std::env::var("WOW_RES_CENSUS").ok()?;
+            let (at, window) = v.split_once(':')?;
+            Some(Self {
+                at: at.parse().ok()?,
+                window: window.parse().ok()?,
+                last_run: None,
+                frames: 0,
+                counts: HashMap::new(),
+                done: false,
+            })
+        }
+    }
+
+    pub(in crate::perf) fn res_census(world: &mut World) {
+        let now = world.resource::<Time<Real>>().elapsed_secs();
+        let this_run = world.read_change_tick();
+        // `resource_scope` lifts the census out of the world for the walk, so it never counts
+        // its own borrow.
+        world.resource_scope(|world, mut census: Mut<ResCensus>| {
+            if census.done || now < census.at {
+                return;
+            }
+            let Some(last_run) = census.last_run.replace(this_run) else {
+                return; // the window's first frame: arm the tick, count from the next
+            };
+            if now >= census.at + census.window {
+                census.done = true;
+                report(world, &census);
+                return;
+            }
+            census.frames += 1;
+            let changed: Vec<ComponentId> = world
+                .iter_resources()
+                .map(|(info, _)| info.id())
+                .filter(|&id| {
+                    world
+                        .get_resource_change_ticks_by_id(id)
+                        .is_some_and(|t| t.is_changed(last_run, this_run))
+                })
+                .collect();
+            for id in changed {
+                *census.counts.entry(id).or_insert(0) += 1;
+            }
+        });
+    }
+
+    fn report(world: &World, census: &ResCensus) {
+        let total = world.iter_resources().count();
+        let mut rows: Vec<(u32, String)> = census
+            .counts
+            .iter()
+            .map(|(&id, &n)| {
+                let name = world
+                    .components()
+                    .get_info(id)
+                    .map(|i| i.name().shortname().to_string())
+                    .unwrap_or_else(|| format!("{id:?}"));
+                (n, name)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let frames = census.frames.max(1);
+        let hot = |n: u32| n * 10 >= frames * 9;
+        // bevy's own asset stores are `ResMut` in its per-frame asset systems by design (that is
+        // why `AssetChanged` exists) — every `Assets<T>` reads hot on every run, so they are one
+        // count here and never a row, or they would bury the app's own writers.
+        let bevy_store =
+            |name: &str| name.starts_with("Assets<") || name.starts_with("AssetChanges<");
+        let every_frame = rows.iter().filter(|(n, _)| hot(*n)).count();
+        let bevy_hot = rows
+            .iter()
+            .filter(|(n, name)| hot(*n) && bevy_store(name))
+            .count();
+        let mut out = format!(
+            "RES_CENSUS frames={frames} resources={total} touched={} at_90pct_or_more={every_frame} (of which bevy asset stores: {bevy_hot})\n",
+            rows.len()
+        );
+        // Every row at half the window or more: the whole list is the point (the first run
+        // printed 48 of 302 and stopped in the B's).
+        for (n, name) in rows
+            .iter()
+            .filter(|(n, name)| *n * 2 >= frames && !bevy_store(name))
+        {
+            out.push_str(&format!("  {n:>5}/{frames}  {name}\n"));
+        }
+        eprint!("{out}");
+    }
+}

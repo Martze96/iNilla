@@ -52,6 +52,13 @@ pub(crate) fn alphatest_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_ALPHATEST").is_some())
 }
 
+/// `WOW_WMO_BIAS=0` — the WMO batch's clip-z nudge off (a bisect lever; see its use site). Read
+/// once: the use site runs per WMO batch on stream-in, thousands of times through a city's load.
+fn wmo_bias_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")))
+}
+
 /// Material-dedup key: same texture + blend + sidedness + kind + fade-variant → one shared material.
 #[derive(PartialEq, Eq, Hash)]
 pub struct MatKey {
@@ -459,12 +466,11 @@ pub fn model_material(
                     // The clip-z nudge stays WMO-only: M2 coplanar layers pass GreaterEqual at exactly
                     // equal depth (same mesh, same transform, same vertex path), and their ORDER is
                     // the sort bias above — nudging their depth would be an unverified extra.
-                    let order =
-                        if !is_wmo || matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
-                            0.0
-                        } else {
-                            f32::from(batch_order)
-                        };
+                    let order = if !is_wmo || wmo_bias_off() {
+                        0.0
+                    } else {
+                        f32::from(batch_order)
+                    };
                     Vec4::new(shade.selector(), order, uv0[0], uv0[1])
                 },
                 // The animated M2Color tint's first key (identity white for static batches — their

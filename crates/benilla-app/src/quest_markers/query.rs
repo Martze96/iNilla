@@ -140,7 +140,7 @@ pub(super) fn query_statuses(
             Entity,
             &crate::net::Guid,
             &NetEntity,
-            &ObjectStore,
+            Ref<ObjectStore>,
             Option<&crate::ui_taxi::FlightMasterStatus>,
         ),
         Without<SelfPlayer>,
@@ -193,9 +193,24 @@ pub(super) fn query_statuses(
     // The map is NOT cleared by a sweep — it holds each unit's last ask key, and a sweep re-asking
     // everyone must stay distinguishable from that unit's own key actually moving, because only
     // the second is a `0x607380` and only a `0x607380` tears the marker down.
-    state.asked.retain(|guid, _| index.0.contains_key(guid));
-    quest.retain_statuses(|npc| index.0.contains_key(&npc));
+    // …and it can only shrink on a frame the object index moved (a guid left the world): the
+    // two retains used to walk both maps every frame, the second through `ResMut` — which
+    // marked `QuestGiver` changed on every frame whether or not a status left.
+    if index.is_changed() {
+        state.asked.retain(|guid, _| index.0.contains_key(guid));
+        quest.retain_statuses(|npc| index.0.contains_key(&npc));
+    }
+    // On a frame that is not a sweep, a unit's verdict below is a function of its own
+    // descriptor and of the two reaction catalogs, and nothing else: with all three still, the
+    // arm is a no-op (same reaction → same teardown already done, same key → no `0x607380`), so
+    // the unit is not visited. A city's whole idle population used to take the reaction
+    // resolve and the ask-key insert every frame for it.
+    let catalogs_moved =
+        reputations.is_changed() || factions.as_ref().is_some_and(|f| f.is_changed());
     for (entity, guid, net, obj, fm) in &objects {
+        if !swept && !full && !catalogs_moved && !obj.is_changed() {
+            continue;
+        }
         // `0x6073f0` zeroes `+0xb2c` (the marker instance) and `+0xcb8` (the questgiver status)
         // **together**, and the flight master's green `!` lives in that same `+0xb2c` — so every
         // teardown below takes both. Only removed when there is something to remove: a `Commands`
@@ -220,7 +235,7 @@ pub(super) fn query_statuses(
                 let reaction = crate::target::ring_reaction(
                     factions.as_deref(),
                     &reputations,
-                    Some(obj),
+                    Some(&*obj),
                     Some(&store),
                 );
                 if reaction <= 1 {

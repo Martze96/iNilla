@@ -283,6 +283,10 @@ fn feed_shapeshift_bar(
         (order, id)
     });
 
+    // The bags walked once for every form's reagent leg (see `feed_action_state`).
+    let carried = store
+        .map(|s| crate::ui_items::carried_counts(&s.0, &items))
+        .unwrap_or_default();
     let fresh: Vec<ShapeshiftFormView> = rows
         .into_iter()
         .map(|(id, d)| {
@@ -297,6 +301,7 @@ fn feed_shapeshift_bar(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
+                        carried: &carried,
                     };
                     usable::spell_usable(id, d, &spells, &ctx, &mut items, &commands).0
                 });

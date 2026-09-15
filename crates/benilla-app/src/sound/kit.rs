@@ -1157,11 +1157,19 @@ pub(super) fn pump_channels(
                 }
             }
         }
+        // Compare before the write, on both arms (1362's no-op-write law, the audio edition):
+        // `set_volume` is a command into the audio thread's queue whether or not the value
+        // moved, and on a still frame every live channel's amp is bit-identical to last
+        // frame's — the glide an earlier write started completes on its own. The handle's
+        // volume is `amp_to_db(ch.amp)` from `play` onward, so the field IS the handle's state.
         let Some(p) = ch.pos else {
             // 2D: only the category slider can move under a live channel.
-            ch.amp = config.category_amp(ch.category) * ch.v * ch.gain;
-            ch.handle
-                .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+            let amp = config.category_amp(ch.category) * ch.v * ch.gain;
+            if amp != ch.amp {
+                ch.amp = amp;
+                ch.handle
+                    .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+            }
             return true;
         };
         let d_sq = math::dist_sq(listener, p);
@@ -1170,16 +1178,19 @@ pub(super) fn pump_channels(
             ch.handle.stop(mixer::declick());
             return false;
         }
-        ch.amp = config.category_amp(ch.category)
+        let amp = config.category_amp(ch.category)
             * ch.v
             * ch.gain
             * math::fmod_rolloff(d_sq, ch.min_dist)
             * near_field(d_sq, ch.cutoff);
-        // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here is a
-        // click. It is also the one that scales — every live channel steps together when a frame
-        // hitches, which is what a "crack fest" under OBS actually was.
-        ch.handle
-            .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+        if amp != ch.amp {
+            ch.amp = amp;
+            // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here
+            // is a click. It is also the one that scales — every live channel steps together when
+            // a frame hitches, which is what a "crack fest" under OBS actually was.
+            ch.handle
+                .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+        }
         true
     });
 }

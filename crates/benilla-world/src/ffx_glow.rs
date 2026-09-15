@@ -428,7 +428,8 @@ fn ensure_ffx_glow(
 ) {
     // Perf-bisect kill-switch: $WOW_NO_FFX strips the pass from every camera (the frame then shows
     // undecoded gamma — ~2.2× bright — which is fine: this is a measurement mode, not a look mode).
-    if std::env::var_os("WOW_NO_FFX").is_some() {
+    static NO_FFX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *NO_FFX.get_or_init(|| std::env::var_os("WOW_NO_FFX").is_some()) {
         for e in &with {
             commands.entity(e).remove::<FfxGlow>();
         }
@@ -835,63 +836,76 @@ impl ViewNode for FfxGlowNode {
             bytemuck::cast_slice(&uniform),
         );
         let post = view_target.post_process_write();
-        let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
         let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
-
-        // The downsample binds `post.source`, which `post_process_write` flips per call — this
-        // bind group cannot be cached (it would sample last frame's texture); the two Gauss ones
-        // bind only the stable ¼-res ping-pong and ride prepared on [`FfxGlowTextures`].
-        let down_bind = render_device.create_bind_group(
-            "ffx_glow_down_quarter",
-            &layout_filter,
-            &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
-        );
-
-        // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
-        // Each pass opens its own diagnostic span (`render/ffx_glow_*/elapsed_gpu` on a device
-        // that times passes): the journal's `gpu_glow` column is their sum (2008).
         let diagnostics = render_context.diagnostic_recorder();
-        let filter_passes: [(&'static str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
-            (
+
+        // The combine reads the blur through exactly two terms — `w·blur²` (`lane.x`) and the
+        // haze cross-fade (`lane.z`; the ghost combine has no haze and reads the blur through
+        // the same `x`). With both exactly zero the three filter passes would compute a texture
+        // the combine multiplies by nothing, so they are skipped and the combine samples what
+        // the ¼-res target holds — finite bytes from an earlier frame, or wgpu's zero-init — × 0.
+        // Every UI-pane view (`gain_scale` 0, no haze lane) skips on every frame; the world view
+        // skips in a zone whose `LightParams.glow` is 0 while the eye is dry and sober. The same
+        // shader then runs with the same uniform: look-neutral by construction, and the
+        // journal's `gpu_glow` column reads 0 for a view that skipped (2008).
+        let blur_read = uniform[0] != 0.0 || uniform[2] != 0.0;
+        if blur_read {
+            let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
+            // The downsample binds `post.source`, which `post_process_write` flips per call —
+            // this bind group cannot be cached (it would sample last frame's texture); the two
+            // Gauss ones bind only the stable ¼-res ping-pong and ride prepared on
+            // [`FfxGlowTextures`].
+            let down_bind = render_device.create_bind_group(
                 "ffx_glow_down_quarter",
-                downsample,
-                &down_bind,
-                &textures.quarter_a.default_view,
-            ),
-            (
-                "ffx_glow_gauss_h",
-                gauss_h,
-                &textures.gauss_h_bind,
-                &textures.quarter_b.default_view,
-            ),
-            (
-                "ffx_glow_gauss_v",
-                gauss_v,
-                &textures.gauss_v_bind,
-                &textures.quarter_a.default_view,
-            ),
-        ];
-        for (label, pipeline, bind, dst) in filter_passes {
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_render_pass(&RenderPassDescriptor {
-                        label: Some(label),
-                        color_attachments: &[Some(RenderPassColorAttachment {
-                            view: dst,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: Operations::default(),
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-            let span = diagnostics.pass_span(&mut pass, label);
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.draw(0..3, 0..1);
-            span.end(&mut pass);
+                &layout_filter,
+                &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
+            );
+
+            // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
+            // Each pass opens its own diagnostic span (`render/ffx_glow_*/elapsed_gpu` on a
+            // device that times passes): the journal's `gpu_glow` column is their sum (2008).
+            let filter_passes: [(&'static str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
+                (
+                    "ffx_glow_down_quarter",
+                    downsample,
+                    &down_bind,
+                    &textures.quarter_a.default_view,
+                ),
+                (
+                    "ffx_glow_gauss_h",
+                    gauss_h,
+                    &textures.gauss_h_bind,
+                    &textures.quarter_b.default_view,
+                ),
+                (
+                    "ffx_glow_gauss_v",
+                    gauss_v,
+                    &textures.gauss_v_bind,
+                    &textures.quarter_a.default_view,
+                ),
+            ];
+            for (label, pipeline, bind, dst) in filter_passes {
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_render_pass(&RenderPassDescriptor {
+                            label: Some(label),
+                            color_attachments: &[Some(RenderPassColorAttachment {
+                                view: dst,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: Operations::default(),
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                let span = diagnostics.pass_span(&mut pass, label);
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind, &[]);
+                pass.draw(0..3, 0..1);
+                span.end(&mut pass);
+            }
         }
 
         // Combine: screen + w·blur² (gamma-space byte math in the shader) → the post destination.

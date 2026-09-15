@@ -136,10 +136,12 @@ fn tick_clouds(
         glow_dir: light.cloud_glow_dir,
         glow_track: light.cloud_glow_track,
     };
-    if surfaced && std::env::var_os("WOW_CLOUD_DUMP").is_some() {
+    static CLOUD_DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let cloud_dump = *CLOUD_DUMP.get_or_init(|| std::env::var_os("WOW_CLOUD_DUMP").is_some());
+    if surfaced && cloud_dump {
         eprintln!("[cloud] surfaced -> full rebuild (C {density:.3})");
     }
-    if std::env::var_os("WOW_CLOUD_DUMP").is_some() && cov.last_frame != Some(frame) {
+    if cloud_dump && cov.last_frame != Some(frame) {
         eprintln!(
             "[cloud] C {density:.3} sun {:?} slope {:?} gbase {:?} bcc {:.2} glow_dir {:?} track {:.2}",
             frame.sun, frame.slope, frame.gbase, frame.bcc, frame.glow_dir, frame.glow_track

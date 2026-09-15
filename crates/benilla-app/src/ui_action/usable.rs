@@ -21,7 +21,6 @@
 
 use benilla_protocol::messages::ItemUseSpell;
 
-use crate::ui_items::{count_of, InventoryScope};
 use benilla_formats::{
     SpellDisplay, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED,
     SPELL_EFFECT_TRADE_SKILL,
@@ -50,6 +49,10 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) factions: Option<&'a Factions>,
     pub(crate) reputations: &'a Reputations,
     pub(crate) cooldowns: &'a Cooldowns,
+    /// Every carried entry's count, walked ONCE by the caller for the frame
+    /// ([`crate::ui_items::carried_counts`]) — leg 3 reads reagents and totems off it instead
+    /// of walking the bags per reagent per slot.
+    pub(crate) carried: &'a std::collections::HashMap<u32, u32>,
 }
 
 /// How many equipment indices the search covers — `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the
@@ -263,7 +266,7 @@ fn equipped_slots_match(
 /// combat; the reference runs three more gates, and the third is the whole spell walk.
 ///
 /// 1. **the count cache** `[0xbc6390+slot*4] == 0` ⇒ `(false, false)` (`4e50ab`). `held` is our
-///    stand-in: carried copies ([`InventoryScope::CARRIED`], decision 1158's documented narrowing)
+///    stand-in: carried copies ([`crate::ui_items::InventoryScope::CARRIED`], decision 1158's documented narrowing)
 ///    or a copy worn on an equipment slot. The reference fills that cache from `0x4e6d20`, whose
 ///    mask `0x4e6d20`→`0x622439` rewrites to **`0x47`** — equipment `0..0x12`, bag slots, the
 ///    backpack, container contents and **the keyring**, bank excluded. So the `|| equipped` half
@@ -351,13 +354,14 @@ pub(crate) fn spell_usable(
         return (false, false);
     }
     // Leg 3 (`0x6e4000`): every reagent pair in bag counts; every totem tool present.
+    let carried = |entry: u32| ctx.carried.get(&entry).copied().unwrap_or(0);
     for &(entry, count) in &d.reagents {
-        if entry != 0 && count_of(&ctx.store.0, items, entry, InventoryScope::CARRIED) < count {
+        if entry != 0 && carried(entry) < count {
             return (false, false);
         }
     }
     for &totem in &d.totems {
-        if totem != 0 && count_of(&ctx.store.0, items, totem, InventoryScope::CARRIED) == 0 {
+        if totem != 0 && carried(totem) == 0 {
             return (false, false);
         }
     }
@@ -711,6 +715,7 @@ mod tests {
         store: &'a ObjectStore,
         cooldowns: &'a Cooldowns,
         reputations: &'a Reputations,
+        carried: &'a std::collections::HashMap<u32, u32>,
     ) -> UsableCtx<'a> {
         UsableCtx {
             store,
@@ -718,6 +723,7 @@ mod tests {
             factions: None,
             reputations,
             cooldowns,
+            carried,
         }
     }
 
@@ -728,11 +734,12 @@ mod tests {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
+        let carried = crate::ui_items::carried_counts(&store.0, &items);
         spell_usable(
             1,
             d,
             &spells,
-            &ctx(store, &cooldowns, &reputations),
+            &ctx(store, &cooldowns, &reputations, &carried),
             &mut items,
             &commands,
         )
@@ -864,6 +871,7 @@ mod tests {
 
         let healthy = ObjectStore(ObjectFields::from_pairs(&[(22, 100), (125, 0)]));
         let low = ObjectStore(ObjectFields::from_pairs(&[(22, 10), (125, 0x2)]));
+        let carried = crate::ui_items::carried_counts(&me.0, &items);
         for (target, expect) in [(&healthy, false), (&low, true)] {
             let ctx = UsableCtx {
                 store: &me,
@@ -871,6 +879,7 @@ mod tests {
                 factions: None,
                 reputations: &reputations,
                 cooldowns: &cooldowns,
+                carried: &carried,
             };
             assert_eq!(
                 spell_usable(5308, &execute, &spells, &ctx, &mut items, &commands),

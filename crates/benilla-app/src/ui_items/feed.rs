@@ -421,12 +421,22 @@ pub(super) fn feed_item_stats(
     // player is bound. But the item feed idles whenever nothing is pending, and the bind point
     // arrives long after world entry (`SMSG_BINDPOINTUPDATE` at login and on every re-bind), so the
     // push cannot sit behind that gate.
-    let home_area: Option<String> = home_bind
+    let home_area: Option<&str> = home_bind
         .as_deref()
         .and_then(|b| b.0)
-        .and_then(|id| area_names.as_deref()?.0.resolve(id as i32))
-        .map(str::to_string);
-    script.set_bind_location(home_area.as_deref().unwrap_or_default());
+        .and_then(|id| area_names.as_deref()?.0.resolve(id as i32));
+    // …pushed on CHANGE, per VM: the memo resets with the VM, so a rebuilt one is fed again
+    // the frame it appears. It used to push every frame — with a fresh String each time —
+    // because it cannot sit behind the pending gate below; the memo compare is the gate it can
+    // sit behind, and the re-substitute rides the same edge.
+    if last_home.as_deref() != home_area {
+        script.set_bind_location(home_area.unwrap_or_default());
+        *last_home = home_area.map(str::to_string);
+        // A bind-point change re-substitutes every held view: templates pushed before the
+        // login's SMSG_BINDPOINTUPDATE landed carry a raw $z otherwise (the hearthstone's login
+        // race).
+        pending.extend(items.cached_template_ids());
+    }
 
     pending.extend(items.take_fresh());
     pending.extend(script.take_item_stat_asks());
@@ -435,12 +445,6 @@ pub(super) fn feed_item_stats(
     }
     let spell_res = spells.as_deref();
     let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
-    // A bind-point change re-substitutes every held view: templates pushed before the login's
-    // SMSG_BINDPOINTUPDATE landed carry a raw $z otherwise (the hearthstone's login race).
-    if *last_home != home_area {
-        *last_home = home_area.clone();
-        pending.extend(items.cached_template_ids());
-    }
     let ready: Vec<u32> = pending
         .iter()
         .copied()
@@ -468,7 +472,7 @@ pub(super) fn feed_item_stats(
                         &t,
                         spell_res,
                         skill_catalog,
-                        home_area.as_deref(),
+                        home_area,
                         factions.as_deref().map(|f| f.catalog()),
                         sub_classes.as_deref().map(|s| &s.0),
                         classes.as_deref().map(|c| &c.0),

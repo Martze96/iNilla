@@ -1531,7 +1531,7 @@ pub(super) fn seat_camera(
     // camera-derived can be the cause" (0671) rests entirely on that being untrue, and it was never
     // measured. `open` is printed beside the eased arm so a hit/miss alternation in the CAST is
     // visible even on a frame where the ease has not yet moved the camera far enough to see.
-    if std::env::var_os("WOW_CAM_DUMP").is_some() {
+    if cam_dump_enabled() {
         // `follow=` is the auto-follow's own reading (1502): the offset the return is animating,
         // the state the input word classifies to, and — once armed — how far through the
         // transition this frame is. `off` moving while `arm` reads `-` means something other than
@@ -1895,6 +1895,13 @@ pub(super) fn fly_free(
         };
         cam_t.translation += dir.normalize() * cam.speed * boost * dt;
     }
+}
+
+/// `$WOW_CAM_DUMP` — the per-frame camera/turn dump (this file's seat and the controller's turn
+/// line share it). One read for the process: both sites sit on the every-frame path.
+pub(crate) fn cam_dump_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_CAM_DUMP").is_some())
 }
 
 #[cfg(test)]

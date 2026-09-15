@@ -188,7 +188,22 @@ fn sync_shadows(
         ),
     >,
     shadows: Query<(Entity, &BlobShadow)>,
+    // The reconciler's inputs move only when a unit's animated model arrives or leaves, or a
+    // unit becomes or stops being a mount child (the `units` filter's two terms); a frame with
+    // none of those has the same answer it had last frame, and used to pay a set build plus a
+    // walk of every unit for it.
+    grew: Query<(), Added<ModelAnimations>>,
+    mut shrank: RemovedComponents<ModelAnimations>,
+    mounted: Query<(), Added<crate::entities::mount::MountBody>>,
+    mut unmounted: RemovedComponents<crate::entities::mount::MountBody>,
 ) {
+    if grew.is_empty()
+        && mounted.is_empty()
+        && shrank.read().next().is_none()
+        && unmounted.read().next().is_none()
+    {
+        return;
+    }
     let mut shadowed = EntityHashSet::default();
     for (entity, shadow) in &shadows {
         // Owner gone or no longer eligible (model torn down) → the decal goes with it.

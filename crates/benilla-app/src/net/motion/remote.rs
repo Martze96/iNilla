@@ -772,7 +772,16 @@ pub(in crate::net) fn extrapolate_remote_units(
                 now_ms,
             );
         }
-        t.translation = wow_to_bevy(pos);
+        // Compare-then-write, all three (1362's no-op-write law, as `spline.rs`'s clamp and the
+        // camera seat already do): the loop visits every remote mover, and a flag-still one —
+        // the whole idle population of a city — reproduces last frame's pose bit for bit. Writing
+        // it anyway marked every such body's `Transform` changed on every frame: its whole model
+        // subtree re-propagated, the visibility walk's per-part skip (1979) missed on every one
+        // of its parts, and the swim-mark and splash gates re-asked the water for it.
+        let translation = wow_to_bevy(pos);
+        if t.translation != translation {
+            t.translation = translation;
+        }
         // The strafe body pose, same as our own avatar's (the client's display-facing blend): a
         // strafing remote player renders its body at `orientation ± 90°/45°`, eased in aim-relative
         // offset space (a left↔right flip swings around the front, never the 180°-tie back path),
@@ -794,9 +803,15 @@ pub(in crate::net) fn extrapolate_remote_units(
         // The swim body pitch — [`crate::creature_anim::swim_body_rotation`], the same law our own
         // avatar's pose owner calls, on the pitch this mover reported. TU-A is explicit that the
         // observed mover takes the *reported* pitch here, exactly as the local one takes its own.
-        t.rotation = crate::creature_anim::swim_body_rotation(yaw, rm.flags, rm.pitch);
+        let rotation = crate::creature_anim::swim_body_rotation(yaw, rm.flags, rm.pitch);
+        if t.rotation != rotation {
+            t.rotation = rotation;
+        }
         if let Some(mut twist) = twist {
-            twist.yaw_gap = wrap_pi(orientation - yaw);
+            let gap = wrap_pi(orientation - yaw);
+            if twist.yaw_gap != gap {
+                twist.yaw_gap = gap;
+            }
         }
     }
 }

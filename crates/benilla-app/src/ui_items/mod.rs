@@ -473,6 +473,26 @@ pub(crate) fn count_of(
     total
 }
 
+/// Every carried entry's count in ONE walk — [`count_of`] for a caller that asks about many
+/// entries on one frame. The action bar asked `count_of` once per reagent, per totem and per
+/// item slot, each a whole walk of the bags to sum one entry; one walk answers all of them, and
+/// the per-entry question becomes a lookup. Same scope, same per-copy stack sum.
+pub(crate) fn carried_counts(
+    store: &ObjectFields,
+    items: &Items,
+) -> std::collections::HashMap<u32, u32> {
+    let mut counts = std::collections::HashMap::new();
+    walk_inventory::<()>(store, items, InventoryScope::CARRIED, |_, _, guid| {
+        if let Some(fields) = items.object(guid) {
+            if let Some(entry) = fields.object_entry() {
+                *counts.entry(entry).or_insert(0) += fields.item_stack_count().unwrap_or(1);
+            }
+        }
+        None
+    });
+    counts
+}
+
 /// How far [`find_item`] looks, and which copies count — the two mode bits the reference's own
 /// callers pass into the inventory walker `0x622420` (wow-re `action-item-slot.md` §8.2).
 #[derive(Clone, Copy, Default)]

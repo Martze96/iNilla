@@ -23,7 +23,7 @@
 //! §2a fold-back: reagents, forms, stealth, aura states (the Execute-family target dependence),
 //! the works.
 
-use crate::ui_items::{count_of, InventoryScope};
+use crate::ui_items::carried_counts;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -436,6 +436,12 @@ pub(super) fn feed_action_state(
 
     let (pending, queued_melee, channel, targeting, bound) = &cast_state;
     let me = self_q.iter().next();
+    // The bags, walked ONCE for the frame: every reagent, totem and item-count question below
+    // reads this table. It used to be one whole walk per question — per reagent per spell slot,
+    // per item slot — for the same bags each time (1697 item 13).
+    let carried = me
+        .map(|(s, _, _, _)| carried_counts(&s.0, &items))
+        .unwrap_or_default();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
         .map(|(s, _, _, _)| s.0.unit_shapeshift_form())
@@ -524,6 +530,7 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
+                        carried: &carried,
                     };
                     let (u, oom) =
                         usable::spell_usable(button.action, d, sp, &ctx, &mut items, &commands);
@@ -558,15 +565,15 @@ pub(super) fn feed_action_state(
                 }
             }
             ACTION_KIND_ITEM => {
-                let template = items.template(button.action, 0, &commands).cloned();
+                // Only the on-use spell leaves the template (`ItemUseSpell` is `Copy`) — not a
+                // clone of the whole `ItemInfo` (its Strings and Vecs) per item slot per frame.
+                let use_spell = items
+                    .template(button.action, 0, &commands)
+                    .and_then(|t| t.use_spell);
                 // `IsConsumableAction` is NOT fed from here. It reads nothing but this template
                 // (`0x4e5250`), so it is slot IDENTITY, and it rides the identity feed's push
                 // beside the count it gates — `super::feed`'s ITEM arm, decision 1301.
-                let count = me
-                    .map(|(s, _, _, _)| {
-                        count_of(&s.0, &items, button.action, InventoryScope::CARRIED)
-                    })
-                    .unwrap_or(0);
+                let count = carried.get(&button.action).copied().unwrap_or(0);
                 // Worn on any equipment slot (0..18) — the green border's IsEquippedAction.
                 st.equipped = me.is_some_and(|(s, _, _, _)| {
                     (0..19).any(|i| {
@@ -579,7 +586,6 @@ pub(super) fn feed_action_state(
                 // The rest of `0x4e5050`'s ITEM arm — the count gate, `IsItemOnCooldown`, and
                 // the item's on-use spell run through the SAME `0x6e3d60` walk a spell slot
                 // takes ([`super::usable::item_usable`]). Food greys in combat from leg 8 there.
-                let use_spell = template.as_ref().and_then(|t| t.use_spell);
                 // No active player and the reference answers (0,0) before resolving anything
                 // (§2a P0) — which is `ActionState::default()`'s `usable`.
                 if let Some((store, _, _, _)) = me {
@@ -589,6 +595,7 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
+                        carried: &carried,
                     };
                     let (u, oom) = usable::item_usable(
                         button.action,

@@ -463,7 +463,13 @@ fn pump_emitters(
         let emitter = match pool.entries[e].voice {
             Some(em) => {
                 match emitters.get_mut(em) {
-                    Ok(mut tf) => tf.translation = nearest,
+                    // Compare-then-write (1362): a parked listener's nearest record is the same
+                    // point every frame, and a no-op write still re-propagates the transform.
+                    Ok(mut tf) => {
+                        if tf.translation != nearest {
+                            tf.translation = nearest;
+                        }
+                    }
                     // Ours, spawned on an earlier frame, so this cannot happen — except through a
                     // query-filter mistake, which would silently freeze every ambience at the
                     // first emitter it ever found and leave the whole nearest-follow inert. That

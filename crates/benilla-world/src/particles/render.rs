@@ -628,7 +628,7 @@ fn prepare_effects(
     // The lane is keyed on the SORT rung because that is the one field unique per lane: the raster
     // bias is shared (every ground decal rides `DECAL_RASTER`, and prints were being labelled
     // shadows here for exactly that reason).
-    let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
+    let trace = effect_trace();
     let mut trace_lines: Vec<String> = Vec::new();
     // The per-draw uniform rows, THIS frame: the six canonical fog policies plus one row per
     // distinct (fog, clip) a clipped draw asks for. It is rebuilt every frame rather than once
@@ -801,7 +801,7 @@ fn prepare_effect_bind_groups(
         let Some(image) = gpu_images.get(draw.texture) else {
             continue;
         };
-        if std::env::var_os("WOW_EFFECT_TRACE").is_some() {
+        if effect_trace() {
             info!(
                 "effect bind: new group for tex {:?} ({}x{})",
                 draw.texture, image.size.width, image.size.height
@@ -881,8 +881,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawEffectBatch {
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         // The `$WOW_EFFECT_TRACE` tail: what draw_indexed ACTUALLY ran — read against the
         // prepare-side item lines to see which appended ranges never reached the GPU.
-        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *TRACE.get_or_init(|| std::env::var_os("WOW_EFFECT_TRACE").is_some()) {
+        if effect_trace() {
             info!(
                 "effect draw: merged {} indices {:?}",
                 item.batch_range().start,
@@ -922,6 +921,14 @@ impl Plugin for EffectLanePlugin {
                 ),
             );
     }
+}
+
+/// `$WOW_EFFECT_TRACE` — the effect lane's per-item / per-bind / per-draw trace, one read for
+/// the process: the three sites that asked the environment per frame (and per new bind group)
+/// now ask this.
+fn effect_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("WOW_EFFECT_TRACE").is_some())
 }
 
 #[cfg(test)]

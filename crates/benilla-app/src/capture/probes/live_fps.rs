@@ -59,7 +59,7 @@ impl Plugin for LiveFpsPlugin {
             paced_samples: Vec::new(),
             threads_at_start: None,
             faults_at_start: None,
-            still_at_start: [0; 5],
+            still_at_start: [0; 7],
             cpu_at_start: None,
             sys_at_start: None,
             occluded_now: false,
@@ -83,7 +83,7 @@ enum LiveFpsPhase {
 
 /// [`LiveFpsPlugin`] state.
 /// The still-frame input counters (`benilla_world::dev_state::STILL_INPUTS_CHANGED`), now.
-fn still_inputs_now() -> [u32; 5] {
+fn still_inputs_now() -> [u32; 7] {
     let c = &benilla_world::dev_state::STILL_INPUTS_CHANGED;
     std::array::from_fn(|i| c[i].load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -123,7 +123,7 @@ struct LiveFps {
     /// The page-fault counters at the window's first frame (`perf::process_faults`).
     faults_at_start: Option<(u64, u64)>,
     /// `dev_state::STILL_INPUTS_CHANGED` at the window's first frame — `noisy=` is the delta.
-    still_at_start: [u32; 5],
+    still_at_start: [u32; 7],
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
@@ -545,7 +545,7 @@ fn drive_live_fps(
                             let faults =
                                 match (probe.faults_at_start, crate::perf::process_faults()) {
                                     (Some((mi0, ma0)), Some((mi1, ma1))) => format!(
-                                        " faults={:.0}/{:.1} noisy=[cam:{},dbg:{},view:{},win:{},claim:{}]",
+                                        " faults={:.0}/{:.1} noisy=[cam:{},dbg:{},view:{},win:{},claim:{},portals:{},flips:{}]",
                                         (mi1 - mi0) as f64 / v_len as f64,
                                         (ma1 - ma0) as f64 / v_len as f64,
                                         noisy[0],
@@ -553,6 +553,8 @@ fn drive_live_fps(
                                         noisy[2],
                                         noisy[3],
                                         noisy[4],
+                                        noisy[5],
+                                        noisy[6],
                                     ),
                                     _ => String::new(),
                                 };

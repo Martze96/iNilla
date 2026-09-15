@@ -563,13 +563,25 @@ fn compute_wmo_pvs(
         // visit records): a group entering the PVS this frame stays "visited" for the rest of this
         // placement's residency, and the visibility authority draws its MLIQ surface off THIS latch,
         // never off the per-frame `visible`.
-        if inst.liquid_visited.len() != groups {
-            inst.liquid_visited = vec![false; groups];
+        // Through the change gate like the flood's own answer above: this latch used to be
+        // written through `Mut` for every visible building on every frame, which marked the
+        // whole resident population changed and held `Changed<WmoPortalInstance>` open — the
+        // one term of the visibility walk's still-frame skip (1979/1982) that a city can never
+        // satisfy. A slot that actually flips is a PVS change and marks, as `visible` does.
+        let held = inst.bypass_change_detection();
+        let mut latched = false;
+        if held.liquid_visited.len() != groups {
+            held.liquid_visited = vec![false; groups];
+            latched = true;
         }
         for g in 0..groups {
-            if inst.visible.get(g).copied().unwrap_or(false) {
-                inst.liquid_visited[g] = true;
+            if held.visible.get(g).copied().unwrap_or(false) && !held.liquid_visited[g] {
+                held.liquid_visited[g] = true;
+                latched = true;
             }
+        }
+        if latched {
+            inst.set_changed();
         }
     }
     if camera_fog.0 != fog_target {

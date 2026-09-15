@@ -684,7 +684,8 @@ fn drive_vplates(
         // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
         // this frame, in logical px — the machine-side check the capture PNG can't give
         // (fill/border/text hues overlap under zoom).
-        let trace = std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1");
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point
         // (the plate hangs below head + 2/3 yd), then the bucket-0 seat law — normalize, SOLVE
         // off the plates already claimed this frame, clamp the resolved center-X/top half a

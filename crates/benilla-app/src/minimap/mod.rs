@@ -462,9 +462,12 @@ fn emit_minimap(
     // `WOW_MM_ZOOM=0..5` forces the zoom level of whichever map is showing — a capture instrument
     // (pairs with the `WOW_MM_PROBE` interior probe). Indoors and outdoors each carry their own
     // persisted index, so the override stands in for both.
-    let zoom_override = std::env::var("WOW_MM_ZOOM")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok());
+    static ZOOM_OVERRIDE: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
+    let zoom_override = *ZOOM_OVERRIDE.get_or_init(|| {
+        std::env::var("WOW_MM_ZOOM")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok())
+    });
     let zoom = zoom_override.unwrap_or(slot.zoom);
     let inside_zoom = zoom_override.unwrap_or(slot.inside_zoom);
     let center = (slot.rect.min + slot.rect.max) * 0.5;
@@ -634,7 +637,8 @@ fn emit_minimap(
         // how many groups the flood-fill kept out of how many, and how many tiles that came to. The
         // reference's own Stormwind capture emitted 57 tiles at indoor zoom 3, which is the number
         // this is here to be compared against (wow-re `wmo-interior-no-adt-underlay.md`).
-        if std::env::var("WOW_MM_STATS").is_ok() {
+        static MM_STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *MM_STATS.get_or_init(|| std::env::var_os("WOW_MM_STATS").is_some()) {
             eprintln!(
                 "MM-STATS: radius {radius} yd, groups {}/{} selected, {} tiles composited",
                 drawable.iter().filter(|d| **d).count(),
@@ -735,7 +739,8 @@ fn emit_minimap(
         })
         .unwrap_or_default();
     let blip_ctx = (blip_px_per_yd > 0.0).then(|| {
-        if std::env::var("WOW_MM_BLIP_PROBE").is_ok() {
+        static BLIP_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *BLIP_PROBE.get_or_init(|| std::env::var_os("WOW_MM_BLIP_PROBE").is_some()) {
             eprintln!(
                 "BLIP-PROBE: arrow_art={} pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
                 blips::RimArrow::ALL

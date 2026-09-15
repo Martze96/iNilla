@@ -324,7 +324,7 @@ fn watch_skill_ups(
 /// without `0x2` under its own header (decision 1091).
 fn feed_skills(
     script: Option<NonSendMut<UiScript>>,
-    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    self_store: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     mut last: Local<crate::ui_script::VmMemo<Option<SkillsState>>>,
 ) {
@@ -332,9 +332,16 @@ fn feed_skills(
         return;
     };
     let last = last.get(&script);
+    let lines_moved = skill_lines.as_ref().is_some_and(|l| l.is_changed());
     let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
         return;
     };
+    // The list is a pure function of our descriptor and the catalog: with both still and a
+    // push already made on this VM, nothing below can differ from what the memo holds. It used
+    // to build ~40 rows with a cloned name each, every frame, to compare and drop them.
+    if last.is_some() && !store.is_changed() && !lines_moved {
+        return;
+    }
     // The display predicate reads the player's own race/class (the SkillRaceClassInfo row-match —
     // the spellbook's own General-collapse inputs, `ui_spellbook::build_book`) and level (the
     // untrained gate).
