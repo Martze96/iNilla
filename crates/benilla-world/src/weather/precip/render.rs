@@ -5,7 +5,11 @@
 //! Empty pools push nothing, so an idle sky costs zero here — the structural replacement for
 //! the old fixed-capacity meshes' `WriteGate` (the 0353 fps hunt).
 
-use bevy::prelude::*;
+// Explicit, not `bevy::prelude::*`: the parent module's own prelude glob reaches this file
+// through `use super::*` below, and two globs supplying the same names had rustc crediting the
+// use to one or the other by platform — the "unused import" every non-macOS build warned on
+// (2205's next move 4).
+use bevy::math::{Quat, Vec3};
 
 use crate::particles::buffer::EffectVertex;
 

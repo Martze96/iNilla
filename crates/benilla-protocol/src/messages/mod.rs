@@ -234,8 +234,8 @@ pub use social::{
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
-    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_gameobject, cast_spell_item,
-    CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
+    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_gameobject,
+    cast_spell_item, CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,

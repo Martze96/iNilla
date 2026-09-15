@@ -36,9 +36,12 @@
 //! GameObject (decision 0939). A LOCKED spell — Opening, Pick Lock, Mining, Herb Gathering —
 //! satisfies the last **two**, and the click decides which leg it was, exactly as `BindTarget
 //! 0x6e5b40` decides: by the clicked object's typemask (`6e5f17` item bit 1, `6e5f52` GameObject
-//! bit 5), each arm then re-testing the word. Still deferred, refused-not-guessed: the pure SOURCE
-//! word (0x20 — NPC-cast data only), STRING bit 13, and the *unit* hand-cursor mode (the
-//! residual-unit-word machine behind the autoSelfCast stand-in above).
+//! bit 5), each arm then re-testing the word. The terrain seam likewise serves **both** location
+//! bits — `TargetingWantsLocation`'s mask is `0x60`, and `BindLocation 0x6e60f0` has an arm for
+//! each (decision 2218, closing B388: Martin Fury's spell 265 is a pure `0x20` word, and reading
+//! that seam as dest-only refused the only three shipped items that carry one). Still deferred,
+//! refused-not-guessed: STRING bit 13, and the *unit* hand-cursor mode (the residual-unit-word
+//! machine behind the autoSelfCast stand-in above).
 
 use benilla_formats::SpellDisplay;
 use bevy::ecs::system::SystemParam;
@@ -78,9 +81,16 @@ pub(crate) const ERR_INVALID_TARGET: u8 = 0x0A;
 /// why it travels as [`CastWireTarget::RefusedAtArm`]. Decision 1554.
 pub(crate) const ERR_MAINHAND_EMPTY: u8 = 0x2d;
 
-/// The dest-location bit — the ground-cast wire mask (`BindLocation 0x6e60f0`'s bit-6 arm; the
-/// source bit 5 completes `TargetingWantsLocation 0x6e6320`'s `0x60`, still refused below).
+/// The dest-location bit — the ground-cast wire mask (`BindLocation 0x6e60f0`'s bit-6 arm).
 const TF_DEST_LOCATION: u16 = 0x0040;
+/// The source-location bit — `BindLocation 0x6e60f0`'s **other** arm (`6e6105`–`6e6126`), tested
+/// one instruction before the dest one and writing `SPELLCAST+0x30` instead of `+0x3c`. Together
+/// the two are `TargetingWantsLocation 0x6e6320`'s `0x60`: the terrain click serves both
+/// (decision 2218).
+const TF_SOURCE_LOCATION: u16 = 0x0020;
+/// `TargetingWantsLocation 0x6e6320`'s whole mask (`6e6328: testb $0x60, %cl`) — the one
+/// predicate the terrain seam asks the standing word.
+const LOCATION_BITS: u16 = TF_SOURCE_LOCATION | TF_DEST_LOCATION;
 /// The item bit — the *other* half of the targeting cursor (decision 0923). Its predicate twin is
 /// `TargetingWantsItem 0x6e6330` (`flag_word & 0x4010`), which the bag and paper-doll click seams
 /// consult before binding the clicked item ([`super::targeting`]).
@@ -438,13 +448,14 @@ pub(crate) fn resolve_cast_target(
         }
     }
     // Bits outside the unit family (item/gameobject/location/string) have no candidate here.
-    // The DEST-location word (Blizzard's bare `Targets = 0x40`, default switch arm) is the
-    // targeting cursor's location half (decision 0792) — in the ref it falls out of the failed
-    // bind walk into cursor mode (`6e50c8`); real 5875 data never combines location bits with
-    // unit bits (live spell_template sweep: `Targets & 0x60` rows are exactly 0x20 or 0x40
-    // alone), so deferring before the unit walk is byte-equivalent. The pure SOURCE word (0x20)
-    // is NPC-cast data (Aura of Fear kin), unreachable from a player's book, and keeps the
-    // refusal with the item/GO/string machines.
+    // A location word — Blizzard's bare `Targets = 0x40`, Martin Fury's bare `0x20` — is the
+    // targeting cursor's location half (decisions 0792, 2218): in the ref it falls out of the
+    // failed bind walk into cursor mode (`6e50c8`), and deferring before the unit walk is
+    // byte-equivalent **only while no unit bit stands beside it**, which is why the location arm
+    // below carries that condition where the item/GO one is a bare mask test. One shipped row
+    // breaks the old "never combined" reading (`Summon Fallout Slime` 28218, word `0x42`,
+    // NPC-cast): there the ref binds the unit at arm time and the cursor takes only the residue,
+    // so that word keeps the refusal rather than guessing at a shape nothing can reach.
     if word & !UNIT_BITS != 0 {
         // Hand the whole word to the cursor when any seam can serve it — written as the
         // reference's own three predicates rather than as equalities on bare words. The reference
@@ -460,7 +471,9 @@ pub(crate) fn resolve_cast_target(
         // of them (0928's live probe: a Dull Iron Key drew "Invalid target" instead of the
         // cursor) — and a single-verdict enum then had to *choose* item-or-world for a word the
         // reference lets satisfy both. Both bits ride along; the click picks the leg.
-        if word == TF_DEST_LOCATION || word & (TF_ITEM | TF_LOCKED | TF_GAMEOBJECT) != 0 {
+        if word & LOCATION_BITS != 0 && word & UNIT_BITS == 0
+            || word & (TF_ITEM | TF_LOCKED | TF_GAMEOBJECT) != 0
+        {
             return CastWireTarget::Targeting(word);
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
@@ -643,13 +656,46 @@ mod tests {
         );
     }
 
-    /// The still-deferred non-unit masks (source-location, string, the 0x60 pair) refuse instead
-    /// of shipping a guess — the machines named in the module docs. `0x60` is the *pair*: the
-    /// reference binds source then dest across two clicks (`BindLocation 0x6e60f0`'s bit-5 arm
-    /// takes priority and only the second click sends), and our terrain seam binds dest only.
+    /// **The SOURCE word raises the cursor, exactly as the DEST word does** (decision 2218,
+    /// closing B388). `TargetingWantsLocation 0x6e6320` is `word & 0x60` — one predicate over both
+    /// bits — and `BindLocation 0x6e60f0` has an arm for each, so a bare `0x20` is a terrain click
+    /// waiting to happen, not a refusal. Martin Fury's spell 265 (`Targets 0x20`, implicit 15 =
+    /// default arm) is the shipped case; a selection changes nothing, since no unit candidate can
+    /// clear a location bit.
+    #[test]
+    fn the_source_location_word_enters_targeting_mode() {
+        let area_death = spell(0x20, 15);
+        assert_eq!(
+            resolve_cast_target(
+                Some(&area_death),
+                &cands(Some(42), Some(1)),
+                true,
+                &rel_none()
+            ),
+            CastWireTarget::Targeting(TF_SOURCE_LOCATION)
+        );
+        assert_eq!(
+            resolve_cast_target(Some(&area_death), &cands(None, Some(1)), true, &rel_none()),
+            CastWireTarget::Targeting(TF_SOURCE_LOCATION),
+            "and with nothing selected — autoSelfCast has no location to give either"
+        );
+        // The pair, the shape `BindLocation` walks across two clicks. No 5875 row carries it; the
+        // resolver still hands the whole word over rather than choosing a leg here.
+        let both = spell(0x60, 0);
+        assert_eq!(
+            resolve_cast_target(Some(&both), &cands(None, Some(1)), true, &rel_none()),
+            CastWireTarget::Targeting(LOCATION_BITS)
+        );
+    }
+
+    /// What still refuses rather than shipping a guess — the machines named in the module docs.
+    /// STRING (bit 13) has no seam at all; a location bit with a **unit** bit beside it (`0x42`,
+    /// `Summon Fallout Slime` 28218, NPC-cast) is the one shipped word where deferring before the
+    /// unit walk would NOT be byte-equivalent: the reference binds the unit at arm time and the
+    /// cursor takes only the residue.
     #[test]
     fn non_unit_masks_refuse() {
-        for targets in [0x20u32, 0x2000, 0x60] {
+        for targets in [0x2000u32, 0x42] {
             let s = spell(targets, 0);
             assert_eq!(
                 resolve_cast_target(Some(&s), &cands(Some(42), Some(1)), true, &rel_none()),

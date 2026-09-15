@@ -64,6 +64,23 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// **Shape D** — a `lua_isnumber`-gated *flag* whose failure edge does NOT raise: the local keeps
+/// the zero it was seeded with and the binding carries on. `SetInventoryItem`'s optional third
+/// argument, the one the image's own usage string (`0x8552dc`) calls `nameOnly`, is this repo's
+/// example, and it is stricter than the other shapes on one point: after the
+/// `is-number(L, idx)` guard (`0x6f34d0`, so a numeric STRING passes it) the value is compared
+/// `> 0.0` **strictly** — `0x53303f fcomp qword [0x802970]` against a literal `0.0`, then
+/// `0x533047 test ah,0x41; 0x53304a jne` onto the block that keeps the zero. Masked AH is `0x00`
+/// only for greater-than; less (`0x01`), equal (`0x40`) and unordered (`0x41`) all jump. So `0`,
+/// a negative and NaN are false, and `1`, `0.5` and `"1"` are true.
+///
+/// The distinction from [`number_arg`] is the whole point: shape A *raises* `Usage:` on a
+/// non-number, shape D shrugs. Which shape an argument takes is per binding — wow-re
+/// `ui/scratch/tooltip-nameonly-p4-census.md` §3 for this one.
+pub(crate) fn positive_number_flag(lua: &Lua, v: Value) -> mlua::Result<bool> {
+    Ok(lua.coerce_number(v)?.is_some_and(|n| n > 0.0))
+}
+
 /// **Shape C** — a numeric argument the binding reads with a bare `lua_tonumber 0x6f3620` and NO
 /// `lua_isnumber` guard, so it cannot fail: absent, `nil`, `true`, a table, a function, or an
 /// unparseable string all land on **`0.0`** and the binding completes.

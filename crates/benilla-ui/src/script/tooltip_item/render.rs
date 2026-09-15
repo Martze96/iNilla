@@ -116,6 +116,29 @@ pub(super) struct ItemInstance {
 /// blank rows.
 const SET_SPACER: &str = " \n";
 
+/// The builder's two independent render flags, p4 and p5 of `0x52b650` — a struct rather than two
+/// adjacent `bool`s because collapsing them into one was decision 2216's bug, and two positional
+/// bools at a call site is the same mistake with an extra step.
+#[derive(Clone, Copy, Default)]
+pub(super) struct BuilderFlags {
+    /// **p5 `[arg+0x18]`** — prepend the gray `CURRENTLY_EQUIPPED` line. Set by the two shopping
+    /// plates (`SetMerchantCompareItem`, `SetAuctionCompareItem`) and by nothing else in the
+    /// image; those two sites pass [`name_only`](Self::name_only) ZERO.
+    pub currently_equipped: bool,
+    /// **p4 `[arg+0x14]`** — the compact mode the binary itself calls `nameOnly`
+    /// (`0x8552dc`: `"Usage: SetInventoryItem(unit, slot [, nameOnly])"`). Reachable from exactly
+    /// one binding — `SetInventoryItem`'s optional third argument, a number `> 0` — and from no
+    /// stock FrameXML caller at all, but it is live code an addon can ask for (wow-re
+    /// `ui/scratch/tooltip-nameonly-p4-census.md`, §5 trio + orchestrator, 2026-09-13; benilla
+    /// decision 2224).
+    ///
+    /// It is *trimmed*, not bare, and the trim is two non-contiguous jumps plus an early return:
+    /// the name goes white, the bind/lock region and the whole stat body are cut, and everything
+    /// after the cooldown line is skipped. What survives is the name, the slot/type cell,
+    /// durability, duration, every requirement line, the spell triggers and the set block.
+    pub name_only: bool,
+}
+
 /// Render one item template into the tooltip — the BYTE-VERIFIED emission law of the shared
 /// renderer `0x52b650` (wow-re `ui/scratch/tooltip-content-law.md`, §5-cross-checked 2026-07-10;
 /// the proficiency-cell and SET legs byte-read directly 2026-07-11; the creator/readable
@@ -126,7 +149,7 @@ pub(super) fn render_view(
     lua: &Lua,
     this: &Table,
     v: &ItemTemplateView,
-    currently_equipped: bool,
+    flags: BuilderFlags,
     // `None` = a template/link source (the ref's no-object path).
     inst: Option<&ItemInstance>,
 ) -> mlua::Result<()> {
@@ -186,13 +209,21 @@ pub(super) fn render_view(
     // renders a 'compare mode' abbreviated tooltip here is wrong"), and `tooltip-content-law.md`
     // §1's per-call-site census over all 31 sites of `0x52b650` is what settles it: those two are
     // the only sites in the image passing a literal non-zero p5, and both pass p4 zero.
-    if currently_equipped {
+    if flags.currently_equipped {
         keyed("CURRENTLY_EQUIPPED", &[], GRAY, false)?;
     }
     let name = inst
         .and_then(|i| i.name.clone())
         .unwrap_or_else(|| v.name.clone());
-    add((name, quality_color(v.quality)))?;
+    // The NAME's one recolor: `nameOnly` paints it white (`0x52b8b3`, the `je 0x52b8ca` target
+    // being the quality arm `lea ecx,[eax*4+0xc0d3c8]`). Nothing else ever recolors it — an
+    // unusable item's name stays quality-colored.
+    let name_color = if flags.name_only {
+        WHITE
+    } else {
+        quality_color(v.quality)
+    };
+    add((name, name_color))?;
     // Line 3 — the petition block, ABOVE the green line and below the name: "Guild Name: X" then
     // "Guild Master: Y" for a charter, "Petition: X" / "Created by Y" for a plain petition. The
     // keys are picked by the record's own charter bit, the same bit `GetPetitionInfo`'s first
@@ -219,43 +250,47 @@ pub(super) fn render_view(
     if v.flags & 0x2000 != 0 {
         keyed("ITEM_SIGNABLE", &[], GREEN, false)?;
     }
-    // ITEM_CONJURED (Flags bit 0x2).
-    if v.flags & 0x2 != 0 {
-        keyed("ITEM_CONJURED", &[], WHITE, false)?;
-    }
-    // The bind line (§6, white, one line). Bonding `[record+0x194]` ∈ {1..5} is what decides
-    // whether a line prints at ALL — a Bonding-0 item says nothing here however it is held.
-    // Within that, a **runtime-bound instance** (`0x5da2c0` — [`ItemInstance::already_bound`])
-    // overrides the whole line to ITEM_SOULBOUND, and to ITEM_BIND_QUEST for the two quest
-    // kinds, which is the same text 4|5 print anyway; only then does the jump table `0x52e4fc`
-    // pick 1→picked up · 2→equipped · 3→used · 4/5→Quest Item.
-    //
-    // Before this arm an equipped Binds-when-equipped piece kept saying *Binds when equipped*
-    // forever (B310, Frostshake): the template's `bonding` never changes when the item binds —
-    // the instance's flag is the only thing that does.
-    match v.bonding {
-        4 | 5 => keyed("ITEM_BIND_QUEST", &[], WHITE, false)?,
-        1..=3 if inst.is_some_and(|i| i.already_bound) => {
-            keyed("ITEM_SOULBOUND", &[], WHITE, false)?
+    // **p4's FIRST cut** (`0x52babe`; `0x52bac3 jne 0x52bfad` skips `[0x52bac9, 0x52bfad)`) — the
+    // whole bind/lock region. `ITEM_SIGNABLE` just above is NOT in the jumped range and survives.
+    if !flags.name_only {
+        // ITEM_CONJURED (Flags bit 0x2).
+        if v.flags & 0x2 != 0 {
+            keyed("ITEM_CONJURED", &[], WHITE, false)?;
         }
-        1 => keyed("ITEM_BIND_ON_PICKUP", &[], WHITE, false)?,
-        2 => keyed("ITEM_BIND_ON_EQUIP", &[], WHITE, false)?,
-        3 => keyed("ITEM_BIND_ON_USE", &[], WHITE, false)?,
-        _ => {}
-    }
-    match v.max_count {
-        1 => keyed("ITEM_UNIQUE", &[], WHITE, false)?,
-        n if n > 1 => keyed("ITEM_UNIQUE_MULTIPLE", &[Arg::D(n.into())], WHITE, false)?,
-        _ => {}
-    }
-    if v.start_quest != 0 {
-        keyed("ITEM_STARTS_QUEST", &[], WHITE, false)?;
-    }
-    // LOCKED (red) — suppressed once the INSTANCE carries UNLOCKED `0x4` (the law's "and the
-    // item is not already unlocked"; the same bit the openable sub-gate reads). The key-item
-    // "Requires %s" sub-line joins with the Lock.dbc resolve (the GO-locks follow-up).
-    if v.lock_id != 0 && inst.is_none_or(|i| i.flags & 0x4 == 0) {
-        keyed("LOCKED", &[], RED, false)?;
+        // The bind line (§6, white, one line). Bonding `[record+0x194]` ∈ {1..5} is what decides
+        // whether a line prints at ALL — a Bonding-0 item says nothing here however it is held.
+        // Within that, a **runtime-bound instance** (`0x5da2c0` — [`ItemInstance::already_bound`])
+        // overrides the whole line to ITEM_SOULBOUND, and to ITEM_BIND_QUEST for the two quest
+        // kinds, which is the same text 4|5 print anyway; only then does the jump table `0x52e4fc`
+        // pick 1→picked up · 2→equipped · 3→used · 4/5→Quest Item.
+        //
+        // Before this arm an equipped Binds-when-equipped piece kept saying *Binds when equipped*
+        // forever (B310, Frostshake): the template's `bonding` never changes when the item binds —
+        // the instance's flag is the only thing that does.
+        match v.bonding {
+            4 | 5 => keyed("ITEM_BIND_QUEST", &[], WHITE, false)?,
+            1..=3 if inst.is_some_and(|i| i.already_bound) => {
+                keyed("ITEM_SOULBOUND", &[], WHITE, false)?
+            }
+            1 => keyed("ITEM_BIND_ON_PICKUP", &[], WHITE, false)?,
+            2 => keyed("ITEM_BIND_ON_EQUIP", &[], WHITE, false)?,
+            3 => keyed("ITEM_BIND_ON_USE", &[], WHITE, false)?,
+            _ => {}
+        }
+        match v.max_count {
+            1 => keyed("ITEM_UNIQUE", &[], WHITE, false)?,
+            n if n > 1 => keyed("ITEM_UNIQUE_MULTIPLE", &[Arg::D(n.into())], WHITE, false)?,
+            _ => {}
+        }
+        if v.start_quest != 0 {
+            keyed("ITEM_STARTS_QUEST", &[], WHITE, false)?;
+        }
+        // LOCKED (red) — suppressed once the INSTANCE carries UNLOCKED `0x4` (the law's "and the
+        // item is not already unlocked"; the same bit the openable sub-gate reads). The key-item
+        // "Requires %s" sub-line joins with the Lock.dbc resolve (the GO-locks follow-up).
+        if v.lock_id != 0 && inst.is_none_or(|i| i.flags & 0x4 == 0) {
+            keyed("LOCKED", &[], RED, false)?;
+        }
     }
     // Slot | type — or, for a bag, the single CONTAINER_SLOTS line in the same seat. The type
     // cell is suppressed for cloaks (InventoryType 16) and displayFlags-hidden subclasses
@@ -344,241 +379,246 @@ pub(super) fn render_view(
             _ => {}
         }
     }
-    // **The damage block** — five slots, a five-arm template matrix and a first/PLUS_ flag
-    // (wow-re `tooltip-damage-matrix-and-container-slots.md` §D1, VERIFIED at
-    // `[0x52c22b, 0x52c5a1)`; §5 trio). Every arm is a key, and every hole's shape is the
-    // binary's own push list — this block composed its English in Rust until it was converted.
-    //
-    // The three predicates and the flag: **hasSchool** is the slot's school field being nonzero
-    // (school 0 takes the no-school subtree — `SPELL_SCHOOL0_CAP` is never looked up);
-    // **isAmmo** is `ItemClass == 6` and *only* that (not InventoryType, not a flag);
-    // **isSingle** is `floor(min) == ceil(max)` on the ROUNDED integers, tested only on the
-    // no-school non-ammo leaf (there is no `SINGLE_…_WITH_SCHOOL`); and **isFirst** is per-ITEM,
-    // cleared on the first EMITTED slot, so a skipped slot does not consume it.
-    let mut first = true;
-    let mut dps_acc = 0.0f32;
-    for &(min, max, school) in v.damages.iter().take(5) {
-        // `floor(min)` / `ceil(max)` — NOT a round-half pair, which is what this block used to
-        // do on both bounds. The reference biases by `0x808120` (0.9999899864196777, neither 0.5
-        // nor 1.0 — the epsilon is what stops an exactly-integral max being bumped) and converts
-        // with `__ftol`'s truncate-toward-zero. Fang of the Mystics' 38.7–85.7 reads "38 - 86";
-        // rounding to nearest would say "39 - 86" (43 shipped items carry fractional damage).
-        let (lo, hi) = (floor_min(min), ceil_max(max));
-        // A slot is emitted iff either rounded bound is nonzero (`0x52c292`).
-        if lo == 0 && hi == 0 {
-            continue;
+    // **p4's SECOND cut** (`0x52c220`; `0x52c225 jne 0x52cc5b` skips `[0x52c22b, 0x52cc5b)`) —
+    // damage/speed/DPS, armor, block, the stat mods, the resistances and the whole enchant family.
+    // The two cuts are not contiguous: the slot/type cell between them is emitted either way.
+    if !flags.name_only {
+        // **The damage block** — five slots, a five-arm template matrix and a first/PLUS_ flag
+        // (wow-re `tooltip-damage-matrix-and-container-slots.md` §D1, VERIFIED at
+        // `[0x52c22b, 0x52c5a1)`; §5 trio). Every arm is a key, and every hole's shape is the
+        // binary's own push list — this block composed its English in Rust until it was converted.
+        //
+        // The three predicates and the flag: **hasSchool** is the slot's school field being nonzero
+        // (school 0 takes the no-school subtree — `SPELL_SCHOOL0_CAP` is never looked up);
+        // **isAmmo** is `ItemClass == 6` and *only* that (not InventoryType, not a flag);
+        // **isSingle** is `floor(min) == ceil(max)` on the ROUNDED integers, tested only on the
+        // no-school non-ammo leaf (there is no `SINGLE_…_WITH_SCHOOL`); and **isFirst** is per-ITEM,
+        // cleared on the first EMITTED slot, so a skipped slot does not consume it.
+        let mut first = true;
+        let mut dps_acc = 0.0f32;
+        for &(min, max, school) in v.damages.iter().take(5) {
+            // `floor(min)` / `ceil(max)` — NOT a round-half pair, which is what this block used to
+            // do on both bounds. The reference biases by `0x808120` (0.9999899864196777, neither 0.5
+            // nor 1.0 — the epsilon is what stops an exactly-integral max being bumped) and converts
+            // with `__ftol`'s truncate-toward-zero. Fang of the Mystics' 38.7–85.7 reads "38 - 86";
+            // rounding to nearest would say "39 - 86" (43 shipped items carry fractional damage).
+            let (lo, hi) = (floor_min(min), ceil_max(max));
+            // A slot is emitted iff either rounded bound is nonzero (`0x52c292`).
+            if lo == 0 && hi == 0 {
+                continue;
+            }
+            // The school WORD is the resolved key; the school NUMBER is what picks the arm. A chain
+            // that carries no `SPELL_SCHOOL%d_CAP` still takes the with-school template and fills
+            // the hole with the empty string, exactly as `FrameScript_GetText` does.
+            let school_name = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
+            // `avg` is the two ROUNDED bounds averaged, round-tripped through f32 — and it is NOT
+            // divided by anything: `AMMO_DAMAGE_TEMPLATE`'s shipped "Adds %g damage per second" is
+            // FrameXML's phrasing over a number the binary never makes per-second (Rough Arrow's
+            // 1–2 reads "Adds 1.5 damage per second").
+            let avg = f64::from((lo + hi) as f32 * 0.5);
+            let plus = |k: &str| {
+                if first {
+                    k.to_string()
+                } else {
+                    format!("PLUS_{k}")
+                }
+            };
+            let (key, args): (String, Vec<Arg<'_>>) = if school != 0 {
+                if v.class == 6 {
+                    (
+                        plus("AMMO_SCHOOL_DAMAGE_TEMPLATE"),
+                        vec![Arg::F(avg), Arg::S(&school_name)],
+                    )
+                } else {
+                    (
+                        plus("DAMAGE_TEMPLATE_WITH_SCHOOL"),
+                        vec![Arg::D(lo.into()), Arg::D(hi.into()), Arg::S(&school_name)],
+                    )
+                }
+            } else if v.class == 6 {
+                (plus("AMMO_DAMAGE_TEMPLATE"), vec![Arg::F(avg)])
+            } else if lo == hi {
+                (plus("SINGLE_DAMAGE_TEMPLATE"), vec![Arg::D(lo.into())])
+            } else {
+                (
+                    plus("DAMAGE_TEMPLATE"),
+                    vec![Arg::D(lo.into()), Arg::D(hi.into())],
+                )
+            };
+            // The RIGHT cell is the FIRST emitted line's alone, and weapons' alone (`0x52c494`/
+            // `0x52c49c` — the only two conjuncts): every later damage line, and every line of a
+            // non-weapon, renders left-text-only. `"%s %.2f"` is an `.rdata` LITERAL, not a key —
+            // only the word "Speed" is looked up — over `Delay × 0.001`.
+            let speed = (first && v.class == 2).then(|| {
+                let word = get("SPEED").unwrap_or_default();
+                let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
+                format!("{word} {secs:.2}")
+            });
+            // The damage line is white in BOTH cells unconditionally — it never reddens for an item
+            // the player cannot use (`0x52c4fa`–`0x52c516`).
+            if let Some(t) = get(&key) {
+                let line = (fill(&t, &args), WHITE);
+                match speed {
+                    Some(s) => add2(line, (s, WHITE))?,
+                    None => add(line)?,
+                }
+            }
+            // The DPS accumulator runs on the emit path, and it uses the RAW floats — so the
+            // printed range and the printed DPS are computed from different numbers by design.
+            dps_acc += (max + min) * 0.5;
+            first = false;
         }
-        // The school WORD is the resolved key; the school NUMBER is what picks the arm. A chain
-        // that carries no `SPELL_SCHOOL%d_CAP` still takes the with-school template and fills
-        // the hole with the empty string, exactly as `FrameScript_GetText` does.
-        let school_name = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
-        // `avg` is the two ROUNDED bounds averaged, round-tripped through f32 — and it is NOT
-        // divided by anything: `AMMO_DAMAGE_TEMPLATE`'s shipped "Adds %g damage per second" is
-        // FrameXML's phrasing over a number the binary never makes per-second (Rough Arrow's
-        // 1–2 reads "Adds 1.5 damage per second").
-        let avg = f64::from((lo + hi) as f32 * 0.5);
-        let plus = |k: &str| {
-            if first {
-                k.to_string()
-            } else {
-                format!("PLUS_{k}")
-            }
-        };
-        let (key, args): (String, Vec<Arg<'_>>) = if school != 0 {
-            if v.class == 6 {
-                (
-                    plus("AMMO_SCHOOL_DAMAGE_TEMPLATE"),
-                    vec![Arg::F(avg), Arg::S(&school_name)],
-                )
-            } else {
-                (
-                    plus("DAMAGE_TEMPLATE_WITH_SCHOOL"),
-                    vec![Arg::D(lo.into()), Arg::D(hi.into()), Arg::S(&school_name)],
-                )
-            }
-        } else if v.class == 6 {
-            (plus("AMMO_DAMAGE_TEMPLATE"), vec![Arg::F(avg)])
-        } else if lo == hi {
-            (plus("SINGLE_DAMAGE_TEMPLATE"), vec![Arg::D(lo.into())])
-        } else {
-            (
-                plus("DAMAGE_TEMPLATE"),
-                vec![Arg::D(lo.into()), Arg::D(hi.into())],
-            )
-        };
-        // The RIGHT cell is the FIRST emitted line's alone, and weapons' alone (`0x52c494`/
-        // `0x52c49c` — the only two conjuncts): every later damage line, and every line of a
-        // non-weapon, renders left-text-only. `"%s %.2f"` is an `.rdata` LITERAL, not a key —
-        // only the word "Speed" is looked up — over `Delay × 0.001`.
-        let speed = (first && v.class == 2).then(|| {
-            let word = get("SPEED").unwrap_or_default();
+        // DPS — two conjuncts: a line was emitted AND `ItemClass == 2`. Ammo can satisfy neither
+        // (its arms require class 6), so an arrow gets no DPS line and no Speed cell.
+        if !first && v.class == 2 {
+            // The precision is DPS_TEMPLATE's own `%.1f`, not ours — a locale that respells it gets
+            // its own number of decimals with no code change (law §12: "the print precision is
+            // FRAMEXML-DATA"). There is no divide-by-zero guard in the reference either.
             let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
-            format!("{word} {secs:.2}")
-        });
-        // The damage line is white in BOTH cells unconditionally — it never reddens for an item
-        // the player cannot use (`0x52c4fa`–`0x52c516`).
-        if let Some(t) = get(&key) {
-            let line = (fill(&t, &args), WHITE);
-            match speed {
-                Some(s) => add2(line, (s, WHITE))?,
-                None => add(line)?,
-            }
-        }
-        // The DPS accumulator runs on the emit path, and it uses the RAW floats — so the
-        // printed range and the printed DPS are computed from different numbers by design.
-        dps_acc += (max + min) * 0.5;
-        first = false;
-    }
-    // DPS — two conjuncts: a line was emitted AND `ItemClass == 2`. Ammo can satisfy neither
-    // (its arms require class 6), so an arrow gets no DPS line and no Speed cell.
-    if !first && v.class == 2 {
-        // The precision is DPS_TEMPLATE's own `%.1f`, not ours — a locale that respells it gets
-        // its own number of decimals with no code change (law §12: "the print precision is
-        // FRAMEXML-DATA"). There is no divide-by-zero guard in the reference either.
-        let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
-        keyed(
-            "DPS_TEMPLATE",
-            &[Arg::F(f64::from(dps_acc) / secs)],
-            WHITE,
-            false,
-        )?;
-    }
-    if v.armor > 0 {
-        keyed("ARMOR_TEMPLATE", &[Arg::D(v.armor.into())], WHITE, false)?;
-    }
-    if v.block > 0 {
-        keyed(
-            "SHIELD_BLOCK_TEMPLATE",
-            &[Arg::D(v.block.into())],
-            WHITE,
-            false,
-        )?;
-    }
-    // Stat mods (+N Stamina …) in the client's DISPLAY order — the `0x808e88` table (byte-read:
-    // 4,3,7,5,6,1,0 then 8,9,2,10 + zero padding; the builder's outer loop walks the table,
-    // the inner loop scans the item's raw slots — `0x52c6b0..0x52c801`). So Strength, Agility,
-    // Stamina, Intellect, Spirit, Health, Mana — never the wire order. (The table's trailing
-    // ZERO entries would re-match a mana slot once per pass — a dormant client quirk nothing
-    // shipped can reach: the only mana-stat item in the whole 1.12 DB is the internal "Test MP
-    // Ring" 6674. Not emulated.)
-    const STAT_DISPLAY_ORDER: [u32; 7] = [4, 3, 7, 5, 6, 1, 0];
-    for &want in &STAT_DISPLAY_ORDER {
-        for &(t, val) in &v.stats {
-            if t != want || val == 0 {
-                continue;
-            }
-            // The `ITEM_MOD_*` template is the whole line, sign hole included
-            // (`"%c%d Agility"`) — the sign is an argument, not a prefix we glue on.
-            let Some(key) = stat_key(t) else { continue };
-            let sign = if val > 0 { "+" } else { "-" };
-            keyed(key, &[Arg::S(sign), Arg::D(val.abs().into())], WHITE, false)?;
-        }
-    }
-    // Resistances: six equal nonzero values collapse to the ALL line; otherwise one line per
-    // nonzero school with HOLY excluded from the singles loop (both byte-verified). The six
-    // fields are schools 1..6, so slot `i` names `SPELL_SCHOOL{i+1}_CAP` — the same `%d`-composed
-    // key the damage line uses one block up.
-    let first_res = v.resistances[0];
-    if first_res != 0 && v.resistances.iter().all(|&r| r == first_res) {
-        let sign = if first_res > 0 { "+" } else { "-" };
-        keyed(
-            "ITEM_RESIST_ALL",
-            &[Arg::S(sign), Arg::D(first_res.abs().into())],
-            WHITE,
-            false,
-        )?;
-    } else {
-        // **The singles come out in the BUILDER's order, not the field order.** `0x52c8ad–
-        // 0x52c93e` runs `edi` 1..5 and reads school `esi = (edi == 1) ? 6 : edi`, so the lines
-        // are Arcane, Fire, Nature, Frost, Shadow — and that 1→6 remap is *how* Holy is excluded:
-        // it is displaced by Arcane rather than skipped by a test. Read while converting the
-        // block's keys and named in decision 2080; we emitted plain field order (Fire first,
-        // Arcane last) until it was converted.
-        const RESIST_EMIT_ORDER: [u32; 5] = [6, 2, 3, 4, 5];
-        for school in RESIST_EMIT_ORDER {
-            let r = v.resistances[school as usize - 1];
-            if r == 0 {
-                continue;
-            }
-            let sign = if r > 0 { "+" } else { "-" };
-            let school = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
             keyed(
-                "ITEM_RESIST_SINGLE",
-                &[Arg::S(sign), Arg::D(r.abs().into()), Arg::S(&school)],
+                "DPS_TEMPLATE",
+                &[Arg::F(f64::from(dps_acc) / secs)],
                 WHITE,
                 false,
             )?;
         }
-    }
-    // **Line 17 — the enchant family** (wow-re `tooltip-content-law.md` §1-ENCHANT, byte-carved
-    // 2026-08-03 on this lane's dispatch; decisions 0915/0920). One contiguous block
-    // `[0x52c991, 0x52cc69)` between the resistances and the durability precompute, and three arms
-    // that are mutually exclusive by construction — the per-slot loop falls through to the
-    // proposed-enchant pair and jumps the block's end, so RANDOM_ENCHANT is reachable only when
-    // there was no id source at all (§E1).
-    //
-    // The **colour is per slot**, and this is the correction the carve landed (§E3): the value is a
-    // computed local, defaulting to WHITE, overwritten **only for slots 0 and 1** — green
-    // `0xc0d3ac` for a positive id, pure-red `0xc0d398` for a negative one. Slots 2..6 — the
-    // random-property suffix enchants — are **always white**, whatever the sign. (Our first cut
-    // painted every slot green.) The sign never picks a different DBC row; the app already
-    // resolved that off `abs(id)`.
-    //
-    // Two gates sit above the loop. **ITEM_SIGNABLE** (template Flags bit `0x2000`, a petition or
-    // guild charter) forces every id to 0 with no fallback (`0x52c9e0: test ah,0x20`) — such an
-    // item shows no enchant line even if its instance carries ids. And with **no id source at all**
-    // the block instead prints the template-only `ITEM_RANDOM_ENCHANT` placeholder (§E5).
-    let signable = v.flags & 0x2000 != 0;
-    let enchant_slots = match signable {
-        true => &[][..],
-        false => inst.map(|i| i.enchants.as_slice()).unwrap_or_default(),
-    };
-    // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
-    // object AND no caller-supplied instance block (`+0x440 == 0`). Ours reads the same: a hover
-    // that passes NO [`ItemInstance`] is a p6=0 leg — the template sources (merchant, quest,
-    // craft, buyback, send-mail, the compare legs, `BenillaSetItemById`) — plus the wrapped-gift bit.
-    //
-    // **A block-supplying source never prints the placeholder, even carrying no ids at all.** The
-    // fork tests the block's presence, not its contents, so `SetLootItem`/`SetHyperlink`/
-    // `SetInboxItem`/`SetAuctionItem`/`SetLootRollItem`/the trade legs fall into the slot loop and
-    // print whatever their slots hold — nothing, when the roll is absent. Decision 0920's prose
-    // put a hyperlink hover on the placeholder arm; §E1's `0x52c9a3` fork says otherwise, and
-    // that is the drift 1547 corrects (a linked or looted "of the Monkey" showed the placeholder
-    // where the reference shows the rolled lines).
-    let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
-    if no_id_source && !signable && v.random_property != 0 {
-        keyed("ITEM_RANDOM_ENCHANT", &[], GREEN, false)?;
-    }
-    for e in enchant_slots {
-        let color = match (e.slot < 2, e.negative) {
-            (true, false) => GREEN,
-            (true, true) => ENCHANT_RED,
-            (false, _) => WHITE,
-        };
-        // A TEMPORARY enchant's countdown REPLACES the plain name in the same line and keeps that
-        // colour — it is never a second line (§E3). The bucket ladder (day/hour/min/sec) and its
-        // ceil-vs-truncate split are [`enchant_time_left`]'s; its source is
-        // `SMSG_ITEM_ENCHANT_TIME_UPDATE`, never the item's own duration field.
-        let mut text = match e.remaining_ms {
-            // The countdown IS the line — `ITEM_ENCHANT_TIME_LEFT_MIN = "%s (%d min)"` carries
-            // the enchant's own name in its first hole. Without that template there is no line
-            // to compose: the reference printf's an empty format into a zeroed buffer and
-            // `AddLine` drops the empty row, so a missing key skips the slot rather than falling
-            // back to the bare name.
-            Some(ms) => match enchant_time_left(&e.name, ms, &get) {
-                Some(t) => t,
-                None => continue,
-            },
-            None => e.name.clone(),
-        };
-        // " (N Charges)" — the slot's own charges dword through ITEM_SPELL_CHARGES, then the
-        // literal `" (%s)" 0x854820` (`0x52caa6–0x52cb38`), which is the engine's own format and
-        // not a string table entry. Only an owned item object carries charges; the session/inspect
-        // legs ship ids alone, so this is naturally absent there.
-        if let Some(charges) = charges_phrase(e.charges, &get) {
-            text.push_str(&format!(" ({charges})"));
+        if v.armor > 0 {
+            keyed("ARMOR_TEMPLATE", &[Arg::D(v.armor.into())], WHITE, false)?;
         }
-        add((text, color))?;
+        if v.block > 0 {
+            keyed(
+                "SHIELD_BLOCK_TEMPLATE",
+                &[Arg::D(v.block.into())],
+                WHITE,
+                false,
+            )?;
+        }
+        // Stat mods (+N Stamina …) in the client's DISPLAY order — the `0x808e88` table (byte-read:
+        // 4,3,7,5,6,1,0 then 8,9,2,10 + zero padding; the builder's outer loop walks the table,
+        // the inner loop scans the item's raw slots — `0x52c6b0..0x52c801`). So Strength, Agility,
+        // Stamina, Intellect, Spirit, Health, Mana — never the wire order. (The table's trailing
+        // ZERO entries would re-match a mana slot once per pass — a dormant client quirk nothing
+        // shipped can reach: the only mana-stat item in the whole 1.12 DB is the internal "Test MP
+        // Ring" 6674. Not emulated.)
+        const STAT_DISPLAY_ORDER: [u32; 7] = [4, 3, 7, 5, 6, 1, 0];
+        for &want in &STAT_DISPLAY_ORDER {
+            for &(t, val) in &v.stats {
+                if t != want || val == 0 {
+                    continue;
+                }
+                // The `ITEM_MOD_*` template is the whole line, sign hole included
+                // (`"%c%d Agility"`) — the sign is an argument, not a prefix we glue on.
+                let Some(key) = stat_key(t) else { continue };
+                let sign = if val > 0 { "+" } else { "-" };
+                keyed(key, &[Arg::S(sign), Arg::D(val.abs().into())], WHITE, false)?;
+            }
+        }
+        // Resistances: six equal nonzero values collapse to the ALL line; otherwise one line per
+        // nonzero school with HOLY excluded from the singles loop (both byte-verified). The six
+        // fields are schools 1..6, so slot `i` names `SPELL_SCHOOL{i+1}_CAP` — the same `%d`-composed
+        // key the damage line uses one block up.
+        let first_res = v.resistances[0];
+        if first_res != 0 && v.resistances.iter().all(|&r| r == first_res) {
+            let sign = if first_res > 0 { "+" } else { "-" };
+            keyed(
+                "ITEM_RESIST_ALL",
+                &[Arg::S(sign), Arg::D(first_res.abs().into())],
+                WHITE,
+                false,
+            )?;
+        } else {
+            // **The singles come out in the BUILDER's order, not the field order.** `0x52c8ad–
+            // 0x52c93e` runs `edi` 1..5 and reads school `esi = (edi == 1) ? 6 : edi`, so the lines
+            // are Arcane, Fire, Nature, Frost, Shadow — and that 1→6 remap is *how* Holy is excluded:
+            // it is displaced by Arcane rather than skipped by a test. Read while converting the
+            // block's keys and named in decision 2080; we emitted plain field order (Fire first,
+            // Arcane last) until it was converted.
+            const RESIST_EMIT_ORDER: [u32; 5] = [6, 2, 3, 4, 5];
+            for school in RESIST_EMIT_ORDER {
+                let r = v.resistances[school as usize - 1];
+                if r == 0 {
+                    continue;
+                }
+                let sign = if r > 0 { "+" } else { "-" };
+                let school = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
+                keyed(
+                    "ITEM_RESIST_SINGLE",
+                    &[Arg::S(sign), Arg::D(r.abs().into()), Arg::S(&school)],
+                    WHITE,
+                    false,
+                )?;
+            }
+        }
+        // **Line 17 — the enchant family** (wow-re `tooltip-content-law.md` §1-ENCHANT, byte-carved
+        // 2026-08-03 on this lane's dispatch; decisions 0915/0920). One contiguous block
+        // `[0x52c991, 0x52cc69)` between the resistances and the durability precompute, and three arms
+        // that are mutually exclusive by construction — the per-slot loop falls through to the
+        // proposed-enchant pair and jumps the block's end, so RANDOM_ENCHANT is reachable only when
+        // there was no id source at all (§E1).
+        //
+        // The **colour is per slot**, and this is the correction the carve landed (§E3): the value is a
+        // computed local, defaulting to WHITE, overwritten **only for slots 0 and 1** — green
+        // `0xc0d3ac` for a positive id, pure-red `0xc0d398` for a negative one. Slots 2..6 — the
+        // random-property suffix enchants — are **always white**, whatever the sign. (Our first cut
+        // painted every slot green.) The sign never picks a different DBC row; the app already
+        // resolved that off `abs(id)`.
+        //
+        // Two gates sit above the loop. **ITEM_SIGNABLE** (template Flags bit `0x2000`, a petition or
+        // guild charter) forces every id to 0 with no fallback (`0x52c9e0: test ah,0x20`) — such an
+        // item shows no enchant line even if its instance carries ids. And with **no id source at all**
+        // the block instead prints the template-only `ITEM_RANDOM_ENCHANT` placeholder (§E5).
+        let signable = v.flags & 0x2000 != 0;
+        let enchant_slots = match signable {
+            true => &[][..],
+            false => inst.map(|i| i.enchants.as_slice()).unwrap_or_default(),
+        };
+        // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
+        // object AND no caller-supplied instance block (`+0x440 == 0`). Ours reads the same: a hover
+        // that passes NO [`ItemInstance`] is a p6=0 leg — the template sources (merchant, quest,
+        // craft, buyback, send-mail, the compare legs, `BenillaSetItemById`) — plus the wrapped-gift bit.
+        //
+        // **A block-supplying source never prints the placeholder, even carrying no ids at all.** The
+        // fork tests the block's presence, not its contents, so `SetLootItem`/`SetHyperlink`/
+        // `SetInboxItem`/`SetAuctionItem`/`SetLootRollItem`/the trade legs fall into the slot loop and
+        // print whatever their slots hold — nothing, when the roll is absent. Decision 0920's prose
+        // put a hyperlink hover on the placeholder arm; §E1's `0x52c9a3` fork says otherwise, and
+        // that is the drift 1547 corrects (a linked or looted "of the Monkey" showed the placeholder
+        // where the reference shows the rolled lines).
+        let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
+        if no_id_source && !signable && v.random_property != 0 {
+            keyed("ITEM_RANDOM_ENCHANT", &[], GREEN, false)?;
+        }
+        for e in enchant_slots {
+            let color = match (e.slot < 2, e.negative) {
+                (true, false) => GREEN,
+                (true, true) => ENCHANT_RED,
+                (false, _) => WHITE,
+            };
+            // A TEMPORARY enchant's countdown REPLACES the plain name in the same line and keeps that
+            // colour — it is never a second line (§E3). The bucket ladder (day/hour/min/sec) and its
+            // ceil-vs-truncate split are [`enchant_time_left`]'s; its source is
+            // `SMSG_ITEM_ENCHANT_TIME_UPDATE`, never the item's own duration field.
+            let mut text = match e.remaining_ms {
+                // The countdown IS the line — `ITEM_ENCHANT_TIME_LEFT_MIN = "%s (%d min)"` carries
+                // the enchant's own name in its first hole. Without that template there is no line
+                // to compose: the reference printf's an empty format into a zeroed buffer and
+                // `AddLine` drops the empty row, so a missing key skips the slot rather than falling
+                // back to the bare name.
+                Some(ms) => match enchant_time_left(&e.name, ms, &get) {
+                    Some(t) => t,
+                    None => continue,
+                },
+                None => e.name.clone(),
+            };
+            // " (N Charges)" — the slot's own charges dword through ITEM_SPELL_CHARGES, then the
+            // literal `" (%s)" 0x854820` (`0x52caa6–0x52cb38`), which is the engine's own format and
+            // not a string table entry. Only an owned item object carries charges; the session/inspect
+            // legs ship ids alone, so this is naturally absent there.
+            if let Some(charges) = charges_phrase(e.charges, &get) {
+                text.push_str(&format!(" ({charges})"));
+            }
+            add((text, color))?;
+        }
     }
     if let Some((cur, max)) = inst.and_then(|i| i.durability).filter(|&(_, max)| max > 0) {
         // Red iff BROKEN (durability 0) — the byte law (wow-re ui.md tooltip content law:
@@ -792,6 +832,14 @@ pub(super) fn render_view(
                 keyed("ITEM_SET_BONUS_GRAY", &args, GRAY, true)?;
             }
         }
+    }
+    // **p4's early return** — `0x52e147` reads the flag and `0x52e14c je 0x52e170` takes the
+    // NON-compact leg, so compact is the fall-through `0x52e14e`: it stamps `[esi+0xd0]=1`, lays
+    // out, and returns `[ebp-0x38]` (the `hasCooldown` answer is produced on this path too).
+    // Everything from here down — flavor text, creator/gift, OPENABLE/READABLE, money — is below
+    // `0x52e170` and never runs.
+    if flags.name_only {
+        return Ok(());
     }
     // The quoted flavor text — gold, wrapped, literal quotes (all three byte-verified).
     if !v.description.is_empty() {

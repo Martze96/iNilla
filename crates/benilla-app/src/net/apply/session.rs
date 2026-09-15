@@ -129,6 +129,13 @@ pub(super) fn connected(
     status.connected = true;
     status.last_reason = None;
     info!("net: in world as {name} (guid {guid})");
+    // **The reference's world-session wipe, first** (`0x555740`'s `0x5557ad` arm): the player-name
+    // and pet-name stores are cleared at every world entry, because a guid names one character and
+    // a pet number one spawn, and nothing on the wire says either has been handed to somebody else
+    // since we last looked (decision 2223 — a wiped server's new character wearing a deleted one's
+    // name, B386). Creature templates are keyed by an entry that means the same thing forever and
+    // survive this, exactly as they survive the process.
+    names.clear_world_session();
     // Our own name came with the login — seed the cache so "player" never queries.
     names.insert_player(guid, name, None);
     // Seated before the world-entry UI load reads it (2175), and overwritten every login so a

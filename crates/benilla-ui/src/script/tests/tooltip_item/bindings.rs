@@ -206,6 +206,112 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
     assert!(s.take_errors().is_empty());
 }
 
+/// **`nameOnly`** — `SetInventoryItem`'s optional third argument, p4 of the builder, and the ONLY
+/// door onto the compact render in 1.12.1 (wow-re `ui/scratch/tooltip-nameonly-p4-census.md`: 27
+/// of 31 call sites pass a provable zero, one forwards, and the three that carry a flag are all
+/// this binding's). No stock FrameXML caller passes it — all 8 stock call sites are
+/// two-argument — so this is addon surface, and it is live code, not a dead arm.
+///
+/// The mode is **trimmed, not bare**, and that is the half a plausible implementation gets wrong:
+/// two non-contiguous cuts plus an early return. Gone: the bind/lock region, the whole stat body,
+/// and everything past the cooldown line. Kept: the name (white), the slot/type cell, durability,
+/// every requirement line and the spell triggers.
+#[test]
+fn set_inventory_item_name_only_is_the_trimmed_build() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        durability: Some((50, 90)),
+        item_id: 8100,
+        name: Some("Sealed Blade".into()),
+        quality: 4,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.set_item_template(
+        8100,
+        ItemTemplateView {
+            name: "Sealed Blade".into(),
+            quality: 4,
+            class: 2,
+            subclass: 7,
+            inventory_type: 13,
+            // One line from each of the three regions p4 treats differently: CONJURED / the bind
+            // line / UNIQUE / LOCKED are CUT, ARMOR is CUT, and the type cell, durability, the
+            // level requirement and the trigger all SURVIVE.
+            flags: 0x2,
+            bonding: 1,
+            max_count: 1,
+            lock_id: 7,
+            armor: 100,
+            max_durability: 90,
+            required_level: 40,
+            spell_triggers: vec![(1, 100, "Zap".into())],
+            description: "Sealed.".into(),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot13"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+
+        function has(needle)
+            for i = 1, TT:NumLines() do
+                local t = getglobal("TTTextLeft" .. i):GetText()
+                if t and string.find(t, needle, 1, true) then return true end
+            end
+            return false
+        end
+
+        -- ── no third argument: the full build ──────────────────────────────────────────────
+        assert(tt:SetInventoryItem("player", 16) == 1)
+        assert(has("[ITEM_CONJURED]") and has("[ITEM_BIND_ON_PICKUP]")
+               and has("[ITEM_UNIQUE]") and has("[LOCKED]"), "full: the bind/lock region")
+        assert(has("[ARMOR 100]"), "full: the stat body")
+        assert(has("[INVTYPE_WEAPON]") and has("[DURABILITY 50/90]")
+               and has("[MIN_LEVEL 40]") and has("Zap"), "full: the kept lines")
+        assert(has("\"Sealed.\""), "full: the description")
+        local r, g, b = TTTextLeft1:GetTextColor()
+        assert(math.abs(r - 0.639) < 0.01 and math.abs(g - 0.208) < 0.01
+               and math.abs(b - 0.933) < 0.01, "full: the name is epic purple")
+
+        -- ── nameOnly = 1: trimmed, not bare ───────────────────────────────────────────────
+        assert(tt:SetInventoryItem("player", 16, 1) == 1, "nameOnly still answers 1")
+        assert(TTTextLeft1:GetText() == "Sealed Blade")
+        local r2, g2, b2 = TTTextLeft1:GetTextColor()
+        assert(r2 == 1 and g2 == 1 and b2 == 1, "nameOnly: the NAME goes white (0x52b8b3)")
+        assert(not has("[ITEM_CONJURED]") and not has("[ITEM_BIND_ON_PICKUP]")
+               and not has("[ITEM_UNIQUE]") and not has("[LOCKED]"),
+               "nameOnly: the bind/lock region is cut (0x52bac3)")
+        assert(not has("[ARMOR 100]"), "nameOnly: the stat body is cut (0x52c225)")
+        assert(not has("\"Sealed.\""), "nameOnly: the early return (0x52e14e) drops the tail")
+        assert(has("[INVTYPE_WEAPON]"), "nameOnly KEEPS the slot/type cell — between the two cuts")
+        assert(has("[DURABILITY 50/90]") and has("[MIN_LEVEL 40]") and has("Zap"),
+               "nameOnly KEEPS durability, the requirements and the triggers")
+
+        -- ── the gate's polarity: is-number AND strictly > 0 (0x53304a) ────────────────────
+        -- Absent, nil, 0, a negative and a non-numeric string all leave the flag at its zero
+        -- seed, and none of them RAISES — this argument is not `number_arg`'s shape.
+        local full = { nil, 0, -1, "nope", {}, false }
+        for i = 1, 6 do
+            tt:SetInventoryItem("player", 16, full[i])
+            assert(has("[ARMOR 100]"), "a non-positive third argument builds the FULL tooltip")
+        end
+        -- A numeric STRING passes lua_isnumber, and a fraction is still > 0.
+        tt:SetInventoryItem("player", 16, "1")
+        assert(not has("[ARMOR 100]"), "a numeric string is a number to lua_isnumber")
+        tt:SetInventoryItem("player", 16, 0.5)
+        assert(not has("[ARMOR 100]"), "strictly greater than zero, not >= 1")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
 /// `SetInventoryItem` outside a compare: the FULL line law (quality name, description — no cut),
 /// return 1 on an occupied slot, nil on empty/foreign units.
 #[test]

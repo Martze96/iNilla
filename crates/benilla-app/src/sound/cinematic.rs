@@ -73,7 +73,16 @@ impl CinematicVoice {
 pub(super) fn plugin(app: &mut App) {
     // In `Present`, after the cinematic driver in `Input` has settled this frame's shot: the
     // narration follows the picture rather than racing it.
-    app.add_systems(Update, drive_narration.in_set(WorldStage::Present));
+    // Gated on the kit catalog: `SoundKits` is inserted only once the install's kits have
+    // loaded, and a run with no install (an instrument leg pointed at the wrong data path, 2211)
+    // reached this system's bare `ResMut<SoundKits>` and panicked the app instead of playing
+    // nothing. The narration needs a catalog to play from; without one there is nothing to do.
+    app.add_systems(
+        Update,
+        drive_narration
+            .in_set(WorldStage::Present)
+            .run_if(resource_exists::<SoundKits>),
+    );
 }
 
 /// The narration channel, plus its line in the voice budget.

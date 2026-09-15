@@ -69,6 +69,16 @@ fn item_query_wire() {
         hx("13030140000000803f0000004000004040")
     );
 
+    // The SOURCE form (decision 2218): the same terrain click one bit over — the three shipped
+    // items carrying spell 265 "Area Death (TEST)" (Martin Fury 17, plus 192 and 5417), whose
+    // `Targets` is a bare 0x20. `BindLocation 0x6e60f0` writes SPELLCAST+0x30 and ORs 0x0020
+    // where its dest arm writes +0x3c and ORs 0x0040; vmangos reads this triple first. Martin
+    // Fury is worn, so the wire position is the player array (255) + EQUIPMENT_SLOT_BODY (3).
+    assert_eq!(
+        messages::use_item(255, 3, 0, messages::UseItemTarget::Source([1.0, 2.0, 3.0])),
+        hx("ff030020000000803f0000004000004040")
+    );
+
     // The ITEM form (decision 0923): the targeting cursor's item commit — a poison / sharpening
     // stone / weapon oil applied to the weapon you clicked. TARGET_FLAG_ITEM (0x0010) + the packed
     // guid, the same block cast_spell_on_item writes; the reference reaches both through the one

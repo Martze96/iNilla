@@ -194,6 +194,22 @@ impl SpellTargeting {
             .map(|t| (t.spell_id, t.commit))
     }
 
+    /// `BindLocation 0x6e60f0`'s own fork, as one read: which of the two location slots the
+    /// terrain click binds this point to. Bit 5 (SOURCE) is tested **before** bit 6 (DEST) and
+    /// the arms are exclusive (wow-re `wave-cast.md` §0x6e60f0 + its caller census — a word
+    /// carrying both takes two clicks and sends on the second; no 5875 spell carries both, so
+    /// only the precedence is transcribed here, not the two-click walk). Decision 2218.
+    fn location_bind(&self, point: [f32; 3]) -> Option<super::cast_send::TargetedBind> {
+        let word = self.0.as_ref()?.word;
+        if word & 0x0020 != 0 {
+            Some(super::cast_send::TargetedBind::Source(point))
+        } else if word & 0x0040 != 0 {
+            Some(super::cast_send::TargetedBind::Dest(point))
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.0 = None;
     }

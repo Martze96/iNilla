@@ -29,6 +29,16 @@
 //! image, so `PaperDollFrame.lua`'s slot listener is dead code there (wow-re
 //! `merchant-compare-item-law.md` §8).
 //!
+//! **`nameOnly`** (p4 `[arg+0x14]`, the flag 2216 had tangled with the header; built by 2224):
+//! the builder's
+//! compact mode, and the census that settled it found exactly one door onto it — this module's
+//! `SetInventoryItem`, third argument, a number `> 0`. It is what the image's own usage string
+//! `0x8552dc` calls it. No stock FrameXML caller passes it (all 8 sites are two-argument), so it
+//! is addon surface; it is nonetheless live code, and the mode is **trimmed, not bare** — the
+//! bind/lock region and the stat body are jumped and the tail is cut, but the slot/type cell,
+//! durability, every requirement line and the spell triggers all still print. Both flags ride in
+//! [`render::BuilderFlags`], a struct precisely so they cannot be collapsed again.
+//!
 //! **The red "you can't use this" law** (the director's explicit ask) — byte-verified §1-RED:
 //! red is the AddLine color `0xffff2020`, applied to requirement lines the ACTIVE player fails
 //! (level, class/race lists, skill rank, required spell), to LOCKED, to broken durability, and
@@ -52,7 +62,7 @@ mod names;
 mod render;
 
 use names::{quality_color, GRAY, WHITE};
-use render::render_view;
+use render::{render_view, BuilderFlags};
 
 /// The compare tooltips' shared body — what `SetMerchantCompareItem 0x536080` and
 /// `SetAuctionCompareItem 0x535d70` both run once their wrapper has an offered template and a
@@ -211,7 +221,7 @@ fn render_by_id(
     fire_cleared(lua, h);
     match view_of(lua, item_id) {
         Some(v) => {
-            render_view(lua, this, &v, false, None)?;
+            render_view(lua, this, &v, BuilderFlags::default(), None)?;
         }
         None => {
             if let Some(name) = fb_name {
@@ -396,7 +406,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             match view_of(lua, id) {
                 Some(v) => {
-                    render_view(lua, &this, &v, false, Some(&inst))?;
+                    render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
                     // Unchanged from the `render_by_id` this leg used to share: a link dropped on
                 }
                 None => {
@@ -447,105 +457,123 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // (`mov eax,2` @0x534985). A carve of `0x532ee0`'s tail would upgrade this line.
     m.set(
         "SetInventoryItem",
-        lua.create_function(|lua, (this, unit, slot): (Table, String, usize)| {
-            let h = frame_handle_of(lua, &this)?;
-            let (item_id, name, quality, inst, currently_equipped) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let armed = match super::tooltip::tip_mut(&mut model, h) {
-                    Ok(t) => std::mem::take(&mut t.equipped_header_armed),
-                    Err(_) => false,
-                };
-                let view = model
-                    .inv_slot(&unit, slot)
-                    .filter(|s| s.item_id != 0)
-                    .map(|s| {
-                        (
-                            s.item_id,
-                            s.name.clone(),
-                            s.quality,
-                            render::ItemInstance {
-                                // The slot's own name — app-composed, so it carries the
-                                // random-suffix roll off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
-                                name: s.name.clone(),
-                                durability: s.durability,
-                                creator: s.creator.clone(),
-                                has_text: false,
-                                flags: s.flags,
-                                already_bound: s.already_bound,
-                                // No petition line on the doll: a charter has `InventoryType = 0`
-                                // and cannot be equipped, so this hover can never be over one.
-                                petition: None,
-                                enchants: s.enchants.clone(),
-                                // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
-                                // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
-                                // is dead here too (wow-re `right-click-open.md` §1.2). Which leg
-                                // each takes is not pinned, and the case is unobservable anyway:
-                                // nothing openable is equippable, so the doll hover has no clam to
-                                // show. Left `false` deliberately — inventing a selector we have
-                                // not read would be the §4 trade, and there is nothing to gain.
-                                openable_source: false,
-                                duration_ms: s.duration_ms,
-                            },
-                        )
-                    });
-                match view {
-                    Some((id, name, q, inst)) => (id, name, q, inst, armed),
-                    // An EMPTY slot answers `nil` for hasItem — and still pushes the other two,
-                    // because the reference's own caller destructures all three unconditionally
-                    // and only then tests `hasItem`. Answering one value here would hand
-                    // `PaperDollItemSlotButton_OnEnter` a nil `repairCost` on every empty slot,
-                    // which its `repairCost and (repairCost > 0)` guard survives but pfUI's bare
-                    // `totalRep + repCost` does not.
-                    None => {
-                        return Ok(MultiValue::from_vec(vec![
-                            Value::Nil,
-                            Value::Nil,
-                            Value::Integer(0),
-                        ]))
-                    }
-                }
-            };
-            {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                clear_content(&mut model, h);
-            }
-            fire_cleared(lua, h);
-            match view_of(lua, item_id) {
-                Some(v) => render_view(lua, &this, &v, currently_equipped, Some(&inst))?,
-                None => {
-                    // Template in flight — the slot view's own name holds the plate (the same
-                    // 0138 posture as SetBagItem's miss path).
-                    // The compare header is a key like every other sentence (2045); this
-                    // fallback path shows it for exactly the reason the full render does.
-                    if currently_equipped {
-                        if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
-                            append_line(lua, &this, (t, GRAY), None, false)?;
+        lua.create_function(
+            |lua, (this, unit, slot, name_only): (Table, String, usize, Value)| {
+                let h = frame_handle_of(lua, &this)?;
+                // **The third argument the binary names itself**: `0x8552dc` carries
+                // `"Usage: SetInventoryItem(unit, slot [, nameOnly])"`, and `0x533027`–`0x53304c` is
+                // its gate — the flag seeds 0 and becomes 1 only on `lua_isnumber(L,4)` AND
+                // `lua_tonumber(L,4) > 0.0` STRICTLY. A miss does not raise; it leaves the zero and
+                // builds the ordinary tooltip. Three of this binding's four builder legs pass it
+                // through (wow-re `ui/scratch/tooltip-nameonly-p4-census.md` §3).
+                let name_only = super::binding_abi::positive_number_flag(lua, name_only)?;
+                let (item_id, name, quality, inst, currently_equipped) = {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let armed = match super::tooltip::tip_mut(&mut model, h) {
+                        Ok(t) => std::mem::take(&mut t.equipped_header_armed),
+                        Err(_) => false,
+                    };
+                    let view = model
+                        .inv_slot(&unit, slot)
+                        .filter(|s| s.item_id != 0)
+                        .map(|s| {
+                            (
+                                s.item_id,
+                                s.name.clone(),
+                                s.quality,
+                                render::ItemInstance {
+                                    // The slot's own name — app-composed, so it carries the
+                                    // random-suffix roll off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
+                                    name: s.name.clone(),
+                                    durability: s.durability,
+                                    creator: s.creator.clone(),
+                                    has_text: false,
+                                    flags: s.flags,
+                                    already_bound: s.already_bound,
+                                    // No petition line on the doll: a charter has `InventoryType = 0`
+                                    // and cannot be equipped, so this hover can never be over one.
+                                    petition: None,
+                                    enchants: s.enchants.clone(),
+                                    // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
+                                    // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
+                                    // is dead here too (wow-re `right-click-open.md` §1.2). Which leg
+                                    // each takes is not pinned, and the case is unobservable anyway:
+                                    // nothing openable is equippable, so the doll hover has no clam to
+                                    // show. Left `false` deliberately — inventing a selector we have
+                                    // not read would be the §4 trade, and there is nothing to gain.
+                                    openable_source: false,
+                                    duration_ms: s.duration_ms,
+                                },
+                            )
+                        });
+                    match view {
+                        Some((id, name, q, inst)) => (id, name, q, inst, armed),
+                        // An EMPTY slot answers `nil` for hasItem — and still pushes the other two,
+                        // because the reference's own caller destructures all three unconditionally
+                        // and only then tests `hasItem`. Answering one value here would hand
+                        // `PaperDollItemSlotButton_OnEnter` a nil `repairCost` on every empty slot,
+                        // which its `repairCost and (repairCost > 0)` guard survives but pfUI's bare
+                        // `totalRep + repCost` does not.
+                        None => {
+                            return Ok(MultiValue::from_vec(vec![
+                                Value::Nil,
+                                Value::Nil,
+                                Value::Integer(0),
+                            ]))
                         }
                     }
-                    if let Some(name) = name {
-                        let color = quality_color(quality.max(0) as u32);
-                        append_line(lua, &this, (name, color), None, false)?;
+                };
+                // p5 and p4, carried as one value but never as one flag (2216).
+                let flags = BuilderFlags {
+                    currently_equipped,
+                    name_only,
+                };
+                {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    clear_content(&mut model, h);
+                }
+                fire_cleared(lua, h);
+                match view_of(lua, item_id) {
+                    Some(v) => render_view(lua, &this, &v, flags, Some(&inst))?,
+                    None => {
+                        // Template in flight — the slot view's own name holds the plate (the same
+                        // 0138 posture as SetBagItem's miss path).
+                        // The compare header is a key like every other sentence (2045); this
+                        // fallback path shows it for exactly the reason the full render does.
+                        if flags.currently_equipped {
+                            if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
+                                append_line(lua, &this, (t, GRAY), None, false)?;
+                            }
+                        }
+                        if let Some(name) = name {
+                            let color = if flags.name_only {
+                                WHITE
+                            } else {
+                                quality_color(quality.max(0) as u32)
+                            };
+                            append_line(lua, &this, (name, color), None, false)?;
+                        }
                     }
                 }
-            }
-            show_or_hide_empty(lua, h);
-            Ok(MultiValue::from_vec(vec![
-                Value::Integer(1),
-                // `hasCooldown` — **broader than its name**, and this is the one arm of it we can
-                // answer. The builder's Lua return is `[ebp-0x38]`, set by FOUR sites, only one of
-                // which is the cooldown line: LOCKED_WITH_ITEM, the temporary-enchant countdown,
-                // **the item's own duration line** (`0x52ce0d`), and ITEM_COOLDOWN_TIME. So a
-                // duration-bearing item answers truthy here with no cooldown of any kind, and an
-                // addon can see it (decision 1933's fold-back). The equipped-cooldown feed is
-                // still the INTERIM above; this is the half that now exists.
-                if inst.duration_ms.is_some() {
-                    Value::Boolean(true)
-                } else {
-                    Value::Nil
-                },
-                Value::Integer(0),
-            ]))
-        })?,
+                show_or_hide_empty(lua, h);
+                Ok(MultiValue::from_vec(vec![
+                    Value::Integer(1),
+                    // `hasCooldown` — **broader than its name**, and this is the one arm of it we can
+                    // answer. The builder's Lua return is `[ebp-0x38]`, set by FOUR sites, only one of
+                    // which is the cooldown line: LOCKED_WITH_ITEM, the temporary-enchant countdown,
+                    // **the item's own duration line** (`0x52ce0d`), and ITEM_COOLDOWN_TIME. So a
+                    // duration-bearing item answers truthy here with no cooldown of any kind, and an
+                    // addon can see it (decision 1933's fold-back). The equipped-cooldown feed is
+                    // still the INTERIM above; this is the half that now exists.
+                    if inst.duration_ms.is_some() {
+                        Value::Boolean(true)
+                    } else {
+                        Value::Nil
+                    },
+                    Value::Integer(0),
+                ]))
+            },
+        )?,
     )?;
 
     // GameTooltip:SetBagItem(bag, slot) → hasCooldown, repairCost — the real-instance hover.
@@ -614,7 +642,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             fire_cleared(lua, h);
             match view_of(lua, item_id) {
                 Some(v) => {
-                    render_view(lua, &this, &v, false, Some(&inst))?;
+                    render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
                     let (merchant_open, repairing) = {
                         let model = lua.app_data_mut::<Model>().expect("model app_data");
                         (model.merchant.is_some(), model.repair_mode)
@@ -699,7 +727,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     ..Default::default()
                 };
                 match view_of(lua, item.item_id) {
-                    Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                    Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                     None => {
                         if let Some(name) = item.name.clone() {
                             append_line(
@@ -749,7 +777,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             match view_of(lua, row.item_id) {
-                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                 // Template in flight — the row's name holds the plate (SetBagItem's 0138 posture;
                 // the re-enter loop repaints when the push lands).
                 None => {
@@ -802,7 +830,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             match view_of(lua, entry.item_id) {
-                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                 None => {
                     if let Some(name) = entry.name.clone() {
                         append_line(
@@ -1009,7 +1037,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 fire_cleared(lua, h);
                 match view_of(lua, row.item_id) {
                     Some(v) => {
-                        render_view(lua, &this, &v, false, None)?;
+                        render_view(lua, &this, &v, BuilderFlags::default(), None)?;
                         // **The vendor tab arms nothing** — `MerchantFrame.xml:67-80` seats
                         // `ShoppingTooltip1/2` itself on every hover of it, unconditionally, and
                         // that is the reference's own live compare. Arming here would put the
@@ -1038,7 +1066,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             block: head.block,
                             ..Default::default()
                         };
-                        render_view(lua, &this, &v, false, None)?;
+                        render_view(lua, &this, &v, BuilderFlags::default(), None)?;
                     }
                 }
                 show_or_hide_empty(lua, h);
@@ -1081,7 +1109,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, Some(&inst))?;
+                render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1130,7 +1158,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, Some(&inst))?;
+                render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1166,7 +1194,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, None)?;
+                render_view(lua, &this, &v, BuilderFlags::default(), None)?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1197,7 +1225,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, None)?;
+                render_view(lua, &this, &v, BuilderFlags::default(), None)?;
             }
             show_or_hide_empty(lua, h);
             Ok(())

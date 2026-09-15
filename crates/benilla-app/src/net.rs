@@ -1054,6 +1054,14 @@ pub(crate) enum ClientCommand {
         spell_id: u32,
         dest: [f32; 3],
     },
+    /// Cast a spell at a **source point** (`CMSG_CAST_SPELL` with `TARGET_FLAG_SOURCE_LOCATION`,
+    /// decision 2218): the same terrain click, one bit over — `BindLocation 0x6e60f0` binds bit 5
+    /// to `SPELLCAST+0x30` where it binds bit 6 to `+0x3c`. `src` is the clicked world point in
+    /// **WoW coords**. Answered by `SMSG_CAST_RESULT`.
+    CastSpellAtSource {
+        spell_id: u32,
+        src: [f32; 3],
+    },
     /// Cancel one of our own auras (`CMSG_CANCEL_AURA`, decision 0257): the right-click-a-buff wire,
     /// carrying the **spell id** (the server cancels by spell, not slot). No answer packet — the
     /// removal comes back as a `UNIT_FIELD_AURA` delta. Sent by the aura feed's cancel drain.

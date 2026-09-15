@@ -11,6 +11,15 @@
 //!
 //! A *negative* answer (the server doesn't know the guid/entry) is cached too — resolving to
 //! "unknown, and asking again won't help" — so a bad id can never turn into a query loop.
+//!
+//! **Two of the three live for one world session; one persists.** Creature templates are keyed by
+//! a template entry that means the same thing forever, and the reference writes them to
+//! `creaturecache.wdb` — so ours persist too (decision 1689, corrected scope). Player names and
+//! pet names are keyed by a guid and a pet number, which name *one character* and *one spawn*, and
+//! the reference neither writes them to disk nor carries them across a world entry — it clears
+//! both stores at world-session start ([`NameCache::clear_world_session`]). Persisting them was
+//! benilla's own addition, and it is what answered a wiped server's brand-new character with a
+//! deleted one's name (report B386, decision 2223).
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,11 +78,15 @@ pub(crate) struct NameCache {
     /// and didn't know (an empty wire name) — cached so we never re-ask a dead guid.
     players: HashMap<u64, Option<String>>,
     /// `(race, class, gender)` from the same `SMSG_NAME_QUERY_RESPONSE` that carried the name — the
-    /// wire has always sent these three and we used to drop them. They exist for one reason: the
-    /// `$`-macro expander's non-player-subject path. The reference resolves a macro subject from the
-    /// object manager first and falls back to **this** cache record when the unit isn't streamed
-    /// (`questtext-macro-expander.md` §1), so without them `$R`/`$C`/`$G` against an off-screen
-    /// player would silently read race 0.
+    /// wire has always sent these three and we used to drop them. Two consumers now: the
+    /// `$`-macro expander's non-player-subject path: the reference resolves a macro subject from
+    /// the object manager first and falls back to **this** cache record when the unit isn't
+    /// streamed (`questtext-macro-expander.md` §1), so without them `$R`/`$C`/`$G` against an
+    /// off-screen player would silently read race 0.
+    ///
+    /// **An entry here is present only when the server answered for it.** A name learned any other
+    /// way (our own, seeded from the login) has no entry, and that absence is the live shape
+    /// decision 1549 rests on — not a gap to fill with a zero triple.
     player_traits: HashMap<u64, (u8, u8, u8)>,
     /// Creature template records by entry; the outer `None` = the server flagged the entry
     /// unknown. The subname is the overhead/tooltip title line ("Stable Master", …); the type is
@@ -255,15 +268,47 @@ impl NameCache {
     /// for [`Self::player_traits`]. It is `None` for the seams that learn a name **without** that
     /// packet — the login-time seed of our own name, and the capture fixtures — rather than having
     /// them invent a zero triple that would read as a real (and wrong) race.
+    ///
+    /// **A `None` therefore *clears* any traits already filed under this guid**, rather than
+    /// leaving them: the triple describes the character the name belongs to, and this call is
+    /// replacing that name. Keeping the old one would leave a record whose name says one character
+    /// and whose race says another — a contradiction manufactured by the cache itself.
     pub(crate) fn insert_player(&mut self, guid: u64, name: String, traits: Option<(u8, u8, u8)>) {
         self.pending_players.remove(&guid);
-        if !name.is_empty() {
-            if let Some(t) = traits {
-                self.player_traits.insert(guid, t);
-            }
-        }
+        match traits.filter(|_| !name.is_empty()) {
+            Some(t) => self.player_traits.insert(guid, t),
+            None => self.player_traits.remove(&guid),
+        };
         self.players
             .insert(guid, (!name.is_empty()).then_some(name));
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// **Drop everything that names one character or one spawn — the reference's world-session
+    /// wipe** (`0x555740`, the `0x5557ad call 0x560400` arm for the player cache).
+    ///
+    /// The reference walks all thirteen `DBCache<T>` singletons at world-session start and clears
+    /// each one **whose persistence is disabled** — the byte at `[cache+0x39]`, tested inverted:
+    /// non-zero skips, zero clears. Four stores pass `0` to the ctor and are therefore both
+    /// never-written-to-disk and wiped here: `'WNAM'` (player names, `0x554cd0` — three `push 0x0`
+    /// against `'WNPC'`/`'WIDB'`'s `push 0x1; push 0x1`), `'WGLD'`, `'WPNM'` and `'WPTN'`. A real
+    /// 1.12 install's `WDB/` holds exactly the enabled ones and none of those four.
+    ///
+    /// The rule behind the list is the key's meaning. A creature template **entry** names the same
+    /// creature on every realm, forever, so its record survives both the wipe and the process. A
+    /// player **guid** names one character on one realm, and a **pet number** names one live spawn
+    /// — and nothing on the 1.12 wire ever says either has been handed to somebody else. So the
+    /// reference does not keep them, and benilla keeping them is what let a server's brand-new
+    /// character wear a deleted one's name (B386, decision 2223).
+    ///
+    /// Called at world entry, **before** the login seeds our own name — the seed is about the
+    /// session we are starting, not the one we just left.
+    pub(crate) fn clear_world_session(&mut self) {
+        self.players.clear();
+        self.player_traits.clear();
+        self.pets.clear();
+        self.pending_players.clear();
+        self.pending_pets.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -371,7 +416,13 @@ const CACHE_MAGIC: &str = "benilla-namecache";
 /// Our own record-layout version — the analogue of the header's `recordSize`+`version` pair. Bump
 /// it whenever a column below is added, removed or reordered; the old file is then discarded
 /// rather than misparsed.
-const CACHE_FORMAT: u32 = 1;
+///
+/// **2** — the player (`P`/`p`) and pet (`E`) records are gone (decision 2223). They were never the
+/// reference's to write: `'WNAM'` and `'WPNM'` are constructed with persistence disabled and are
+/// wiped at world-session start instead ([`NameCache::clear_world_session`]). A version-1 file
+/// still holding them is discarded whole, which is the header's job and exactly the right thing —
+/// its player lines are the stale identities B386 was about.
+const CACHE_FORMAT: u32 = 2;
 /// The client build the names were answered by — the reference's `0x16f3`. A different build is a
 /// different server protocol, so its answers are not ours.
 const CACHE_BUILD: u32 = 5875;
@@ -391,19 +442,6 @@ impl NameCache {
     pub(crate) fn to_tsv(&self, realm: &str) -> String {
         let mut out =
             format!("{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{CACHE_LOCALE}\t{realm}\n");
-        for (guid, name) in &self.players {
-            match name {
-                // `P` — a known player. The traits ride the same line they arrived on.
-                Some(name) => {
-                    let (race, class, gender) =
-                        self.player_traits.get(guid).copied().unwrap_or((0, 0, 0));
-                    out.push_str(&format!("P\t{guid}\t{race}\t{class}\t{gender}\t{name}\n"));
-                }
-                // `p` — asked, and the server did not know. Worth keeping for the same reason it
-                // is worth caching in memory: it stops us re-asking a dead guid forever.
-                None => out.push_str(&format!("p\t{guid}\n")),
-            }
-        }
         for (entry, rec) in &self.creatures {
             match rec {
                 Some(r) => out.push_str(&format!(
@@ -420,9 +458,6 @@ impl NameCache {
                 )),
                 None => out.push_str(&format!("c\t{entry}\n")),
             }
-        }
-        for (pet_number, name) in &self.pets {
-            out.push_str(&format!("E\t{pet_number}\t{name}\n"));
         }
         out
     }
@@ -447,25 +482,6 @@ impl NameCache {
         for line in lines {
             let f: Vec<&str> = line.split('\t').collect();
             match f.first().copied() {
-                Some("P") if f.len() >= 6 => {
-                    let Ok(guid) = f[1].parse::<u64>() else {
-                        continue;
-                    };
-                    // The name is the LAST field, not `f[5]`: a name cannot contain a tab, so the
-                    // split is exact — but taking the tail keeps this honest if a column is ever
-                    // added before it and the format version is forgotten.
-                    cache.players.insert(guid, Some(f[5].to_string()));
-                    if let (Ok(race), Ok(class), Ok(gender)) =
-                        (f[2].parse(), f[3].parse(), f[4].parse())
-                    {
-                        cache.player_traits.insert(guid, (race, class, gender));
-                    }
-                }
-                Some("p") if f.len() >= 2 => {
-                    if let Ok(guid) = f[1].parse::<u64>() {
-                        cache.players.insert(guid, None);
-                    }
-                }
                 Some("C") if f.len() >= 11 => {
                     let Ok(entry) = f[1].parse::<u32>() else {
                         continue;
@@ -498,11 +514,6 @@ impl NameCache {
                 Some("c") if f.len() >= 2 => {
                     if let Ok(entry) = f[1].parse::<u32>() {
                         cache.creatures.insert(entry, None);
-                    }
-                }
-                Some("E") if f.len() >= 3 => {
-                    if let Ok(pet_number) = f[1].parse::<u32>() {
-                        cache.pets.insert(pet_number, f[2].to_string());
                     }
                 }
                 _ => {}
@@ -646,15 +657,15 @@ mod tests {
     }
 
     /// **The round trip keeps every record kind and every shape of answer** (decision 1689) —
-    /// including the two "the server said no" negatives, which are the ones a naive serializer
-    /// drops: cached as absent, they are what stops us re-asking a dead guid or an unknown entry
-    /// on every single login, forever.
+    /// including the "the server said no" negative, which is the one a naive serializer drops:
+    /// cached as absent, it is what stops us re-asking an unknown entry on every login, forever.
+    ///
+    /// The *player* negative used to be here too and is gone with the player records themselves
+    /// (2223): a guid the server did not know this week is not a guid it will not know next week,
+    /// because the guid may by then belong to somebody it does.
     #[test]
     fn the_cache_round_trips_through_its_file_format() {
-        let (cmds, _rx) = commands();
         let mut cache = NameCache::default();
-        cache.insert_player(0x11, "Sam".into(), Some((1, 2, 0)));
-        cache.insert_player(0x22, String::new(), None); // the server did not know
         cache.insert_creature(
             69,
             Some(CreatureRecord {
@@ -670,16 +681,12 @@ mod tests {
             }),
         );
         cache.insert_creature(1234, None); // the server flagged the entry unknown
-        cache.insert_pet(7, "Rex".into());
 
         let text = cache.to_tsv("Hydraxian Waterlords");
-        let mut back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header matches");
+        let back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header matches");
 
-        assert_eq!(back.resolve(0x11, &cmds), Some("Sam"));
-        assert_eq!(back.player_traits(0x11), Some((1, 2, 0)));
         // A cached negative must survive as a negative — present-and-None, not absent.
-        assert_eq!(back.resolve(0x22, &cmds), None);
-        assert_eq!(back.peek(0x22), None);
+        assert!(back.creatures.contains_key(&1234));
         let rec = back.creature_record(69).expect("creature survived");
         assert_eq!(rec.name, "Stable Master Kitrik");
         assert_eq!(rec.subname.as_deref(), Some("Stable Master"));
@@ -687,7 +694,7 @@ mod tests {
         assert_eq!((rec.civilian, rec.racial_leader), (true, false));
         assert_eq!(rec.display_id, 533, "the model a stabled pet is drawn from");
         assert!(back.creature_record(1234).is_none());
-        assert_eq!(back.len(), 5);
+        assert_eq!(back.len(), 2);
 
         // An EMPTY subname must come back as no subname, the same mapping the wire decode makes —
         // `Some("")` paints an empty tooltip line whose zero-extent slot spills the ones below it.
@@ -709,6 +716,92 @@ mod tests {
         assert_eq!(back.creature_record(70).unwrap().subname, None);
     }
 
+    /// **B386 — the file carries creature templates and NOTHING that names one character.**
+    ///
+    /// The reference constructs `'WNAM'` (player names) and `'WPNM'` (pet names) with persistence
+    /// **disabled** — `0x554cd0`'s three `push 0x0` against `'WNPC'`/`'WIDB'`'s `push 0x1; push
+    /// 0x1` — and a real 1.12 install's `WDB/` holds `creaturecache.wdb` and no `namecache.wdb`.
+    /// A creature template entry means the same creature forever; a player guid means one
+    /// character on one realm, and a wiped server hands it to the next one it creates.
+    #[test]
+    fn the_file_keeps_creature_templates_and_no_identities() {
+        let mut cache = NameCache::default();
+        cache.insert_player(0x11, "Moamtester".into(), Some((1, 2, 0)));
+        cache.insert_pet(7, "Rex".into());
+        cache.insert_creature(
+            69,
+            Some(CreatureRecord {
+                name: "Stable Master Kitrik".into(),
+                subname: Some("Stable Master".into()),
+                creature_type: 7,
+                pet_family: 0,
+                rank: 1,
+                type_flags: 0x10,
+                civilian: true,
+                racial_leader: false,
+                display_id: 533,
+            }),
+        );
+
+        let text = cache.to_tsv("R");
+        assert!(
+            !text.contains("Moamtester") && !text.contains("Rex"),
+            "no guid- or spawn-keyed name may reach the disk:\n{text}"
+        );
+        let back = NameCache::from_tsv(&text, "R").expect("header matches");
+        assert_eq!(
+            back.peek(0x11),
+            None,
+            "a player name never survives the file"
+        );
+        assert_eq!(back.player_traits(0x11), None);
+        assert_eq!(
+            back.creature_record(69).map(|r| r.name.as_str()),
+            Some("Stable Master Kitrik"),
+            "the template entry is the key that keeps meaning what it meant",
+        );
+    }
+
+    /// **World entry drops every guid- and spawn-keyed name, and keeps the templates** — the
+    /// reference's `0x555740`, which clears exactly the stores whose `[cache+0x39]` enable byte is
+    /// zero (tested inverted: `0x55579f`–`0x5557ad` for the player cache at `0xc0e228`).
+    #[test]
+    fn world_entry_clears_the_identities_and_keeps_the_templates() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        cache.insert_player(0x11, "Moamtester".into(), Some((1, 2, 0)));
+        cache.insert_pet(7, "Rex".into());
+        cache.insert_creature(69, None);
+
+        cache.clear_world_session();
+
+        assert_eq!(cache.peek(0x11), None);
+        assert_eq!(cache.player_traits(0x11), None);
+        assert!(
+            cache.creatures.contains_key(&69),
+            "templates outlive the world session"
+        );
+        // And the ask-once markers went with them, so the next sighting asks rather than sitting
+        // behind a pending flag from a session that is over.
+        assert_eq!(cache.resolve(0x11, &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::NameQuery { guid: 0x11 })
+        ));
+    }
+
+    /// **Replacing a name drops the traits that belonged to the old one.** They describe the
+    /// character the name names; leaving them behind manufactures exactly the record the
+    /// descriptor check exists to catch — one whose name says one character and whose race says
+    /// another.
+    #[test]
+    fn a_name_replaced_without_traits_does_not_keep_the_old_ones() {
+        let mut cache = NameCache::default();
+        cache.insert_player(0x7, "Moamtester".into(), Some((1, 1, 0)));
+        cache.insert_player(0x7, "Corances".into(), None);
+        assert_eq!(cache.player_traits(0x7), None);
+    }
+
     /// **The header is an equality gate with no tolerance** — the reference's own `.wdb` rule, and
     /// the reason its cache carries no checksum and no clock. Each field is rejected on its own:
     /// a different build speaks a different protocol, a different locale means different strings,
@@ -717,7 +810,7 @@ mod tests {
     #[test]
     fn a_header_that_differs_in_any_field_discards_the_whole_file() {
         let mut cache = NameCache::default();
-        cache.insert_player(0x11, "Sam".into(), None);
+        cache.insert_creature(1234, None);
         let good = cache.to_tsv("Hydraxian Waterlords");
         assert!(NameCache::from_tsv(&good, "Hydraxian Waterlords").is_some());
 
@@ -745,9 +838,19 @@ mod tests {
         assert!(NameCache::from_tsv("", "R").is_none());
         assert!(NameCache::from_tsv("nonsense", "R").is_none());
         // A good header with a mangled record line keeps the header's other records.
-        let text = format!("{}\nP\tnotanumber\t1\t2\t0\tX\nE\t7\tRex\n", head);
+        let text = format!("{}\nC\tnotanumber\t1\t2\t0\tX\nc\t1234\n", head);
         let back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header still good");
         assert_eq!(back.len(), 1, "the bad line is skipped, the good one kept");
+
+        // **A version-1 file is discarded whole, and its player lines with it** (2223). The format
+        // field does that on its own — but say it here, because those lines are exactly the stale
+        // identities B386 was about and "the old file is simply dropped" is the property that
+        // matters, not that the `P` arm no longer parses.
+        let v1 = format!(
+            "{CACHE_MAGIC}\t1\t{CACHE_BUILD}\t{CACHE_LOCALE}\tHydraxian Waterlords\n\
+             P\t7\t1\t1\t0\tMoamtester\n"
+        );
+        assert!(NameCache::from_tsv(&v1, "Hydraxian Waterlords").is_none());
     }
 
     /// `SMSG_INVALIDATE_PLAYER`'s eviction — the safety valve persistence needs. The cache ages

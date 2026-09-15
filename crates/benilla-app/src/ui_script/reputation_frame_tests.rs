@@ -735,3 +735,115 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
     assert!(!shown(&mut s, "MainMenuExpBar"));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **B368 — "Show as Experience Bar", the whole round trip.** The reported symptom is the one thing
+/// no test here covered: every check above either drives `SetWatchedFactionIndex` from Lua or pushes
+/// `watched` in by hand, so the box itself — the only thing a player touches — had no guard at all
+/// between the pointer and the wire.
+///
+/// What the round trip is, and why it LOOKS broken when a link is missing: the box's `<OnClick>`
+/// (stock `ReputationFrame.xml` l.839-848) calls `SetWatchedFactionIndex(GetSelectedFaction())` and
+/// then `ReputationWatchBar_Update()` — and that update reads `GetWatchedFactionInfo()`, which is
+/// still nil, because watching is **not optimistic** (`0x4d6b60`: the slot is
+/// `PLAYER_FIELD_WATCHED_FACTION_INDEX`, a server field with no client mirror). So the click's own
+/// frame moves NOTHING on screen by design; the bar comes up one round trip later, when the
+/// descriptor update lands as a fresh push plus `UPDATE_FACTION`. A server that never answers the
+/// opcode therefore reads exactly as "the box does nothing", and so does anything between the
+/// pointer and the send.
+///
+/// Driven through the real pointer pipeline, so a frame eating the box's clicks fails here.
+#[test]
+fn the_show_as_experience_bar_box_sends_the_watch_and_the_server_brings_the_bar_up() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = shown_reputation_page();
+    // The row's checkmark is anchored past `factionName:GetStringWidth()`, so this test needs a
+    // font: without a measurer installed every metric reads 0 (`script::measure`'s "absent by
+    // default" state) and the mark would land on the name's first letter for that reason rather
+    // than for a real one. 6 units a character, the file-wide stand-in.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    let _ = s.take_reputation_sends();
+
+    // Ironforge (visible row 2, reputation slot 20) — select it and open the popup by clicking it.
+    click_center(&mut s, "ReputationBar2");
+    assert!(shown(&mut s, "ReputationDetailFrame"), "the popup opened");
+    assert!(
+        !s.eval::<bool>("return ReputationDetailMainScreenCheckBox:GetChecked() and true or false")
+            .unwrap(),
+        "nothing watched, so the box starts clear"
+    );
+    assert!(
+        !shown(&mut s, "ReputationWatchBar"),
+        "and the strip is down"
+    );
+
+    // THE CLICK. The engine ticks the box before the handler runs (the reference's own order), so
+    // the handler takes the `GetChecked()` branch that watches rather than the one that clears.
+    click_center(&mut s, "ReputationDetailMainScreenCheckBox");
+    assert_eq!(
+        s.take_reputation_sends(),
+        [benilla_ui::script::ReputationSend::Watch(Some(20))],
+        "one send, carrying Ironforge's reputation SLOT — not its visible row"
+    );
+    assert!(
+        !shown(&mut s, "ReputationWatchBar"),
+        "and nothing on screen moved: watching is not optimistic"
+    );
+
+    // The server's answer: the descriptor update arrives as a fresh push, and the event with it.
+    let mut watched = state();
+    watched.watched = Some(20);
+    s.set_reputation(watched);
+    s.fire_event("UPDATE_FACTION", vec![]);
+    s.resolve();
+
+    assert!(
+        s.eval::<bool>("return ReputationDetailMainScreenCheckBox:GetChecked() and true or false")
+            .unwrap(),
+        "NOW the box reads ticked — off the server's field, not off the click"
+    );
+    assert!(shown(&mut s, "ReputationWatchBar"), "and the strip is up");
+    assert_eq!(
+        text_of(&mut s, "ReputationWatchStatusBarText"),
+        "Ironforge 1000 / 6000"
+    );
+    // The list's own witness: the row grows a checkmark, re-anchored past the name's string width
+    // (ref `ReputationFrame.lua` l.96-103) — the half a player sees without leaving the pane.
+    assert!(
+        shown(&mut s, "ReputationBar2Check"),
+        "the watched row wears the checkmark"
+    );
+    assert!(
+        !shown(&mut s, "ReputationBar3Check"),
+        "and no other row does"
+    );
+    let (check_l, name_l) = s
+        .eval::<(f32, f32)>(
+            "return ReputationBar2Check:GetLeft(), ReputationBar2FactionName:GetLeft()",
+        )
+        .unwrap();
+    // "Ironforge" is nine characters, so the stand-in font makes the offset exactly 54 — the
+    // reference's `factionName:GetStringWidth()`, not a guess at one.
+    assert_eq!(
+        check_l - name_l,
+        54.0,
+        "the mark sits the name's own string width to its right"
+    );
+
+    // Untick: the same box, the same funnel, and `None` — NOT slot 0, which is a real faction.
+    click_center(&mut s, "ReputationDetailMainScreenCheckBox");
+    assert_eq!(
+        s.take_reputation_sends(),
+        [benilla_ui::script::ReputationSend::Watch(None)]
+    );
+    let mut cleared = state();
+    cleared.watched = None;
+    s.set_reputation(cleared);
+    s.fire_event("UPDATE_FACTION", vec![]);
+    s.resolve();
+    assert!(!shown(&mut s, "ReputationWatchBar"), "the strip goes down");
+    assert!(!shown(&mut s, "ReputationBar2Check"), "and the row's mark");
+    assert!(!s
+        .eval::<bool>("return ReputationDetailMainScreenCheckBox:GetChecked() and true or false")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

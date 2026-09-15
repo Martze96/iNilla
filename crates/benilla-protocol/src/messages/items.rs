@@ -585,6 +585,10 @@ const TARGET_FLAG_UNIT: u16 = 0x0002;
 /// `TARGET_FLAG_DEST_LOCATION` — a ground point, the same bit and the same three `f32` WoW coords
 /// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
+/// `TARGET_FLAG_SOURCE_LOCATION` — the dest bit's twin one place down, and the same three `f32`
+/// ([`super::spells::cast_spell_at_source`]). Both come out of the one binder `BindLocation
+/// 0x6e60f0` (decision 2218).
+const TARGET_FLAG_SOURCE_LOCATION: u16 = 0x0020;
 /// `TARGET_FLAG_ITEM` — a bound *item* target, the same bit and the same packed guid an
 /// item-targeted `CMSG_CAST_SPELL` writes (`super::spells::cast_spell_on_item`). One block
 /// builder, two opcodes (decision 0923).
@@ -623,6 +627,12 @@ pub enum UseItemTarget {
     /// `BindTarget 0x6e5b40` a unit goes through (`0x495d60` @ `496056`), so the block is the same
     /// block; only which bit is set differs.
     Item(u64),
+    /// `TARGET_FLAG_SOURCE_LOCATION` + three `f32` WoW coords — [`Self::Dest`]'s twin, one bit
+    /// over: `BindLocation 0x6e60f0`'s bit-5 arm writes the clicked point to `SPELLCAST+0x30` and
+    /// ORs `0x0020` into the wire mask, where its bit-6 arm writes `+0x3c` and ORs `0x0040`. Three
+    /// shipped items reach it — Martin Fury (17), 192 and 5417, all carrying spell 265 "Area Death
+    /// (TEST)" (decision 2218). vmangos reads this triple **before** the dest one.
+    Source([f32; 3]),
 }
 
 /// Body of `CMSG_USE_ITEM` (VERIFIED vmangos `UseItem::ReadFromWorldPacket` + opcode 171
@@ -655,6 +665,13 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
         UseItemTarget::Dest(dest) => {
             body.extend_from_slice(&TARGET_FLAG_DEST_LOCATION.to_le_bytes());
             for c in dest {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+            return body;
+        }
+        UseItemTarget::Source(src) => {
+            body.extend_from_slice(&TARGET_FLAG_SOURCE_LOCATION.to_le_bytes());
+            for c in src {
                 body.extend_from_slice(&c.to_le_bytes());
             }
             return body;

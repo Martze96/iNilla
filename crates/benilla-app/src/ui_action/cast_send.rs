@@ -112,8 +112,13 @@ pub(crate) struct CastLadder<'w, 's> {
 /// `BindTarget 0x6e5b40` can fill into a standing flag_word once the ladder has already run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TargetedBind {
-    /// The terrain click's point, in WoW coords (decision 0792).
+    /// The terrain click's point, in WoW coords (decision 0792) — `BindLocation 0x6e60f0`'s
+    /// bit-6 arm.
     Dest([f32; 3]),
+    /// The same terrain click's point, bound to the **source** slot instead — `BindLocation
+    /// 0x6e60f0`'s bit-5 arm (`6e6105`–`6e6126`), which the reference tests *first* and which
+    /// writes `SPELLCAST+0x30` and the wire bit `0x0020`. Decision 2218.
+    Source([f32; 3]),
     /// The bag / paper-doll click's item guid (decision 0923).
     Item(u64),
     /// The world click's GameObject guid (decision 0939) — a chest, a door, a vein, a herb.
@@ -140,6 +145,7 @@ impl CastLadder<'_, '_> {
             // in different builders), one on the item side — the block itself is the same block.
             CastCommit::Spell => match bound {
                 TargetedBind::Dest(dest) => ClientCommand::CastSpellAtDest { spell_id, dest },
+                TargetedBind::Source(src) => ClientCommand::CastSpellAtSource { spell_id, src },
                 TargetedBind::Item(item_guid) => ClientCommand::CastSpellItem {
                     spell_id,
                     item_guid,
@@ -162,6 +168,7 @@ impl CastLadder<'_, '_> {
                 spell_index,
                 target: match bound {
                     TargetedBind::Dest(dest) => UseItemTarget::Dest(dest),
+                    TargetedBind::Source(src) => UseItemTarget::Source(src),
                     TargetedBind::Item(guid) => UseItemTarget::Item(guid),
                     TargetedBind::Object(guid) => UseItemTarget::Object(guid),
                 },

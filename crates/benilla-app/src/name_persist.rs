@@ -4,13 +4,19 @@
 //! ## Why this exists at all
 //!
 //! Three of benilla's caches are filled by a server round trip: player names, creature templates
-//! and pet names. The reference persists all three (`namecache.wdb`, `creaturecache.wdb`,
-//! `petnamecache.wdb`), so on a machine that has played before, an answer is usually *already
-//! there* when the packet that needs it arrives. benilla asked fresh every login, which made a
-//! race the reference has practically closed wide open for us — the director hit it as a Lua error
-//! when unstabling a pet, where `PetStable_Update` hands a nil `UnitName("pet")` to a
-//! `GameTooltip:SetText` whose signature requires a string (decision 1688 closed that one path by
-//! seeding from the stable list; this closes the class).
+//! and pet names. **The reference persists exactly one of the three** — `creaturecache.wdb` — and
+//! that is what this module keeps. `'WNAM'` and `'WPNM'` are constructed with persistence
+//! **disabled** (`0x554cd0`'s three `push 0x0`, against `'WNPC'`/`'WIDB'`'s `push 0x1; push 0x1`)
+//! and are cleared at world-session start instead; a real 1.12 install's `WDB/` holds
+//! `creaturecache.wdb`, `npccache.wdb`, `itemcache.wdb` … and no `namecache.wdb`. 1689 read the
+//! carve as "all three" and wrote player and pet names to disk too, which is what answered a wiped
+//! server's brand-new character with a deleted one's name (B386); **decision 2223** took them back
+//! out and put the wipe in ([`NameCache::clear_world_session`]).
+//!
+//! What survives is the half that carried the value anyway: a city's worth of creature-template
+//! queries on zone-in, answered from disk instead of the wire. The **key** is the whole argument —
+//! a template entry means the same creature on every realm forever, while a player guid means one
+//! character and a pet number one live spawn.
 //!
 //! ## The law, from the carve
 //!
@@ -22,9 +28,8 @@
 //!   20 bytes are `[FourCC | build 0x16f3 | locale | recordSize | version 1]`. A mismatch discards
 //!   the file wholesale. Ours is a header line with the same job ([`NameCache::to_tsv`]).
 //! - **Eviction is explicit only** — a high-bit key in a response, or `SMSG_INVALIDATE_PLAYER`
-//!   (`0x31C` → remove-by-key `0x556ff0`). Nothing ages out. So a persisted name lives until the
-//!   server says otherwise, which is why that opcode had to be wired before anything was written
-//!   to disk: in memory a stale name costs a session, on disk it costs forever.
+//!   (`0x31C`). Nothing ages out. That is survivable for a record whose key cannot change meaning,
+//!   which is precisely why the stores whose keys *can* are not persisted at all.
 //!
 //! ## Where it lives, and the one place we deviate
 //!
@@ -101,7 +106,9 @@ fn load_name_cache(
             let n = loaded.len();
             // Replace rather than merge: this is the *start* of a realm's session, so there is
             // nothing of this realm's in memory to preserve, and a merge would silently keep the
-            // previous realm's records alive under their own keys.
+            // previous realm's records alive under their own keys. (What it replaces is creature
+            // templates — the file carries nothing else since 2223 — and world entry clears the
+            // guid-keyed stores a moment later regardless.)
             *names = loaded;
             file.saved_generation = names.generation();
             debug!(

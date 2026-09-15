@@ -68,15 +68,23 @@ pub(crate) fn commit_ground_cast_on_click(
         // stays, exactly like the UnableCast cursor said it would.
         return;
     };
-    let dest = bevy_to_wow(point);
+    let at = bevy_to_wow(point);
+    // `BindLocation 0x6e60f0` has an arm per location bit and tests SOURCE first — the one click
+    // binds `SPELLCAST+0x30` (wire `0x0020`) for a `Targets & 0x20` spell and `+0x3c` (wire
+    // `0x0040`) for a `& 0x40` one (decision 2218). `None` cannot happen behind
+    // `pending_for(Location)`, whose mask is the same `0x60`; it stays a `let else` rather than an
+    // unwrap so a future seam edit fails closed.
+    let Some(bound) = ladder.ground.location_bind(at) else {
+        return;
+    };
     debug!(
-        "ui_action: ground cast {spell_id} committed at wow ({:.2}, {:.2}, {:.2})",
-        dest[0], dest[1], dest[2]
+        "ui_action: ground cast {spell_id} committed at wow ({:.2}, {:.2}, {:.2}) as {bound:?}",
+        at[0], at[1], at[2]
     );
     // The shared commit tail — same block, two opcodes (`SendCast 0x6e54f0`'s one discriminator
     // survives the cursor, decision 0914: a thrown grenade commits as `CMSG_USE_ITEM` with the
-    // DEST block), then the pending arm, the GCD, and the word cleared.
-    ladder.commit_targeted(spell_id, commit, TargetedBind::Dest(dest));
+    // location block), then the pending arm, the GCD, and the word cleared.
+    ladder.commit_targeted(spell_id, commit, bound);
 }
 
 /// The world click's **GameObject** commit — the object leg (decision 0939). While targeting, a
@@ -200,6 +208,87 @@ mod tests {
             .resource_mut::<Messages<WorldClick>>()
             .write(WorldClick);
         world.run_system(id).expect("the object commit runs");
+    }
+
+    /// **`BindLocation 0x6e60f0`'s two arms, from one terrain click** (decision 2218). The same
+    /// click, the same point, the same commit tail — the standing word alone decides whether the
+    /// point is bound to the SOURCE slot (`Targets 0x20`: Martin Fury's spell 265) or the DEST one
+    /// (`Targets 0x40`: Blizzard). Before this, every ground commit wrote DEST, and a `0x20` word
+    /// never reached the cursor at all — it drew "Invalid target" (B388).
+    #[test]
+    fn the_terrain_click_binds_source_or_dest_by_the_standing_word() {
+        const BLIZZARD: u32 = 10;
+        const AREA_DEATH: u32 = 265;
+        let commit = crate::ui_action::cast_send::CastCommit::Spell;
+
+        let ground = |world: &mut World| {
+            world.resource_mut::<crate::target::PressPick>().occlusion =
+                crate::target::PickOcclusion {
+                    distance: 5.0,
+                    point: Some(Vec3::new(1.0, 2.0, 3.0)),
+                };
+        };
+        let run = |world: &mut World, id: SystemId| {
+            world
+                .resource_mut::<Messages<WorldClick>>()
+                .write(WorldClick);
+            world.run_system(id).expect("the ground commit runs");
+        };
+
+        // DEST word → the dest opcode, as before.
+        let (mut world, rx, _) = fixture();
+        let id = world.register_system(commit_ground_cast_on_click);
+        world
+            .resource_mut::<super::super::SpellTargeting>()
+            .enter(BLIZZARD, commit, 0x0040);
+        ground(&mut world);
+        run(&mut world, id);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpellAtDest {
+                spell_id: BLIZZARD,
+                ..
+            })
+        ));
+
+        // SOURCE word → the source opcode, from the identical click.
+        let (mut world, rx, _) = fixture();
+        let id = world.register_system(commit_ground_cast_on_click);
+        world
+            .resource_mut::<super::super::SpellTargeting>()
+            .enter(AREA_DEATH, commit, 0x0020);
+        ground(&mut world);
+        run(&mut world, id);
+        let sent = rx.try_recv().expect("a source word still commits");
+        assert!(
+            matches!(
+                sent,
+                ClientCommand::CastSpellAtSource {
+                    spell_id: AREA_DEATH,
+                    ..
+                }
+            ),
+            "a 0x20 word binds the SOURCE slot, not the dest: {sent:?}"
+        );
+        assert!(
+            !world.resource::<super::super::SpellTargeting>().active(),
+            "and the commit clears the one word"
+        );
+
+        // Both bits standing: SOURCE wins — the reference tests bit 5 before bit 6 and the arms
+        // are exclusive. No 5875 row carries both; the precedence is transcribed, not the
+        // two-click walk.
+        let (mut world, rx, _) = fixture();
+        let id = world.register_system(commit_ground_cast_on_click);
+        world
+            .resource_mut::<super::super::SpellTargeting>()
+            .enter(AREA_DEATH, commit, 0x0060);
+        ground(&mut world);
+        run(&mut world, id);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpellAtSource { .. })
+        ));
     }
 
     /// The whole gesture, end to end: a lock word standing, a chest under the cursor, one

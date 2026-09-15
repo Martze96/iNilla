@@ -402,6 +402,26 @@ pub fn cast_spell_at_dest(spell_id: u32, dest: [f32; 3]) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_CAST_SPELL` aimed at a **source point** (decision 2218): the targeting-cursor
+/// commit for a `Targets & 0x20` spell — the *other* half of `BindLocation 0x6e60f0`, whose bit-5
+/// arm writes `SPELLCAST+0x30..0x38` and ORs `SOURCE_LOCATION (0x0020)` into the wire mask
+/// (`6e6105`–`6e6126`), exactly as its bit-6 arm does for the dest at `+0x3c..0x44`. Same block,
+/// same three `f32` WoW world coords, one bit over (vmangos `SpellCastTargets::read`,
+/// `SpellCastTargetsInfo.cpp:161-167`: `SOURCE_LOCATION → x,y,z`, `IsValidMapCoord`-gated, read
+/// **before** the dest triple).
+///
+/// The server centres the AoE on it: `TARGET_ENUM_UNITS_ENEMY_AOE_AT_SRC_LOC (15)` fills its
+/// target map with `FillAreaTargets(…, PUSH_SRC_CENTER, …)` (`Spell.cpp:2265`).
+pub fn cast_spell_at_source(spell_id: u32, src: [f32; 3]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(18);
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body.extend_from_slice(&TARGET_FLAG_SOURCE_LOCATION.to_le_bytes());
+    for c in src {
+        body.extend_from_slice(&c.to_le_bytes());
+    }
+    body
+}
+
 /// Body of `CMSG_CANCEL_AURA` (vmangos `WorldPackets::Spell::CancelAura`, `Server/Packets/Spell.h:55-62`):
 /// one `u32` spell id. The server cancels **by spell, not by slot** — `HandleCancelAuraOpcode`
 /// (`SpellHandler.cpp:333-405`) looks the spell up, refuses passives, `SPELL_ATTR_NO_AURA_CANCEL`
@@ -445,6 +465,37 @@ mod tests {
                 0x00, 0x00, 0x40, 0x40, // z = 3.0
             ],
             "CMSG_CAST_SPELL (ground dest) body"
+        );
+    }
+
+    #[test]
+    fn cast_spell_at_source_body_golden() {
+        // spell_id 265 (Area Death (TEST) — Martin Fury's on-use, LE) + mask SOURCE_LOCATION
+        // 0x0020 (LE `20 00`) + the source Vec3 as three f32 LE. VERIFIED against vmangos
+        // `SpellCastTargets::read` (`SpellCastTargetsInfo.cpp:161-167`), which reads the SOURCE
+        // triple BEFORE the dest one and `IsValidMapCoord`-gates it. Decision 2218.
+        assert_eq!(
+            cast_spell_at_source(265, [1.0, -2.5, 3.0]),
+            [
+                0x09, 0x01, 0x00, 0x00, // spell id 265
+                0x20, 0x00, // TARGET_FLAG_SOURCE_LOCATION
+                0x00, 0x00, 0x80, 0x3F, // x = 1.0
+                0x00, 0x00, 0x20, 0xC0, // y = -2.5
+                0x00, 0x00, 0x40, 0x40, // z = 3.0
+            ],
+            "CMSG_CAST_SPELL (ground source) body"
+        );
+        // One bit apart from its twin, and nothing else: the two bodies differ in exactly the
+        // mask byte.
+        let (src, dest) = (
+            cast_spell_at_source(265, [1.0, -2.5, 3.0]),
+            cast_spell_at_dest(265, [1.0, -2.5, 3.0]),
+        );
+        assert_eq!(src.len(), dest.len());
+        assert_eq!(
+            src.iter().zip(&dest).filter(|(a, b)| a != b).count(),
+            1,
+            "source and dest bodies differ only in the mask"
         );
     }
 

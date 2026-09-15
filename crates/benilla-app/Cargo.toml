@@ -186,3 +186,9 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 # posture the old `stub.rs` had, without a second file to rot.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cpal = "0.17"
+
+# Windows: the journal's and the probes' CPU clocks (decision 2219, `perf::clock`) —
+# `GetProcessTimes`, `GetThreadTimes` and `GetSystemTimes`, the twins of the `getrusage`,
+# `clock_gettime` and `host_statistics64` arms. The version is one the graph already carries.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

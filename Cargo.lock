@@ -543,6 +543,7 @@ dependencies = [
  "symphonia",
  "toml",
  "wgpu",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

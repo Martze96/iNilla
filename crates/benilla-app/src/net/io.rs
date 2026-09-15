@@ -1274,6 +1274,9 @@ fn writer_loop(
                     ClientCommand::CastSpellAtDest { spell_id, dest } => {
                         w.cast_spell_at_dest(spell_id, dest)
                     }
+                    ClientCommand::CastSpellAtSource { spell_id, src } => {
+                        w.cast_spell_at_source(spell_id, src)
+                    }
                     ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
                     ClientCommand::SetActionButton { button, packed } => {
                         w.set_action_button(button, packed)

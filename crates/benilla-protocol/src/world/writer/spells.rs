@@ -71,6 +71,17 @@ impl WorldWriter {
         )
     }
 
+    /// Cast a spell at a **source point** (`CMSG_CAST_SPELL` with `TARGET_FLAG_SOURCE_LOCATION` +
+    /// the Vec3 in WoW world coords — [`messages::cast_spell_at_source`]): the targeting-cursor
+    /// commit for a `Targets & 0x20` spell (decision 2218). The dest verb's twin, one bit over;
+    /// the server centres the AoE on the point it carries.
+    pub fn cast_spell_at_source(&mut self, spell_id: u32, src: [f32; 3]) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_at_source(spell_id, src),
+        )
+    }
+
     /// Cancel a named in-flight cast (`CMSG_CANCEL_CAST`: one `u32` spell id — vmangos
     /// `HandleCancelCastOpcode`). Sent by the wand-only auto-repeat handoff (`0x6095b8`) and by
     /// the cast bar's local self-cancel (movement/Esc mid-cast, `benilla::ui_cast`).

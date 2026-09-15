@@ -769,6 +769,13 @@ pub(crate) mod apply {
     }
 }
 
+/// **The guild feed, as an orderable thing** — so a system that must run after the guild events
+/// have fired can say so without reaching for the function (and dragging its private memo type
+/// into the crate's surface). Its one consumer is the chat drain, which the reference orders
+/// after the world-enter cascade's events: `ui_chat`'s registration has the addresses.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GuildFeed;
+
 /// The guild windows' session: the wire mirror, the VM feed, and the outbound intents.
 pub(crate) struct UiGuildPlugin;
 
@@ -779,7 +786,7 @@ impl Plugin for UiGuildPlugin {
             .add_systems(
                 Update,
                 (
-                    feed::feed_guild.before(UiInput),
+                    feed::feed_guild.before(UiInput).in_set(GuildFeed),
                     feed::drain_guild.after(UiInput),
                 )
                     // **Never against the boot VM** (1348/1978, and B376's half of it): the feed
