@@ -15,8 +15,9 @@
 //! ordering exactly where 0025 already reserved it ("where player-UI arbitration will live later") —
 //! **dev overlays stay on top of the player UI, which stays on top of the world.** The camera renders
 //! nothing from the 3D world (its own [`RenderLayers`] layer, disjoint from the world camera's default
-//! layer 0) and composites over whatever the world camera already painted (`CameraOutputMode::Write`
-//! with alpha blending, no clear — same pattern as the egui overlay camera).
+//! layer 0); the world reaches it as its first quad ([`crate::world_backdrop`]), and its finished
+//! frame reaches the swapchain through [`crate::ui_gamma`]'s decode directly — output mode `Skip`,
+//! no blit (decision 2206).
 //!
 //! ## Colour space: the UI gamma composite lane (decision 0254)
 //! The reference draws its whole UI through the fixed-function device into an 8-bit backbuffer, so
@@ -643,24 +644,22 @@ fn spawn_ui_camera(mut commands: Commands) {
         ui_render_layers(),
         Camera {
             order: UI_CAMERA_ORDER,
-            output_mode: CameraOutputMode::Write {
-                // **No blend at all** — this camera now carries the world too
-                // ([`crate::world_backdrop`]), so its target is a whole opaque frame and the blit
-                // is a copy. That is the point: the blend that used to happen HERE, against the
-                // sRGB swapchain view, was the frame's one linear composite, and it was the only
-                // one that mixed UI with world. Moving the world into the UI's own byte buffer
-                // moves that blend into `ui_quad.wgsl`'s gamma target, where every other UI blend
-                // already lives.
-                //
-                // It also retires the hazard 0254 patched around here: `ui_quad.wgsl` writes
-                // PREMULTIPLIED colour, so the original `ALPHA_BLENDING`'s `SrcAlpha` factor
-                // weighted it by alpha twice (`rgb·a²`), and a pure-additive quad (a = 0) over the
-                // world was multiplied clean away. `PREMULTIPLIED_ALPHA_BLENDING` fixed the
-                // arithmetic but kept the blend — and kept it in the wrong space. With nothing to
-                // blend against, neither factor can be wrong.
-                blend_state: None,
-                clear_color: ClearColorConfig::None,
-            },
+            // **No output blit at all** (decision 2206, [`benilla_world::final_pass`]): the
+            // lane's final pass — [`crate::ui_gamma`]'s decode — renders straight into the
+            // swapchain, so bevy's `upscaling` copy of the finished frame is skipped.
+            //
+            // It could already have been a plain copy, because this camera carries the world
+            // too ([`crate::world_backdrop`]) and its target is a whole opaque frame. That was
+            // the point of the backdrop: the blend that used to happen HERE, against the sRGB
+            // swapchain view, was the frame's one linear composite, and the only one that mixed
+            // UI with world; moving the world into the UI's own byte buffer moved that blend
+            // into `ui_quad.wgsl`'s gamma target, where every other UI blend already lives. It
+            // also retired the hazard 0254 patched around here: `ui_quad.wgsl` writes
+            // PREMULTIPLIED colour, so the original `ALPHA_BLENDING`'s `SrcAlpha` factor
+            // weighted it by alpha twice (`rgb·a²`), and a pure-additive quad (a = 0) over the
+            // world was multiplied clean away. With nothing to blend against, neither factor can
+            // be wrong — and with no blit, there is no pass left to get it wrong in.
+            output_mode: CameraOutputMode::Skip,
             // An overlay must composite ONLY its own pixels. `ClearColorConfig::None` made this
             // camera depend on `MsaaWriteback::Auto`, which (for any non-first camera on a target)
             // COPIES the world camera's already-final output into this camera's MSAA texture and

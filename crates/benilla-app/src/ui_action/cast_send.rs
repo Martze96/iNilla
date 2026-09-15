@@ -195,10 +195,37 @@ impl CastLadder<'_, '_> {
         ctx: &cast_target::CastContext,
         commit: CastCommit,
     ) {
+        self.send_bound(spell_id, ctx, commit, None);
+    }
+
+    /// The same ladder for a cast the **caller** has already bound to a world GameObject — the
+    /// lock chain's opener (decisions 0239 / 0752 / 2199). TryCast takes its target as an ordinary
+    /// argument (`6e4ef4` hands `0x612df0` the guid pair it was *passed*), and the GameObject
+    /// strategy's use-sender is one of the callers that fills it: `0x5f35c0 → 0x6e5a90 →
+    /// 0x6e4b60`. So this is not a second send path — it is the one path, told what the click
+    /// already resolved, and the bound guid short-circuits the target binder exactly as the
+    /// key-in-a-lock arm's does.
+    pub(crate) fn send_at_object(
+        &mut self,
+        spell_id: u32,
+        ctx: &cast_target::CastContext,
+        go_guid: u64,
+    ) {
+        self.send_bound(spell_id, ctx, CastCommit::Spell, Some(go_guid));
+    }
+
+    fn send_bound(
+        &mut self,
+        spell_id: u32,
+        ctx: &cast_target::CastContext,
+        commit: CastCommit,
+        on_object: Option<u64>,
+    ) {
         send_spell_cast(
             spell_id,
             ctx,
             commit,
+            on_object,
             &self.commands,
             &self.self_player,
             self.spells.as_deref(),
@@ -236,6 +263,10 @@ fn send_spell_cast(
     spell_id: u32,
     ctx: &cast_target::CastContext,
     commit: CastCommit,
+    // The GameObject the CALLER bound, for a SPELL commit (`CastLadder::send_at_object`). The
+    // item commit carries its own on `CastCommit::Item`, because `CGItem::Use` is handed the
+    // lock's guid and the commit is what remembers it.
+    bound_object: Option<u64>,
     commands: &NetCommands,
     self_player: &Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     spells: Option<&Spells>,
@@ -343,7 +374,7 @@ fn send_spell_cast(
     let mut deferred_refusal = None;
     let explicit_object = match commit {
         CastCommit::Item { on_object, .. } => on_object,
-        CastCommit::Spell => None,
+        CastCommit::Spell => bound_object,
     };
     let candidates = cast_target::CastCandidates {
         selection: ctx.selection_guid,
@@ -675,14 +706,18 @@ fn send_spell_cast(
     }
     // The commit's ONE branch (`SendCast 0x6e54f0`): same block, two opcodes.
     let _ = commands.0.send(match commit {
-        CastCommit::Spell => match item_target {
+        CastCommit::Spell => match (explicit_object, item_target) {
+            // The lock chain's opener, bound by the click that resolved it (decision 2199) — the
+            // same builder `commit_targeted`'s `TargetedBind::Object` reaches, because
+            // `BindTarget`'s GameObject arm fills the block on both routes.
+            (Some(go_guid), _) => ClientCommand::CastSpellGameObject { spell_id, go_guid },
             // `SendCast 0x6e54f0`'s item leg — the same block the bag click's commit reaches, just
             // arrived at without a click (decision 1552).
-            Some(item_guid) => ClientCommand::CastSpellItem {
+            (None, Some(item_guid)) => ClientCommand::CastSpellItem {
                 spell_id,
                 item_guid,
             },
-            None => ClientCommand::CastSpell { spell_id, target },
+            (None, None) => ClientCommand::CastSpell { spell_id, target },
         },
         CastCommit::Item {
             bag_index,
@@ -836,6 +871,57 @@ mod tests {
                 ladder.send(spell_id, &ctx(), commit);
             })
             .expect("the ladder runs as a one-shot system");
+    }
+
+    fn send_at_go(world: &mut World, spell_id: u32, go_guid: u64) {
+        world
+            .run_system_once(move |mut ladder: CastLadder| {
+                ladder.send_at_object(spell_id, &ctx(), go_guid);
+            })
+            .expect("the ladder runs as a one-shot system");
+    }
+
+    /// **The mashed chest, at the ladder** (decision 2199). Right-clicking a lockable GameObject
+    /// resolves to a known `OPEN_LOCK` spell cast *at the object*; before this the arm sent its own
+    /// packet, so every extra click shipped another `CMSG_CAST_SPELL`, vmangos answered each one
+    /// `SPELL_FAILED_SPELL_IN_PROGRESS`, and that failure — naming the **same** spell as the cast
+    /// still running — red-faded its bar while the chest opened anyway.
+    ///
+    /// Two halves, both the reference's: the bound guid reaches the wire as the GameObject block
+    /// (`BindTarget`'s GO arm), and the re-click is `6e4d43`'s **silent** same-spell bail — no
+    /// packet, and no red line either, because the client refusing itself says nothing.
+    #[test]
+    fn a_mashed_gameobject_opener_never_ships_the_duplicate() {
+        const OPENING: u32 = 6478;
+        const CHEST: u64 = 0xF110_0000_0000_1234;
+        let (mut world, rx) = world();
+
+        send_at_go(&mut world, OPENING, CHEST);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(ClientCommand::CastSpellGameObject { spell_id, go_guid })
+                    if spell_id == OPENING && go_guid == CHEST
+            ),
+            "the first click commits as a GameObject-targeted cast and arms the one inflight id"
+        );
+
+        send_at_go(&mut world, OPENING, CHEST);
+        assert!(rx.try_recv().is_err(), "no duplicate on the wire");
+        assert!(
+            world.resource::<CastErrors>().0.is_empty(),
+            "the same spell's re-press is the ref's SILENT bail (6e4d43), not \"Another action is \
+             in progress\""
+        );
+
+        // The control: a *different* cast mid-opener is the loud refusal (6e4d97), unchanged.
+        send(&mut world, MOUNT, CastCommit::Spell);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![CastFail::local(MOUNT, 0x61)],
+            "a different spell mid-cast still errors 0x61"
+        );
     }
 
     // ── The melee ⟷ auto-repeat exclusion (the 5875 image, read 2026-08-06) ──────────────────

@@ -74,6 +74,7 @@ use std::time::Duration;
 
 use crate::creature_anim::{advance_track, scan_events, select, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
+use benilla_world::model_fade::DespawnFade;
 use benilla_world::schedule::WorldStage;
 
 /// `GO_STATE_ACTIVE` (vmangos `GOState`) — the **open** state (door swung, chest lid up). Passable.
@@ -581,10 +582,18 @@ fn arm_despawn_anim(mut gos: Query<&mut GoAnim, Changed<DespawnAnimAnnounced>>) 
 ///
 /// Runs AFTER [`drive_go_anim`], and that ordering is load-bearing in both directions. On the
 /// arming frame the drive has just set [`GoAnim::transient`], so the object is held; on the frame
-/// [`retire_transient_anim`] clears it (the window ended) nothing re-arms 157, so the object pops.
+/// [`retire_transient_anim`] clears it (the window ended) nothing re-arms 157, so the release runs.
 /// An entity that never armed anything — no [`GoAnim`], a model that doesn't author 157 — fails the
-/// test on its very first pass and pops the same frame, which is today's behaviour for everything
+/// test on its very first pass and is released the same frame, which is the case for everything
 /// that isn't an egg.
+///
+/// **"Released" is a fade, not a pop** (decision 2198). What the deferred `0x464920` runs into is
+/// the base OnDeactivate `0x6145e0`, which hands the object's model to the `SWModelFadeout`
+/// scheduler `0x672df0` on its way out — so the object stops existing while its model keeps
+/// drawing and ramps to zero. A looted chest whose static model authors no `Despawn` sequence is
+/// exactly this path with no animation in front of it, and popping it was the report that found
+/// the missing hop. [`DespawnFade`] is that hand-off; it arms once and drives itself, so the pin
+/// comes off with it and this query stops matching.
 fn release_despawn_pin(
     mut commands: Commands,
     pinned: Query<(Entity, Option<&GoAnim>), With<PendingDestroy>>,
@@ -593,7 +602,10 @@ fn release_despawn_pin(
         if go.is_some_and(|g| g.transient.is_some_and(|t| t.id == ANIM_DESPAWN)) {
             continue;
         }
-        commands.entity(e).try_despawn();
+        commands
+            .entity(e)
+            .try_remove::<PendingDestroy>()
+            .try_insert(DespawnFade::default());
     }
 }
 
@@ -1627,17 +1639,23 @@ mod tests {
         advance(&mut app, 2700);
         app.update();
         assert!(
-            app.world().get_entity(go).is_err(),
-            "the window ended — the pin drops and the deferred destroy runs"
+            app.world().get::<DespawnFade>(go).is_some(),
+            "the window ended — the pin drops and the deferred destroy hands the model to the fade"
+        );
+        assert!(
+            app.world().get::<PendingDestroy>(go).is_none(),
+            "and the pin comes off with it, so the release stops re-arming the fade"
         );
     }
 
     /// The other half of the same rule: a model that doesn't author 157 (or an object with no
     /// animation machine at all — a totem, a DynamicObject, both of which `SendObjectDeSpawnAnim`
-    /// also fires for) must keep today's **instant pop**. Nothing arms, so the pin never forms and
-    /// the release runs on its first pass.
+    /// also fires for) has nothing to play, so the pin never forms and the release runs on its
+    /// first pass — straight to the fade, with no animation in front of it. **This is the looted
+    /// chest** (decision 2198): `DeadmineCargoBoxes.m2` is a fully static model, so the announced
+    /// despawn resolves to nothing and the teardown fade is the whole observable.
     #[test]
-    fn an_unownable_despawn_anim_still_pops_instantly() {
+    fn an_unownable_despawn_anim_goes_straight_to_the_fade() {
         let (mut app, go) = crate_app(&[]); // the crate family only — no 157
         app.update();
 
@@ -1646,8 +1664,8 @@ mod tests {
             .insert((DespawnAnimAnnounced, PendingDestroy));
         app.update();
         assert!(
-            app.world().get_entity(go).is_err(),
-            "nothing to play ⇒ the ordinary instant destroy, same frame"
+            app.world().get::<DespawnFade>(go).is_some(),
+            "nothing to play ⇒ the teardown fade, same frame — never a pop"
         );
     }
 

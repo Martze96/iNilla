@@ -19,6 +19,7 @@
 //! afterwards. [`FfxGlow::state_scale`] is that whole class in one field, `0` on every bake
 //! (decision 1481).
 
+use bevy::camera::CameraOutputMode;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
@@ -37,6 +38,7 @@ use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
+use crate::final_pass::FinalPassTarget;
 use crate::view::WorldCamera;
 
 /// Marks a camera rendering with the faithful FFXGlow pass (extracted to the render world).
@@ -424,14 +426,22 @@ fn sync_gain(
 fn ensure_ffx_glow(
     mut commands: Commands,
     cam: Query<Entity, (With<WorldCamera>, Without<FfxGlow>)>,
-    with: Query<Entity, With<FfxGlow>>,
+    mut with: Query<(Entity, &mut Camera), With<FfxGlow>>,
 ) {
     // Perf-bisect kill-switch: $WOW_NO_FFX strips the pass from every camera (the frame then shows
     // undecoded gamma — ~2.2× bright — which is fine: this is a measurement mode, not a look mode).
     static NO_FFX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *NO_FFX.get_or_init(|| std::env::var_os("WOW_NO_FFX").is_some()) {
-        for e in &with {
+        for (e, mut camera) in &mut with {
             commands.entity(e).remove::<FfxGlow>();
+            // With no combine left to write the output, the view goes back to bevy's blit — a
+            // `Skip` camera (2206, `final_pass`) would otherwise present a target nothing wrote.
+            if matches!(camera.output_mode, CameraOutputMode::Skip) {
+                camera.output_mode = CameraOutputMode::Write {
+                    blend_state: None,
+                    clear_color: ClearColorConfig::Default,
+                };
+            }
         }
         return;
     }
@@ -465,12 +475,56 @@ struct FfxGlowPipelines {
     downsample: CachedRenderPipelineId,
     gauss_h: CachedRenderPipelineId,
     gauss_v: CachedRenderPipelineId,
-    combine: CachedRenderPipelineId,
-    /// The underwater combine. A SEPARATE pipeline rather than a branch inside `fs_combine`,
-    /// compiled once at startup beside it: a dry frame then binds byte-for-byte the pipeline it
-    /// bound before this feature existed and pays nothing at all for the warp — no extra pass, no
-    /// extra target, not even a uniform branch.
-    combine_wave: CachedRenderPipelineId,
+    combine: FfxCombinePipeline,
+}
+
+/// The combine — specialised on the **format it renders in** (decision 2206, [`crate::final_pass`]):
+/// a view whose camera runs `CameraOutputMode::Skip` gets it rendered straight into the output
+/// texture (the backdrop image, for the world camera), a `Write` view into the HDR main texture
+/// for bevy's blit to copy out, as before. The three filter passes never leave the ¼-res chain
+/// and stay unspecialised.
+struct FfxCombinePipeline {
+    layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+    fullscreen: FullscreenShader,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FfxCombineKey {
+    format: TextureFormat,
+    /// The underwater combine (`fs_combine_wave`). A SEPARATE pipeline rather than a branch inside
+    /// `fs_combine`: a dry frame then binds byte-for-byte the pipeline it bound before the warp
+    /// existed and pays nothing at all for it — no extra pass, no extra target, not even a uniform
+    /// branch.
+    wave: bool,
+}
+
+impl SpecializedRenderPipeline for FfxCombinePipeline {
+    type Key = FfxCombineKey;
+
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let (label, entry) = if key.wave {
+            ("ffx_glow_combine_wave", "fs_combine_wave")
+        } else {
+            ("ffx_glow_combine", "fs_combine")
+        };
+        RenderPipelineDescriptor {
+            label: Some(label.into()),
+            layout: vec![self.layout.clone()],
+            vertex: self.fullscreen.to_vertex_state(),
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some(entry.into()),
+                targets: vec![Some(ColorTargetState {
+                    format: key.format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            ..default()
+        }
+    }
 }
 
 fn init_pipelines(
@@ -581,16 +635,11 @@ fn init_pipelines(
         pipeline_cache.queue_render_pipeline(pipeline("ffx_glow_h", &layout_filter, "fs_gauss_h"));
     let gauss_v =
         pipeline_cache.queue_render_pipeline(pipeline("ffx_glow_v", &layout_filter, "fs_gauss_v"));
-    let combine = pipeline_cache.queue_render_pipeline(pipeline(
-        "ffx_glow_combine",
-        &layout_combine,
-        "fs_combine",
-    ));
-    let combine_wave = pipeline_cache.queue_render_pipeline(pipeline(
-        "ffx_glow_combine_wave",
-        &layout_combine,
-        "fs_combine_wave",
-    ));
+    let combine = FfxCombinePipeline {
+        layout: layout_combine.clone(),
+        shader,
+        fullscreen: fullscreen_shader.clone(),
+    };
     commands.insert_resource(FfxGlowPipelines {
         layout_filter,
         layout_combine,
@@ -601,7 +650,6 @@ fn init_pipelines(
         gauss_h,
         gauss_v,
         combine,
-        combine_wave,
     });
 }
 
@@ -617,11 +665,18 @@ struct FfxGlowTextures {
     /// submit executes).
     gain_buf: Buffer,
     /// The two Gauss bind groups bind only the ¼-res ping-pong views + sampler — all stable
-    /// while the textures hold. The downsample and combine bind groups bind the view target's
-    /// post-process source, which `ViewTarget::post_process_write` flips per call, so those two
-    /// CANNOT be cached (they would sample last frame's texture) and stay per-frame in `run`.
+    /// while the textures hold. The downsample and combine bind groups bind the view's finished
+    /// main texture, which `ViewTarget::post_process_write` flips per call on a `Write` view, so
+    /// those two are not cached (they would sample last frame's texture) and stay per-frame in
+    /// `run`.
     gauss_h_bind: BindGroup,
     gauss_v_bind: BindGroup,
+    /// The combine pipelines for this view — dry and wave — specialised on the format the
+    /// combine renders in for THIS camera's output mode (`FinalPassTarget::format`).
+    combine: CachedRenderPipelineId,
+    combine_wave: CachedRenderPipelineId,
+    /// The format those were keyed on: the freshness gate beside the two textures'.
+    combine_format: TextureFormat,
 }
 
 fn prepare_textures(
@@ -630,12 +685,22 @@ fn prepare_textures(
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Res<FfxGlowPipelines>,
-    views: Query<(Entity, &ExtractedCamera, Option<&FfxGlowTextures>), With<FfxGlow>>,
+    mut combine_pipelines: ResMut<SpecializedRenderPipelines<FfxCombinePipeline>>,
+    views: Query<
+        (
+            Entity,
+            &ExtractedCamera,
+            &ViewTarget,
+            Option<&FfxGlowTextures>,
+        ),
+        With<FfxGlow>,
+    >,
 ) {
-    for (entity, camera, existing) in &views {
+    for (entity, camera, target, existing) in &views {
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
+        let combine_format = FinalPassTarget::format(&camera.output_mode, target);
         // The reference's RT-dim chain: ½ and ¼, floored (clamp ≥8 — `ffx_compute_rt_dims`).
         let mut tex = |label: &'static str, w: u32, h: u32| {
             texture_cache.get(
@@ -664,9 +729,26 @@ fn prepare_textures(
         if existing.is_some_and(|t| {
             t.quarter_a.texture.id() == quarter_a.texture.id()
                 && t.quarter_b.texture.id() == quarter_b.texture.id()
+                && t.combine_format == combine_format
         }) {
             continue;
         }
+        let combine = combine_pipelines.specialize(
+            &pipeline_cache,
+            &pipelines.combine,
+            FfxCombineKey {
+                format: combine_format,
+                wave: false,
+            },
+        );
+        let combine_wave = combine_pipelines.specialize(
+            &pipeline_cache,
+            &pipelines.combine,
+            FfxCombineKey {
+                format: combine_format,
+                wave: true,
+            },
+        );
         let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
         let gauss_h_bind = render_device.create_bind_group(
             "ffx_glow_gauss_h",
@@ -690,6 +772,9 @@ fn prepare_textures(
             gain_buf,
             gauss_h_bind,
             gauss_v_bind,
+            combine,
+            combine_wave,
+            combine_format,
         });
     }
 }
@@ -794,13 +879,14 @@ impl ViewNode for FfxGlowNode {
         &'static ViewTarget,
         &'static FfxGlowTextures,
         &'static FfxGlow,
+        &'static ExtractedCamera,
     );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, textures, glow): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_target, textures, glow, camera): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FfxGlowPipelines>();
@@ -817,9 +903,9 @@ impl ViewNode for FfxGlowNode {
         // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
         // pipeline, which is the same fork — the first two passes are identical in both lists.
         let combine_id = if wave_armed(glow.state, wave, death) {
-            pipelines.combine_wave
+            textures.combine_wave
         } else {
-            pipelines.combine
+            textures.combine
         };
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),
@@ -835,7 +921,10 @@ impl ViewNode for FfxGlowNode {
             0,
             bytemuck::cast_slice(&uniform),
         );
-        let post = view_target.post_process_write();
+        // Where this view's combine lands (2206, `final_pass`): a `Skip` camera's output texture
+        // itself, a `Write` camera's ping-pong for bevy's blit to copy out. The downsample reads
+        // the same finished main texture either way.
+        let out = FinalPassTarget::resolve(camera, view_target);
         let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
         let diagnostics = render_context.diagnostic_recorder();
 
@@ -851,14 +940,14 @@ impl ViewNode for FfxGlowNode {
         let blur_read = uniform[0] != 0.0 || uniform[2] != 0.0;
         if blur_read {
             let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
-            // The downsample binds `post.source`, which `post_process_write` flips per call —
-            // this bind group cannot be cached (it would sample last frame's texture); the two
-            // Gauss ones bind only the stable ¼-res ping-pong and ride prepared on
-            // [`FfxGlowTextures`].
+            // The downsample binds `out.source`, which a `Write` view's `post_process_write`
+            // flips per call — this bind group is not cached (it would sample last frame's
+            // texture); the two Gauss ones bind only the stable ¼-res ping-pong and ride
+            // prepared on [`FfxGlowTextures`].
             let down_bind = render_device.create_bind_group(
                 "ffx_glow_down_quarter",
                 &layout_filter,
-                &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
+                &BindGroupEntries::sequential((out.source, &pipelines.sampler)),
             );
 
             // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
@@ -908,13 +997,13 @@ impl ViewNode for FfxGlowNode {
             }
         }
 
-        // Combine: screen + w·blur² (gamma-space byte math in the shader) → the post destination.
-        // Also binds the flipping `post.source` — per-frame for the downsample's reason.
+        // Combine: screen + w·blur² (gamma-space byte math in the shader) → the view's output.
+        // Also binds the flipping `out.source` — per-frame for the downsample's reason.
         let bind = render_device.create_bind_group(
             "ffx_glow_combine",
             &layout_combine,
             &BindGroupEntries::sequential((
-                post.source,
+                out.source,
                 &pipelines.sampler,
                 &textures.quarter_a.default_view,
                 textures.gain_buf.as_entire_binding(),
@@ -922,20 +1011,19 @@ impl ViewNode for FfxGlowNode {
                 &pipelines.wave_sampler,
             )),
         );
+        let scissor = out.scissor_rect();
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
                 label: Some("ffx_glow_combine"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: post.destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
+                color_attachments: &[Some(out.destination)],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+        if let Some((x, y, w, h)) = scissor {
+            pass.set_scissor_rect(x, y, w, h);
+        }
         let span = diagnostics.pass_span(&mut pass, "ffx_glow_combine");
         pass.set_pipeline(combine);
         pass.set_bind_group(0, &bind, &[]);
@@ -979,6 +1067,7 @@ impl Plugin for FfxGlowPlugin {
             return;
         };
         render_app
+            .init_resource::<SpecializedRenderPipelines<FfxCombinePipeline>>()
             .add_systems(RenderStartup, init_pipelines)
             .add_systems(
                 Render,

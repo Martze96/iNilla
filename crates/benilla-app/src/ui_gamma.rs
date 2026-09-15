@@ -6,8 +6,9 @@
 //! multiply, every blend is gamma arithmetic clamped at each write, and `alphaMode="ADD"` is the
 //! byte add `dst + texel·α` (EGxBlend 3 = `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`; wow-re
 //! `system/gx/gx.md`, factor tables `0x85c1f8`/`0x85c224`). This node converts that finished gamma
-//! image to linear ONCE, so the `Rgba8UnormSrgb` write re-encodes it to the exact client byte and
-//! the camera's output blit carries it to the swapchain unchanged.
+//! image to linear ONCE, rendering straight into the swapchain — the camera's output mode is
+//! `Skip`, so there is no output blit (decision 2206, [`benilla_world::final_pass`]) — whose sRGB
+//! write re-encodes it to the exact client byte.
 //!
 //! The node is **mandatory** on the player-UI camera: without it the whole UI presents ~2.2× bright
 //! (the same failure mode `$WOW_NO_FFX` produces for the world). It is gated on [`UiGammaLane`], so
@@ -22,8 +23,8 @@
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
-use bevy::image::BevyDefault as _;
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_graph::{
@@ -33,12 +34,14 @@ use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::ViewTarget;
-use bevy::render::{RenderApp, RenderStartup};
+use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::ui_render::graph::NodeUi;
 use bevy::ui_render::ui_texture_slice_pipeline::{
     init_ui_texture_slice_pipeline, UiTextureSlicePipeline,
 };
 use bevy::ui_render::{init_ui_pipeline, UiPipeline};
+
+use benilla_world::final_pass::FinalPassTarget;
 
 /// Marks the camera whose target holds a gamma-composited image awaiting this pass's one decode,
 /// and carries the [`DisplayGamma`] exponent that decode applies on the way through (2182).
@@ -111,15 +114,65 @@ fn stamp_lane_gamma(gamma: Res<DisplayGamma>, mut lanes: Query<&mut UiGammaLane>
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct UiGammaLabel;
 
+/// The decode's shared halves. The pipeline itself is specialised per view on the format it
+/// renders in ([`ViewUiGammaPipeline`]).
 #[derive(Resource)]
 struct UiGammaPipeline {
     layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
-    decode: CachedRenderPipelineId,
+    shader: Handle<Shader>,
+    fullscreen: FullscreenShader,
     /// The ramp exponent's 16-byte uniform, rewritten each frame with a queue write (which lands
     /// before the graph's submit executes) — the same shape `ffx_glow`'s combine uses. One buffer,
     /// not one per view: [`UiGammaLane`] is on exactly one camera.
     ramp: Buffer,
+}
+
+impl SpecializedRenderPipeline for UiGammaPipeline {
+    type Key = TextureFormat;
+
+    fn specialize(&self, format: Self::Key) -> RenderPipelineDescriptor {
+        RenderPipelineDescriptor {
+            label: Some("ui_gamma_decode".into()),
+            layout: vec![self.layout.clone()],
+            vertex: self.fullscreen.to_vertex_state(),
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("fs_decode".into()),
+                // An 8-bit sRGB target either way: the swapchain's view for the player-UI camera
+                // (`Skip`, 2206), or — for a `Write` camera — its own main texture, which is not
+                // `Hdr` and so carries Bevy's default 8-bit sRGB format, the one that makes the
+                // lane clamp at every blend like the reference.
+                targets: vec![Some(ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            ..default()
+        }
+    }
+}
+
+/// The decode pipeline for one view — specialised on where the decode lands (2206,
+/// [`benilla_world::final_pass`]): the swapchain, for the player-UI camera, whose output mode is
+/// `Skip`. Stamped every frame, the way bevy stamps its own `ViewUpscalingPipeline`.
+#[derive(Component)]
+struct ViewUiGammaPipeline(CachedRenderPipelineId);
+
+fn prepare_view_pipelines(
+    mut commands: Commands,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Res<UiGammaPipeline>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<UiGammaPipeline>>,
+    views: Query<(Entity, &ExtractedCamera, &ViewTarget), With<UiGammaLane>>,
+) {
+    for (entity, camera, target) in &views {
+        let format = FinalPassTarget::format(&camera.output_mode, target);
+        let id = pipelines.specialize(&pipeline_cache, &pipeline, format);
+        commands.entity(entity).insert(ViewUiGammaPipeline(id));
+    }
 }
 
 fn init_pipeline(
@@ -127,7 +180,6 @@ fn init_pipeline(
     render_device: Res<RenderDevice>,
     fullscreen_shader: Res<FullscreenShader>,
     asset_server: Res<AssetServer>,
-    pipeline_cache: Res<PipelineCache>,
 ) {
     let layout = BindGroupLayoutDescriptor::new(
         "ui_gamma_layout",
@@ -150,24 +202,6 @@ fn init_pipeline(
         address_mode_v: AddressMode::ClampToEdge,
         ..Default::default()
     });
-    let decode = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-        label: Some("ui_gamma_decode".into()),
-        layout: vec![layout.clone()],
-        vertex: fullscreen_shader.to_vertex_state(),
-        fragment: Some(FragmentState {
-            shader: asset_server.load("embedded://benilla_app/shaders/ui_gamma.wgsl"),
-            shader_defs: vec![],
-            entry_point: Some("fs_decode".into()),
-            // The UI camera is not `Hdr`, so its `ViewTarget` carries Bevy's default 8-bit sRGB
-            // format — which is what makes the lane clamp at every blend, like the reference.
-            targets: vec![Some(ColorTargetState {
-                format: TextureFormat::bevy_default(),
-                blend: None,
-                write_mask: ColorWrites::ALL,
-            })],
-        }),
-        ..default()
-    });
     let ramp = render_device.create_buffer(&BufferDescriptor {
         label: Some("ui_gamma_ramp"),
         size: 16,
@@ -177,7 +211,8 @@ fn init_pipeline(
     commands.insert_resource(UiGammaPipeline {
         layout,
         sampler,
-        decode,
+        shader: asset_server.load("embedded://benilla_app/shaders/ui_gamma.wgsl"),
+        fullscreen: fullscreen_shader.clone(),
         ramp,
     });
 }
@@ -186,18 +221,23 @@ fn init_pipeline(
 struct UiGammaNode;
 
 impl ViewNode for UiGammaNode {
-    type ViewQuery = (&'static ViewTarget, &'static UiGammaLane);
+    type ViewQuery = (
+        &'static ViewTarget,
+        &'static UiGammaLane,
+        &'static ExtractedCamera,
+        &'static ViewUiGammaPipeline,
+    );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, lane): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_target, lane, camera, pipeline): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<UiGammaPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(decode) = pipeline_cache.get_render_pipeline(pipelines.decode) else {
+        let Some(decode) = pipeline_cache.get_render_pipeline(pipeline.0) else {
             // Still compiling. Skipping leaves the UI undecoded (over-bright) for a frame or two,
             // which beats dropping the UI entirely.
             return Ok(());
@@ -208,33 +248,34 @@ impl ViewNode for UiGammaNode {
             0,
             bytemuck::cast_slice(&[lane.gamma, 0.0, 0.0, 0.0]),
         );
-        let post = view_target.post_process_write();
+        // Where the decode lands (2206, `final_pass`): the swapchain itself for the player-UI
+        // camera (`Skip`), the ping-pong for a `Write` camera.
+        let out = FinalPassTarget::resolve(camera, view_target);
         let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout);
         let bind = render_context.render_device().create_bind_group(
             "ui_gamma_decode",
             &layout,
             &BindGroupEntries::sequential((
-                post.source,
+                out.source,
                 &pipelines.sampler,
                 pipelines.ramp.as_entire_binding(),
             )),
         );
         // Its diagnostic span: the journal's `gpu_ui` column counts this decode (2008).
         let diagnostics = render_context.diagnostic_recorder();
+        let scissor = out.scissor_rect();
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
                 label: Some("ui_gamma_decode"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: post.destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
+                color_attachments: &[Some(out.destination)],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+        if let Some((x, y, w, h)) = scissor {
+            pass.set_scissor_rect(x, y, w, h);
+        }
         let span = diagnostics.pass_span(&mut pass, "ui_gamma_decode");
         pass.set_pipeline(decode);
         pass.set_bind_group(0, &bind, &[]);
@@ -283,7 +324,12 @@ impl Plugin for UiGammaPlugin {
             return;
         };
         render_app
+            .init_resource::<SpecializedRenderPipelines<UiGammaPipeline>>()
             .add_systems(RenderStartup, init_pipeline)
+            .add_systems(
+                Render,
+                prepare_view_pipelines.in_set(RenderSystems::Prepare),
+            )
             .add_systems(
                 RenderStartup,
                 use_gamma_ui_shaders
@@ -291,7 +337,8 @@ impl Plugin for UiGammaPlugin {
                     .after(init_ui_texture_slice_pipeline),
             )
             .add_render_graph_node::<ViewNodeRunner<UiGammaNode>>(Core2d, UiGammaLabel)
-            // After the quads are composited, before the blit that composites the UI over the world.
+            // After the quads are composited, in the slot before the output blit's — which a
+            // `Skip` camera leaves empty: the decode IS the output write.
             .add_render_graph_edges(
                 Core2d,
                 (Node2d::EndMainPass, UiGammaLabel, Node2d::Upscaling),

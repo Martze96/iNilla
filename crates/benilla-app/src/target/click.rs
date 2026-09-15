@@ -322,9 +322,14 @@ pub(super) fn act_on_right_click(
         // The reader session the TEXT branch opens (decision 1105) — like the mailbox, a
         // client-side window with no packet behind it.
         ResMut<crate::ui_item_text::ItemTextOpen>,
+        // The GameObject opener's one-frame queue (decision 2199): this system cannot hold
+        // `CastLadder` (it would reach `Items`/`CastErrors` twice), so the lock chain's verdict
+        // travels to `ui_action::drain::drain_go_openers` instead of becoming a packet here.
+        ResMut<crate::ui_action::GoOpenerCasts>,
     ),
 ) {
-    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail, mut item_text) = ui_feedback;
+    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail, mut item_text, mut openers) =
+        ui_feedback;
     if clicks.read().last().is_none() {
         return;
     }
@@ -483,7 +488,7 @@ pub(super) fn act_on_right_click(
                     &seam.net,
                 ) {
                     GoAction::Use if cursor.unable => {}
-                    GoAction::OpenLock(_) | GoAction::OpenByKey { .. } if cursor.unable => {}
+                    GoAction::OpenLock(_) | GoAction::OpenByKey(_) if cursor.unable => {}
                     GoAction::Use => {
                         debug!("right-click gameobject use: {guid:#x}");
                         if benilla_assets::trace::enabled_for("use") {
@@ -494,87 +499,28 @@ pub(super) fn act_on_right_click(
                         }
                         let _ = seam.net.0.send(ClientCommand::GameObjUse { guid });
                     }
+                    // **Both opener arms queue for the one cast path** (decision 2199) — they
+                    // do not send. The reference reaches `TryCast 0x6e4b60` from the GameObject
+                    // strategy's use-sender (`0x5f35c0 → 0x6e5a90 → 0x6e4b60`, §8.4) exactly as it
+                    // does from a button press, so an opener owes the whole ladder — the in-flight
+                    // refusal above all, which is what keeps a mashed right-click from shipping a
+                    // duplicate the server answers "Another action is in progress" while red-fading
+                    // the bar of the cast that is still running. The local reagent/totem and
+                    // mounted checks that used to stand here are ladder rungs; they ran here only
+                    // because this arm could not reach the ladder at all.
                     GoAction::OpenLock(spell_id) => {
-                        // The opener cast funnels through the ref's TryCast like any other cast
-                        // (§8.4: `0x5f35c0 → 0x6e5a90 → 0x6e4b60`), so the pre-send totem check
-                        // `0x6e4000` gates it too (decision 0552): a pickless Mining cast
-                        // refuses HERE with the local red "Requires Mining Pick" and sends
-                        // nothing — vmangos would answer the sent cast with the wrong code.
-                        let def = go_inputs
-                            .spells
-                            .as_ref()
-                            .and_then(|s| s.catalog.get(spell_id));
-                        if crate::ui_action::reagent_totem_refusal(
-                            spell_id,
-                            def,
-                            self_store,
-                            &go_inputs.items,
-                            &mut cast_errors,
-                        ) {
-                            return;
-                        }
-                        // Same funnel, same requirement validator: a mounted opener refuses with
-                        // reason `0x39` and sends nothing (`0x609c6c`). Mining and Herbalism are
-                        // exactly the gathering casts a rider tries without dismounting, and the
-                        // server would silently dismount us instead of saying so. **After** the
-                        // reagent check, which is TryCast's own order — step 5 (`0x6e4dec`) before
-                        // step 7 (`0x6e4f3b`) — so a pickless mounted miner still reads "Requires
-                        // Mining Pick", exactly as [`CastLadder`] orders its own two rungs.
-                        if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
-                            debug!("right-click gameobject open-lock: refused locally — mounted");
-                            cast_errors.push_local(spell_id, 0x39);
-                            return;
-                        }
                         debug!("right-click gameobject open-lock: cast {spell_id} at {guid:#x}");
-                        let _ = seam.net.0.send(ClientCommand::CastSpellGameObject {
+                        openers.0.push(crate::ui_action::GoOpener::Spell {
                             spell_id,
                             go_guid: guid,
                         });
                     }
-                    GoAction::OpenByKey {
-                        bag_index,
-                        slot,
-                        spell_index,
-                    } => {
-                        // No reagent/totem pre-check here, unlike the skill arm above: that gate is
-                        // about a Mining cast without a pick, and a key has no reagents — the ref's
-                        // `0x6e4000` would pass every key trivially.
-                        //
-                        // The MOUNTED gate is not skippable the same way: an item use IS a cast
-                        // (decision 0908) and reaches the same requirement validator, so a rider
-                        // turning a key refuses and sends nothing. The key's ON_USE *spell* is
-                        // exactly what this arm does not resolve (the stated 0914 gap below), so
-                        // the record is `None` — which the predicate reads as "no exemption to
-                        // claim" and refuses. That is the right way to be wrong: no 1.12 key
-                        // carries Attributes bit 24. Raised by KEY rather than through
-                        // [`CastErrors`], because a reason-coded entry wants a spell id and we
-                        // have none — the red line is identical either way; what a spell-less
-                        // entry would cost is the combat-log twin, which needs the spell's name
-                        // and cannot have it here. A disclosed shortfall of 0914's gap, not a new
-                        // one.
-                        if crate::ui_action::cast_mounted_refusal(self_mounted, None) {
-                            debug!("right-click gameobject open-by-key: refused locally — mounted");
-                            ui_error_keys
-                                .0
-                                .push(crate::ui_action::UiError::key("SPELL_FAILED_NOT_MOUNTED"));
-                            return;
-                        }
+                    GoAction::OpenByKey(it) => {
                         debug!(
-                            "right-click gameobject open-by-key: use item ({bag_index},{slot}) blk {spell_index} at {guid:#x}"
+                            "right-click gameobject open-by-key: use item ({},{}) blk {} at {guid:#x}",
+                            it.bag_index, it.slot, it.spell_index
                         );
-                        // NOT through [`crate::ui_action::CastLadder`] yet — this arm and the
-                        // `OpenLock` cast above are the last two sends outside the one ladder, and
-                        // folding them in is its own slice: the system is already at the
-                        // SystemParam ceiling, the resolver would have to carry the key's ON_USE
-                        // *spell* as well as its block ordinal, and the binder has no GameObject
-                        // arm (`CastCommit::Item::on_object` is the seam that awaits it). Stated
-                        // gap, decision 0914.
-                        let _ = seam.net.0.send(ClientCommand::UseItem {
-                            bag_index,
-                            slot,
-                            spell_index,
-                            target: benilla_protocol::messages::UseItemTarget::Object(guid),
-                        });
+                        openers.0.push(crate::ui_action::GoOpener::Key(it));
                     }
                     GoAction::Refuse(err) => {
                         // `None` is a case the ref is silent on too (a key-item record miss —
@@ -976,11 +922,11 @@ pub(crate) enum GoAction {
     /// (decision 0769; wow-re `cursor-system.md` §8.4 — "the client never sends a bare
     /// CMSG_CAST_SPELL for a key lock"). The distinction is the whole ballgame: `Spell::CanOpenLock`
     /// honours a `Lock.dbc` KEY slot only when `m_CastItem` is set, which only USE_ITEM supplies.
-    OpenByKey {
-        bag_index: u8,
-        slot: u8,
-        spell_index: u8,
-    },
+    ///
+    /// Carried as a whole [`crate::ui_items::ItemUse`] (decision 2199) because the reference's
+    /// lock chain calls `CGItem::Use` with the lock's guid — the one item-use fork every surface
+    /// takes — rather than building a packet of its own. `on_object` is that guid.
+    OpenByKey(crate::ui_items::ItemUse),
     /// A lock present that we cannot open — the client-local refusal (§8.4: `DisplayError`, **no
     /// packet**). `Some` = the red toast to queue; `None` = the ref is silent for this case too.
     Refuse(Option<crate::ui_action::UiError>),
@@ -1091,7 +1037,7 @@ pub(crate) fn resolve_go_action(
     let Some(store) = me_store else {
         return GoAction::Refuse(None);
     };
-    let Some((bag_index, slot, _)) = crate::ui_items::find_item(
+    let Some((bag_index, slot, key_guid)) = crate::ui_items::find_item(
         &store.0,
         &inputs.items,
         key_entry,
@@ -1102,18 +1048,24 @@ pub(crate) fn resolve_go_action(
     };
     // The template is ask-once — a miss queries and does nothing this click, exactly like the
     // toast's own name miss. `use_spell_index` is the BLOCK ordinal, the packet's third byte.
-    match inputs
-        .items
-        .template(key_entry, 0, net)
-        .and_then(|i| i.use_spell_index())
-    {
-        Some(spell_index) => GoAction::OpenByKey {
-            bag_index,
-            slot,
-            spell_index,
-        },
-        None => GoAction::Refuse(None),
-    }
+    let Some(tmpl) = inputs.items.template(key_entry, 0, net) else {
+        return GoAction::Refuse(None);
+    };
+    let Some(spell_index) = tmpl.use_spell_index() else {
+        return GoAction::Refuse(None);
+    };
+    GoAction::OpenByKey(crate::ui_items::ItemUse {
+        guid: Some(key_guid),
+        start_quest: tmpl.start_quest,
+        bag_index,
+        slot,
+        entry: key_entry,
+        spell_index,
+        use_spell: tmpl.use_spell.as_ref().map(|u| u.spell_id),
+        // The bound lock — `CGItem::Use`'s own target argument (decision 0769).
+        on_object: Some(guid),
+        is_charter: tmpl.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0,
+    })
 }
 
 /// The client-local toast for an unopenable lock — the ref's routing, transcribed (wow-re

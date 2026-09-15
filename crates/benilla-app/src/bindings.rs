@@ -134,6 +134,19 @@ pub(crate) struct BindingsState {
     /// Accumulated analog amount per host command this frame (wheel notches; a key press adds
     /// the reference's own 1.0 step) — the camera zoom's input.
     amounts: Vec<(Cmd, f32)>,
+    /// **The pressed-key set — what makes a press a REPEAT** (decision 2204). The reference
+    /// classifies auto-repeat off its own list of keys it believes are down (`0x4248b3`), *not*
+    /// off the Win32 `lParam` repeat bit — so the OS bit is not what this reads either.
+    ///
+    /// Base keys, normalized ([`chord::normalize_key`]) exactly as [`latched`](Self::latched) is,
+    /// so `NUMPADENTER` repeating under a held `ENTER` is the repeat it looks like. Reconciled
+    /// against `ButtonInput` at the top of every pass, which is what wipes it on a window
+    /// activation change for free — and why a key still held across an alt-tab starts running
+    /// again on the way back, as it does in the reference.
+    ///
+    /// **Keyboard only, and the type says so.** The mouse plane is read as edges
+    /// (`just_pressed`), which cannot repeat, so it needs no classification of its own.
+    down: Vec<KeyCode>,
 }
 
 impl BindingsState {
@@ -534,6 +547,24 @@ fn latch_and_dispatch(
     // at the bottom of this system turns that into real releases (the loading cover reaches it the
     // same way, through `loading_screen::input`'s `swallow`).
     //
+    // ── The pressed-key reconcile ── the reference keeps its own list of keys it believes are
+    // down and calls a press a REPEAT when the key is already on it (`0x4248b3`) — it never reads
+    // the Win32 `lParam` repeat bit. Ours is reconciled against bevy's button planes here, before
+    // this frame's messages are read, which buys two things at once (decision 2204):
+    //
+    // - a release the window never saw drops off the list, exactly as it drops off `latched` in
+    //   the sweep below — the list cannot go stale and start swallowing real presses;
+    // - **WM_ACTIVATE's wipe of the pressed-key set comes for free.** `KeyboardFocusLost` →
+    //   `ButtonInput::release_all` empties the plane, so a key still physically held across an
+    //   alt-tab is no longer on the list when we come back, and its next auto-repeat is therefore
+    //   a fresh DOWN that re-latches. That is the reference's own behaviour and not a happy
+    //   accident: `0x514490` cleared the direction bits on the way out, and `0x424790`'s wipe of
+    //   the pressed-key set is what lets the first repeat put them back — so you resume running
+    //   without lifting the key.
+    state
+        .down
+        .retain(|&kc| physically_down(BindKey::Key(kc), &keys, &buttons));
+
     // ── Keyboard ── press edges latch/fire (exact-modifier chord match, no repeats, gated on the
     // two ownership terms and the capture arm); release edges unlatch and fire the runOnUp up-half.
     let typing = capture.typing;
@@ -557,7 +588,14 @@ fn latch_and_dispatch(
                 // world map's fullscreen `OnKeyDown`, a cinematic, the stack-split spinner. Per
                 // key, so the map eating its own `M` leaves every other binding alone.
                 let eaten = capture.consumed.contains(&ev.key_code);
-                if armed || (typing && !arrow_exempt) || eaten || sup || ev.repeat {
+                // **A repeat is a key we already believe is down** — the reference's own test, not
+                // the OS's repeat bit (2204). Registered before the gates below, so a key held
+                // through a focused chat box is still "down" and its repeats stay repeats.
+                let repeat = state.down.contains(&key);
+                if !repeat {
+                    state.down.push(key);
+                }
+                if armed || (typing && !arrow_exempt) || eaten || sup || repeat {
                     continue;
                 }
                 if state.latched.iter().any(|&(k, _)| k == BindKey::Key(key)) {
@@ -581,6 +619,7 @@ fn latch_and_dispatch(
                 }
             }
             ButtonState::Released => {
+                state.down.retain(|&kc| kc != key);
                 release(
                     &mut state,
                     &mut script,
@@ -699,14 +738,7 @@ fn latch_and_dispatch(
     // keyboard focus reaches here, and that is the point (2196).
     let mut stuck: Vec<BindKey> = Vec::new();
     for &(k, _) in &state.latched {
-        let up = match k {
-            BindKey::Key(kc) => {
-                !keys.pressed(kc) && !(kc == KeyCode::Enter && keys.pressed(KeyCode::NumpadEnter))
-            }
-            BindKey::Mouse(b) => !buttons.pressed(b),
-            BindKey::WheelUp | BindKey::WheelDown => true,
-        };
-        if up && !stuck.contains(&k) {
+        if !physically_down(k, &keys, &buttons) && !stuck.contains(&k) {
             stuck.push(k);
         }
     }
@@ -735,6 +767,31 @@ impl BindingDispatch {
             addons: Vec::new(),
             seen_generation: crate::ui_script::VmMemo::default(),
         }
+    }
+}
+
+/// Is this base key physically down right now, per bevy's own button planes?
+///
+/// The one place that question is answered, because two callers ask it for two reasons and an
+/// answer that drifted between them would be a stuck latch on one side or a lost repeat on the
+/// other: the [stuck-latch sweep](latch_and_dispatch) (a release the window never saw) and the
+/// pressed-key reconcile beside it ([`BindingsState::down`]).
+///
+/// `ENTER` is the case that needs saying: [`chord::normalize_key`] folds `NUMPADENTER` into it, so
+/// the normalized key is down while *either* physical key is.
+fn physically_down(
+    key: BindKey,
+    keys: &ButtonInput<KeyCode>,
+    buttons: &ButtonInput<MouseButton>,
+) -> bool {
+    match key {
+        BindKey::Key(KeyCode::Enter) => {
+            keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter)
+        }
+        BindKey::Key(kc) => keys.pressed(kc),
+        BindKey::Mouse(b) => buttons.pressed(b),
+        // A notch is a press and a release in one frame; it is never "held".
+        BindKey::WheelUp | BindKey::WheelDown => false,
     }
 }
 
@@ -891,6 +948,11 @@ mod tests {
     }
     fn release_key(app: &mut App, k: KeyCode) {
         key(app, k, bevy::input::ButtonState::Released, false);
+    }
+    /// A press the OS has flagged as auto-repeat. Whether it *acts* as one is ours to decide
+    /// (2204), which is the whole point of the tests that use this.
+    fn repeat_key(app: &mut App, k: KeyCode) {
+        key(app, k, bevy::input::ButtonState::Pressed, true);
     }
     fn state(app: &App) -> &BindingsState {
         app.world().resource::<BindingsState>()
@@ -1297,6 +1359,61 @@ mod tests {
         // Nothing is left latched: a wheel latch that outlived its notch would hold the down
         // state forever, with no key to press to end it.
         assert!(app.world().resource::<BindingsState>().latched.is_empty());
+    }
+
+    /// **Auto-repeat is classified off OUR pressed-key set, not the OS bit** (2204), and the
+    /// window-deactivate wipe is what makes a held key resume on the way back.
+    ///
+    /// Three laws in one run, because they are one mechanism:
+    ///
+    /// 1. a repeat of a key we already believe is down does NOT re-run its binding — the
+    ///    reference's own test (`0x4248b3`), which matters for the kinds that never latch (a held
+    ///    SPACE must jump once, not every 33 ms);
+    /// 2. a press carrying `repeat: true` that we do NOT have down is a fresh DOWN. The OS bit is
+    ///    not the authority — the reference reads its own list and never the Win32 `lParam` bit;
+    /// 3. so after a window deactivate — bevy's `KeyboardFocusLost` → `release_all`, which is our
+    ///    `0x514490`+`0x424790` pair — the first repeat of a key still physically held re-latches,
+    ///    and **you start running again without lifting the key**, as the reference does.
+    #[test]
+    fn a_repeat_is_a_key_we_already_have_down_so_a_held_key_resumes_after_an_alt_tab() {
+        let mut app = harness();
+        press_key(&mut app, KeyCode::Space);
+        app.update();
+        assert!(state(&app).fired(cmd::JUMP), "the first press jumps");
+
+        // (1) A repeat of a key we have down fires nothing — JUMP never latches, so the
+        // pressed-key set is the only thing standing between a held SPACE and a jump per frame.
+        repeat_key(&mut app, KeyCode::Space);
+        app.update();
+        assert!(
+            !state(&app).fired(cmd::JUMP),
+            "a repeat of a key already down is not a press"
+        );
+
+        // Movement, so the resume below has something to observe.
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+
+        // (3) The window is deactivated. Bevy empties the keyboard plane, which unlatches through
+        // the stuck-latch sweep AND empties our pressed-key set — the reference's two wipes.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "the deactivate releases the direction bits (0x514490)"
+        );
+
+        // (2)+(3) Back in the window, still holding W. The OS calls this a repeat; we do not have
+        // the key down any more, so it is a fresh press — and you run again without lifting it.
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the first repeat after re-activation re-latches (2204)"
+        );
     }
 
     #[test]

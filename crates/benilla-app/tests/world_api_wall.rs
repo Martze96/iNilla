@@ -412,7 +412,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// item (the `#[cfg(feature = "dev")]` weather panel is its only other namer); what changed is
 /// that a game module names it now, which is exactly the crossing this gate exists to make
 /// visible.
-const CEILING: usize = 180;
+/// And 180 → 181: `final_pass::FinalPassTarget`, a PUBLISH — where a colour lane's final pass
+/// lands, as one noun (decision 2206). The client has two colour lanes that end in a full-screen
+/// decode: the world's (the FFXGlow combine, engine-side) and the UI's (`crate::ui_gamma`'s,
+/// game-side since 0254 — the interface is the game's). Both used to write bevy's main texture
+/// and let its `upscaling` blit copy the result out; 2206 has each render straight into its
+/// camera's target when the camera's output mode is `Skip`, and the rule that turns an output
+/// mode into a destination, a format and a scissor is one rule, not two copies of it that drift.
+/// It could not go the other way: moving the UI decode into the engine would put the UI lane's
+/// colour law on the wrong side of the wall. So the engine publishes the rule as one type with
+/// two associated functions, and the game names it once.
+const CEILING: usize = 181;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

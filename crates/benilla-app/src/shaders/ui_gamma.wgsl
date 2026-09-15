@@ -5,8 +5,8 @@
 // `ui_quad.wgsl` composites the whole UI in gamma bytes, like the reference's fixed-function
 // backbuffer. The UI camera's target is `Rgba8UnormSrgb`, so a stored byte round-trips through the
 // hardware's encode/decode and the sampler hands this pass back the gamma value the UI pass wrote.
-// Emitting `srgb_to_linear` of it re-encodes on write to the exact client byte, which the output
-// blit then carries into the swapchain unchanged.
+// Emitting `srgb_to_linear` of it re-encodes on write to the exact client byte — written straight
+// into the swapchain (decision 2206: the camera's output mode is `Skip`, so no blit follows).
 //
 // RGB is premultiplied by coverage; alpha is coverage and carries no gamma, so it passes through.
 

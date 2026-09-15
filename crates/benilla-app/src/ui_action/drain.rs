@@ -163,6 +163,62 @@ pub(super) fn drain_chain_casts(
     }
 }
 
+/// **The world right-click's GameObject opener**, run through the one cast path (decision 2199) —
+/// the seam [`crate::ui_action::GoOpenerCasts`] exists for.
+///
+/// The reference reaches TryCast from the GameObject strategy's use-sender exactly as it does from
+/// a button press (`0x5f35c0 → 0x6e5a90 → 0x6e4b60`, wow-re `cursor-system.md` §8.4), so an opener
+/// takes **every rung** — in-flight, cooldown/GCD, power, crowd control, mounted, water, moving,
+/// form, reagents — and not the two the click used to check on its own. The rung that matters for
+/// the report this closes is the in-flight one: the second right-click on a chest whose Opening
+/// cast is still running is `6e4d43`'s **silent** same-spell bail, so no duplicate ever reaches the
+/// wire and the running bar is never red-faded by the server's answer to a packet we should not
+/// have sent.
+pub(super) fn drain_go_openers(
+    mut queue: ResMut<crate::ui_action::GoOpenerCasts>,
+    script: Option<NonSendMut<UiScript>>,
+    targeting: cast_target::CastTargeting,
+    mut ladder: CastLadder,
+    // The by-key local-refusal sink, passed explicitly for the same reason `drain_action_uses`
+    // does: a resource reachable twice from one system is a `B0002` panic (decision 1903).
+    mut ui_errors: ResMut<UiErrorKeys>,
+    mut gate: crate::ui_bind_confirm::BindGate,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let ctx = targeting.context();
+    let mut script = script;
+    for opener in std::mem::take(&mut queue.0) {
+        match opener {
+            super::GoOpener::Spell { spell_id, go_guid } => {
+                debug!("ui_action: gameobject opener casts {spell_id} at {go_guid:#x}");
+                ladder.send_at_object(spell_id, &ctx, go_guid);
+            }
+            // The key's own `CGItem::Use` fork — one function for every use surface (decision
+            // 0664), so the key reaches the wire through the same route a bag click does.
+            super::GoOpener::Key(it) => {
+                let Some(script) = script.as_deref_mut() else {
+                    continue;
+                };
+                debug!(
+                    "ui_action: gameobject opener uses the key at wire {}/{} on {:?}",
+                    it.bag_index, it.slot, it.on_object
+                );
+                crate::ui_items::send_item_use(
+                    it,
+                    &ctx,
+                    &mut ladder,
+                    script,
+                    &mut gate,
+                    false,
+                    &mut ui_errors,
+                );
+            }
+        }
+    }
+}
+
 /// The **self-cast modifier**, applied to a cast's targeting inputs: `UseAction`'s third argument
 /// (1.12's `SELFACTIONBUTTON1`-`12`, `ALT-1`…`ALT-=`, through `ActionButtonUp(id, 1)`).
 ///

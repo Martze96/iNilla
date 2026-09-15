@@ -149,6 +149,39 @@ pub(crate) struct AutoRepeatActive(pub Option<u32>);
 #[derive(Resource, Default)]
 pub(crate) struct ChainCasts(pub(crate) Vec<u32>);
 
+/// **The world right-click's GameObject-opener queue** — the lock chain's resolved action, carried
+/// one frame to the one cast path (decision 2199).
+///
+/// It exists for exactly the reason [`ChainCasts`] does, and no other: the right-click system
+/// ([`crate::target::click::act_on_right_click`]) and [`CastLadder`] want the same half-dozen
+/// resources, so the click cannot call the ladder in place — a resource reachable twice from one
+/// system is a `B0002` panic on the first live frame. A one-frame queue is the seam, and it keeps
+/// the rule that **nothing sends a cast except the ladder**.
+///
+/// Before it, the opener was the last cast in the tree that sent its own packet. That is not a
+/// tidiness point: the ladder is where the in-flight rung lives (`6e4d97` — the reference's
+/// already-casting refusal, whose same-spell leg `6e4d43` is *silent*), so spamming right-click on
+/// a chest shipped a `CMSG_CAST_SPELL` per click, vmangos answered every duplicate
+/// `SPELL_FAILED_SPELL_IN_PROGRESS`, and that failure — naming the **same** spell as the running
+/// cast — red-faded the running bar while the cast completed anyway. Character for character the
+/// B200 report decision 0908 fixed for items; this is the same bug at the arm 0914 named as still
+/// open.
+#[derive(Resource, Default)]
+pub(crate) struct GoOpenerCasts(pub(crate) Vec<GoOpener>);
+
+/// One queued opener — what the lock chain resolved the right-click to
+/// ([`crate::target::click::resolve_go_action`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GoOpener {
+    /// A known `OPEN_LOCK` spell the player satisfies, cast **at the object** — `CMSG_CAST_SPELL`
+    /// carrying the GameObject target block (decision 0239).
+    Spell { spell_id: u32, go_guid: u64 },
+    /// A key slot we carry: `CGItem::Use` with the lock's guid, which the commit turns into
+    /// `CMSG_USE_ITEM` + `TARGET_FLAG_GAMEOBJECT` (decision 0769). The item carries the bound guid
+    /// on its own [`crate::ui_items::ItemUse::on_object`].
+    Key(crate::ui_items::ItemUse),
+}
+
 /// The spell display catalog + the shapeshift bonus-bar map (absent when the client data isn't —
 /// every consumer tolerates that). `pub(crate)`: the cast-visual router
 /// (`crate::creature_anim::spell_visual`) resolves spell → visual through the same catalog — one
@@ -333,6 +366,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<ChainCasts>()
+            .init_resource::<GoOpenerCasts>()
             .init_resource::<cast_target::AutoSelfCast>()
             .init_resource::<targeting::SpellTargeting>()
             .init_resource::<targeting::EnchantConfirmItem>()
@@ -370,6 +404,11 @@ impl Plugin for UiActionPlugin {
                     // takes. After the input pass like the other drains — the queue is filled by
                     // the net drain, which runs earlier in the frame.
                     drain::drain_chain_casts.after(UiInput),
+                    // The world right-click's opener (2199), beside the chain cast and for the
+                    // same reason: the click resolved it, the ladder sends it. After the input
+                    // pass like the other drains — the queue is filled by the target chain,
+                    // which runs earlier in the frame.
+                    drain::drain_go_openers.after(UiInput),
                     // The learned-ability latches must be current before the target chain's
                     // cursor classifier reads them; the book feed runs in `UnitFeed`, so sitting
                     // right after it is enough.

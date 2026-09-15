@@ -1532,6 +1532,7 @@ mod tests {
                     duration: 2.0,
                     from: 0.0,
                     to: 1.0,
+                    curve: crate::model_fade::FadeCurve::Cubic,
                 },
             ))
             .id();
@@ -1610,6 +1611,7 @@ mod tests {
                     duration: 2.0,
                     from: 0.0,
                     to: 1.0,
+                    curve: crate::model_fade::FadeCurve::Cubic,
                 },
             ))
             .id();
@@ -1664,6 +1666,7 @@ mod tests {
                 duration: 1.0,
                 from: 0.0,
                 to: 1.0,
+                curve: crate::model_fade::FadeCurve::Cubic,
             });
         world
             .entity_mut(part)

@@ -458,18 +458,31 @@ pub(super) fn object_destroyed(
     index: &mut GuidIndex,
     items: &mut Items,
 ) {
-    // The reference frees it on the spot, an **instant pop** with no fade-out
-    // (byte-verified, wow-re selection-death-clear RE — the only lifecycle fade is the
-    // appear-fade on create). A respawn then streams in as a fresh entity. If it was the
-    // target, the ring's gone-entity branch clears the selection next frame — the
-    // reference's teardown does the same (and sends the same `CMSG_SET_SELECTION 0`).
+    // **The object goes away by the same fade its stream-out takes** — `DespawnFade`, not a raw
+    // despawn (decision 2198). The reference's object-manager destroy hands the object's *model*
+    // to the `SWModelFadeout` scheduler on the way out: the base OnDeactivate `0x6145e0` (vtable
+    // slot 1, which `0x464920` invokes on **both** DESTROY and OUT_OF_RANGE) unbinds the scene
+    // handle and calls `0x672df0`, which keeps the detached model drawing and ramps its alpha to
+    // zero. So "the object is freed instantly" and "the model fades" are both true, one hop
+    // apart — and the paragraph that used to stand here read the first as the whole story,
+    // because it went looking for a `FadeTo` on the OBJECT and found none.
+    //
+    // That is why a looted chest pops: the chest's model authors no `Despawn` sequence, so the
+    // announced despawn animation produces nothing and there was nothing left but the pop. The
+    // fade is not the animation; it is what every teardown does underneath it.
+    //
+    // The guid leaves the index either way — to the server it no longer exists, and a respawn
+    // streams in as a fresh entity that fades in over the top. If it was the target, the ring's
+    // gone-entity branch clears the selection next frame, the same as the reference's teardown
+    // (which sends the same `CMSG_SET_SELECTION 0`).
     //
     // …*unless the object is pinned* — `0x464920` on a still-pinned object only sets the
     // pending-destroy bit and returns, and the real free waits for the last pin to drop (wow-re
     // `go-display-sound-events.md` §6d). The one pin benilla takes is the despawn animation
     // announced a moment earlier by `SMSG_GAMEOBJECT_DESPAWN_ANIM`, which is the whole of how an
-    // object gets to play its own despawn after the server says it is gone (decision 1404).
-    // The guid leaves the index either way: to the server it no longer exists.
+    // object gets to play its own despawn after the server says it is gone (decision 1404); the
+    // fade then follows the animation, where the deferred destroy runs
+    // ([`crate::go_anim::release_despawn_pin`]).
     if let Some(e) = index.0.remove(&guid) {
         commands.queue(move |world: &mut bevy::ecs::world::World| {
             if world
@@ -479,8 +492,8 @@ pub(super) fn object_destroyed(
                 if let Ok(mut ent) = world.get_entity_mut(e) {
                     ent.insert(crate::go_anim::PendingDestroy);
                 }
-            } else if let Ok(ent) = world.get_entity_mut(e) {
-                ent.despawn();
+            } else if let Ok(mut ent) = world.get_entity_mut(e) {
+                ent.insert(DespawnFade::default());
             }
         });
     }
@@ -492,10 +505,12 @@ pub(super) fn object_destroyed(
 /// left its range.
 pub(super) fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &mut GuidIndex) {
     // Don't pop the entity, fade it out, then despawn (`apply_despawn_fade` drives the ramp; an
-    // entity with no fadeable geometry pops straight out there). Director-verified look:
-    // on the reference, distant mobs fade out, never blink out (destroy, above, is the
-    // byte-verified instant pop; 0067's open question, settled by the director's eyes —
-    // which reference mechanism produces the fade is unpinned and doesn't matter here).
+    // entity with no fadeable geometry pops straight out there). Director-verified look: on the
+    // reference, distant mobs fade out, never blink out (0067's open question, settled by their
+    // eyes). The mechanism behind it is the same one [`object_destroyed`] above now takes — the
+    // OUT_OF_RANGE block and DESTROY reach `0x464920` alike, and its OnDeactivate hands the model
+    // to the `SWModelFadeout` scheduler either way ([`DespawnFade`], decision 2198). That the two
+    // routes agree is not a convenience here; it is the reference's own shape.
     for g in guids {
         if let Some(e) = index.0.remove(&g) {
             commands.entity(e).insert(DespawnFade::default());
