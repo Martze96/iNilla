@@ -96,11 +96,19 @@ impl Plugin for UiHonorPlugin {
 
 /// Read the honor block off our own descriptor, or `None` while none of it has streamed.
 ///
-/// **`None` and all-zeroes are different states and the difference is visible**: a fresh character
-/// who has never fought has every counter at 0 *and* the fields present, while a player who has
-/// only just entered the world may have none of them yet. The reference paints the second as
-/// blank, not as zero, so the feed pushes nothing until at least one field arrives rather than
-/// inventing a zeroed snapshot.
+/// **`None` and all-zeroes are the same thing on screen, and that is the point of the gate, not a
+/// flaw in it.** This doc used to say the reference "paints a player whose fields have not arrived
+/// as blank, not as zero". It does not: `0x51a4b0`–`0x51a7c0`'s "absent → 0.0" tails are about the
+/// absent player OBJECT, and once the object exists every one of those bindings reads a
+/// descriptor array that is allocated and zeroed, so a field the server never sent reads `0`
+/// (wow-re `honor-panel-law.md` §3.1–3.5). Our bindings answer the same zeros —
+/// `honor(lua).unwrap_or_default()` — so what the gate actually decides is only *when the first
+/// snapshot is pushed*, and with it when `PLAYER_PVP_KILLS_CHANGED`/`PLAYER_PVP_RANK_CHANGED`
+/// first fire. It cannot make a row differ from the reference.
+///
+/// That is worth stating because this gate was the other candidate cause of report B378, and it
+/// is ruled out by exactly this: a missing snapshot and a zeroed one paint the same pane. The
+/// cause was the rank title's team digit (decision 2227).
 fn honor_snapshot(store: &ObjectStore) -> Option<HonorState> {
     let f = &store.0;
     let session = f.player_session_kills();

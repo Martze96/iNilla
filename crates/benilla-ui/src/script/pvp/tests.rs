@@ -64,7 +64,12 @@ fn player() -> UnitState {
         name: Some("Benilla".into()),
         sex: 3, // female
         is_player: true,
+        // Both, because a real Alliance player has both — and they are not the same field.
+        // `faction_group` is `UnitFactionGroup`'s live faction template; `pvp_team` is
+        // `0x5efe00`'s race walk, which is what every rank title is keyed by. The GM-mode test
+        // below is the one that drives them apart.
         faction_group: Some("Alliance".into()),
+        pvp_team: 1,
         pvp_rank: 9,
         ..Default::default()
     }
@@ -337,6 +342,7 @@ fn the_pane_title_is_keyed_by_team_and_is_never_gendered() {
         Some(UnitState {
             sex: 2,
             faction_group: Some("Horde".into()),
+            pvp_team: 0,
             ..player()
         }),
     );
@@ -417,12 +423,65 @@ fn a_missing_rank_global_reads_nil_not_empty() {
     s.set_unit(
         "player",
         Some(UnitState {
-            faction_group: None,
+            pvp_team: -1,
             ..player()
         }),
     );
     seat_rank_globals(&s);
     assert!(s.eval::<bool>("return GetPVPRankInfo(9) == nil").unwrap());
+}
+
+/// **The team digit is NOT the faction group** — report B378 at the binding level (decision 2227).
+///
+/// `UnitFactionGroup` reads the unit's live `UNIT_FIELD_FACTIONTEMPLATE` (`0x516630`) and the rank
+/// title's team digit reads the unit's RACE (`0x5efe00`), so a vmangos GM — template 35, group
+/// mask 0 — has no side and keeps his rank. Both `0x5efe00` surfaces are asserted here: the
+/// binding's key and `UnitPVPName`'s decoration (`0x5efe60`, the same walk).
+#[test]
+fn a_sideless_player_still_has_a_team_digit_because_his_race_has_one() {
+    let mut s = seated();
+    seat_rank_globals(&s);
+    s.lua()
+        .globals()
+        .set("UNIT_PVP_NAME", "%s %s")
+        .expect("global");
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            // `.gm on` — the template names nothing …
+            faction_group: None,
+            faction_group_localized: None,
+            // … and the race still names Alliance.
+            pvp_team: 1,
+            sex: 2,
+            pvp_rank: 18,
+            ..player()
+        }),
+    );
+    assert_eq!(
+        s.eval::<String>("return (GetPVPRankInfo(18))").unwrap(),
+        "Grand Marshal",
+        "the sideless template must not reach the key"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return UnitPVPName("player")"#).unwrap(),
+        "Grand Marshal Benilla",
+        "and the name decoration reads the same digit"
+    );
+    // The control: a unit whose RACE resolves to nothing is still −1, and −1 still misses.
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            faction_group: Some("Alliance".into()),
+            pvp_team: -1,
+            pvp_rank: 18,
+            ..player()
+        }),
+    );
+    assert!(
+        s.eval::<bool>("return GetPVPRankInfo(18) == nil").unwrap(),
+        "a side on the template cannot stand in for a missing team digit either"
+    );
 }
 
 /// The internal→visual conversion across its whole range — **and the negative half runs the
@@ -520,6 +579,7 @@ fn get_pvp_rank_info_takes_a_second_argument_three_different_ways() {
             name: Some("Thrall".into()),
             is_player: true,
             faction_group: Some("Horde".into()),
+            pvp_team: 0,
             pvp_rank: 14,
             ..Default::default()
         }),
@@ -575,7 +635,7 @@ fn get_pvp_rank_info_takes_a_second_argument_three_different_ways() {
         Some(UnitState {
             exists: true,
             name: Some("Timber Wolf".into()),
-            faction_group: Some("Alliance".into()),
+            pvp_team: 1,
             ..Default::default()
         }),
     );
@@ -593,7 +653,7 @@ fn get_pvp_rank_info_takes_a_second_argument_three_different_ways() {
         Some(UnitState {
             exists: true,
             is_player: true,
-            faction_group: None,
+            pvp_team: -1,
             ..Default::default()
         }),
     );
@@ -643,6 +703,7 @@ fn unit_pvp_rank_answers_for_a_foreign_unit() {
             name: Some("Thrall".into()),
             is_player: true,
             faction_group: Some("Horde".into()),
+            pvp_team: 0,
             pvp_rank: 14,
             ..Default::default()
         }),

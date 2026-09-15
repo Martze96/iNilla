@@ -348,22 +348,22 @@ fn global_string(lua: &Lua, key: &str) -> Option<String> {
 }
 
 /// A unit's PvP **team digit** — `0x5efe00`'s tri-state: `0` Horde, `1` Alliance, `-1` for a unit
-/// with no side (a neutral/monster faction template, or a race the tables can't resolve).
+/// whose race resolves to no side.
 ///
 /// The engine walks race → `ChrRaces` → `FactionTemplate` and tests `[rec+0xc]`'s factionGroupMask
-/// `& 4` → 0, `& 2` → 1, else −1. This crate holds no DBC (decision 0068 §3), so the same answer
-/// arrives pre-resolved on the snapshot as [`UnitState::faction_group`](super::UnitState) — the
-/// app resolves it from `UNIT_FIELD_FACTIONTEMPLATE` through the same mask. Different hop, same
-/// output space (the credit line's own inline copy at `0x62530a` reads the template one hop
-/// earlier than `0x5efe00` does and lands in the same three values).
+/// `& 4` → 0, `& 2` → 1, else −1. This crate holds no DBC (decision 0068 §3), so the walk is the
+/// app's and the answer arrives pre-resolved as [`UnitState::pvp_team`](super::UnitState).
+///
+/// **It is not [`UnitState::faction_group`](super::UnitState), which this used to read.** That
+/// field is `UnitFactionGroup`'s — the unit's LIVE `UNIT_FIELD_FACTIONTEMPLATE` — and the two
+/// part company the moment anything moves a unit off its racial faction. A vmangos GM is forced
+/// to template 35 (group mask 0), so every rank title in the Honor tab read `NONE` for a Grand
+/// Marshal while the 1.12 client on the same server read "Grand Marshal" off his unchanged race:
+/// report B378, decision 2227.
 ///
 /// −1 needs no special case: it formats into the key, and `PVP_RANK_9_-1` matches no GlobalString.
 fn team_of(u: &super::UnitState) -> i64 {
-    match u.faction_group.as_deref() {
-        Some("Horde") => 0,
-        Some("Alliance") => 1,
-        _ => -1,
-    }
+    i64::from(u.pvp_team)
 }
 
 /// `GetPVPRankInfo`'s **second argument** → the team digit, the engine's three-way dispatch
@@ -399,11 +399,11 @@ fn team_arg(lua: &Lua, v: Value) -> mlua::Result<i64> {
         .and_then(|t| model.unit(t))
         // `0x51a9af`'s `shr edx,4; test dl,1` player gate. Applied here, unlike in `UnitPVPRank`
         // (see there), because on this arm nothing else can tell a creature from a player: a
-        // PvP-flagged city guard's faction template carries Player|<side> too, so its
-        // `faction_group` would otherwise name a side the engine answers 0 for. The cost is the
-        // mirror-image miss — an un-enriched player snapshot reads as a non-player — which lands
-        // on a different title rather than on none, and this arm is addon surface: neither pane
-        // passes a second argument at all.
+        // creature carries a race byte and a faction template like anything else, and the two
+        // misses are different numbers anyway (this gate's 0 against `0x5efe00`'s −1) — it is
+        // this gate the engine reaches first. The cost is the mirror-image miss — an un-enriched player snapshot reads as a non-player — which
+        // lands on a different title rather than on none, and this arm is addon surface: neither
+        // pane passes a second argument at all.
         .filter(|u| u.is_player)
         .map_or(0, team_of))
 }

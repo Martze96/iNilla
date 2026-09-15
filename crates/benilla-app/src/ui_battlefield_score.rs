@@ -78,13 +78,12 @@ fn resolve_board(
         let (race, class) = names
             .player_traits(r.guid)
             .map_or((0, 0), |(race, class, _)| (race, class));
-        // `0` Horde, `1` Alliance, `-1` neither — the reference's mask walk lands on the same
-        // three values (§6.2), and every playable race has a fixed side in 1.12.
-        let faction = match crate::ui_unit::race_faction_group(race) {
-            Some("Alliance") => 1,
-            Some(_) => 0,
-            None => -1,
-        };
+        // `0` Horde, `1` Alliance, `-1` neither. `0x4aa200` walks the name-cache record's race
+        // through `ChrRaces` → `FactionTemplate` → factionGroupMask, which is `0x5efe00`'s walk
+        // with the null-row guards omitted — so it is [`crate::ui_unit::race_pvp_team`] and not a
+        // second copy of it. (It used to be one, re-derived here out of `race_faction_group`; a
+        // second copy of this walk is exactly what report B378 was, one surface over.)
+        let faction = i32::from(crate::ui_unit::race_pvp_team(race));
         let mut stats = [0u32; 8];
         for (slot, v) in stats.iter_mut().zip(&r.stats) {
             *slot = *v;

@@ -307,6 +307,9 @@ mod text_filter_lists;
 pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPattern};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
+
+mod race_pvp_team;
+pub use race_pvp_team::load_race_pvp_teams;
 mod zone_map;
 pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
 

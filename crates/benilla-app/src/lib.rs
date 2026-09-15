@@ -109,6 +109,7 @@ mod shaders;
 
 mod game_tip;
 mod name_persist;
+mod opaque2d;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
 mod shutdown;

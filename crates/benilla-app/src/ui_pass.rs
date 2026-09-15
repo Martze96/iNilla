@@ -578,6 +578,8 @@ impl Plugin for PlayerUiPlugin {
                 Material2dPlugin::<UiQuadMaterial>::default(),
                 // Owned here, not in main.rs: the lane's decode is not optional (see its doc).
                 crate::ui_gamma::UiGammaPlugin,
+                // The 2D opaque pass skipped when empty — which on this camera is always (2225).
+                crate::opaque2d::SkipEmptyOpaque2dPlugin,
             ))
             .add_systems(Startup, (spawn_ui_camera, init_white_texture))
             .configure_sets(

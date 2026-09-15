@@ -341,6 +341,24 @@ pub struct UnitState {
     /// return, which stock uses as display text (`PlayerFrame.lua`'s PvP hit-area tooltip title).
     /// Never interchangeable with the English half above.
     pub faction_group_localized: Option<String>,
+    /// The unit's **PvP team digit** — `0x5efe00`'s tri-state: `0` Horde, `1` Alliance, `-1` a
+    /// unit with no side. The second `%d` of `PVP_RANK_<rank>_<team>`, and **not**
+    /// [`Self::faction_group`] restated.
+    ///
+    /// The two answer different questions and the difference is a shipped bug's whole cause
+    /// (report B378, decision 2227): `UnitFactionGroup` reads the unit's LIVE
+    /// `UNIT_FIELD_FACTIONTEMPLATE` (`0x5166b8`/`0x5166be`), while every rank-title surface reads
+    /// the unit's **RACE** and walks `ChrRaces` → `FactionTemplate` → factionGroupMask
+    /// (`0x5efe00`, `[obj+0x110]+0x78`). A vmangos GM is forced to template 35 and so genuinely
+    /// loses the PvP flag icon — and keeps his rank title, because his race did not move. Wiring
+    /// this to the faction group instead read `NONE` at every rank for a Grand Marshal.
+    ///
+    /// **`Default` is `0`, and that is the reference's answer too, not a placeholder.** A literal
+    /// snapshot is one the object manager could not resolve (the out-of-range roster leg), and
+    /// `GetPVPRankInfo`'s team register is left at its initial `0` on exactly that edge
+    /// (`0x51a9af`'s lookup failing) — so a roster-only unit is named off the Horde list on both
+    /// clients. Every snapshot built from a live descriptor fills it (`ui_unit::snapshot`).
+    pub pvp_team: i8,
     /// The unit's GUID (`OBJECT_FIELD_GUID`) — the identity the cross-token predicates compare
     /// (`UnitIsUnit`, `UnitInParty`; decision 0434 §5's popup gating). `0` = the app's feed didn't
     /// resolve one; two zero guids never compare equal.

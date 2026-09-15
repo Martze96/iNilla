@@ -1680,6 +1680,10 @@ fn seat_a_session(script: &mut UiScript) {
             // `realm .. " - " .. faction` at file scope, so a nil faction is 24 addons stopping on
             // `attempt to concatenate local 'faction'`. Every playable race has a side.
             faction_group: Some("Alliance".into()),
+            // `0x5efe00`'s team digit for Human (race 1) — the rank-title key's second `%d`.
+            // Seated beside the faction group because they are different questions
+            // (`ui_unit::race_pvp_team`), not because they agree here.
+            pvp_team: crate::ui_unit::race_pvp_team(1),
             ..Default::default()
         }),
     );

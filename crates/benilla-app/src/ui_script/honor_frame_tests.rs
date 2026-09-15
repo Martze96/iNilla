@@ -96,6 +96,11 @@ fn alliance_player() -> UnitState {
         level: 60,
         sex: 2,
         faction_group: Some("Alliance".into()),
+        // The rank title's team digit is `pvp_team` (`0x5efe00`: race → ChrRaces →
+        // FactionTemplate), NOT `faction_group` (`UnitFactionGroup`: the live template). Human is
+        // race 1 → Alliance → 1. Both are seated because a real Alliance player has both; the GM
+        // test below is what drives them apart.
+        pvp_team: crate::ui_unit::race_pvp_team(1),
         race: Some("Human".into()),
         race_file: Some("Human".into()),
         class: Some("Warrior".into()),
@@ -206,6 +211,68 @@ fn an_unranked_character_reads_none_and_shows_no_badge() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Report B378 — a GM-flagged Grand Marshal's Highest Rank read `None`.** The regression test
+/// for decision 2227, and the one that holds the two sides apart.
+///
+/// vmangos forces a GM to faction template 35, whose group mask is 0, so `UnitFactionGroup`
+/// genuinely answers nil — that half is faithful and the PvP icon is *supposed* to vanish with it.
+/// The rank title is not on that wire at all: `0x5efe00` reads the unit's RACE through
+/// `ChrRaces`/`FactionTemplate` (`[obj+0x110]+0x78`), and a GM's race does not change, which is why
+/// the reporter's own 1.12 client on the same server read "Grand Marshal" from the same byte. We
+/// had the title keyed off the faction group, so both rows went to NONE together.
+///
+/// The control is the pair: the two rank rows must name the rank **and** the bar must still take
+/// the sideless arm's Horde red — a fix that "restored the side" would pass the first half and
+/// silently break the second. Skips without client data.
+#[test]
+fn a_gm_flagged_player_keeps_his_rank_title_and_loses_only_the_faction_group() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = shown_honor_page();
+    s.set_honor(Some(HonorState {
+        // Grand Marshal — internal 18, the top of the Alliance list.
+        rank: 18,
+        highest_rank: 18,
+        ..state()
+    }));
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            // `.gm on`: template 35, group mask 0 → no side.
+            faction_group: None,
+            faction_group_localized: None,
+            pvp_rank: 18,
+            ..alliance_player()
+        }),
+    );
+    s.run("HonorFrame_Update(1)").unwrap();
+    s.resolve();
+    assert_eq!(
+        text(&mut s, "HonorFrameLifeTimeRankValue"),
+        "Grand Marshal",
+        "the Highest Rank row — the reported symptom"
+    );
+    assert_eq!(
+        text(&mut s, "HonorFrameCurrentPVPTitle"),
+        "Grand Marshal",
+        "and the title under the badge, which reads the same key"
+    );
+    assert!(
+        s.eval::<bool>(r#"return UnitFactionGroup("player") == nil"#)
+            .unwrap(),
+        "the side itself is still gone — that half of GM mode is the reference's"
+    );
+    // The control: the bar's colour is `UnitFactionGroup`'s, so a sideless player takes the
+    // `else` arm (Horde red, `HonorFrame.lua:68`) and must KEEP taking it.
+    let (r, g, b) = s
+        .eval::<(f64, f64, f64)>("return HonorFrameProgressBar:GetStatusBarColor()")
+        .unwrap();
+    assert!(
+        r > g && r > b,
+        "a sideless player keeps the else-arm's red bar, got ({r}, {g}, {b})"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The bar takes the 0..1 fraction straight, and wears the player's own faction colour. Alliance
 /// navy here; the `else` arm is Horde red for everyone else, including a unit whose side has not
 /// resolved — a bar with no colour at all would read as a broken pane.
@@ -298,11 +365,11 @@ fn the_real_global_strings_name_the_rank() {
     load_page(&s);
     s.set_honor(Some(state()));
 
-    for (group, want) in [("Alliance", "Knight-Captain"), ("Horde", "Legionnaire")] {
+    for (team, want) in [(1i8, "Knight-Captain"), (0, "Legionnaire")] {
         s.set_unit(
             "player",
             Some(UnitState {
-                faction_group: Some(group.into()),
+                pvp_team: team,
                 ..alliance_player()
             }),
         );
@@ -312,7 +379,7 @@ fn the_real_global_strings_name_the_rank() {
         assert_eq!(
             text(&mut s, "HonorFrameCurrentPVPTitle"),
             want,
-            "rank 12 to the {group}"
+            "rank 12 to team {team}"
         );
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

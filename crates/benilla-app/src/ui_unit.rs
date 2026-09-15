@@ -605,6 +605,42 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
     })
 }
 
+/// A unit's **PvP team digit** — `0x5efe00`'s tri-state: `0` Horde, `1` Alliance, `-1` no side.
+///
+/// **This is NOT [`faction_group`], and the difference is the whole of report B378.** The two read
+/// different sources and only agree while nothing has moved a unit off its racial faction:
+///
+/// * `UnitFactionGroup` (`0x516630`) reads the unit's LIVE `UNIT_FIELD_FACTIONTEMPLATE`
+///   (`0x5166b8 mov eax,[eax+0x110]` / `0x5166be mov eax,[eax+0x74]`, byte-read here) — so a
+///   vmangos GM, forced to template 35, genuinely has no side and the PvP flag icon genuinely
+///   hides. That is faithful.
+/// * The rank title's team digit (`0x5efe00`) reads the unit's **RACE** and walks
+///   `[obj+0x110]+0x78` → `ChrRaces.dbc` field 2 (FactionTemplate id) → `FactionTemplate.dbc`
+///   field 3 (factionGroupMask) → `& 4` ⇒ 0, else `& 2` ⇒ 1, else −1 — never the live template.
+///   A GM's race does not change, so the reference names his rank exactly as it always did.
+///
+/// We had the second wired to the first, which is why a Grand Marshal's Honor tab read `NONE` on
+/// a GM-flagged account while the 1.12 client on the same server read "Grand Marshal"
+/// (decision 2227). Every `0x5efe00` caller is race-derived: `GetPVPRankInfo`'s team
+/// (`0x51a9af`/`0x51a9c8`), `UnitPVPName`'s rank decoration (`0x5efe60`), the battlefield
+/// scoreboard's per-row side (`0x4aa200`, which inlines the same walk off the name-cache record).
+///
+/// The table is the shipped one, frozen: `ChrRaces.dbc` has **nine** rows in 5875 and race 9
+/// (Goblin, unplayable) shares Human's faction template 1, so it answers Alliance — not `None`,
+/// which is what a "playable races only" table would say.
+/// [`tests::race_pvp_team_matches_the_shipped_tables`] walks the real DBCs and pins every row.
+pub(crate) fn race_pvp_team(race: u8) -> i8 {
+    match race {
+        // factionGroupMask 3 = Player|Alliance → `& 4` clear, `& 2` set.
+        1 | 3 | 4 | 7 | 9 => 1,
+        // factionGroupMask 5 = Player|Horde → `& 4` set, tested first.
+        2 | 5 | 6 | 8 => 0,
+        // No `ChrRaces` row (a creature's race byte, or an unstreamed descriptor): the engine's
+        // bounds/NULL failure tail, `-1`. It formats into the key and matches no GlobalString.
+        _ => -1,
+    }
+}
+
 /// Resolve a UnitPopup unit token to the **player guid** it names — `"target"` through the
 /// selection iff it really is a player (the target frame's PLAYER menu), a `"partyN"` token through
 /// the roster (the party frame's PARTY menu). `"player"` (yourself) and any unresolved token answer
@@ -1004,6 +1040,13 @@ pub(crate) fn snapshot(
         // pane's `UnitPVPRank("target")` can answer at all. A creature has no PLAYER block and
         // reads 0, the reference's own answer for one.
         pvp_rank: store.0.player_pvp_rank().unwrap_or(0),
+        // `0x5efe00`'s team digit — the second `%d` of `PVP_RANK_<rank>_<team>`. It sits here
+        // beside the rank byte for the same reason that one does (nothing but the descriptor is
+        // needed) and it reads the RACE, not `faction_group`: the engine walks the race through
+        // `ChrRaces`/`FactionTemplate` and never looks at the live `UNIT_FIELD_FACTIONTEMPLATE`
+        // this unit is carrying, so a GM-flagged player keeps his rank title while losing the PvP
+        // icon. See [`race_pvp_team`] and decision 2227 (report B378).
+        pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
         // `PLAYER_BYTES_3` byte 2 — the city-protector title, the same PUBLIC dword as the rank
         // byte above. `UnitPVPName` appends a `PVP_MEDAL<n>` line for a non-zero one; 0 is "no
         // medal", which is every character on this server (vmangos never writes the byte).
@@ -1556,20 +1599,22 @@ fn feed_units(
     // being broken, which has now cost two separate sessions an investigation. So it is a BENCH
     // diagnostic, not UI: nothing appears on screen, exactly as in the reference.
     //
-    // The honor arc (1512) put a SECOND surface behind this same side: a rank's title is the
-    // GlobalString `PVP_RANK_<rank>_<team>`, and with no side there is no team digit, so
-    // `GetPVPRankInfo` answers nil and the Honor tab renders `NONE` at every rank — for a Grand
-    // Marshal. That reads exactly like an unbuilt pane, which is why it is named in the warning
-    // rather than left for the next investigation to rediscover.
+    // The honor arc (1512) was once listed here as a SECOND surface behind this same side, and
+    // it is not one: the rank title's team digit is `0x5efe00`, which reads the RACE through
+    // `ChrRaces`/`FactionTemplate` and never the live template, so a GM's Honor tab names his
+    // rank exactly as it always did (`race_pvp_team`, decision 2227 — the cause of report B378
+    // was that we had wired the two together, not the GM mode itself). What this warning still
+    // covers is every genuinely template-derived surface: `UnitFactionGroup` and the icons and
+    // comparisons built on it.
     if let Some(p) = &player {
         let sideless = p.faction_group.is_none();
         if sideless && !feed.warned_sideless {
             warn!(
                 "faction: our own template names no side (usually GM mode — vmangos forces \
-                 template 35, group mask 0). Faction-derived UI cannot resolve a side while this \
-                 holds: the PvP flag icon stays hidden however flagged you are, and the Honor tab's rank \
-                 title reads NONE at every rank (PVP_RANK_<rank>_<team> has no team digit). \
-                 `.gm off` restores both."
+                 template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
+                 side while this holds — the PvP flag icon stays hidden however flagged you are. \
+                 `.gm off` restores it. (The Honor tab's rank title is NOT one of these: its team \
+                 digit comes from your race, not your template.)"
             );
         }
         feed.warned_sideless = sideless;
@@ -2157,6 +2202,89 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DESCRIPTOR leg of the same answer: `snapshot` takes the team digit off
+    /// `UNIT_FIELD_BYTES_0` byte 0 and **never** off `UNIT_FIELD_FACTIONTEMPLATE`.
+    ///
+    /// The pane-level regression (`ui_script::honor_frame_tests::a_gm_flagged_player_…`) seats
+    /// `pvp_team` by hand, so it proves the key is built from the right field and not that the
+    /// right field is read. This is that half: a template-35 GM — the exact descriptor vmangos
+    /// gives one — still answers his race's side.
+    #[test]
+    fn the_team_digit_comes_off_the_race_byte_not_the_faction_template() {
+        use benilla_protocol::ObjectFields;
+        /// `UNIT_FIELD_FACTIONTEMPLATE` / `UNIT_FIELD_BYTES_0`, one dword apart — the reference's
+        /// own `[obj+0x110]+0x74` and `+0x78`.
+        const FACTIONTEMPLATE: u16 = 35;
+        const BYTES_0: u16 = 36;
+        /// vmangos's GM template: `FactionTemplate.dbc` group mask 0, friendly to everyone.
+        const GM_TEMPLATE: u32 = 35;
+
+        let team = |fields: &[(u16, u32)]| {
+            snapshot(
+                &ObjectStore(ObjectFields::from_pairs(fields)),
+                None,
+                0,
+                None,
+            )
+            .pvp_team
+        };
+        // Byte 0 of BYTES_0 is the race; the class in byte 1 must not disturb it.
+        let human_warrior = 1 | (1 << 8);
+        let scourge_mage = 5 | (8 << 8);
+        assert_eq!(team(&[(BYTES_0, human_warrior)]), 1, "Human → Alliance");
+        assert_eq!(team(&[(BYTES_0, scourge_mage)]), 0, "Scourge → Horde");
+        // **The report.** The sideless GM template sits right beside the race byte and is not
+        // consulted: the answer is the race's, unchanged.
+        assert_eq!(
+            team(&[(BYTES_0, human_warrior), (FACTIONTEMPLATE, GM_TEMPLATE)]),
+            1,
+            "a GM keeps his race's side (report B378)"
+        );
+        assert_eq!(
+            team(&[(BYTES_0, scourge_mage), (FACTIONTEMPLATE, GM_TEMPLATE)]),
+            0,
+            "…on both sides"
+        );
+        // A unit whose race byte has not streamed is the engine's bounds-failure −1, and a
+        // faction template alone cannot stand in for it.
+        assert_eq!(team(&[]), -1, "no race byte, no team digit");
+        assert_eq!(
+            team(&[(FACTIONTEMPLATE, 1)]),
+            -1,
+            "and a template is not one"
+        );
+    }
+
+    /// [`race_pvp_team`]'s frozen table against the **shipped tables it is a copy of** — the walk
+    /// the engine runs at `0x5efe00`, on the real `ChrRaces.dbc` and `FactionTemplate.dbc`.
+    ///
+    /// The table is hardcoded because it is nine constant rows of a 2006 file and threading a DBC
+    /// resource through every unit snapshot to read them would be pure ceremony. This is what
+    /// makes that safe: the file decides, and a row that ever disagrees — or a race the file has
+    /// and the table does not (race 9, Goblin, which shares Human's template and is **not** a
+    /// `None`) — fails here. Skips without client data.
+    #[test]
+    fn race_pvp_team_matches_the_shipped_tables() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let want = benilla_formats::load_race_pvp_teams(&mut chain).expect("ChrRaces walk");
+        // The misparse guard: 5875 ships nine rows, not eight. An empty or truncated map would
+        // otherwise let this test pass by asserting nothing.
+        assert_eq!(want.len(), 9, "ChrRaces.dbc row count");
+        for (&race, &team) in &want {
+            assert_eq!(race_pvp_team(race), team, "race {race}");
+        }
+        // Both sides are actually represented — a walk that answered one digit for everything
+        // would satisfy the loop above and name every rank off one list.
+        assert!(want.values().any(|&t| t == 0), "some race is Horde");
+        assert!(want.values().any(|&t| t == 1), "some race is Alliance");
+        // Off the end of the file is the engine's bounds-failure tail, not a guess.
+        for race in [0u8, 10, 255] {
+            assert!(!want.contains_key(&race));
+            assert_eq!(race_pvp_team(race), -1, "race {race} has no ChrRaces row");
+        }
+    }
 
     /// **The tapped bit fires `UNIT_FACTION`, and without this the verbs are decorative.**
     ///

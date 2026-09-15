@@ -30,8 +30,10 @@ use super::*;
 /// app's cursor-transition watcher (`crate::sound`), matching the ref's `ClearCursor` play.
 pub(super) fn world_right_click_payload(
     mut right_clicks: MessageReader<WorldRightClick>,
-    hovered: Res<Hovered>,
-    hovered_object: Res<HoveredObject>,
+    // The **press** pick, not the live hover (decision 2230) — this leg and [`act_on_right_click`]
+    // are two halves of one click's routing, so they must classify the same pick or a right-click
+    // can dismiss the cursor payload *and* interact with the thing it was held over.
+    press: Res<PressPick>,
     script: Option<NonSendMut<UiScript>>,
 ) {
     if right_clicks.read().last().is_none() {
@@ -40,7 +42,7 @@ pub(super) fn world_right_click_payload(
     let Some(mut script) = script else {
         return;
     };
-    if hovered.target.is_some() || hovered_object.target.is_some() {
+    if press.hovered.target.is_some() || press.object.target.is_some() {
         return;
     }
     script.clear_cursor_payload();
@@ -56,16 +58,21 @@ pub(super) fn world_right_click_payload(
 /// replayed a [`WorldClick`] and was guarded on the press pick naming the same unit; the live probe
 /// caught it — the scripted click selected nothing.
 ///
-/// The RIGHT button is the other way round, deliberately. [`act_on_right_click`] acts on the LIVE
-/// hover across many legs (interact, attack, loot, GameObject), so feeding it a unit the pointer is
-/// not on could attack the wrong thing; it is replayed only when the hover already names the
-/// plate's unit — the physical case. A scripted right-click on a plate does nothing yet, which is
-/// a stated gap rather than a guess about which leg it should take.
+/// The RIGHT button is the other way round, deliberately. [`act_on_right_click`] acts on the
+/// frame's [`PressPick`] across many legs (interact, attack, loot, GameObject), so feeding it a
+/// unit that pick does not name could attack the wrong thing; it is replayed only when the press
+/// pick already names the plate's unit. A scripted right-click on a plate does nothing yet, which
+/// is a stated gap rather than a guess about which leg it should take.
+///
+/// The **physical** right-click on a plate does not come through here at all and never did: the
+/// press engages freelook (the camera looks through a plate — 2159), freelook hands the plates'
+/// mouse back (`0x60f830`), and the release therefore hit-tests off the plate, so its `OnClick`
+/// never fires. That gesture is the camera arbiter's own [`WorldRightClick`], acting on the pick
+/// the press latched — which is exactly what decision 2230 made it read.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn select_on_plate_click(
     mut plate: ResMut<crate::vplates::PlateClicks>,
     press: Res<PressPick>,
-    hovered: Res<Hovered>,
     ground: Res<crate::ui_action::SpellTargeting>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
@@ -95,7 +102,7 @@ pub(super) fn select_on_plate_click(
         greeting.write(crate::sound::NpcGreetingRequest { npc: entity });
         // The attack classification is the press pick's, and only when the press was actually on
         // this unit: a scripted click has no cursor behind it, so it is not an attack-cursor click.
-        let attack = press.attack && press.hovered.target == Some(entity);
+        let attack = press.attack() && press.hovered.target == Some(entity);
         scan::commit(
             &mut selection,
             &mut seam,
@@ -107,7 +114,7 @@ pub(super) fn select_on_plate_click(
             attack,
         );
     }
-    if right.into_iter().any(|e| hovered.target == Some(e)) {
+    if right.into_iter().any(|e| press.hovered.target == Some(e)) {
         right_clicks.write(WorldRightClick);
     }
 }
@@ -179,7 +186,7 @@ pub(super) fn select_on_click(
                 stores.get(entity).ok(),
                 engaged,
                 self_guid,
-                press.attack,
+                press.attack(),
             );
         }
         // Clicked nothing targetable → deselect (only sends the clear if we actually had a
@@ -288,9 +295,16 @@ fn interaction_already_open_on(target: u64, interact: &crate::ui_session::Intera
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn act_on_right_click(
     mut clicks: MessageReader<WorldRightClick>,
-    hovered: Res<Hovered>,
-    hovered_object: Res<HoveredObject>,
-    cursor: Res<WorldCursor>,
+    // **The press pick, not the live hover** (decision 2230) — the same latch the left button has
+    // read since 1122, and for the same reason: the reference picks exactly once, on the down edge
+    // (`0x481f00`, one caller image-wide), into the WorldFrame's own slots, and nothing re-picks on
+    // move or on release. Reading the live hover here only looked right because the release frame
+    // re-picks at the restored cursor and, for a body click that moved nothing, lands back on the
+    // same unit. A V-plate has no body under the cursor to land back on: the plate published the
+    // mouseover at the press (`0x7cb850` → `0x492890`), freelook then took the plates' mouse away
+    // (`0x60f830`), and the live hover at the release was empty — so a right-click on a plate
+    // reached every branch below with nothing hovered and did nothing at all.
+    press: Res<PressPick>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     self_player: Query<(Entity, &Guid, Has<Engaged>), With<SelfPlayer>>,
@@ -333,6 +347,8 @@ pub(super) fn act_on_right_click(
     if clicks.read().last().is_none() {
         return;
     }
+    // The whole ladder below reads ONE pick — the gesture's own, frozen at the press.
+    let (hovered, hovered_object, cursor) = (&press.hovered, &press.object, &press.cursor);
     // ── The interact family's ACTOR gate: am I in the saddle? ────────────────────────────────
     // One predicate, the reference's own — the PLAYER's `UNIT_FIELD_MOUNTDISPLAYID` (decision
     // 0481's "one mounted predicate"; wow-re `mounted-action-gate.md`: no aura, no taxi
@@ -359,7 +375,7 @@ pub(super) fn act_on_right_click(
     // suppresses the send with no toast (the reference auto-walks there instead — `0x610300`, also
     // no packet). The lock arm runs first in `0x5f3130`, and it does here too: a `Refuse` toasts
     // even when we are also out of range.
-    if go_is_nearest(&hovered, &hovered_object) {
+    if go_is_nearest(hovered, hovered_object) {
         // **The interact chain's first link** (tag `use`). "I clicked it and nothing happened" spans
         // three systems — this decision, the `CMSG_GAMEOBJ_USE` it sends, and the `SMSG_SPELL_GO`
         // the server answers with — and until this line existed only the *taken* branches said
@@ -2245,5 +2261,91 @@ mod tests {
         assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
         set(&mut world, None);
         assert_eq!(run(&mut world, "TargetLastEnemy()"), None);
+    }
+    use crate::net::{ClientCommand, NetCommands, ObjectStore};
+    use bevy::ecs::system::RunSystemOnce;
+
+    const F_HEALTH: u16 = 22;
+    const F_MAXHEALTH: u16 = 28;
+    const BOAR: u64 = 0xB0A2;
+    const ME: u64 = 0x5E1F;
+
+    fn store(pairs: &[(u16, u32)]) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs))
+    }
+
+    /// Everything [`act_on_right_click`] and the commit under it reach for, and nothing else.
+    fn right_click_world() -> (World, Entity) {
+        let (tx, _rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<Messages<WorldRightClick>>();
+        world.init_resource::<PressPick>();
+        world.init_resource::<Selection>();
+        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Messages<crate::player::StandStateRequest>>();
+        world.init_resource::<crate::creature_anim::GestureQueue>();
+        world.init_resource::<crate::go_templates::GameObjectTemplates>();
+        world.init_resource::<crate::items::Items>();
+        world.init_resource::<crate::ui_action::PlayerActions>();
+        world.init_resource::<crate::ui_action::LearnedAbilities>();
+        world.init_resource::<crate::ui_quest::QuestGiver>();
+        world.init_resource::<crate::ui_binder::BinderState>();
+        world.init_resource::<crate::death::DeathNet>();
+        world.init_resource::<crate::ui_session::InteractNpc>();
+        world.init_resource::<crate::ui_action::UiErrorKeys>();
+        world.init_resource::<crate::ui_action::CastErrors>();
+        world.init_resource::<crate::ui_loot::LootLatch>();
+        world.init_resource::<crate::ui_mail::MailOpen>();
+        world.init_resource::<crate::ui_item_text::ItemTextOpen>();
+        world.init_resource::<crate::ui_action::GoOpenerCasts>();
+        world.spawn((SelfPlayer, Guid(ME)));
+        let boar = world
+            .spawn((Guid(BOAR), store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)])))
+            .id();
+        (world, boar)
+    }
+
+    /// **A right-click that began on a V-plate acts on that plate's unit** — the bug the director
+    /// reported as "right click on nameplates no longer works", and the reason
+    /// [`act_on_right_click`] reads [`PressPick`] (decision 2230).
+    ///
+    /// The gesture it reconstructs is the whole of it: the plate published the mouseover at the
+    /// press, the press engaged freelook (the camera looks *through* a plate — 2159), freelook
+    /// handed the plates' mouse back (`0x60f830`) so the plate's own `OnClick` never fires and its
+    /// hover goes dark, and `update_hover` blanks the live [`Hovered`] for the whole session. What
+    /// survives all of that is the press latch — and a plate hover leaves **no body under the
+    /// cursor** for the release frame's re-pick to land back on, which is exactly why the live
+    /// hover carried the body case and dropped this one.
+    #[test]
+    fn a_right_click_begun_on_a_plate_acts_on_the_plates_unit() {
+        let (mut world, boar) = right_click_world();
+        // The press: the plate's unit is the mouseover (distance 0.0 — topmost UI), classified
+        // Attack. Nothing here is live state; it is the latch, exactly as `latch_press_pick` wrote
+        // it one frame before the look session began.
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(boar),
+                guid: Some(BOAR),
+                distance: 0.0,
+                ..Hovered::default()
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Attack,
+                unable: false,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert_eq!(
+            world.resource::<Selection>().guid,
+            Some(BOAR),
+            "the release must act on the unit whose plate the press was over"
+        );
     }
 }
