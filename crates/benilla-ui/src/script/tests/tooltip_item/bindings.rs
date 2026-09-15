@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use super::script;
 use crate::script::*;
 
-/// The shopping-compare pipeline end-to-end (0274 P4): a bag-ring hover on the main GameTooltip
-/// with shift held fires `SHOW_COMPARE_TOOLTIP` once per finger slot; a ref-shaped listener
-/// (PaperDollFrame.lua:621-640) seats ShoppingTooltip1/2, whose ARMED `SetInventoryItem` renders
-/// the byte law's compare shape — the gray CURRENTLY_EQUIPPED header, WHITE name, the compact cut (the
-/// description never prints). Releasing shift hides the pair; a shift-up hover fires nothing
-/// until the rising edge.
+/// The shopping-compare pipeline end-to-end (0274 P4, re-based by 2202): a bag-ring hover on the
+/// main GameTooltip with shift held seats ShoppingTooltip1/2 **beside the tooltip**, at
+/// `MerchantFrame.xml:63-80`'s own geometry, and their ARMED render carries the byte law's compare
+/// shape — the gray CURRENTLY_EQUIPPED header, WHITE name, the compact cut (the description never
+/// prints). Two finger slots fill both plates. Releasing shift hides the pair; nothing shows until
+/// the rising edge, and no `SHOW_COMPARE_TOOLTIP` is ever fired (that event is dead in 5875).
 #[test]
-fn shift_compare_fires_seats_and_renders_the_compare_shape() {
+fn shift_compare_seats_beside_the_tooltip_and_renders_the_compare_shape() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     let mut inv: InventorySlots = Default::default();
@@ -98,23 +98,15 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         CreateFrame("GameTooltip", "GameTooltip"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip2"):Hide()
+        -- A ref-shaped SHOW_COMPARE_TOOLTIP listener, kept as the NEGATIVE control: 5875 never
+        -- signals event 377 (zero fire sites, wow-re merchant-compare-item-law.md §8), so nothing
+        -- benilla does may reach this handler.
         compare_calls = {}
-        for slot = 11, 12 do
-            local f = CreateFrame("Button", "Doll" .. slot)
-            f:SetPoint("CENTER", 100, 0); f:SetWidth(8); f:SetHeight(8)
-            f.invSlotId = slot
-            f:RegisterEvent("SHOW_COMPARE_TOOLTIP")
-            f:SetScript("OnEvent", function()
-                if arg1 ~= this.invSlotId or arg2 > 2 then return end
-                table.insert(compare_calls, arg1 .. ":" .. arg2)
-                local tooltip = getglobal("ShoppingTooltip" .. arg2)
-                local anchor = "ANCHOR_RIGHT"
-                if arg2 > 1 then anchor = "ANCHOR_BOTTOMRIGHT" end
-                tooltip:SetOwner(this, anchor)
-                local hasItem = tooltip:SetInventoryItem("player", this.invSlotId)
-                if not hasItem then tooltip:Hide() end
-            end)
-        end
+        local watcher = CreateFrame("Frame", "CompareWatcher")
+        watcher:RegisterEvent("SHOW_COMPARE_TOOLTIP")
+        watcher:SetScript("OnEvent", function()
+            table.insert(compare_calls, arg1 .. ":" .. arg2)
+        end)
     "#,
     )
     .unwrap();
@@ -123,8 +115,8 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         r#"
         GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
         GameTooltip:SetBagItem(0, 1)
-        assert(table.getn(compare_calls) == 0, "no compare while shift is up")
-        assert(not ShoppingTooltip1:IsShown())
+        assert(table.getn(compare_calls) == 0, "the dead event never fires")
+        assert(not ShoppingTooltip1:IsShown(), "no compare while shift is up")
     "#,
     )
     .unwrap();
@@ -132,8 +124,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
     s.set_modifiers(true, false, false);
     s.run(
         r#"
-        assert(table.getn(compare_calls) == 2, "two ring compares, got " .. table.getn(compare_calls))
-        assert(compare_calls[1] == "11:1" and compare_calls[2] == "12:2", "slot:index order")
+        assert(table.getn(compare_calls) == 0, "the dead event still never fires")
         assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
         assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
         assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
@@ -143,11 +134,13 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
             assert(getglobal("ShoppingTooltip1TextLeft" .. i):GetText() ~= "\"Round.\"",
                    "compact cut dropped the description")
         end
-        -- The pair anchors to the DOLL slots (ref: SetOwner(this, ...)), index 2 below-right.
-        local p1, r1 = ShoppingTooltip1:GetPoint()
-        local p2, r2 = ShoppingTooltip2:GetPoint()
-        assert(r1:GetName() == "Doll11" and p1 == "BOTTOMLEFT", "1 rides ANCHOR_RIGHT")
-        assert(r2:GetName() == "Doll12" and p2 == "TOPLEFT", "2 rides ANCHOR_BOTTOMRIGHT")
+        -- The pair rides BESIDE the tooltip, at MerchantFrame.xml:68-78's own seats.
+        local p1, r1, rp1, x1, y1 = ShoppingTooltip1:GetPoint()
+        local p2, r2, rp2, x2, y2 = ShoppingTooltip2:GetPoint()
+        assert(p1 == "TOPLEFT" and r1:GetName() == "GameTooltip" and rp1 == "TOPRIGHT"
+               and x1 == 0 and y1 == -10, "plate 1 hangs off the tooltip's TOPRIGHT")
+        assert(p2 == "TOPLEFT" and r2:GetName() == "ShoppingTooltip1" and rp2 == "TOPRIGHT"
+               and x2 == 0 and y2 == 0, "plate 2 hangs off plate 1")
     "#,
     )
     .unwrap();
@@ -174,6 +167,35 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
     );
     let name = color_of("Old Loop");
     assert_eq!(name, [1.0, 1.0, 1.0, 1.0], "compare name is WHITE");
+    // A ONE-slot hover after a two-slot one takes plate 2 down with it — the selection is
+    // monotone, so plate 2's miss is the only thing that can clear what the rings left there.
+    s.set_item_template(
+        7003,
+        ItemTemplateView {
+            name: "New Band".into(),
+            quality: 2,
+            inventory_type: 2, // neck: one candidate slot, and nothing worn in it
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
+        GameTooltip:BenillaSetItemById(7003)
+        assert(not ShoppingTooltip1:IsShown(), "an empty neck slot shows no plate")
+        assert(not ShoppingTooltip2:IsShown(), "and plate 2 does not survive the ring hover")
+    "#,
+    )
+    .unwrap();
+    // Back to the rings, so the release assertions below have a live pair to take down.
+    s.run(
+        r#"
+        GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
+        GameTooltip:SetBagItem(0, 1)
+        assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
+    "#,
+    )
+    .unwrap();
     // Releasing shift hides the pair; the main tooltip stays.
     s.set_modifiers(false, false, false);
     s.run(

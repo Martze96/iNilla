@@ -81,7 +81,23 @@ impl Loader<'_> {
         dbg: &str,
     ) {
         let is_check = el.tag.eq_ignore_ascii_case("CheckButton");
-        if !is_check && !el.tag.eq_ignore_ascii_case("Button") {
+        // **`<LootButton>` takes this leg too, and taking only two tags is what hid the loot
+        // window's hover highlight.** `CLootButton` is a `CSimpleButton` subclass that overrides
+        // six vtable slots on the primary table (dtor, the Lua lookup, the two type predicates,
+        // `GetObjectType`, and the click virtual) and exactly ONE on the geometry table — slot 1,
+        // the destructor's adjustor thunk. `LoadXML` is geometry slot 2 (`0x81c7c8[2]` for Button,
+        // `0x804594[2]` for LootButton), and those two entries are the same pointer: a
+        // `<LootButton>` element is parsed by `CSimpleButton::LoadXML 0x7788c0` *verbatim* (wow-re
+        // `ui/scratch/lootbutton-widget-type.md` §4 + `button-disabled-state-texture-law.md`).
+        // Stock `LootButtonTemplate` inherits `ItemButtonTemplate`, whose whole art is three state
+        // textures — so with the tag rejected here the rows lost their Quickslot border, their
+        // depress art and the `ButtonHilight-Square` that lights a row under the cursor. It is the
+        // BUTTON leg and not the check one: `CheckButton::LoadXML 0x785170` is a different slot 2
+        // that calls this one first, and nothing routes a LootButton through it.
+        if !is_check
+            && !el.tag.eq_ignore_ascii_case("Button")
+            && !el.tag.eq_ignore_ascii_case("LootButton")
+        {
             return;
         }
         let tex = |tag: &str, method: &str, this: &mut Self| {

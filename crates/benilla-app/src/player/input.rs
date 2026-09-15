@@ -153,8 +153,10 @@ pub(super) fn move_axes(
     // BUTTON4 — the latter is winit's `Forward`, the thumb button this toggle lived on before
     // the table existed, kept by the codec's BUTTON4 mapping). A latched mode, not a held key:
     // the keyboard chord is typing-gated at dispatch like every binding, the mouse chord is
-    // not — and the reference agrees, its focus-loss handler releasing every direction bit
-    // while preserving `0x1000` (`0x514490`'s `and eax,0xfffff00f`, VERIFIED).
+    // not — and the reference agrees, its **OS window-deactivate** handler releasing every
+    // direction bit while preserving `0x1000` (`0x514490`'s `and eax,0xfffff00f`, VERIFIED;
+    // "window-deactivate" and not "focus-loss", which read as *UI* focus and cost us 2196 —
+    // its sole caller `0x493058` hangs off the WM_ACTIVATE callback slot).
     let mut autorun_armed = false;
     if binds.fired(crate::bindings::cmd::TOGGLE_AUTORUN) {
         player.autorun = !player.autorun;
@@ -194,6 +196,10 @@ pub(super) fn move_axes(
     //
     // Deliberately absent, each VERIFIED as a *survivor*: a jump, a chat EditBox taking focus, and
     // a zone change. Mounting is genuinely unsettled in the reference and left alone here.
+    //
+    // A chat box taking focus survives *more* than autorun, note: it releases nothing at all —
+    // the movement handlers simply become no-ops and the direction bits are frozen (2196), which
+    // is why holding W through an ENTER keeps you running.
     let both_buttons_engaged = (both_buttons
         && (rig.world_mouse.down(LookButton::Left) || rig.world_mouse.down(LookButton::Right)))
         || binds.just_pressed(crate::bindings::cmd::MOVE_AND_STEER);

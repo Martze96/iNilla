@@ -178,16 +178,33 @@ pub(crate) struct UiCostWanted(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiHover(pub(crate) Option<u32>);
 
-/// Set each frame by [`feed_ui_input`] to [`UiScript::has_keyboard_focus`]: true while an EditBox owns
-/// keyboard focus and is eating every key. The gameplay/dev keyboard readers (movement, the Z sheath,
-/// the HUD/panel/inspect toggles, chat-open, target-clear) gate on it so a key typed into a focused box
-/// never also drives the world — the app-side twin of the client's `DAT_00cf4dc8 != 0` gate (RF-0082
-/// §1). One mechanism, written once here; every reader is ordered after `UiInput` so it sees this
-/// frame's value, not last frame's.
+/// **Who owns this frame's keys** — written by [`feed_ui_input`], read by the binding dispatch and the
+/// dev keyboard readers, all of which are ordered after `UiInput` so they see this frame's value and
+/// not last frame's. The app-side twin of the client's `DAT_00cf4dc8 != 0` gate (RF-0082 §1).
+///
+/// **Two fields because the reference has two mechanisms, and collapsing them into one boolean was
+/// bug 2196.** A focused EditBox swallows *every* key for as long as it holds focus
+/// ([`typing`](Self::typing)); a shown keyboard-enabled *frame* swallows *the one key* its
+/// existence gate ate this frame ([`consumed`](Self::consumed)). Both suppress the key's binding —
+/// and nothing more. Neither releases anything already held: the only things that clear the
+/// reference's direction bits are the OS **window deactivate** (`0x514490`, whose sole caller
+/// `0x493058` hangs off the WM_ACTIVATE callback slot) and the world-enter cascade (`0x5144c0`).
+/// A UI focus change clears nothing — wow-re `rf79-autorun-cancel-set.md`, and the reason holding
+/// W keeps you running while you type or read the map. See `decisions/2196`.
 #[derive(Resource, Default)]
 pub(crate) struct UiKeyboardCapture {
-    /// True while a focused EditBox is eating every key.
+    /// True while a focused EditBox is eating every key (`0x77b35e` returns 1 on every path but
+    /// the alt-arrow one below). Whole-frame, because there is at most one focused box.
     pub(crate) typing: bool,
+    /// The keys a shown keyboard-enabled **frame** consumed this frame (decision 1319's existence
+    /// gate, wow-re `frame-key-script-delivery.md` §3) — `WorldMapFrame`'s fullscreen `OnKeyDown`,
+    /// `CinematicFrame`, the stack-split spinner. **Per key, not per frame**: the map eating its
+    /// own `M` must not also suppress an unrelated binding, and — the bug this list exists for —
+    /// must not be mistaken for a text box taking focus.
+    ///
+    /// Raw [`bevy::input::keyboard::KeyCode`]s, as the message carried them (the binding dispatch
+    /// normalizes for chord lookup, but matches this list on the raw code it read).
+    pub(crate) consumed: Vec<bevy::input::keyboard::KeyCode>,
     /// **The four arrow keys are exempt this frame** — the focused box is in alt-arrow mode
     /// (`ignoreArrows` / `SetAltArrowKeyMode`) and ALT is not held, so the reference's own key
     /// handler declines LEFT/UP/RIGHT/DOWN at `0x77b1c4` and the strata walk carries them down to

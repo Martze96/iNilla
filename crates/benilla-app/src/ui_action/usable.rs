@@ -19,6 +19,8 @@
 //! durability model), and the ghost state beyond plain death. CanAssist inside 10b is the
 //! reaction-rank stand-in the ring/`can_attack` share, pending the true `0x6066f0` walk.
 
+use benilla_protocol::messages::ItemUseSpell;
+
 use crate::ui_items::{count_of, InventoryScope};
 use benilla_formats::{
     SpellDisplay, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED,
@@ -256,6 +258,81 @@ fn equipped_slots_match(
         })
 }
 
+/// The **ITEM arm** of the usable compute — `0x4e5050`'s item branch, whole. benilla answered
+/// `count > 0 || equipped` here and nothing else, which left a stack of food full-colour in
+/// combat; the reference runs three more gates, and the third is the whole spell walk.
+///
+/// 1. **the count cache** `[0xbc6390+slot*4] == 0` ⇒ `(false, false)` (`4e50ab`). `held` is our
+///    stand-in: carried copies ([`InventoryScope::CARRIED`], decision 1158's documented narrowing)
+///    or a copy worn on an equipment slot. The reference fills that cache from `0x4e6d20`, whose
+///    mask `0x4e6d20`→`0x622439` rewrites to **`0x47`** — equipment `0..0x12`, bag slots, the
+///    backpack, container contents and **the keyring**, bank excluded. So the `|| equipped` half
+///    is *redundant* there rather than an addition (worn copies already count), and two narrower
+///    divergences stay open and named: our `CARRIED` omits the **keyring** (a key on the bar reads
+///    count 0 where the reference reads 1), and we do not model the reference's charges fork —
+///    a `spellcharges[0] ∉ {0, -1}` item sums `|ITEM_FIELD_SPELL_CHARGES[0]|`, so a spent
+///    0-charge copy greys at `4e50ab`. Both are count-scope work, not this arm's.
+/// 2. **`IsItemOnCooldown 0x6e2fc0`** (`4e50d0`) ⇒ `(false, false)`. It resolves the item's FIRST
+///    ON_USE block — `rec+0x11c[i] > 0 && rec+0x130[i] == 0`, `6e3006`–`6e3023`, the same scan
+///    behind [`benilla_protocol::messages::ItemInfo::use_spell`] — and asks
+///    `0x6e1690(spellId, itemId = the item ENTRY)`. That predicate is the **on-hold-record** test,
+///    NOT a general on-cooldown one (wow-re `spell/scratch/gcd-power-gate.md` §3, which corrects
+///    `wave-cooldown.md`'s published gloss): it reads neither a running timed cooldown nor the
+///    GCD. So a potion mid-cooldown keeps its colour under its own sweep, and nothing on the bar
+///    greys for the global cooldown. **The entry is the key**, not `0`: `0x6e2fc0` is the sole
+///    consumer of `0x6e1690`'s item-keyed form image-wide (`6e3037 push esi`), every other caller
+///    passing `0` — so querying leg 11's `(spell, 0)` form here would never find an item's own
+///    parked record, which is how our cooldown store keys it (`(use_spell, entry)`).
+/// 3. **the plain-spell walk.** The resolver `0x4e5a50`'s ITEM arm hands that same first ON_USE
+///    spell back with `*outType = 0` **hard-written** (wow-re `action-button-state-api.md` §0), so
+///    `4e51ab`/`4e51b0 je 0x4e521d` is taken and the button runs the entire
+///    `Spell_C::IsSpellUsableNow 0x6e3d60` gate walk — [`spell_usable`] — exactly as a spell slot
+///    does. **This is where food greys in combat**: every `Food`/`Drink` row in the shipped
+///    `Spell.dbc` (433/434/435, 1127/1129/1131, 1133/1135/1137, 5004–5007, 6410, …) carries
+///    `Attributes = 0x18000100`, bit 28 among them — [`ATTR_NOT_IN_COMBAT`], the walk's leg 8. It
+///    is not a food rule: 453 of the shipped rows carry that bit (bandages, mounts, disguises).
+/// 4. an item with **no** on-use spell resolves 0 and falls into the resolver-0 leg, whose ITEM-tag
+///    test answers `usable = 1` outright (`4e5127`–`4e5135`; §2b.3's consequence iv, "once the
+///    item-count and item-cooldown checks of §2 pass"). An equipped sword on the bar is
+///    full-colour, not grey — and so is an item whose template is still in flight, which is what
+///    keeps a freshly-seen slot from flickering grey for a frame.
+///
+/// A resolved on-use spell the catalog has no row for reads **grey** with `notEnoughMana = 0` —
+/// the reference's `4e5193 jg` / `4e51a0 jne` fall-through at `4e51aa`, and the same answer the
+/// SPELL arm already gives an unknown id.
+pub(crate) fn item_usable(
+    entry: u32,
+    use_spell: Option<&ItemUseSpell>,
+    held: bool,
+    ctx: &UsableCtx,
+    spells: Option<&Spells>,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> (bool, bool) {
+    if !held {
+        return (false, false);
+    }
+    // Gate 4's early answer: no on-use spell (or no template yet) — the ITEM tag alone lights it.
+    let Some(use_spell) = use_spell else {
+        return (true, false);
+    };
+    let spell_id = use_spell.spell_id;
+    let d = spells.and_then(|s| s.catalog.get(spell_id));
+    // Gate 2, keyed as `0x6e2fc0` keys it: the item ENTRY as `0x6e1690`'s `itemId`, and the
+    // item's own resolved category where it has one (the `spellcategory[5]` override, §2c.4).
+    let category = match use_spell.category {
+        0 => d.map_or(0, |d| d.category),
+        c => c,
+    };
+    if ctx.cooldowns.has_on_hold_record(spell_id, entry, category) {
+        return (false, false);
+    }
+    let (Some(d), Some(spells)) = (d, spells) else {
+        return (false, false);
+    };
+    spell_usable(spell_id, d, spells, ctx, items, commands)
+}
+
 /// The walk. Returns `(usable, not_enough_mana)` — the `IsUsableAction` pair.
 pub(crate) fn spell_usable(
     spell_id: u32,
@@ -365,7 +442,7 @@ pub(crate) fn spell_usable(
     // predicate is the corrected `0x6e1690` (an on-hold-record test, wow-re `gcd-power-gate.md`
     // §3): Stealth greys while its record is PARKED; once the event starts the clocks — and for
     // every ordinary cooldown — the button never greys from here.
-    if d.cooldown_on_event() && ctx.cooldowns.has_on_hold_record(spell_id, Some(d)) {
+    if d.cooldown_on_event() && ctx.cooldowns.has_on_hold_record(spell_id, 0, d.category) {
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`–`0x6e3feb`): the power gate — the SOLE notEnoughMana writer (B2).

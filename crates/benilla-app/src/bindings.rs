@@ -15,8 +15,11 @@
 //!   probe is always first). Super held matches nothing;
 //! - [`Kind::Held`] commands **latch** on the matching press and unlatch on the *base key's*
 //!   release — the reference's `runOnUp` movement law, which is why tapping Shift mid-run does
-//!   not stop you, and why a chat box taking focus stops movement (latches clear on the capture
-//!   edge — the reference's own focus handler, `0x514490`) without eating the release;
+//!   not stop you, and why **nothing the UI does stops you**: a chat box taking focus and a
+//!   fullscreen frame eating a key both suppress the *press* and release nothing already held
+//!   (decision 2196). The only things that end a latch are the base key's release, the
+//!   [stuck-latch sweep](latch_and_dispatch) that stands in for a release the window never saw
+//!   (OS focus loss, the loading cover), and the VM swap;
 //! - [`Kind::Edge`]/[`Kind::EdgeUpDown`] run their 1.12 Lua bodies in the VM;
 //! - [`Kind::Host`] lands in [`BindingsState::fired`] for engine consumers (chat open, TAB
 //!   targeting, nameplates, autorun, camera zoom, …).
@@ -131,8 +134,6 @@ pub(crate) struct BindingsState {
     /// Accumulated analog amount per host command this frame (wheel notches; a key press adds
     /// the reference's own 1.0 step) — the camera zoom's input.
     amounts: Vec<(Cmd, f32)>,
-    /// Rising edge of the keyboard-capture gate last frame (internal: clears Held latches once).
-    was_typing: bool,
 }
 
 impl BindingsState {
@@ -513,23 +514,29 @@ fn latch_and_dispatch(
         // latches or fires happen while armed.
     }
 
-    // ── The typing edge ── a box taking focus stops movement (the reference's focus handler
-    // releases every direction bit, `0x514490`): Held latches clear once on the rising edge;
-    // EdgeUpDown latches stay armed — their release half still fires (the reference delivers
-    // the up of a pressed binding regardless).
+    // ── Who owns this frame's keys ── a focused EditBox eats every key for as long as it holds
+    // focus; a shown keyboard frame ate the particular keys in `capture.consumed`. Both suppress a
+    // PRESS below and do nothing else — **a UI focus change releases nothing already held**.
+    //
+    // This is where bug 2196 lived. The block here used to drop every [`Kind::Held`] latch on the
+    // rising edge of `capture.typing`, on a misreading of `0x514490` as "the reference's chat-focus
+    // handler": its sole caller `0x493058` hangs off the CSimpleTop root's WM_ACTIVATE callback
+    // slot (`[root+0x1134]`, event category 2, payload 0 = deactivate), so it is the **OS
+    // window-deactivate** handler, not a UI-focus one (wow-re `loading-screen-input-law.md`; the
+    // conflated phrasing was `rf79-autorun-cancel-set.md`'s "Chat EditBox / window focus" row).
+    // In the reference a focused box merely turns the movement handlers into no-ops and the
+    // direction bits are *frozen, not cleared* — so holding W and pressing ENTER keeps you
+    // running, and the world map eating the `M` that closes it keeps you running too. Both
+    // regressions were one clear.
+    //
+    // The window-deactivate clear needs no code of its own: bevy's `KeyboardFocusLost` →
+    // `ButtonInput::release_all` makes every latched base key read up, and the stuck-latch sweep
+    // at the bottom of this system turns that into real releases (the loading cover reaches it the
+    // same way, through `loading_screen::input`'s `swallow`).
+    //
+    // ── Keyboard ── press edges latch/fire (exact-modifier chord match, no repeats, gated on the
+    // two ownership terms and the capture arm); release edges unlatch and fire the runOnUp up-half.
     let typing = capture.typing;
-    if typing && !state.was_typing {
-        state.latched.retain(|&(_, b)| match b {
-            Bound::Spec(c) => !matches!(SPECS[c.0 as usize].kind, Kind::Held),
-            // An addon's `runOnUp` latch is an EdgeUpDown pair by another name — its release half
-            // is a Lua body that must still run, so it stays armed for the same reason.
-            Bound::Addon(_) => true,
-        });
-    }
-    state.was_typing = typing;
-
-    // ── Keyboard ── press edges latch/fire (exact-modifier chord match, no repeats, gated on
-    // typing and the capture arm); release edges unlatch and fire the runOnUp up-half.
     for ev in keyboard.read() {
         let key = chord::normalize_key(ev.key_code);
         match ev.state {
@@ -546,7 +553,11 @@ fn latch_and_dispatch(
                             | KeyCode::ArrowUp
                             | KeyCode::ArrowDown
                     );
-                if armed || (typing && !arrow_exempt) || sup || ev.repeat {
+                // A keyboard frame's existence gate ate this one key (decision 1319) — the
+                // world map's fullscreen `OnKeyDown`, a cinematic, the stack-split spinner. Per
+                // key, so the map eating its own `M` leaves every other binding alone.
+                let eaten = capture.consumed.contains(&ev.key_code);
+                if armed || (typing && !arrow_exempt) || eaten || sup || ev.repeat {
                     continue;
                 }
                 if state.latched.iter().any(|&(k, _)| k == BindKey::Key(key)) {
@@ -678,9 +689,14 @@ fn latch_and_dispatch(
         }
     }
 
-    // ── The stuck-latch sweep ── a release the window never saw (focus loss, the macOS
-    // modifier eater's cousin): any latch whose base key reads up in the input state unlatches
-    // now, firing its up-half so a pushed action button unsticks visibly.
+    // ── The stuck-latch sweep ── a release the window never saw: any latch whose base key reads
+    // up in the input state unlatches now, firing its up-half so a pushed action button unsticks
+    // visibly. This is also where the reference's two real bulk clears land, because bevy already
+    // zeroes `ButtonInput` for both: **OS window deactivate** (`KeyboardFocusLost` →
+    // `release_all` — `0x514490`'s `and eax,0xfffff00f`, the direction bits released while
+    // autorun survives) and the loading cover (`loading_screen::input`'s `swallow` — the
+    // world-enter cascade's `0x5144c0`, which clears everything). Nothing about the UI's own
+    // keyboard focus reaches here, and that is the point (2196).
     let mut stuck: Vec<BindKey> = Vec::new();
     for &(k, _) in &state.latched {
         let up = match k {
@@ -880,6 +896,13 @@ mod tests {
         app.world().resource::<BindingsState>()
     }
 
+    /// What a keyboard FRAME ate this frame — the list `feed_ui_input` rewrites every pass, which
+    /// this harness has no copy of, so it is **set** rather than pushed (an accumulating list would
+    /// keep suppressing a key the frame stopped eating rounds ago).
+    fn frame_ate(app: &mut App, keys: &[KeyCode]) {
+        app.world_mut().resource_mut::<UiKeyboardCapture>().consumed = keys.to_vec();
+    }
+
     /// One addon's `Bindings.xml`, in the reference's own shape: a `runOnUp` binding whose single
     /// body forks on `keystate`, and a one-shot beside it. Each half counts itself in a global, so
     /// the assertions below read what the VM actually ran rather than what we told it to run.
@@ -1020,14 +1043,6 @@ mod tests {
         );
     }
 
-    /// A `runOnUp` addon latch survives a chat box taking focus, and its release half still runs.
-    ///
-    /// The typing edge clears [`Kind::Held`] latches (the reference's focus handler releasing the
-    /// direction bits) and deliberately leaves [`Kind::EdgeUpDown`] armed, because the up half of
-    /// a *pressed* binding is delivered regardless of focus. An addon's `runOnUp` binding is that
-    /// same pair wearing one chunk, so it must follow the same rule — dropped on the focus edge,
-    /// it would leave whatever its down half started running forever, with no key left to press
-    /// to stop it.
     /// **The alt-arrow exemption: you can turn while the chat box has focus.**
     ///
     /// A focused EditBox swallows every key — that is the reference's own handler returning 1 on
@@ -1076,8 +1091,16 @@ mod tests {
         );
     }
 
+    /// **Nothing a box taking focus does releases what is already held** (2196), and a `runOnUp`
+    /// addon latch still delivers its up-half when the key finally goes up.
+    ///
+    /// The reference's focused box turns the movement handlers into no-ops — the direction bits are
+    /// frozen, not cleared — so a held binding of ANY kind rides the focus change out. This test
+    /// used to assert the opposite for [`Kind::Held`] (`assert!(!pressed(MOVE_FORWARD))`), on the
+    /// misreading of `0x514490` as a chat-focus handler that 2196 corrects: its sole caller hangs
+    /// off the WM_ACTIVATE slot, so it is the OS window-deactivate clear.
     #[test]
-    fn a_run_on_up_addon_latch_survives_the_typing_edge_and_still_releases() {
+    fn a_held_latch_rides_out_a_box_taking_focus_and_still_releases() {
         let mut script = UiScript::new().expect("VM");
         script.register_bindings(&registry_commands());
         script.register_addon_bindings(
@@ -1093,18 +1116,28 @@ mod tests {
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1);
 
-        // A box takes focus: movement stops, the addon's latch stays.
+        // A box takes focus. Both latches ride it out: the reference freezes the direction bits,
+        // it does not clear them.
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
-        assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "holding W and opening the chat box keeps you running (2196)"
+        );
         assert_eq!(
             lua_count(&app, "PROBE_UP"),
             0,
             "the focus edge is not a release — nothing has run the up half yet"
         );
 
+        // And the keys still stop when the player lets go, box focused or not.
+        release_key(&mut app, KeyCode::KeyW);
         release_key(&mut app, KeyCode::KeyJ);
         app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "releasing W stops you, while typing exactly as otherwise"
+        );
         assert_eq!(
             lua_count(&app, "PROBE_UP"),
             1,
@@ -1445,25 +1478,38 @@ mod tests {
         assert!(!state(&app).pressed(by_name("BONUSACTIONBUTTON1")));
     }
 
+    /// **The typing gate blocks NEW presses and releases nothing already held** (2196).
+    ///
+    /// The two halves used to be one: the gate's rising edge dropped every [`Kind::Held`] latch, so
+    /// holding W and pressing ENTER stopped you dead. It rests on nothing — `0x514490`, the clear
+    /// that reading cited, is the OS window-deactivate handler (sole caller `0x493058`, off the
+    /// WM_ACTIVATE callback slot), and the reference's focused box only makes the movement handlers
+    /// no-ops: the bits are frozen, not cleared.
     #[test]
-    fn the_typing_gate_blocks_new_input_and_clears_held_latches_once() {
+    fn the_typing_gate_blocks_new_input_but_a_held_binding_keeps_running() {
         let mut app = harness();
         press_key(&mut app, KeyCode::KeyW);
         app.update();
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
-        // A box takes focus: movement stops (the reference's focus handler releases the
-        // direction bits), and new presses do nothing.
+        // A box takes focus. You keep running, and new presses type instead of binding.
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(
-            !state(&app).pressed(cmd::MOVE_FORWARD),
-            "latches clear on the capture edge"
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the capture edge is not a release — holding W keeps you running while you type"
         );
         press_key(&mut app, KeyCode::KeyX);
         app.update();
         assert!(
             !state(&app).fired(cmd::SIT_OR_STAND),
             "typed keys are not bindings"
+        );
+        // Letting go still stops you, box focused or not.
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "the release is delivered regardless of focus"
         );
         // Focus drops; keys work again.
         release_key(&mut app, KeyCode::KeyX);
@@ -1472,6 +1518,60 @@ mod tests {
         press_key(&mut app, KeyCode::KeyX);
         app.update();
         assert!(state(&app).fired(cmd::SIT_OR_STAND));
+    }
+
+    /// **The world map's shape** (2196, the director's report): a shown keyboard-enabled frame eats
+    /// the key that closes it, and that must cost the key its binding and nothing else.
+    ///
+    /// `WorldMapFrame` is `frameStrata="FULLSCREEN" enableKeyboard="true"` with an `<OnKeyDown>`
+    /// that re-matches `GetBindingKey("TOGGLEWORLDMAP")` in Lua and calls `RunBinding` itself, so
+    /// under the existence gate (decision 1319) it consumes every key while shown — including the
+    /// `M` that closes it. benilla reported that consumption as `typing`, whose rising edge then
+    /// dropped the movement latch: holding W and tapping `M` twice left you standing in a closed
+    /// map. The consumption is per KEY now, and releases nothing.
+    #[test]
+    fn a_keyboard_frame_eating_its_own_toggle_key_does_not_stop_a_held_run() {
+        let mut app = harness();
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+
+        // The map is open and eats this frame's `M` (its own Lua runs the toggle). `M` carries a
+        // `Kind::Edge` binding, which a no-VM harness cannot observe — so the suppression half is
+        // asserted on `X` below, and this leg asserts the half the report is about.
+        frame_ate(&mut app, &[KeyCode::KeyM]);
+        press_key(&mut app, KeyCode::KeyM);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the frame ate the toggle key; you are still running (2196)"
+        );
+
+        // The eaten key loses its binding…
+        release_key(&mut app, KeyCode::KeyM);
+        app.update();
+        frame_ate(&mut app, &[KeyCode::KeyX]);
+        press_key(&mut app, KeyCode::KeyX);
+        app.update();
+        assert!(
+            !state(&app).fired(cmd::SIT_OR_STAND),
+            "the frame ate this key: its binding must not also fire"
+        );
+
+        // …and only that key. The old whole-frame flag suppressed every binding in the frame.
+        release_key(&mut app, KeyCode::KeyX);
+        app.update();
+        frame_ate(&mut app, &[KeyCode::KeyM]);
+        press_key(&mut app, KeyCode::KeyX);
+        app.update();
+        assert!(
+            state(&app).fired(cmd::SIT_OR_STAND),
+            "consumption is per key, not per frame"
+        );
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "and W has been held throughout"
+        );
     }
 
     #[test]

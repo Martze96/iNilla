@@ -697,6 +697,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
     if let Some(mut keys) = world.get_resource_mut::<UiKeyboardCapture>() {
         keys.typing = false;
         keys.arrows_fall_through = false;
+        keys.consumed.clear();
     }
     if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
         *held = CursorPayloadHeld::default();

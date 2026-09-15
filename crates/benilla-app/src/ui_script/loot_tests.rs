@@ -1202,3 +1202,91 @@ fn loot_row_awaiting_its_template_opens_clean() {
         "the resolved row is white, got {white:?}"
     );
 }
+
+/// **A `<LootButton>` wears `ItemButtonTemplate`'s three state textures, and the highlight tracks
+/// the cursor.** The loader's Button leg used to gate on the two tags `Button`/`CheckButton`, so
+/// the stock rows — whose tag is `LootButton` — were built with no `<NormalTexture>`, no
+/// `<PushedTexture>` and no `<HighlightTexture>` at all: no Quickslot border on the icons, and
+/// nothing to light under the mouse. The gate is wrong about the reference: `CLootButton`'s
+/// geometry vtable differs from `CSimpleButton`'s in exactly one slot — the destructor thunk — and
+/// `LoadXML` is not it, so `0x7788c0` parses a `<LootButton>` element verbatim (wow-re
+/// `ui/scratch/lootbutton-widget-type.md` §4).
+///
+/// Asserted through the ENGINE's hover path rather than off the state: what a player sees is the
+/// emitted quad, and the quad is what was missing.
+#[test]
+fn stock_loot_rows_wear_the_item_button_art_and_light_under_the_cursor() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in super::test_ui::LOOT_UI {
+        load_xml(&s, f);
+    }
+    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
+    s.set_loot(Some(coin_and_two_items()));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The inherited template's own art reached every visible row.
+    s.resolve();
+    let border = |quads: &[ExtractedQuad]| {
+        quads
+            .iter()
+            .filter(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("UI-Quickslot2"))
+            })
+            .count()
+    };
+    assert_eq!(
+        border(&s.extract()),
+        3,
+        "ItemButtonTemplate's <NormalTexture> is the Quickslot border on each of the three rows"
+    );
+
+    // The highlight is not on screen until the cursor is on a row.
+    let hilite = |quads: &[ExtractedQuad]| {
+        quads
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("ButtonHilight-Square") =>
+                {
+                    q.rect
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        hilite(&s.extract()).is_empty(),
+        "no row is lit with the mouse away"
+    );
+
+    // Hover the second row: exactly one highlight, over THAT row's icon.
+    let icon = |quads: &[ExtractedQuad], needle: &str| {
+        quads
+            .iter()
+            .find(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
+            })
+            .and_then(|q| q.rect)
+            .unwrap_or_else(|| panic!("no icon quad for {needle}"))
+    };
+    let wool = icon(&s.extract(), "INV_Fabric_Wool_01");
+    super::test_ui::hover(&mut s, "LootButton2");
+    s.resolve();
+    let lit = hilite(&s.extract());
+    assert_eq!(lit.len(), 1, "one row lights, not three: {lit:?}");
+    assert_eq!(
+        lit[0], wool,
+        "the highlight covers the hovered row's icon square"
+    );
+
+    // And it leaves with the cursor.
+    super::test_ui::unhover(&mut s);
+    s.resolve();
+    assert!(
+        hilite(&s.extract()).is_empty(),
+        "the highlight is not latched: it goes out when the cursor leaves"
+    );
+}

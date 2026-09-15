@@ -837,8 +837,9 @@ impl UiScript {
             model.modifiers = (shift, ctrl, alt);
             was
         };
-        // The shift EDGE drives the shopping-compare tooltips (0274 P4): press over a live
-        // equippable item hover fires SHOW_COMPARE_TOOLTIP, release hides the pair.
+        // The shift EDGE drives the shopping-compare tooltips (0274 P4, re-based by 2202): press
+        // over a live equippable item hover seats the plates beside the tooltip, release hides
+        // them.
         if shift_was != shift {
             tooltip_item::on_shift_edge(&self.lua, shift);
         }

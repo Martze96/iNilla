@@ -307,6 +307,40 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         "the ref's out-of-power blue-grey"
     );
 
+    // The PLAIN grey — `usable = false` with `notEnoughMana = false`, which is what an unusable
+    // item reads (food in combat, the whole point of the ITEM arm's spell walk). Stock
+    // `ActionButton_UpdateUsable`'s `else` dims the ICON to 0.4 and leaves the normal texture
+    // at full strength, so the ring keeps its colour under a dead icon.
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: false,
+            not_enough_mana: false,
+            cooldown: Some((6_000, 10_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+    s.resolve();
+    let c = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                color,
+                ..
+            } if p.contains("Spell_Fire_FlameBolt") => Some(*color),
+            _ => None,
+        })
+        .expect("icon quad")
+        .expect("vertex color set");
+    assert_eq!(
+        (c[0], c[1], c[2]),
+        (0.4, 0.4, 0.4),
+        "the ref's unusable grey — the icon the director sees on food in combat"
+    );
+
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

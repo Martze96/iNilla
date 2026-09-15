@@ -186,7 +186,9 @@ pub(super) fn control(
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
-    // works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives; the free-fly
+    // works. The gate is `UiKeyboardCapture::typing`, which the focused chat EditBox drives —
+    // deliberately not its per-key `consumed` twin (2196): that one says a keyboard FRAME ate one
+    // key, whose business is that key's binding, not whether a dev free-cam may read WASD. The free-fly
     // chord below is deliberately outside it, like every dev chord ([`modkeys::dev_chord`]).
     let typing = ui_capture.typing;
     // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the

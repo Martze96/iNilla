@@ -381,17 +381,18 @@ pub struct TooltipState {
     pub world_owned: bool,
     /// ARMED for a shopping-compare render: the next `SetInventoryItem` on this frame renders in
     /// the byte law's compare mode (`[arg+0x14]≠0` compact + `[arg+0x18]≠0` "Currently Equipped"
-    /// — wow-re tooltip-content-law.md). Set by the engine right before it fires
-    /// `SHOW_COMPARE_TOOLTIP` for this frame's index and consumed by that render. Survives
-    /// `SetOwner`'s content clear (FrameXML SetOwners between the arm and the render — ref
-    /// PaperDollFrame.lua:621-640); how the real engine plumbs the flag to `0x52b650` is
-    /// unrecorded, so this seam is the INTERIM model of it.
+    /// — wow-re tooltip-content-law.md). Set by the engine right before it fills a shopping
+    /// plate, and consumed by that render. Survives `SetOwner`'s content clear, because the
+    /// reference's own live compare caller (`MerchantFrame.xml:67-72`) SetOwners *between* the
+    /// arm and the render; how the real engine plumbs the flag to `0x52b650` is unrecorded, so
+    /// this seam is the INTERIM model of it.
     pub compare_armed: bool,
-    /// The paperdoll slot ids the item currently shown could equip into (empty = not
-    /// equippable / not an item tooltip) — set by the item render on the main GameTooltip, read
-    /// by the shift-edge compare drive to (re)fire `SHOW_COMPARE_TOOLTIP`. Dropped with the
-    /// content.
-    pub compare_slots: Vec<u32>,
+    /// What the MAIN GameTooltip is currently offering for comparison — the class and
+    /// `InventoryType` of the equippable item it shows (`None` = not equippable, not an item
+    /// tooltip, or a surface whose own FrameXML drives the plates). It is what the shift-held
+    /// compare drive re-runs the selection law against, and the gate that keeps that drive from
+    /// touching plates it does not own. Dropped with the content.
+    pub compare_offer: Option<CompareOffer>,
     /// `SetPadding(w)` — extra width beyond the measured content (ref ItemRefTooltip's
     /// OnLoad `SetPadding(16)`: room for the corner close button). 0 for ordinary tooltips.
     pub padding: f32,
@@ -400,6 +401,20 @@ pub struct TooltipState {
     /// declared set clone the previous line's faces instead of the header/text defaults, the
     /// real class's grow-past-the-template behavior.
     pub xml_declared_lines: bool,
+}
+
+/// What a compare drive selects a worn item *against* — the two template fields the byte-verified
+/// selection law reads (wow-re `merchant-compare-item-law.md` §3/§5): the offered item's
+/// `InventoryType`, which names the candidate slots, and its item CLASS, which every candidate's
+/// worn item must match. Carried instead of a whole `ItemTemplateView` because these two fields
+/// are the entire input — a hover that re-drives on a shift edge must not depend on the rest of a
+/// template that may have been replaced under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompareOffer {
+    /// `ItemTemplateView::class`.
+    pub class: u32,
+    /// `ItemTemplateView::inventory_type`.
+    pub inventory_type: u32,
 }
 
 /// The tooltip plate's text inset — the real template seats `TextLeft1` at TOPLEFT (10,−10).

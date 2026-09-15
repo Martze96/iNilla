@@ -330,7 +330,7 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
         // Content-scoped like the rest; `compare_armed` and `padding` survive on purpose —
         // the arm spans FrameXML's SetOwner (kinds.rs has the seam note), the padding is a
         // frame property (ref: set once in OnLoad).
-        t.compare_slots.clear();
+        t.compare_offer = None;
     }
     // The mouseover health bar is UNIT content: it hides with the lines (the ref bar exists
     // only while a unit shows; the byte law's watcher re-shows it on the next unit render).

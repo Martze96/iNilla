@@ -183,10 +183,16 @@ pub(crate) struct Roster {
     ///
     /// The ref's `SelectCharacter` zeroes the select facing **unconditionally**: `0x472950`'s
     /// `mov ds:0xb4217c, 0` sits one instruction *above* the already-built discriminator, so it
-    /// dominates both legs, and the merged tail re-applies it geometrically — so re-clicking the
-    /// row you are already on snaps the character square again (wow-re
+    /// dominates both legs, and the merged tail re-applies it geometrically (wow-re
     /// `glue/scratch/glue-preview-facing-law.md`, 1533). A counter rather than change-detection on
-    /// `selected`, because "the same index again" is a selection.
+    /// `selected`, because the engine re-squares on a *re*-selection of the same index too — which
+    /// is exactly what a roster refresh does, calling it with the index it already holds.
+    ///
+    /// **The click is the one caller that does not reach it**, and the gate is in the stock Lua
+    /// rather than in the engine — see [`Roster::click_row`] and decision 2194. The caller census
+    /// is wow-re `glue/scratch/select-character-caller-gate.md`: of the ten Lua call sites only the
+    /// two click handlers are gated, and of `0x472740`'s four C callers two are the roster teardown
+    /// passing `-1` (so `0x472950` exits above the reset) — every ungated path re-squares.
     pub(super) select_seq: u64,
     /// The guid we answered the IO thread with; `Some` = a login is requested/live.
     pub(super) pending_pick: Option<u64>,
@@ -259,6 +265,24 @@ impl Roster {
     pub(super) fn select(&mut self, row: Option<usize>) {
         self.selected = row;
         self.select_seq = self.select_seq.wrapping_add(1);
+    }
+
+    /// A click on a character row — the ref's `CharacterSelectButton_OnClick`, whose entire body is
+    /// the gate `if ( id ~= CharacterSelect.selectedIndex ) then CharacterSelect_SelectCharacter(id)`
+    /// (shipped `CharacterSelect.lua` l.305-310; `OnDoubleClick`, l.312-318, repeats it verbatim
+    /// before entering the world, and the ten `CharSelectCharacterButtonTemplate` buttons carry
+    /// `id="1".."10"` 1:1 with the character index, so `id` *is* the row).
+    ///
+    /// So the row you are already on is never re-selected from a click, and the facing zero
+    /// [`Self::select`] owes never fires for it: the angle you dragged the character to survives
+    /// clicking it again. Decision 2194, correcting 1533 — the engine function is unconditional as
+    /// recorded (verified again, three ways, in wow-re
+    /// `glue/scratch/select-character-caller-gate.md`), but the click never reaches it: the binding
+    /// has exactly one live call site, and the two handlers that lead to it both gate.
+    pub(super) fn click_row(&mut self, row: usize) {
+        if self.selected != Some(row) {
+            self.select(Some(row));
+        }
     }
 
     /// The selected row, if any.
@@ -1464,6 +1488,33 @@ mod tests {
             roster_policy_over(Some("0"), &["Kerwind", "Xero", "Zzbullone"], Some(2)),
             Some(0),
             "row 2 was only ever clicked; the roster rebuild goes back to the remembered row 0",
+        );
+    }
+
+    /// **The report**: drag the character round on the select screen, then click the row it is
+    /// already standing on, and it snapped square again — the reference keeps the angle.
+    /// `CharacterSelectButton_OnClick`'s whole body is `if ( id ~= CharacterSelect.selectedIndex )`,
+    /// so that click never reaches the engine's unconditional facing zero at all (2194, correcting
+    /// 1533 — which verified the engine function and never asked what calls it). The facing reset
+    /// rides `select_seq`, so "did it re-square" is exactly "did the counter move".
+    #[test]
+    fn re_clicking_the_selected_row_keeps_the_facing() {
+        let mut roster = Roster {
+            chars: vec![character(1, "Kerwind"), character(2, "Xero")],
+            ..Roster::default()
+        };
+        roster.click_row(0);
+        let squared = roster.select_seq;
+        roster.click_row(0);
+        assert_eq!(
+            roster.select_seq, squared,
+            "a click on the row already selected must not re-select — the dragged angle survives",
+        );
+        roster.click_row(1);
+        assert_eq!(
+            roster.select_seq,
+            squared + 1,
+            "…while a click on a DIFFERENT row selects, and squares the character it brings up",
         );
     }
 

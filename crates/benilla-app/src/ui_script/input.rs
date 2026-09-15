@@ -62,7 +62,7 @@ impl PointerFeed<'_> {
 /// [`super::extract::tick_script`] has resolved this frame's rects), firing
 /// OnEnter/OnLeave/OnClick/OnMouseWheel and the EditBox
 /// char/key dispatch, publishing [`PlayerUiHover`] (so the pointer arbiter yields world-pick/camera to
-/// the UI) and [`UiKeyboardCapture`] (so gameplay/dev keyboard readers yield to a focused box).
+/// the UI) and [`UiKeyboardCapture`] (so a key a box or frame ate never also fires its binding).
 ///
 /// Runs in [`UiInput`], before `WorldStage::Input` and every other keyboard reader — a key a focused
 /// box consumes must never also reach the world in the same frame.
@@ -110,12 +110,14 @@ pub(super) fn feed_ui_input(
     let Some(mut script) = script else {
         capture.typing = false;
         capture.arrows_fall_through = false;
+        capture.consumed.clear();
         payload_held.0 = false;
         return;
     };
     let Ok((window, raw_handle)) = window.single() else {
         capture.typing = false;
         capture.arrows_fall_through = false;
+        capture.consumed.clear();
         payload_held.0 = false;
         return;
     };
@@ -229,6 +231,8 @@ pub(super) fn feed_ui_input(
     // box) but BEFORE feeding keys (an Escape that clears focus is still "captured" this frame, so the
     // world doesn't also act on it). Gameplay/dev readers run after `UiInput` and see this value.
     capture.typing = script.has_keyboard_focus();
+    // The per-key half is this frame's alone (a frame's existence gate ate THIS key).
+    capture.consumed.clear();
     // ── The alt-arrow exemption (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED) ─────────
     // A focused EditBox in alt-arrow mode (`ignoreArrows` in XML, `SetAltArrowKeyMode` in Lua)
     // does NOT consume LEFT/UP/RIGHT/DOWN unless ALT is held: the reference's handler returns 0
@@ -291,7 +295,10 @@ pub(super) fn feed_ui_input(
         };
         if let Some(name) = frame_named {
             if script.frame_key_input(name) {
-                capture.typing = true; // consumed by a frame: its binding must not also fire
+                // Consumed by a frame: THIS key's binding must not also fire. Not `typing` — a
+                // frame eating a key is not a text box taking focus, and reading it as one is what
+                // stopped a held W dead when the world map ate the `M` that closed it (2196).
+                capture.consumed.push(ev.key_code);
                 continue;
             }
         }
@@ -308,14 +315,15 @@ pub(super) fn feed_ui_input(
         // handler has to call `RunBinding("SCREENSHOT")` **by hand** to get one key back. It would
         // not need to if unhandled keys fell through to their bindings.
         //
-        // Consumption sets the capture gate and nothing else: it suppresses the binding and the
-        // world/gameplay readers, and deliberately does NOT suppress `char_input` below — `OnChar`
-        // is a separate channel off a separate dispatcher (`0x765df0`), which is exactly how the
-        // stack-split spinner receives a digit whose key-down its own `OnKeyDown` already ate.
+        // Consumption suppresses THE KEY'S BINDING and nothing else. It deliberately does NOT
+        // suppress `char_input` below — `OnChar` is a separate channel off a separate dispatcher
+        // (`0x765df0`), which is exactly how the stack-split spinner receives a digit whose
+        // key-down its own `OnKeyDown` already ate. And it is emphatically not a focus change: it
+        // releases nothing that is already held (2196).
         else if named.is_none() {
             if let Some(token) = crate::bindings::chord::key_token(ev.key_code) {
                 if script.frame_key_input(token) {
-                    capture.typing = true;
+                    capture.consumed.push(ev.key_code);
                 }
             }
         }
@@ -326,11 +334,12 @@ pub(super) fn feed_ui_input(
             // dispatch (decision 0997, `crate::bindings`), which runs right after this pass and
             // reads the capture gate written above, so a key a focused box consumed this frame
             // never also fires its binding — the real client's ESC precedence, table-wide.
-            // Consumption suppresses the binding — a keyboard FRAME that took this key counts
-            // exactly as a focused box does (decision 1319; `capture.typing` above already covers the
-            // box case, and this adds the frame one).
+            // Consumption suppresses this key's binding — a keyboard FRAME that took the key
+            // counts as the focused box does for *that key* (decision 1319; `capture.typing` above
+            // covers the box, which takes every key for as long as it holds focus, and this adds
+            // the frame's one-key case).
             if script.key_input(name) {
-                capture.typing = true;
+                capture.consumed.push(ev.key_code);
             }
         } else if let Some(chord) = chord {
             // The gate, on the KEY rather than the action: a gated arrow is not handed to the box
@@ -382,7 +391,7 @@ pub(super) fn feed_ui_input(
                 // row IS a binding (the action buttons), so a digit typed into a keyboard frame —
                 // the stack-split spinner — must not also fire action button 3 (decision 1319).
                 if script.char_input(text) {
-                    capture.typing = true;
+                    capture.consumed.push(ev.key_code);
                 }
             }
         }

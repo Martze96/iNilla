@@ -1,8 +1,15 @@
-//! The shopping-compare + chat-link tooltips over the REAL shipped XMLs (decision 0274 P4):
-//! shift over a bag item fires `SHOW_COMPARE_TOOLTIP`, CharacterFrame's doll-slot listener
-//! (ref PaperDollFrame.lua:621-640) seats `ShoppingTooltip1` on the matching slot, the armed
-//! `SetInventoryItem` renders the byte law's compare shape over the template's own adopted
-//! small-font ladder, and `SetItemRef` fills the parked `ItemRefTooltip`.
+//! The shopping-compare + chat-link tooltips over the REAL shipped XMLs (decision 0274 P4,
+//! re-based by 2202): shift over an item hover seats `ShoppingTooltip1/2` BESIDE the tooltip at
+//! `MerchantFrame.xml:63-80`'s own geometry, their armed `SetInventoryItem` renders the byte law's
+//! compare shape over the template's own adopted small-font ladder, and `SetItemRef` fills the
+//! parked `ItemRefTooltip`.
+//!
+//! **Why not the paper-doll listener these tests used to drive.** `SHOW_COMPARE_TOOLTIP` (event
+//! 377) has zero fire sites in 5875 — `PaperDollFrame.lua:621-640` is dead code there, and the
+//! vendor row is the only live consumer of the shopping plates (wow-re
+//! `merchant-compare-item-law.md` §8). benilla fired it anyway until 2202, which is why a compare
+//! needed the character window open, landed across the screen from the tooltip it compared to, and
+//! could be left stale by a hover whose slot listener never answered.
 //!
 //! **The bag end of that flow is the REFERENCE's own code since 1751.** The hover source used to be
 //! benilla's `BenillaBagSlot_OnEnter` on a `BenillaBagFrame`; it is the reference's
@@ -180,14 +187,14 @@ fn seed_items(s: &mut UiScript) {
     );
 }
 
-/// Shift over a bag helm with the character window OPEN: `ShoppingTooltip1` seats on the head
-/// doll slot (ANCHOR_RIGHT), renders gray "Currently Equipped" + the equipped helm through the
-/// template's ADOPTED small-font ladder (line 1 = GameFontNormalSmall's 10px face — the
-/// engine-created lines of the MAIN tooltip stay on its own faces), the compact cut drops the
-/// description, and releasing shift hides the pair. With the window CLOSED nothing shows —
-/// the 1.12 behavior.
+/// Shift over a bag helm: `ShoppingTooltip1` seats at the tooltip's own TOPRIGHT (0, −10),
+/// renders gray "Currently Equipped" + the equipped helm through the template's ADOPTED small-font
+/// ladder (line 1 = GameFontNormalSmall's 10px face — the engine-created lines of the MAIN tooltip
+/// stay on its own faces), the compact cut drops the description, and releasing shift hides the
+/// pair. **The character window is irrelevant to all of it** — it is checked both closed and open,
+/// because the listener that used to make it matter is dead code in 5875 (2202).
 #[test]
-fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
+fn shift_compare_over_a_bag_item_seats_beside_the_tooltip() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with_bags();
     s.set_unit("player", Some(player()));
@@ -202,15 +209,26 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
     hover(&mut s, &btn);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
 
-    // Character window CLOSED: the shift edge fires, no listener answers, nothing shows.
+    // Character window CLOSED — and the compare shows anyway, beside the tooltip.
     s.set_modifiers(true, false, false);
+    assert!(s.errors().is_empty(), "compare errors: {:?}", s.errors());
+    let ok: bool = s
+        .eval(
+            "local p, rel, rp, x, y = ShoppingTooltip1:GetPoint() \
+             return ShoppingTooltip1:IsShown() \
+               and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
+               and ShoppingTooltip1TextLeft2:GetText() == \"Test Helm\" \
+               and rel:GetName() == \"GameTooltip\" \
+               and p == \"TOPLEFT\" and rp == \"TOPRIGHT\" and x == 0 and y == -10",
+        )
+        .unwrap();
     assert!(
-        !s.eval::<bool>("return ShoppingTooltip1:IsShown()").unwrap(),
-        "no compare with the character window closed"
+        ok,
+        "the compare plate seats beside the tooltip with the character window closed"
     );
     s.set_modifiers(false, false, false);
 
-    // Open the window; the shift edge now seats the compare on the head slot.
+    // Opening the character window changes nothing about where it lands.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
     hover(&mut s, &btn);
@@ -220,12 +238,11 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
         .eval(
             "local p, rel = ShoppingTooltip1:GetPoint() \
              return ShoppingTooltip1:IsShown() \
-               and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
                and ShoppingTooltip1TextLeft2:GetText() == \"Test Helm\" \
-               and rel:GetName() == \"CharacterHeadSlot\" and p == \"BOTTOMLEFT\"",
+               and rel:GetName() == \"GameTooltip\" and p == \"TOPLEFT\"",
         )
         .unwrap();
-    assert!(ok, "the compare plate seats on the head doll slot");
+    assert!(ok, "the open character window does not move the plate");
     // The adopted ladder: the shopping plate's line 1 wears GameFontNormalSmall (10px); the
     // MAIN tooltip's engine-created line 1 keeps the header face — different sizes.
     let ok: bool = s
@@ -389,4 +406,165 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     );
     s.set_modifiers(false, false, false);
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// A **quest reward** row, which is where the director found this: shift over an equippable
+/// choice shows what is worn in that slot, beside the tooltip, with no character window open —
+/// and a reward whose slot is EMPTY shows nothing at all rather than the plate an earlier hover
+/// left behind.
+///
+/// That last clause is the reported symptom, reproduced before it was fixed: a Back-slot cape
+/// hover painted `Currently Equipped / Rustmetal Bracers` — a *wrist* plate from an earlier
+/// compare — sitting over the tooltip. It survived because the old drive fired
+/// `SHOW_COMPARE_TOOLTIP` and left the plate's whole lifecycle to a paper-doll listener that
+/// answers only while the character window is visible: with the window closed, nothing hid it and
+/// nothing refilled it. The engine owns both plates on every drive now, so the miss path hides.
+#[test]
+fn shift_compare_over_a_quest_reward_never_shows_a_stale_plate() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = quest_harness();
+
+    // Worn: bracers on the WRIST slot. The BACK slot is empty.
+    let mut inv: InventorySlots = Default::default();
+    inv[9] = Some(worn_item(7000, "Rustmetal Bracers"));
+    s.set_inventory_slots(inv);
+    s.set_item_template(7000, armor_template("Rustmetal Bracers", 9));
+    s.set_item_template(8000, armor_template("Short Duskbat Cape", 16));
+    s.set_item_template(8001, armor_template("Other Bracers", 9));
+
+    // A wrist compare first — the plate this hover must not inherit. Rendered straight onto the
+    // main tooltip, because what made the stale plate stick was the tooltip never HIDING between
+    // the two renders (a mouse move between buttons hides it and would mask the bug).
+    s.run(r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE") GameTooltip:BenillaSetItemById(8001)"#)
+        .unwrap();
+    s.set_modifiers(true, false, false);
+    let ok: bool = s
+        .eval(
+            "return ShoppingTooltip1:IsShown() \
+               and ShoppingTooltip1TextLeft2:GetText() == \"Rustmetal Bracers\"",
+        )
+        .unwrap();
+    assert!(ok, "fixture: the wrist compare really is on screen");
+
+    // Now the cape, still holding shift, without the tooltip hiding in between: the back slot is
+    // empty, so the plate goes away instead of riding along.
+    s.run(r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE") GameTooltip:BenillaSetItemById(8000)"#)
+        .unwrap();
+    assert!(
+        !s.eval::<bool>("return ShoppingTooltip1:IsShown()").unwrap(),
+        "an empty slot shows no compare, and never the previous hover's plate"
+    );
+
+    // And with something worn on the back, the real quest row compares against it — the mouse on
+    // the stock reward button, no character window open.
+    s.set_modifiers(false, false, false);
+    let mut inv: InventorySlots = Default::default();
+    inv[9] = Some(worn_item(7000, "Rustmetal Bracers"));
+    inv[15] = Some(worn_item(7001, "Old Cloak"));
+    s.set_inventory_slots(inv);
+    s.set_item_template(7001, armor_template("Old Cloak", 16));
+    s.fire_event("QUEST_COMPLETE", vec![]);
+    hover(&mut s, "QuestRewardItem1");
+    s.set_modifiers(true, false, false);
+    assert!(s.errors().is_empty(), "compare errors: {:?}", s.errors());
+    let ok: bool = s
+        .eval(
+            "local p, rel, rp, x, y = ShoppingTooltip1:GetPoint() \
+             return not CharacterFrame:IsVisible() \
+               and GameTooltipTextLeft1:GetText() == \"Short Duskbat Cape\" \
+               and ShoppingTooltip1:IsShown() \
+               and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
+               and ShoppingTooltip1TextLeft2:GetText() == \"Old Cloak\" \
+               and rel:GetName() == \"GameTooltip\" \
+               and p == \"TOPLEFT\" and rp == \"TOPRIGHT\" and x == 0 and y == -10",
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "the quest reward compares against the worn cloak, beside its own tooltip"
+    );
+    assert!(
+        !s.eval::<bool>("return ShoppingTooltip2:IsShown()").unwrap(),
+        "one candidate slot fills one plate"
+    );
+
+    // Release hides it; the reward hover itself stays.
+    s.set_modifiers(false, false, false);
+    let ok: bool = s
+        .eval("return not ShoppingTooltip1:IsShown() and GameTooltip:IsShown()")
+        .unwrap();
+    assert!(ok, "release hides the compare, keeps the hover");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// [`harness`] plus the questgiver window, showing a one-choice reward panel.
+fn quest_harness() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let mut seen = Vec::new();
+    load_once(&s, &mut seen, CHARACTER_UI);
+    load_once(&s, &mut seen, &ROUTER_UI);
+    load_once(
+        &s,
+        &mut seen,
+        &[
+            "Interface\\FrameXML\\QuestFrame.xml",
+            "Interface\\FrameXML\\QuestLogFrame.xml",
+        ],
+    );
+    s.set_money(0);
+    s.set_unit("player", Some(player()));
+    s.set_quest(Some(benilla_ui::script::QuestState {
+        panel: benilla_ui::script::QuestPanel::Reward,
+        title: "A Threat Within".into(),
+        body: "Here — have one of the better items I've found.".into(),
+        choices: vec![benilla_ui::script::QuestItemView {
+            name: Some("Short Duskbat Cape".into()),
+            texture: Some("Interface\\Icons\\INV_Misc_Cape_01".into()),
+            count: 1,
+            quality: 1,
+            item_id: 8000,
+            usable: true,
+            link: Some("|cffffffff|Hitem:8000:0:0:0|h[Short Duskbat Cape]|h|r".into()),
+        }],
+        ..Default::default()
+    }));
+    s.fire_event("QUEST_COMPLETE", vec![]);
+    s
+}
+
+/// One worn armour piece, template-backed by [`armor_template`].
+fn worn_item(item_id: u32, name: &str) -> InvSlotView {
+    InvSlotView {
+        duration_ms: None,
+        already_bound: false,
+        bar_placeable: true,
+        durability: None,
+        flags: 0,
+        item_id,
+        icon: None,
+        count: 1,
+        contents_count: None,
+        quality: 1,
+        name: Some(name.into()),
+        link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
+        locked: false,
+        equip_slots: Vec::new(),
+        creator: None,
+        enchants: Vec::new(),
+    }
+}
+
+/// An armour template in one `InventoryType`. The CLASS matters: the selection law only compares
+/// a worn item of the same item class (wow-re `merchant-compare-item-law.md` §3).
+fn armor_template(name: &str, inventory_type: u32) -> ItemTemplateView {
+    ItemTemplateView {
+        name: name.into(),
+        quality: 1,
+        class: 4,
+        subclass: 1,
+        inventory_type,
+        armor: 5,
+        ..Default::default()
+    }
 }

@@ -2366,7 +2366,15 @@ mod tests {
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
-            ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
+            (
+                "SHOW_COMPARE_TOOLTIP",
+                "PaperDollFrame.lua — the second `TRADE_REQUEST` (decision 1764): event 377 is \
+                 registered in 5875 and signalled from NOWHERE (zero fire sites in wow-re's own \
+                 census, `merchant-compare-item-law.md` §8), so this listener is dead code THERE \
+                 too. benilla fired it from 0283 until 2202 and took it back out — decision 2202; the \
+                 shopping plates are driven the way the reference's one LIVE caller drives them, \
+                 `MerchantFrame.xml:63-80`. Producing this would be a divergence, not a fix",
+            ),
             ("SYSMSG", "UIErrorsFrame.lua"),
             ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
             (
