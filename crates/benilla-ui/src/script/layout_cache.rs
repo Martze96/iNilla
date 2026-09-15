@@ -1,10 +1,16 @@
 //! The **layout cache** — the consumer `Frame::user_placed` never had.
 //!
 //! `SetUserPlaced` / the drag entries set the client's userPlaced bit (`frame+0xb4 & 0x1000`,
-//! [`super::object::movable`]), and its whole meaning is *"the player put this window here; put it
-//! back next time"*. The real client honours that by writing a per-character `layout-cache.txt` at
-//! logout and seating the frames from it at load; benilla had the bit and nothing that read it, so
-//! a dragged or resized window went back to its authored anchors on the next login.
+//! [`super::object::movable`]), and together with the frame's own `movable`/`resizable` flags it
+//! means *"the player put this window here; put it back next time"*. The real client honours that
+//! by writing a per-character `layout-cache.txt` at logout and seating the frames from it at load;
+//! benilla had the bit and nothing that read it, so a dragged or resized window went back to its
+//! authored anchors on the next login.
+//!
+//! **The bit is not the whole gate**, at either end — see [`super::UiScript::user_placed_layouts`]
+//! and [`super::UiScript::restore_user_placed_layouts`] for the conjuncts and their byte sites.
+//! Reading it as the whole gate is what let one addon's stamp seat a stock frame forever
+//! (decision 2193).
 //!
 //! This module is the **engine half** of that: a snapshot out, a restore in, and a dirty bit for
 //! the host to debounce on. Where the file lives, when it is written and which character owns it
@@ -81,18 +87,30 @@ pub struct FrameLayout {
 }
 
 impl super::UiScript {
-    /// Snapshot every frame carrying the userPlaced bit — the save path.
+    /// Snapshot every frame the reference's writer would write — the save path.
     ///
     /// Sorted by name so the file is stable: a rewrite that reorders its own lines makes every
     /// diff useless and every "did this change?" check a false positive. Frames whose anchors
     /// cannot be re-addressed by name are dropped (see the module doc), as are unnamed ones —
     /// there is nothing to write them under.
+    ///
+    /// **The filter is `userPlaced AND (movable OR resizable)`, not the bit alone.** The
+    /// reference's per-frame writer `0x490e60` tests four conjuncts in a row: a non-NULL name
+    /// (`0x490e79`), a non-empty one (`0x490e82`), `userPlaced` (`0x490e8e test ah,0x10` =
+    /// `0x1000`) and **`movable|resizable`** (`0x490e97 test ah,0x3` = `0x100|0x200`). The bit
+    /// alone was benilla's whole filter until decision 2193, and the missing fourth conjunct is
+    /// what made this cache a one-way ratchet: **every** drag entry stamps `userPlaced`
+    /// (`0x7652b0` @`0x7652e5`, with no cursor-movement dependency), so an addon that windows a
+    /// stock frame and stamps it in passing — `Cartographer/Modules/LookNFeel.lua`'s
+    /// `StartMoving(); StopMovingOrSizing()` over `WorldMapFrame` — wrote a row that outlived
+    /// the addon on every character, forever. The reference drops that row at the first logout
+    /// the addon does not load, because the frame's own `movable`/`resizable` flags went with it.
     pub fn user_placed_layouts(&self) -> Vec<FrameLayout> {
         let model = self.model_ref();
         let mut out: Vec<FrameLayout> = model
             .arena
             .iter_frames()
-            .filter(|(_, f)| f.user_placed)
+            .filter(|(_, f)| f.user_placed && (f.movable || f.resizable))
             .filter_map(|(h, f)| {
                 let name = f.name.clone()?;
                 let input = model.layout_inputs.get(&h)?;
@@ -120,6 +138,18 @@ impl super::UiScript {
     /// anchors rather than half-seated. Restoring **sets the userPlaced bit**, which is what keeps
     /// the position: `UIParent_ManageFramePositions` skips a user-placed frame, so the managed
     /// bottom-stack pass does not re-seat the window the player moved.
+    ///
+    /// **The apply is gated per ARM, not per row** (`0x4905e0`, decision 2193): the position arm
+    /// is behind the frame's own `movable` bit (`0x490600 test ah,0x1`) and the size arm behind
+    /// `resizable` (`0x490689 test ah,0x2`) — a frame carrying neither is left entirely alone,
+    /// however old and however stamped its row is. The userPlaced stamp itself lives **inside**
+    /// each arm (`0x49067e` in the position arm, `0x490706` in the size one), after that arm's
+    /// own "the row carries no position" bail
+    /// (`0x490613`, the reference's `X == 0 && Y == 0`; the size arm's twin is `0x49069a`'s
+    /// `W == 0 && H == 0`). Both bails are spelled in this payload's own terms rather than the
+    /// reference's integer sentinels: a row that carries no anchors, and a row that carries no
+    /// size, are the same two states in a format that stores an anchor list instead of an X/Y
+    /// pair.
     ///
     /// It marks nothing dirty — the values came *from* the file, and an echo would re-dirty what
     /// was just read (`set_chat_window_looks`' reasoning, one store over).
@@ -156,17 +186,37 @@ impl super::UiScript {
             if !usable {
                 continue;
             }
+            // The two arm gates, read before the layout input is borrowed mutably.
+            let Some((movable, resizable)) = model.arena.frame(h).map(|f| (f.movable, f.resizable))
+            else {
+                continue;
+            };
+            let seat_position = movable && !anchors.is_empty();
+            let seat_size = resizable && (l.width != 0.0 || l.height != 0.0);
+            if !seat_position && !seat_size {
+                continue;
+            }
             let Some(input) = model.layout_inputs.get_mut(&h) else {
                 continue;
             };
-            let changed = input.anchors != anchors
-                || input.width.to_bits() != l.width.to_bits()
-                || input.height.to_bits() != l.height.to_bits();
-            input.anchors = anchors;
-            input.width = l.width;
-            input.height = l.height;
-            if let Some(f) = model.arena.frame_mut(h) {
-                f.user_placed = true;
+            let mut changed = false;
+            if seat_position {
+                changed |= input.anchors != anchors;
+                input.anchors = anchors;
+            }
+            if seat_size {
+                changed |= input.width.to_bits() != l.width.to_bits()
+                    || input.height.to_bits() != l.height.to_bits();
+                input.width = l.width;
+                input.height = l.height;
+            }
+            // The stamp is EACH arm's, not the row's: the position arm's is `0x49067e` and the
+            // size arm's `0x490706`, both inside their own gate. A frame that took neither is
+            // left un-stamped, which is what lets its row fall out of the file.
+            if seat_position || seat_size {
+                if let Some(f) = model.arena.frame_mut(h) {
+                    f.user_placed = true;
+                }
             }
             if changed {
                 // The whole graph, not the frame alone: a restore REPOINTS anchors (a saved row

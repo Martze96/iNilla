@@ -325,9 +325,14 @@ pub struct Frame {
     /// The upper twin of [`Frame::min_resize`] — see its doc, including the `0.0` sentinel.
     pub max_resize: (f32, f32),
     /// `SetUserPlaced` — the client's "the user placed this frame; persist its position across
-    /// sessions" bit. Default false. Stored and readable (`IsUserPlaced`); **nothing consumes it
-    /// yet** — persisting a frame's position belongs with the layout cache, not with the drag that
-    /// moved it, so the flag lands here and the saving lands with the cache.
+    /// sessions" bit. Default false, readable through `IsUserPlaced`, and consumed by the layout
+    /// cache ([`crate::script::layout_cache`]) — which is where persisting a frame's position
+    /// belongs, rather than with the drag that moved it.
+    ///
+    /// **Necessary, not sufficient.** Every drag entry stamps this bit unconditionally
+    /// (`0x7652b0` @`0x7652e5`), so an addon that drags a stock frame once stamps it too; the
+    /// cache's own filter is this bit AND [`Frame::movable`]`|`[`Frame::resizable`], at both the
+    /// write and the apply, which is what lets the stamp fall off again (decision 2193).
     pub user_placed: bool,
     /// `SetToplevel` / XML `toplevel` — flag word `[frame+0xb4]` **bit `0x1`**, the same word as
     /// [`Frame::movable`] (`0x100`) and [`Frame::resizable`] (`0x200`), written by the same pure

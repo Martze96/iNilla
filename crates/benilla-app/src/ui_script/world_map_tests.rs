@@ -814,3 +814,104 @@ fn the_real_feralas_catalog_names_dire_maul_under_the_cursor() {
         "the stock OnUpdate puts the hovered sub-area's name in the label"
     );
 }
+
+/// **A layout row an addon stamped does not outlive the addon** — director report: the world map
+/// stopped opening full screen, "leaving the left and bottom open", on a character whose addons
+/// were all disabled.
+///
+/// `Cartographer/Modules/LookNFeel.lua` windows the map on enable — `SetMovable(true)`,
+/// `SetResizable(true)`, `SetWidth(1024)`, `SetHeight(768)`, `StartMoving(); StopMovingOrSizing()`,
+/// then `SetPoint("CENTER", UIParent, "CENTER", db.x, db.y)` — and the drag entry stamps the
+/// userPlaced bit on the way through (`0x7652b0` @`0x7652e5`, unconditionally). benilla's layout
+/// cache was gated on that bit **alone**, so it persisted the row and re-seated it at every login
+/// on every character, replacing the stock `setAllPoints="true"` forever; the blackout, which
+/// `WorldMapFrame_OnLoad` sizes to the screen and anchors BOTTOMLEFT of the map, slid up-and-right
+/// with it and left the world showing at the left and the bottom.
+///
+/// The reference gates both ends on `movable|resizable` as well (`0x490e97 test ah,0x3` at the
+/// writer; `0x490600 test ah,0x1` / `0x490689 test ah,0x2` at the two arms of the apply), and
+/// stock `WorldMapFrame` carries neither flag — so the stale row is inert the first session the
+/// addon does not load, and falls out of the file at that logout. Decision 2193.
+#[test]
+fn a_stale_layout_row_cannot_seat_a_stock_frame() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    // The row verbatim as an affected `benilla-config/layout/<realm>-<character>.txt` carries it:
+    // Cartographer's own saved `LookNFeel` profile offsets, and the size it forces.
+    let row = || benilla_ui::script::FrameLayout {
+        name: "WorldMapFrame".into(),
+        width: 1024.0,
+        height: 768.0,
+        points: vec![benilla_ui::script::LayoutPoint {
+            point: "CENTER".into(),
+            relative_to: Some("UIParent".into()),
+            relative_point: "CENTER".into(),
+            x: -0.6369222,
+            y: 53.861614,
+        }],
+    };
+
+    s.restore_user_placed_layouts([row()]);
+    s.resolve();
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+
+    let (w, h, sw, sh) = s
+        .eval::<(f64, f64, f64, f64)>(
+            "return WorldMapFrame:GetWidth(), WorldMapFrame:GetHeight(), \
+             GetScreenWidth(), GetScreenHeight()",
+        )
+        .unwrap();
+    assert_eq!(
+        (w, h),
+        (sw, sh),
+        "the stale row seated nothing — the map is still the screen, as its setAllPoints authored it"
+    );
+    assert!(
+        !s.eval::<bool>("return WorldMapFrame:IsUserPlaced()")
+            .unwrap(),
+        "and the apply's userPlaced stamp lives inside the position arm it never took"
+    );
+    assert!(
+        s.user_placed_layouts().is_empty(),
+        "so the row falls out of the file at this logout instead of being written again"
+    );
+
+    // The positive control: the gate is the frame's own flags, not a special case for this frame.
+    // With the addon's `SetMovable`/`SetResizable` in place the same row seats exactly as before.
+    s.run("WorldMapFrame:SetMovable(true) WorldMapFrame:SetResizable(true)")
+        .unwrap();
+    s.restore_user_placed_layouts([row()]);
+    s.resolve();
+    let (w, h) = s
+        .eval::<(f64, f64)>("return WorldMapFrame:GetWidth(), WorldMapFrame:GetHeight()")
+        .unwrap();
+    assert_eq!(
+        (w, h),
+        (1024.0, 768.0),
+        "a movable+resizable frame takes it"
+    );
+    assert!(
+        s.eval::<bool>("return WorldMapFrame:IsUserPlaced()")
+            .unwrap(),
+        "and the position arm stamps the bit it was written under"
+    );
+    let saved = s.user_placed_layouts();
+    assert_eq!(saved.len(), 1, "which is what puts the row back: {saved:?}");
+    assert_eq!(saved[0], row(), "unchanged through the round trip");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

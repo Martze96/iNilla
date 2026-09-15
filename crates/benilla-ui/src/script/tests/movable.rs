@@ -615,3 +615,117 @@ fn region_getters_answer_in_the_owners_units_under_scale() {
     );
     assert!((cx - (fl + fr) * 0.5).abs() < 1e-3);
 }
+
+/// **The layout cache's filter is the flags AND the bit, at both ends** (decision 2193).
+///
+/// `SetUserPlaced` is already guarded by `movable|resizable` at its own setter (`0x776adb`), but
+/// the drag entry (`0x7652b0` @`0x7652e5`) and the cache's own apply stamp the bit without going
+/// through it — so a frame can carry the stamp while carrying neither flag, and the reference's
+/// writer tests for both: `0x490e8e test ah,0x10` (userPlaced) AND `0x490e97 test ah,0x3`
+/// (`movable|resizable`). Clearing the flags is how a window stops being persisted, which is what
+/// an addon's `:OnDisable` does on the way out.
+#[test]
+fn the_write_filter_is_user_placed_and_movable_or_resizable() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        F = CreateFrame("Frame", "CachePanel")
+        F:SetPoint("BOTTOMLEFT", 10, 10); F:SetWidth(50); F:SetHeight(50)
+        F:SetResizable(true); F:SetUserPlaced(true)
+        "#,
+    )
+    .unwrap();
+    let names = |s: &UiScript| {
+        s.user_placed_layouts()
+            .into_iter()
+            .map(|l| l.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&s), ["CachePanel"], "stamped and resizable — written");
+
+    s.run("CachePanel:SetResizable(false)").unwrap();
+    assert!(
+        s.eval::<bool>("return CachePanel:IsUserPlaced()").unwrap(),
+        "the stamp itself survives the flag going away — nothing clears it"
+    );
+    assert!(
+        names(&s).is_empty(),
+        "but the row does not: the fourth conjunct is gone"
+    );
+
+    s.run("CachePanel:SetMovable(true)").unwrap();
+    assert_eq!(names(&s), ["CachePanel"], "either flag satisfies it");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The apply is gated per ARM** (decision 2193): position behind `movable` (`0x490600 test
+/// ah,0x1`), size behind `resizable` (`0x490689 test ah,0x2`), and each arm stamps the userPlaced
+/// bit itself (`0x49067e` / `0x490706`) only if it ran. A stock frame carrying neither flag is
+/// left entirely alone, however old its row — which is what stops one addon's stamp from seating
+/// a window forever.
+#[test]
+fn the_apply_seats_position_behind_movable_and_size_behind_resizable() {
+    use crate::script::{FrameLayout, LayoutPoint};
+
+    let row = |name: &str| FrameLayout {
+        name: name.to_owned(),
+        width: 200.0,
+        height: 80.0,
+        points: vec![LayoutPoint {
+            point: "BOTTOMLEFT".into(),
+            relative_to: None,
+            relative_point: "BOTTOMLEFT".into(),
+            x: 300.0,
+            y: 200.0,
+        }],
+    };
+    // Three frames, one per flag state, all authored identically.
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    for (name, flags) in [
+        ("Neither", ""),
+        ("Movable", "F:SetMovable(true)"),
+        ("Sizable", "F:SetResizable(true)"),
+    ] {
+        s.run(&format!(
+            r#"F = CreateFrame("Frame", "{name}")
+               F:SetPoint("BOTTOMLEFT", 10, 10); F:SetWidth(50); F:SetHeight(50)
+               {flags}"#
+        ))
+        .unwrap();
+        s.restore_user_placed_layouts([row(name)]);
+    }
+    s.resolve();
+    let read = |s: &UiScript, n: &str| {
+        s.eval::<(f64, f64, f64, bool)>(&format!(
+            "local f = getglobal('{n}') \
+             return f:GetLeft(), f:GetWidth(), f:GetHeight(), f:IsUserPlaced()"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        read(&s, "Neither"),
+        (10.0, 50.0, 50.0, false),
+        "neither flag: the row is inert, and leaves no stamp behind either"
+    );
+    assert_eq!(
+        read(&s, "Movable"),
+        (300.0, 50.0, 50.0, true),
+        "movable: seated at the saved position, still its authored size"
+    );
+    assert_eq!(
+        read(&s, "Sizable"),
+        (10.0, 200.0, 80.0, true),
+        "resizable: given the saved size, left on its authored anchors"
+    );
+    assert_eq!(
+        s.user_placed_layouts()
+            .into_iter()
+            .map(|l| l.name)
+            .collect::<Vec<_>>(),
+        ["Movable", "Sizable"],
+        "and only the two that took an arm are written back"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

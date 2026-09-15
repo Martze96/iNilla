@@ -987,6 +987,9 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
 /// userPlaced bit (`SetUserPlaced` refuses a frame that is neither movable nor resizable).
 /// Parentless, so its anchor is the screen root — the file's `-` target — which is what lets this
 /// need no FrameXML and no install.
+/// **Both flags, deliberately**: the layout cache's apply is gated per arm — position behind
+/// `movable`, size behind `resizable` (decision 2193) — so a probe standing in for a window the
+/// player both moved and resized has to carry both, or half its geometry is correctly left behind.
 fn place_a_window(world: &mut World) {
     world
         .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
@@ -995,7 +998,7 @@ fn place_a_window(world: &mut World) {
             "local f = CreateFrame(\"Frame\", \"B353Probe\") \
              f:SetWidth(413) f:SetHeight(147) \
              f:SetPoint(\"BOTTOMLEFT\", 61, 29) \
-             f:SetMovable(true) f:SetUserPlaced(true)",
+             f:SetMovable(true) f:SetResizable(true) f:SetUserPlaced(true)",
         )
         .expect("place the probe window");
 }
@@ -1099,6 +1102,10 @@ fn each_character_gets_its_own_layout_cache() {
 /// A window as FrameXML would author it — the shape the restore has to overwrite. Same name as
 /// [`place_a_window`]'s, different geometry, and **not** user-placed: this is the fresh tree a
 /// relog meets.
+///
+/// It carries the same `movable`/`resizable` pair, because those are the window's **authored**
+/// state — XML attributes on a real resizable window, rebuilt with it — and the layout cache's
+/// apply reads them off the live frame to decide which arm runs (decision 2193).
 fn author_a_window(world: &mut World) {
     world
         .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
@@ -1107,7 +1114,7 @@ fn author_a_window(world: &mut World) {
             "local f = CreateFrame(\"Frame\", \"B353Probe\") \
              f:SetWidth(100) f:SetHeight(100) \
              f:SetPoint(\"BOTTOMLEFT\", 0, 0) \
-             f:SetMovable(true)",
+             f:SetMovable(true) f:SetResizable(true)",
         )
         .expect("author the probe window");
 }
