@@ -1039,7 +1039,8 @@ pub(super) fn route_cast_visuals(
                 );
             }
             CastEventKind::GroundImpact { pos } => {
-                // A missile arrived at a POINT (`0x61e1d0`'s ground arm → `0x61d870`): play
+                // A missile arrived at a POINT (`0x61e1d0` → `0x61d870`, its no-live-target
+                // arm — see [`crate::creature_anim::CastEventKind::GroundImpact`]): play
                 // `SpellVisual` field 13 — the **area kit** — at stage 3 on the caster, with
                 // `extra` = the landing point. The reference then walks the missile's own
                 // server-recorded hit array (`CMissile+0x58/+0x5c`) for per-unit impact/state

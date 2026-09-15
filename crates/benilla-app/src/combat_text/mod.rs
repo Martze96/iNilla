@@ -23,12 +23,25 @@
 //! (PetMeleeDamage cvar); pet spell → GOLD (PetSpellDamage cvar); **any OTHER source is
 //! suppressed entirely** — another unit's fight floats nothing (the emitter returns before
 //! submitting; it was never "white"). Crit does NOT recolor (it only picks the pop row); there
-//! is NO school coloring. The bit-15 flip is implemented at the spell-packet emitters
-//! (`net/apply/combat_log.rs::melee_styled`, decision 0376): the flag is
-//! `SPELL_ATTR3_NORMAL_RANGED_ATTACK` — set on exactly the ranged basic shots on the real DBC —
-//! so a Throw/Auto Shot number floats white off `SMSG_SPELLNONMELEEDAMAGELOG`. Remaining
-//! divergence: the `SMSG_SPELLLOGMISS` word site's record push is unpinned — those outcome
-//! words stay the row-default white (open).
+//! is NO school coloring. The bit-15 flip is [`melee_styled`] (decision 0376): the flag is
+//! `SPELL_ATTR3_NORMAL_RANGED_ATTACK` — set on exactly 8 rows of the real DBC, the ranged
+//! auto-attack family — so a Throw/Auto Shot number floats white off
+//! `SMSG_SPELLNONMELEEDAMAGELOG`.
+//!
+//! **The WORD emitter runs that same law** (decision 2229, closing what phase 2 left open). The
+//! two emitters are separate functions — `0x607140` takes three stack args and `0x6128b0` four,
+//! so they are not the "byte-identical twins" the first reading called them — but they compute
+//! `B` and `K` identically, and **seven of the eight `0x607140` call sites push a resolved
+//! SpellRec**. Only the melee swing's word site (`0x624511`, every one of its seven predecessors
+//! a `6a 00 push 0x0`) pushes NULL. So a spell's "Miss"/"Resist"/"Immune" is spell-GOLD exactly
+//! like its number, and only a white hit's miss is white. The three CVar gates live *inside*
+//! `0x607140`, so `CombatDamage 0` silences words as well as numbers, on every path.
+//!
+//! **A travelling spell's word is DEFERRED to the projectile's arrival.** `SMSG_SPELL_GO`'s
+//! inline emit is skipped whenever `Spell.dbc` Speed is nonzero (`0x6e7d4e`), and the missile's
+//! own arrival handlers re-resolve the record and call the same emitter: a resisted Fireball
+//! reads "Resist" when the ball lands, a missed Sinister Strike at packet receive.
+//! [`missile_miss_text`] is that arrival half, fed by [`crate::entities::MissileMiss`].
 //!
 //! **The render geometry** (wow-re `worldtext-geometry-law.md`, §5-verified, 9af65294 — zero free
 //! parameters; the anchor-seat half corrected here, see the seating comment in
@@ -107,11 +120,17 @@
 
 mod law;
 
+/// The spell-gold override, re-exported so the emitter arms' own tests can assert the colour they
+/// now pass through (decision 2229). Live code never names it — [`damage_color`] picks it.
+#[cfg(test)]
+pub(crate) use law::COLOR_SPELL_GOLD;
 use law::{
     argb, claimed_box_px, fade_alpha, melee_text, scale_value, shadow_offset_px, text_px,
     CATEGORIES,
 };
-pub(crate) use law::{damage_color, miss_word, spell_text, DamageSource, DamageTextGates};
+pub(crate) use law::{
+    damage_color, melee_styled, miss_word, spell_text, DamageSource, DamageTextGates,
+};
 
 use bevy::prelude::*;
 
@@ -459,6 +478,67 @@ fn drop_indices<T>(v: &mut Vec<T>, mut idx: Vec<usize>) {
     });
 }
 
+/// The `0x5efea0` source-ownership class (`K`) over an attacker **entity** — the ECS-side twin of
+/// `net/apply/combat_log.rs::classify_source`, which does the same job from a guid. `None` is the
+/// classifier's "every other source", which suppresses the emit outright.
+fn source_class(
+    attacker: Entity,
+    self_player: &Query<(), With<crate::net::SelfPlayer>>,
+    self_guid: &crate::net::SelfGuid,
+    stores: &Query<&crate::net::ObjectStore>,
+) -> Option<DamageSource> {
+    if self_player.contains(attacker) {
+        return Some(DamageSource::Player);
+    }
+    let me = self_guid.0?;
+    stores
+        .get(attacker)
+        .is_ok_and(|st| st.0.unit_summoned_by() == Some(me) || st.0.unit_created_by() == Some(me))
+        .then_some(DamageSource::Pet)
+}
+
+/// The **deferred** outcome-word producer: a travelling spell's miss word, floated when the
+/// projectile lands rather than when `SMSG_SPELL_GO` arrives (decision 2229).
+///
+/// `0x6e7a70`'s inline word emit is skipped whenever the spell's `Spell.dbc` Speed is nonzero
+/// (`0x6e7d4e fld [SpellRec+0x94]; fcomp 0.0; test ah,0x44; jp 0x6e7e71`); the projectile's own
+/// arrival handlers re-resolve the record from `[missile+0x18]` and call the same word emitter
+/// `0x607140`. So a resisted Fireball reads "Resist" when the ball reaches the target, while a
+/// Speed-0 ability's word prints at packet receive. The colour law is the same one the inline
+/// site runs — the arrival pushes a real record, so a bit-15-clear spell's word is spell-GOLD.
+fn missile_miss_text(
+    mut arrivals: MessageReader<crate::entities::MissileMiss>,
+    self_player: Query<(), With<crate::net::SelfPlayer>>,
+    self_guid: Res<crate::net::SelfGuid>,
+    stores: Query<&crate::net::ObjectStore>,
+    gates: Res<DamageTextGates>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    mut text: MessageWriter<CombatTextSpawn>,
+) {
+    for arrival in arrivals.read() {
+        if self_player.contains(arrival.anchor) {
+            continue; // Gate A: never over your own head
+        }
+        let Some(source) = source_class(arrival.caster, &self_player, &self_guid, &stores) else {
+            continue; // K = other: never drawn
+        };
+        let display = spells
+            .as_ref()
+            .and_then(|s| s.catalog.get(arrival.spell_id));
+        let Some(color) = damage_color(*gates, source, melee_styled(display)) else {
+            continue; // the CombatDamage / Pet* gates, read inside `0x607140` itself
+        };
+        if let Some((word, category)) = miss_word(arrival.code) {
+            text.write(CombatTextSpawn {
+                anchor: arrival.anchor,
+                text: word.to_string(),
+                category,
+                color,
+            });
+        }
+    }
+}
+
 /// The MELEE number/word producer: consumes [`SwingImpact`] (the swing clip's impact keyframe —
 /// `creature_anim::impact`, the client's `0x6247d0 → 0x624530` deferral) rather than the packet,
 /// so the number pops when the blow lands, with the blood and the flinch. Gate A on entities: a
@@ -485,17 +565,7 @@ fn melee_impact_text(
         if self_player.contains(victim) {
             continue; // Gate A: never over your own head
         }
-        // The source-ownership class over the attacker ENTITY (the guid-side twin lives in
-        // `net/apply/combat_log.rs::classify_source` for the packet emitters).
-        let source = if self_player.contains(s.attacker) {
-            DamageSource::Player
-        } else if self_guid.0.is_some()
-            && stores.get(s.attacker).is_ok_and(|st| {
-                st.0.unit_summoned_by() == self_guid.0 || st.0.unit_created_by() == self_guid.0
-            })
-        {
-            DamageSource::Pet
-        } else {
+        let Some(source) = source_class(s.attacker, &self_player, &self_guid, &stores) else {
             continue; // K = other: never drawn
         };
         let Some(color) = damage_color(*gates, source, true) else {
@@ -526,7 +596,7 @@ impl Plugin for CombatTextPlugin {
             .add_message::<CombatTextSpawn>()
             .add_systems(
                 Update,
-                (melee_impact_text, float_combat_text)
+                (melee_impact_text, missile_miss_text, float_combat_text)
                     .chain()
                     .in_set(UiQuadAppend),
             );
@@ -580,6 +650,111 @@ mod tests {
         assert_eq!(texts.0[0].color, 0xFFFF_FFFF);
         let gold = texts.0.iter().find(|t| t.anchor == other).unwrap();
         assert_eq!(gold.color, COLOR_SPELL_GOLD);
+    }
+
+    /// **A travelling spell's outcome word is DEFERRED, and it is GOLD** (decision 2229) — the
+    /// arrival half of the miss text, and the case the whole round came from: a resisted Fireball
+    /// reads "Resist" in spell gold when the ball lands, not white at GO.
+    ///
+    /// Four legs, each an independent branch of the law `0x607140` runs for every one of its
+    /// callers:
+    /// - my spell's word takes the **gold** override — `B=0` (Fireball's `AttributesEx3` bit 15 is
+    ///   clear) and `K=self`;
+    /// - a **ranged basic shot** carries that bit, so a missed Auto Shot floats melee-**white**
+    ///   even though it travels too — decision 0376's number pairing, now reaching the words;
+    /// - **Gate A** — a word never floats over your own head, whatever the colour;
+    /// - **`CombatDamage 0`** silences it, because that gate is read inside the word emitter
+    ///   itself and so binds every word path, not just the numbers.
+    #[test]
+    fn a_travelling_spells_miss_word_is_gold_and_deferred_to_arrival() {
+        use crate::entities::MissileMiss;
+        use crate::net::{ObjectStore, SelfGuid, SelfPlayer};
+
+        const FIREBALL: u32 = 133;
+        const AUTO_SHOT: u32 = 75;
+
+        let catalog = || {
+            benilla_formats::SpellCatalog::from_displays(
+                [
+                    (
+                        FIREBALL,
+                        benilla_formats::SpellDisplay {
+                            name: "Fireball".into(),
+                            speed: 24.0,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        AUTO_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Auto Shot".into(),
+                            speed: 40.0,
+                            attributes_ex3: 0x8000,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+
+        // `(spell, anchor-is-me, CombatDamage)` → the words the arrival floats.
+        let fire = |spell: u32, over_self: bool, combat_damage: bool| {
+            let mut app = App::new();
+            app.add_message::<MissileMiss>()
+                .add_message::<CombatTextSpawn>()
+                .init_resource::<SelfGuid>()
+                .insert_resource(DamageTextGates {
+                    combat_damage,
+                    ..Default::default()
+                })
+                .insert_resource(crate::ui_action::Spells {
+                    catalog: catalog(),
+                    forms: Default::default(),
+                    ranges: Default::default(),
+                    cast_times: Default::default(),
+                    durations: Default::default(),
+                    radii: Default::default(),
+                })
+                .add_systems(Update, missile_miss_text);
+            let me = app
+                .world_mut()
+                .spawn((SelfPlayer, ObjectStore::default()))
+                .id();
+            let victim = app.world_mut().spawn(ObjectStore::default()).id();
+            app.world_mut().write_message(MissileMiss {
+                caster: me,
+                anchor: if over_self { me } else { victim },
+                spell_id: spell,
+                code: 2, // RESIST
+            });
+            app.update();
+            app.world_mut()
+                .resource_mut::<Messages<CombatTextSpawn>>()
+                .drain()
+                .map(|s| (s.text, s.category, s.color))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            fire(FIREBALL, false, true),
+            vec![("Resist".to_string(), 3, Some(law::COLOR_SPELL_GOLD))],
+            "my Fireball's resist word is spell gold, category 3, over the victim"
+        );
+        assert_eq!(
+            fire(AUTO_SHOT, false, true),
+            vec![("Resist".to_string(), 3, None)],
+            "AttributesEx3 bit 15 keeps a ranged basic shot's word melee-white"
+        );
+        assert!(
+            fire(FIREBALL, true, true).is_empty(),
+            "Gate A: never over your own head"
+        );
+        assert!(
+            fire(FIREBALL, false, false).is_empty(),
+            "CombatDamage 0 is read inside the word emitter — it silences words too"
+        );
     }
 
     /// The destroy half of the off-screen cull (1344): the walk collects indices out of order,

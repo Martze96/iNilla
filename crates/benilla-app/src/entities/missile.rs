@@ -28,7 +28,23 @@
 //! so a moving target bends the path (homing) and arrival lands exactly on schedule. Arrival on a
 //! landed target writes [`CastEventKind::Impact`] back to the router (the client's unit-impact
 //! hand-off `0x61dc50`); arrival on a missed target plays the victim's dodge/block defense clip
-//! instead ([`miss_defense_state`] — the `0x61ceb0` dispatch, never Parry).
+//! instead ([`miss_defense_state`]) and floats the outcome WORD ([`MissileMiss`], decision 2229).
+//!
+//! **`0x61e1d0` picks between THREE arms, and the selector is not the one an earlier reading
+//! recorded** (wow-re `missile-arrival-dispatch.md`; it is not ground-vs-unit): first whether the
+//! missile's target guid still resolves to a live object, then a **HIT bit** — `[missile+0x38] &
+//! 1`, written once image-wide at the spawn `0x60a4e8` from an explicit argument.
+//!
+//! | arm | reached when | what it does | ours |
+//! |---|---|---|---|
+//! | `0x61dc50` | live target, HIT set | wound/flinch + impact visual. **Floats no word.** | [`CastEventKind::Impact`] |
+//! | `0x61dd50` | live target, HIT clear | floats the outcome word + UNIT_COMBAT + chat, then disposes of the projectile per code | the defense clip + [`MissileMiss`] |
+//! | `0x61d870` | **no live target resolved** | plays on the CASTER, then walks the missile's own guid list (skipping code 0 per target) | [`CastEventKind::GroundImpact`] |
+//!
+//! Two consequences worth stating because they are easy to get backwards. A missed travelling
+//! spell's wound/flinch is not "skipped" — `0x61dc50` is never *reached*, because a nonzero
+//! outcome means the spawn was not told HIT. And `0x61d870` is **not** "the ground arm": a
+//! ground cast is only its commonest cause; a target that despawned mid-flight lands there too.
 //!
 //! A missile with no visual-chain model flies the **wire ammo model** instead (decision 0099
 //! phase 5 — every basic shot spell: Auto Shot, the Shoot family, Throw, all `SpellVisual = 0`):
@@ -46,16 +62,21 @@
 //! [`RELEASE_WAIT_MAX`] never-played timeout) where the client gets a per-anim finish callback;
 //! homing aims at the dest attach point rather than solving the client's
 //! ray-vs-bounding-sphere intercept (`0x61d230` — same body point in practice); a missed
-//! target's arrival plays its dodge/block clip but the projectile itself still ends there
-//! rather than deflecting (`0x61dd50`'s bounce).
-//!
+//! target's arrival plays its dodge/block clip and floats its word, but the projectile itself
+//! always ends there. **`0x61dd50`'s per-outcome DISPOSITION table is not implemented** (its
+//! jump table `0x61d76c` + case bytes `0x61d784`): the reference despawns on MISS/DODGE/EVADE
+//! and on DEFLECT/ABSORB, but persists a BLOCKed missile 5000 ms (`0x61e7c0`), rebuilds the
+//! model for RESIST/IMMUNE (`0x707350` on `0x861790`) before persisting, **deflects** a parried
+//! one along a curve (`0x4531e0` + two `0x7be490` rotations + a velocity damp), and on REFLECT
+//! re-targets the CASTER and re-launches with the wire's `reflectResult` as the new code. We
+//! despawn in every case.//!
 //! A GO with **no unit targets at all** but a point on the wire flies **one** projectile at the
 //! point — the client's location fallback (`0x6e8a50`'s empty-hit-array arm → `0x60a3d0` once,
 //! owning unit slot −1; wow-re `spell-go-dest-effect.md` §3). That is the whole visible flight of
 //! a pure ground cast: the hunter's Flare arcing out to where it was placed, a bomb thrown at
 //! empty dirt. Such a missile homes to nothing — its aim is a fixed world point ([`Aim::Ground`])
-//! — and it arrives as [`CastEventKind::GroundImpact`] on the CASTER (`0x61e1d0`'s ground arm
-//! `0x61d870`), never through the unit hand-off. Named approximation: it flies the same straight
+//! — and it arrives as [`CastEventKind::GroundImpact`] on the CASTER (`0x61d870`, the
+//! no-live-target arm — see the dispatch table above), never through the unit hand-off. Named approximation: it flies the same straight
 //! arrive-on-time line a unit missile does; the reference's trajectory *class* comes from
 //! `CMissile+0x48` through `0x61d720`'s remap table, whose wire origin wow-re traced to
 //! consumption only — so a lobbed shot reads as a straight glide here.
@@ -306,12 +327,53 @@ fn ensure_ammo_model(
     Some(key)
 }
 
+/// A travelling spell's **deferred outcome word** (decision 2229) — the arrival half of the
+/// floating-combat-text miss word.
+///
+/// `SMSG_SPELL_GO`'s inline word emit is skipped whenever `Spell.dbc` Speed is nonzero
+/// (`0x6e7d4e`), and the projectile floats the word when it lands instead: the arrival handlers
+/// re-resolve the spell record from `[missile+0x18]` and call the same word emitter `0x607140`
+/// the inline site calls. Written here because only the flight knows *when*; the source class,
+/// the CVar gates and the colour are `crate::combat_text::missile_miss_text`'s, which owns that
+/// law for every emitter.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct MissileMiss {
+    /// The unit that cast it — the colour law's source class (`K`).
+    pub(crate) caster: Entity,
+    /// The unit the word floats over — **always the missed target**, `0x61ddb3`'s `this = edi`
+    /// (`0x61d9dc`'s is the per-entry target). Unlike the *inline* site, the arrival never
+    /// re-anchors a REFLECT to the caster: `0x61dd50` floats "Reflect" over the target and then
+    /// re-launches the projectile at the caster, so the caster's word comes from that second
+    /// flight — which we do not yet fly (the disposition table, module doc).
+    pub(crate) anchor: Entity,
+    /// The spell — the colour law's `B` bit resolves off its record.
+    pub(crate) spell_id: u32,
+    /// The wire's `SpellMissInfo` code (1–11).
+    pub(crate) code: u8,
+}
+
+/// **A travelling spell cannot be PARRIED — it is DEFLECTED.** The launch classifier `0x61d720`
+/// (sole caller `0x61cebb`, inside the launch `0x61ceb0`) rewrites the outcome as it picks the
+/// projectile's disposition: `61d753 or eax,0x40` then `61d756 mov dword ptr [ecx+0x48],0x9` —
+/// PARRY(4) is stored back as DEFLECT(9), so every downstream reader (the word emitter, the
+/// UNIT_COMBAT feed, the chat line) sees 9. This is the mechanism behind the recorded negative
+/// that a ranged arrival never plays a parry clip: by arrival there is no parry left to play.
+/// Every other code passes through.
+fn launch_outcome_code(code: u8) -> u8 {
+    if code == 4 {
+        9
+    } else {
+        code
+    }
+}
+
 /// The wire `SpellMissInfo` codes whose missile arrival plays a victim defense clip, mapped to
 /// the melee `$CPP` dispatch's victimState keys (the [`DefenseAnim`] consumer's
 /// `select::defense_anim`): DODGE(3) → the dodge state (Dodge 30), BLOCK(5) → the block state
 /// (ShieldBlock 24). Every other code — miss/resist/evade/immune/deflect — plays nothing, and
-/// PARRY(4) maps to nothing by construction (the recorded negative: a ranged arrival never
-/// parries; wow-re `smsg-attackerstate-consequences.md` §Q4).
+/// PARRY(4) can never reach here at all: [`launch_outcome_code`] has already rewritten it to
+/// DEFLECT(9), which is the mechanism behind the recorded negative that a ranged arrival never
+/// parries (wow-re `smsg-attackerstate-consequences.md` §Q4).
 fn miss_defense_state(code: u8) -> Option<u32> {
     match code {
         3 => Some(2), // SPELL_MISS_DODGE → the dispatch's DODGES state
@@ -320,16 +382,34 @@ fn miss_defense_state(code: u8) -> Option<u32> {
     }
 }
 
+/// **The arrival hand-off's writer set, as one system parameter.** Both missile systems sit at
+/// Bevy's 16-`SystemParam` ceiling, and these three are one concern anyway: everything a
+/// projectile emits at the moment it lands — the router's impact/ground event, the victim's
+/// defense clip, and the deferred outcome word. Bundled for the same reason
+/// [`crate::ui_chat::combat::CombatFeedbackCvars`] is, so the call sites read `out.words` rather
+/// than a positional tuple field.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct ArrivalOut<'w> {
+    /// The router's landed-target impact / ground-burst event.
+    impacts: MessageWriter<'w, CastEvent>,
+    /// A missed target's dodge/block clip ([`miss_defense_state`]).
+    defenses: MessageWriter<'w, DefenseAnim>,
+    /// A missed target's floating outcome WORD ([`MissileMiss`]).
+    words: MessageWriter<'w, MissileMiss>,
+}
+
 /// The arrival hand-off — the client's per-tick outcome dispatch (`0x61e1d0` over `0x61ceb0`'s
 /// clock): a landed spell routes back to the router as [`CastEventKind::Impact`] on the target
 /// (the impact/state kits + wound flinch); a missed one instead plays the victim's defense clip
 /// per [`miss_defense_state`], and no impact kit plays; a **ground** arrival routes
 /// [`CastEventKind::GroundImpact`] to the CASTER carrying the landing point (`0x61d870`).
+///
+/// A missed arrival ALSO floats the outcome WORD ([`MissileMiss`], decision 2229) — the deferred
+/// half of the miss text, which `SMSG_SPELL_GO` skipped because this spell has a travel speed.
 fn arrival_handoff(
     missile: &Missile,
     at: Vec3,
-    impacts: &mut MessageWriter<CastEvent>,
-    defenses: &mut MessageWriter<DefenseAnim>,
+    out: &mut ArrivalOut,
     play_seq: &mut crate::creature_anim::PlaySeq,
 ) {
     // Scene-time stamp: the client plays the arrival after the frame's packet handlers — a fresh
@@ -347,7 +427,7 @@ fn arrival_handoff(
             let kind = CastEventKind::Impact {
                 weapon_visual: missile.weapon_visual,
             };
-            impacts.write(event(target, kind));
+            out.impacts.write(event(target, kind));
         }
         Aim::Unit {
             target,
@@ -355,14 +435,20 @@ fn arrival_handoff(
             ..
         } => {
             if let Some(victim_state) = miss_defense_state(code) {
-                defenses.write(DefenseAnim {
+                out.defenses.write(DefenseAnim {
                     victim: target,
                     victim_state,
                 });
             }
+            out.words.write(MissileMiss {
+                caster: missile.caster,
+                anchor: target,
+                spell_id: missile.spell_id,
+                code,
+            });
         }
         Aim::Ground(_) => {
-            impacts.write(event(
+            out.impacts.write(event(
                 missile.caster,
                 CastEventKind::GroundImpact { pos: at },
             ));
@@ -384,8 +470,7 @@ fn launch_go(
     units: &AttachPosQuery,
     joints: &Query<&GlobalTransform>,
     sounds: &mut MessageWriter<MissileSound>,
-    impacts: &mut MessageWriter<CastEvent>,
-    defenses: &mut MessageWriter<DefenseAnim>,
+    out: &mut ArrivalOut,
     play_seq: &mut crate::creature_anim::PlaySeq,
 ) {
     // The unit targets, else the location fallback's lone ground shot (the client consults the
@@ -399,7 +484,7 @@ fn launch_go(
             .map(|&(target, miss)| Aim::Unit {
                 target,
                 dest_tag: go.spawn.dest_tag,
-                miss,
+                miss: miss.map(launch_outcome_code),
             })
             .collect()
     };
@@ -418,7 +503,7 @@ fn launch_go(
             weapon_visual: go.spawn.weapon_visual,
         };
         if missile.arrive_in <= 0.0 {
-            arrival_handoff(&missile, aim, impacts, defenses, play_seq);
+            arrival_handoff(&missile, aim, out, play_seq);
             continue;
         }
         let dir = (aim - launch).normalize_or(-Vec3::Z);
@@ -470,8 +555,7 @@ pub(super) fn spawn_missiles(
     )>,
     anim_data: Option<Res<AnimData>>,
     mut sounds: MessageWriter<MissileSound>,
-    mut impacts: MessageWriter<CastEvent>,
-    mut defenses: MessageWriter<DefenseAnim>,
+    mut out: ArrivalOut,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
 ) {
     let Some(mut fx) = fx else { return };
@@ -509,8 +593,7 @@ pub(super) fn spawn_missiles(
                 &units,
                 &joints,
                 &mut sounds,
-                &mut impacts,
-                &mut defenses,
+                &mut out,
                 &mut play_seq,
             );
         } // else: caster gone before its projectile left — nothing to show
@@ -536,8 +619,7 @@ pub(super) fn spawn_missiles(
                 &units,
                 &joints,
                 &mut sounds,
-                &mut impacts,
-                &mut defenses,
+                &mut out,
                 &mut play_seq,
             );
         }
@@ -581,8 +663,7 @@ pub(super) fn spawn_missiles(
                 &units,
                 &joints,
                 &mut sounds,
-                &mut impacts,
-                &mut defenses,
+                &mut out,
                 &mut play_seq,
             );
         }
@@ -666,23 +747,25 @@ pub(super) fn move_missiles(
     mut missiles: Query<(Entity, &mut Missile, &mut Transform)>,
     units: AttachPosQuery,
     joints: Query<&GlobalTransform>,
-    mut impacts: MessageWriter<CastEvent>,
-    mut defenses: MessageWriter<DefenseAnim>,
+    mut out: ArrivalOut,
     mut sounds: MessageWriter<MissileSound>,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut missile, mut transform) in &mut missiles {
         let Some(aim) = aim_point(missile.aim, &units, &joints) else {
-            // The target streamed out mid-flight (the client's dead-handle ground path — ours
-            // just ends the flight). A ground shot has no target to lose.
+            // The target streamed out mid-flight. The reference routes this to `0x61d870` (the
+            // no-live-target arm), which plays on the CASTER and still floats a word per guid
+            // from the missile's own list — the eighth `0x607140` call site, `0x61d9dc`. Ours
+            // just ends the flight silently: a named divergence, and the only word path decision
+            // 2229 left unbuilt. A ground shot has no target to lose.
             sounds.write(MissileSound::Stop { entity });
             commands.entity(entity).despawn();
             continue;
         };
         let to_target = aim - transform.translation;
         if missile.arrive_in <= dt {
-            arrival_handoff(&missile, aim, &mut impacts, &mut defenses, &mut play_seq);
+            arrival_handoff(&missile, aim, &mut out, &mut play_seq);
             sounds.write(MissileSound::Stop { entity });
             commands.entity(entity).despawn();
             continue;
@@ -725,7 +808,8 @@ mod tests {
             .add_message::<AnimSoundEvent>()
             .add_message::<MissileSound>()
             .add_message::<CastEvent>()
-            .add_message::<DefenseAnim>();
+            .add_message::<DefenseAnim>()
+            .add_message::<MissileMiss>();
         app.add_systems(Update, spawn_missiles);
         app
     }
@@ -970,12 +1054,26 @@ mod tests {
     }
 
     /// A missed target's arrival plays the victim's defense clip, not the impact (the
-    /// `Missile_C::Update` dispatch, wow-re `smsg-attackerstate-consequences.md` §Q4):
-    /// DODGE(3) → the dodge state, BLOCK(5) → the block state, a plain MISS(1) → nothing —
-    /// and PARRY(4) → nothing (the recorded "never Parry" negative).
+    /// `0x61dd50` arm of `0x61e1d0`'s dispatch): DODGE(3) → the dodge state, BLOCK(5) → the
+    /// block state, a plain MISS(1) → nothing — and PARRY(4) → nothing.
+    ///
+    /// It also floats the outcome WORD (decision 2229), and two of its legs are only visible
+    /// here:
+    /// - **PARRY is gone by arrival.** [`launch_outcome_code`] rewrote it to DEFLECT(9) at
+    ///   launch (`0x61d756`), so the word reads "Deflect" — which is *why* no parry clip plays,
+    ///   rather than a separate rule that suppresses one.
+    /// - **REFLECT floats over the TARGET**, not the caster. The inline site re-anchors a
+    ///   reflect (`0x6e7e51`); this one does not — `0x61dd50` words the target and then
+    ///   re-launches at the caster, and the caster's word belongs to that second flight.
     #[test]
-    fn missed_arrival_plays_dodge_or_block_never_impact_or_parry() {
-        for (code, expect_state) in [(3u8, Some(2u32)), (5, Some(5)), (1, None), (4, None)] {
+    fn missed_arrival_words_the_target_deflects_a_parry_and_plays_dodge_or_block() {
+        for (code, expect_state, expect_word) in [
+            (3u8, Some(2u32), "Dodge"),
+            (5, Some(5), "Block"),
+            (1, None, "Miss"),
+            (4, None, "Deflect"),
+            (11, None, "Reflect"),
+        ] {
             let mut app = app();
             let caster = caster(&mut app, Vec3::ZERO);
             // 2.4 units at speed 24 = a 0.1 s flight; parked 0.2 s → arrival on the spot.
@@ -1019,6 +1117,22 @@ mod tests {
                 }
                 None => assert!(defenses.is_empty(), "code {code} plays nothing"),
             }
+            let words: Vec<_> = app
+                .world_mut()
+                .resource_mut::<Messages<MissileMiss>>()
+                .drain()
+                .map(|w| (w.anchor, w.caster, w.code))
+                .collect();
+            assert_eq!(
+                words,
+                vec![(target, caster, if code == 4 { 9 } else { code })],
+                "one word over the target (code {code})"
+            );
+            assert_eq!(
+                crate::combat_text::miss_word(words[0].2).map(|(w, _)| w),
+                Some(expect_word),
+                "code {code} words as {expect_word}"
+            );
         }
     }
 

@@ -239,8 +239,26 @@ pub(crate) struct NamePlates {
     /// Completed clicks on plates, drained by the app each frame
     /// ([`UiScript::take_nameplate_clicks`]).
     clicks: Vec<NamePlateClick>,
+    /// **The plate's own hit-test veto** — `0x7cba30`, the `+0x3c` override, set while a
+    /// ground-targeted spell is armed ([`UiScript::set_nameplate_hit_test_veto`]).
+    ///
+    /// Deliberately NOT the mouse-enabled bit: the reference has two distinct mechanisms here and
+    /// only one of them is visible from Lua. `0x60f830` (freelook) toggles input kind 2 on every
+    /// plate, so `IsMouseEnabled()` answers `false` — while `0x7cba30` refuses the *hit test*
+    /// before testing the rect and never touches the bit, so an addon asking a plate whether it
+    /// takes the mouse during ground targeting is told `true`, truthfully. Folding the two into
+    /// one flag would have been simpler here and wrong there.
+    hit_test_vetoed: bool,
     /// The geometry every live plate is currently laid out under.
     geometry: Option<PlateGeometry>,
+}
+
+impl NamePlates {
+    /// Does the `0x7cba30` veto refuse `frame` this point? True only for a plate, and only while
+    /// the veto stands.
+    pub(crate) fn vetoes(&self, frame: FrameHandle) -> bool {
+        self.hit_test_vetoed && self.by_frame.contains_key(&frame)
+    }
 }
 
 /// A completed click on a plate — what the reference's own `CGNamePlateFrame` click slot
@@ -325,6 +343,24 @@ impl UiScript {
         for frame in frames {
             model.arena.set_mouse_enabled(frame, enabled);
         }
+    }
+
+    /// **The plate hit-test veto** (`0x7cba30`, the plate's `+0x3c` override — the one of the six
+    /// that can refuse *before* testing the rect): while a ground-targeted spell is armed the
+    /// plates stop taking the mouse and the click falls through to the `WorldFrame`, so the reticle
+    /// can be placed through a plate.
+    ///
+    /// The reference's predicate is `IsTargeting() && TargetingWantsLocation(flag & 0x60) &&
+    /// !0x6e6180()`. The caller supplies the first two verbatim — benilla's `TargetingWants::
+    /// Location` **is** that `& 0x60` mask. The third is another mask predicate over the same
+    /// pending-spell word (`& 0x878e`, per wow-re `item-target-cursor-and-dropitemonunit.md`) whose
+    /// meaning is not settled; a word that reaches our targeting cursor with location bits is a
+    /// pure ground target (the resolver binds or refuses a unit word before then), so it is left
+    /// unmodelled rather than guessed at.
+    pub fn set_nameplate_hit_test_veto(&mut self, vetoed: bool) {
+        let lua = self.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.nameplates.hit_test_vetoed = vetoed;
     }
 
     /// **Retire every live plate** — hide them all and return them to the pool, without touching

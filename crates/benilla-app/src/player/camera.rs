@@ -946,18 +946,33 @@ impl WorldMouse {
 /// gesture the world already has.
 pub(super) fn latch_world_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
-    // **The CHROME flag, not the raw one** — a V-plate is UI the camera looks straight through
-    // (decision 2159, and the concept is named on `PointerOverUiPanel`). Plates became real
-    // mouse-enabled widgets in 2148, so the pointer inside one makes `PointerOverUi` true — right
-    // for the world PICK (the plate publishes the mouseover itself, and its click selects) and
-    // wrong for the camera: a drag that begins over a plate has to turn the view, or nameplates
-    // become dead patches you cannot swing the camera from. The reference says the same thing from
-    // the other end — entering freelook DISABLES plate mouse input (`0x60f830`, from `0x483e80`),
-    // a toggle that would have nothing to do if a press on a plate could not reach freelook.
+    // **The raw flag — a press that lands on a V-plate is the PLATE's, not the camera's** (decision
+    // 2233, reversing 2159's exception).
     //
-    // The click does NOT leak through with it: `PlayerUiClickConsumed` still suppresses the
-    // `WorldClick`/`WorldRightClick` below, so a plate click stays the plate's own.
-    pointer_over_ui: Res<crate::ui_script::PointerOverUiPanel>,
+    // 2159 read it the other way and excepted plates here, on an inference from the other end:
+    // entering freelook disables plate mouse input (`0x60f830`, from `0x483e80`), "a toggle that
+    // would have nothing to do if a press on a plate could not reach freelook". The wow-re round
+    // this session dispatched refuted that: `0x60f830` has plenty to do for a press that starts on
+    // the **world** and then drags the pointer across a plate mid-turn. The press itself never gets
+    // there. `0x7662c0` delivers a mouse-down to exactly ONE frame — `[root+0x80]` else
+    // `[root+0x7c]` — sets the capture at `0x7663e9`, calls `[vt+0x68]`, and returns 0, stopping
+    // the bus walk; and `CBindings::ExecuteBinding 0x4b7990` has exactly six call sites image-wide,
+    // every one inside a `CGWorldFrame` vtable handler. So with a plate under the cursor the
+    // binding that would start mouselook is never reached, and the release goes to the plate's own
+    // click slot (`0x7792d0` → `0x7cb910` → `0x4949f0`, mask 1 select / mask 4 interact — the same
+    // two terminals the world right-click's object leg reaches).
+    //
+    // What it costs is real and is the reference's own cost: **you cannot swing the camera by
+    // dragging off a nameplate.** Plates are small dead patches for turning, exactly as in 1.12.
+    // The one exception is the plate's own `+0x3c` veto (`0x7cba30`) — while a ground-targeted
+    // spell is armed the plates refuse the hit test, the WorldFrame wins the press, and the gesture
+    // *does* enter mouselook. That is built where it belongs, in the hit test itself
+    // ([`benilla_ui::script::UiScript::set_nameplate_hit_test_veto`]), so it arrives here for free
+    // as `PointerOverUi` simply being false over a vetoing plate.
+    //
+    // `PointerOverUiPanel` keeps its other reader — the wheel still zooms with the cursor on a
+    // plate, which is a different law (the wheel walks PAST a frame that merely takes the mouse).
+    pointer_over_ui: Res<crate::ui_script::PointerOverUi>,
     mut rig: ResMut<CameraControl>,
     cameras: Query<&Camera, With<FlyCam>>,
     window: Single<&Window, With<PrimaryWindow>>,

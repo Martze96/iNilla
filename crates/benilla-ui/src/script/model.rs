@@ -1213,11 +1213,16 @@ pub(crate) struct Model {
     pub(crate) bank_close: bool,
 
     /// The open trainer's service snapshot the app pushes (`None` = no trainer open), the
-    /// `BuyTrainerService` intents it drains, the engine-held 1-based selection (0 = none), and
-    /// whether `CloseTrainer` was called — the trainer seam ([`trainer`], decision 0237).
+    /// `BuyTrainerService` intents it drains, the engine-held selection, and whether `CloseTrainer`
+    /// was called — the trainer seam ([`trainer`], decision 0237).
+    ///
+    /// The selection is the selected service's **spell id**, not its row number. A row number is a
+    /// coordinate in a list that three independent things move under it — the state filter, a
+    /// collapse, and a re-list — and `GetTrainerSelectionIndex` answering with a stale-but-in-range
+    /// one is what left the detail pane describing a spell that had already left the window.
     pub(crate) trainer: Option<trainer::TrainerState>,
     pub(crate) trainer_buys: Vec<u32>,
-    pub(crate) trainer_selection: u32,
+    pub(crate) trainer_selection: Option<u32>,
     pub(crate) trainer_close: bool,
     /// The three state filters (available / unavailable / used) — the real client hides filtered
     /// service rows itself ([`trainer`]); all shown by default. A state filter hides *services*, never
@@ -2099,7 +2104,7 @@ impl Model {
             bank_close: false,
             trainer: None,
             trainer_buys: Vec::new(),
-            trainer_selection: 0,
+            trainer_selection: None,
             trainer_close: false,
             trainer_filter: [true; 3],
             trainer_collapsed: HashSet::new(),

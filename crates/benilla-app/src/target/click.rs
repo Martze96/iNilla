@@ -64,11 +64,12 @@ pub(super) fn world_right_click_payload(
 /// pick already names the plate's unit. A scripted right-click on a plate does nothing yet, which
 /// is a stated gap rather than a guess about which leg it should take.
 ///
-/// The **physical** right-click on a plate does not come through here at all and never did: the
-/// press engages freelook (the camera looks through a plate — 2159), freelook hands the plates'
-/// mouse back (`0x60f830`), and the release therefore hit-tests off the plate, so its `OnClick`
-/// never fires. That gesture is the camera arbiter's own [`WorldRightClick`], acting on the pick
-/// the press latched — which is exactly what decision 2230 made it read.
+/// Since 2233 the **physical** right-click on a plate comes through here, and this is the only path
+/// it has: the press is the plate's (the camera no longer looks through one), so no look session
+/// starts and the camera arbiter emits no [`WorldRightClick`] of its own. The plate's click slot
+/// fires on the up edge and the replay below turns it into the interact leg — which is the
+/// reference's own shape, `0x7cb910` → `0x4949f0(mask 4)` → `0x492820`, the same terminal the world
+/// right-click's object leg `0x492ce0` reaches.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn select_on_plate_click(
     mut plate: ResMut<crate::vplates::PlateClicks>,

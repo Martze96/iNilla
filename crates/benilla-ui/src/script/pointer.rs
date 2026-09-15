@@ -211,6 +211,13 @@ impl UiScript {
             // `<TitleRegion setAllPoints="true"/>` stay inert so it drags by its tab and not its
             // body, and a hover over plain text reassigns to whatever is underneath.
             (model.arena.is_mouse_enabled(fh) || link_span_hit(&model, fh, x, y))
+                // **The nameplate's own `+0x3c` veto** (`0x7cba30`): while a ground-targeted spell
+                // is armed a plate refuses the hit test *before* the rect is tested, and the point
+                // falls through to the `WorldFrame` behind it so the reticle can be placed through
+                // a plate. It is not the mouse-enabled bit — see
+                // [`super::UiScript::set_nameplate_hit_test_veto`] for why that distinction is
+                // load-bearing rather than pedantic.
+                && !model.nameplates.vetoes(fh)
                 && model.resolved.get(&fh).is_some_and(|r| {
                     point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
                 })

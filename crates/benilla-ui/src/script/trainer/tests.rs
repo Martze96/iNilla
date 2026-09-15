@@ -211,9 +211,24 @@ fn state_filter_takes_a_groups_header_with_its_last_service() {
     s.run("SetTrainerServiceTypeFilter('unavailable', 0)")
         .unwrap();
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 0);
-    assert!(s
-        .eval::<bool>("return GetTrainerServiceInfo(1) == nil")
-        .unwrap());
+
+    // …but the *rows* are still there behind it, and the getters still serve them (2231). This line
+    // asserted `GetTrainerServiceInfo(1) == nil` until the accessor gate was carved: the single one
+    // every service getter shares, `0x4d89b0`, bounds against the TOTAL `ds:0xb73a10`, and the
+    // visible count `ds:0xb73a18` has exactly five references image-wide — the finalizer seeding and
+    // decrementing it, the buy-ALL loop, and `GetNumTrainerServices`. No getter reads it. An empty
+    // window is empty because the Lua stops iterating, not because the rows stopped existing.
+    assert_eq!(
+        s.eval::<String>("return (GetTrainerServiceInfo(1))")
+            .unwrap(),
+        "Arms",
+        "row 1 is still the Arms header, now in the hidden tail"
+    );
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
+        0,
+        "and nothing is selected, which is a different question from what row 1 holds"
+    );
 }
 
 /// Collapse is the *asymmetric* case, and deliberately so: it hides a group's services but keeps the
@@ -290,18 +305,31 @@ fn collapse_survives_a_content_update_and_resets_on_close() {
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
 }
 
+/// A buy queues the row's **spell id**, and only a green row can be bought — the single-row path
+/// `0x4d89d0` resolves the index through the shared total-bounded gate and then refuses on the state
+/// byte (`0x4d89e5 cmp byte ptr [esi+0x30], bl; jne`), so red and gray rows are silently dropped on
+/// the floor rather than sent to the server (2231). This used to queue whatever the index resolved
+/// to, which is how a `used` row could still put a `CMSG_TRAINER_BUY_SPELL` on the wire.
 #[test]
-fn buy_queues_the_selected_services_spell_id_headers_no_op() {
+fn buy_queues_an_available_services_spell_id_and_refuses_every_other_row() {
     let mut s = UiScript::new().unwrap();
     s.set_trainer(Some(trainer()));
-    // Row 5 is Bloodrage (spell 285). Buying it queues its spell id, not its index.
-    s.run("BuyTrainerService(5)").unwrap();
-    assert_eq!(s.take_trainer_buys(), vec![285]);
+    // Row 2 is Heroic Strike (spell 78, available). Buying it queues its spell id, not its index.
+    s.run("BuyTrainerService(2)").unwrap();
+    assert_eq!(s.take_trainer_buys(), vec![78]);
     assert!(s.take_trainer_buys().is_empty(), "drained");
 
     // Buying a HEADER row (index 1) queues nothing.
     s.run("BuyTrainerService(1)").unwrap();
     assert!(s.take_trainer_buys().is_empty(), "a header is not buyable");
+
+    // Nor does a gray row (Cleave, already known) or a red one (Bloodrage, gated).
+    s.run("BuyTrainerService(3)").unwrap();
+    s.run("BuyTrainerService(5)").unwrap();
+    assert!(
+        s.take_trainer_buys().is_empty(),
+        "only state byte 0 — available — reaches the wire"
+    );
 }
 
 #[test]
@@ -400,6 +428,99 @@ fn unresolved_skill_line_is_dropped() {
     s.set_trainer(Some(t));
     // Still 5 rows — the orphan contributes neither a header nor a service row.
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
+}
+
+/// **The selection is the service, never the row it sits on** — and a hidden service keeps a row.
+///
+/// `SelectTrainerService` stores the record's spell id (`ds:0xb73a0c`, `0x4d74f0`) and
+/// `GetTrainerSelectionIndex` finds it again by scanning the **whole** array (`0x4d7520`, bounded by
+/// the total `ds:0xb73a10`, not the visible `ds:0xb73a18`). Filtering and collapsing only clear a
+/// record's visible flag `[+0x34]` and sort it into a tail, so the answer for an off-screen
+/// selection is an index *past* `GetNumTrainerServices()` — never a clamp, and never a live row
+/// number belonging to some other service. benilla stored the row number and clamped it, which is
+/// the director's "the info and img below don't update" report: see [`super::selected_row`].
+#[test]
+fn the_selection_follows_its_service_and_lands_in_the_tail_when_it_is_hidden() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    let sel = |s: &mut UiScript| s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap();
+    let shown = |s: &mut UiScript| s.eval::<i64>("return GetNumTrainerServices()").unwrap();
+    let at = |s: &mut UiScript, i: i64| {
+        s.eval::<String>(&format!("return (GetTrainerServiceInfo({i})) or ''"))
+            .unwrap()
+    };
+
+    // Bloodrage sits at row 5 of `[H:Arms, Heroic Strike, Cleave, H:Fury, Bloodrage]`.
+    s.run("SelectTrainerService(5)").unwrap();
+    assert_eq!(sel(&mut s), 5);
+    assert_eq!(at(&mut s, 5), "Bloodrage");
+
+    // Hide the already-known state: Cleave leaves and everything under it slides up one. The row
+    // number 5 now names nothing on screen; the selection is still Bloodrage, at row 4.
+    s.run("SetTrainerServiceTypeFilter('used', 0)").unwrap();
+    assert_eq!(at(&mut s, 4), "Bloodrage");
+    assert_eq!(
+        sel(&mut s),
+        4,
+        "it followed its service, it did not stay put"
+    );
+
+    // Fold Bloodrage's group away. It is off screen but not gone: its record goes to the tail, so
+    // the answer is an index past the visible count — which is what sends the stock window down its
+    // "the selection is not on screen" path instead of silently repainting someone else's row.
+    s.run("CollapseTrainerSkillLine(3)").unwrap();
+    let folded = sel(&mut s);
+    assert!(
+        folded > shown(&mut s),
+        "a folded-away selection reads past the visible count, not as row {folded} of {}",
+        shown(&mut s)
+    );
+    s.run("ExpandTrainerSkillLine(3)").unwrap();
+    assert_eq!(sel(&mut s), 4, "and back on screen when the group unfolds");
+
+    // He learns it. The re-list brings it back gray and the filter hides it — the tail again, never
+    // the row number of whatever moved up into its place.
+    let mut learned = trainer();
+    learned.services[2].category = TrainerServiceCategory::Used;
+    s.set_trainer(Some(learned));
+    assert!(
+        sel(&mut s) > shown(&mut s),
+        "the learned spell is off screen, not at some live row"
+    );
+
+    // A service that has left the trainer's list altogether is the one case that reads 0.
+    let mut shorter = trainer();
+    shorter.services.remove(2);
+    s.set_trainer(Some(shorter));
+    assert_eq!(sel(&mut s), 0);
+
+    // A header row is not a selection, and neither is a row past the end.
+    s.set_trainer(Some(trainer()));
+    s.run("SelectTrainerService(1)").unwrap();
+    assert_eq!(sel(&mut s), 0, "row 1 is the Arms header");
+}
+
+/// A new `SMSG_TRAINER_LIST` resets the selection with the rest of the builder's state — `0x4d7560`
+/// selects record 0 after the sort (`0x4d7b40 xor ecx,ecx` → `0x4d7b42 call 0x4d74f0`), which is
+/// always a group header and so reads back as 1. Clearing is the same answer to the only question
+/// the stock window asks (`GetTrainerSelectionIndex() > 1`, which 0 and 1 both fail); what matters
+/// is that a re-opened trainer cannot inherit the last visit's selection.
+#[test]
+fn a_new_list_packet_clears_the_selection() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.run("SelectTrainerService(5)").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
+        5
+    );
+    s.reset_trainer_list_state(0);
+    s.set_trainer(Some(trainer()));
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
+        0,
+        "the same spell is still in the list, and it is still not selected"
+    );
 }
 
 #[test]

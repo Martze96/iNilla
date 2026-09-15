@@ -67,10 +67,10 @@ pub(crate) struct TrainerOpen {
     /// The trainer's greeting line (`SMSG_TRAINER_LIST`'s trailing string).
     pub(crate) greeting: String,
     /// A `SMSG_TRAINER_LIST` that **begins a window session** has landed and the feed has not yet
-    /// handed it to the engine. Drives the engine's filter/collapse reset
-    /// ([`UiScript::reset_trainer_filter`]) — the reference's builder rewrites both masks on every
-    /// list packet (decision 1128). It is not the same edge as a snapshot change: those re-push the
-    /// same list.
+    /// handed it to the engine. Drives the engine's filter/collapse/**selection** reset
+    /// ([`UiScript::reset_trainer_list_state`]) — the reference's builder rewrites all three on every
+    /// list packet (decision 1128; 2231 for the selection, `0x4d7b42`). It is not the same edge as a
+    /// snapshot change: those re-push the same list.
     ///
     /// "Begins a session", not "a packet arrived", because the two are the same thing in the
     /// reference and are **not** in benilla (B253/B256's arc): the reference gets a list packet only
@@ -82,7 +82,9 @@ pub(crate) struct TrainerOpen {
     pub(crate) fresh_list: bool,
     /// The post-buy re-list **we asked for** ([`crate::net::apply`]'s `trainer_buy_succeeded`) is in
     /// flight: the answering packet repaints the open window rather than opening one, so it must not
-    /// reset the filter/collapse masks. Cleared by the packet it belongs to, and by any close.
+    /// reset the filter/collapse masks — nor the selection, which is what leaves the learned spell
+    /// selected-but-hidden and so takes the detail pane down with it, the reference's own
+    /// post-purchase behaviour (2231). Cleared by the packet it belongs to, and by any close.
     pub(crate) refresh_pending: bool,
 }
 
@@ -395,7 +397,7 @@ fn feed_trainer(
     // reference's builder does (decision 1128) — before the snapshot goes in, so `TRAINER_SHOW`
     // finds the reset mask and the window's own show handler pushes the SAVED filter back over it.
     if open.fresh_list {
-        script.reset_trainer_filter(open.trainer_type);
+        script.reset_trainer_list_state(open.trainer_type);
         open.fresh_list = false;
     }
     let fresh = snapshot(

@@ -1775,6 +1775,7 @@ pub(crate) fn apply_net_updates(
                 &mut ui_actions.8,
                 &mut ui_actions.14,
                 &mut audio.7,
+                *ui_actions.1 .5.damage_text,
                 &mut audio.10,
                 &mut loot_latch,
                 (

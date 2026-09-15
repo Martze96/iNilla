@@ -723,8 +723,13 @@ fn a_scripted_click_selects_too() {
 
 /// **The mouselook toggle** (`0x60f830`): entering freelook hands the mouse back on every plate,
 /// leaving takes it again — the reference walks its own intrusive plate list doing exactly this,
-/// from `0x483e80` (enter) and `0x483e70` (leave). Without it a right-drag that begins over a plate
-/// would be a plate click instead of a camera turn.
+/// from `0x483e80` (enter) and `0x483e70` (leave).
+///
+/// **What it is for is NOT "a drag that begins over a plate"** — that gesture never reaches
+/// mouselook at all, because `0x7662c0` hands the mouse-down to the plate and stops the bus walk
+/// before any binding runs (decision 2233, which reversed the inference this doc used to carry).
+/// It is for a turn that started on the **world** and then dragged the pointer across a plate: the
+/// plates must not take a pointer that is hidden and locked to the camera.
 #[test]
 fn freelook_hands_the_mouse_back() {
     let mut s = vm();
@@ -745,5 +750,51 @@ fn freelook_hands_the_mouse_back() {
     assert!(
         s.hovered_nameplate().is_some(),
         "and it takes it back on leave"
+    );
+}
+
+/// **The plate's own `+0x3c` veto** (`0x7cba30`) — a DIFFERENT mechanism from the freelook toggle
+/// above, and the reason it is not folded into the same flag.
+///
+/// While a ground-targeted spell is armed the plate refuses the hit test *before* testing its rect
+/// (`0x6e48a0() && 0x6e6320() && !0x6e6180()` → `xor eax,eax; ret 4`, never calling the base), so
+/// the point falls through to the `WorldFrame` at (strata 0, level 0) behind it and the reticle can
+/// be placed through a plate. Crucially it never touches `[+0xcc]`: `IsMouseEnabled()` still
+/// answers **true** throughout, which is exactly what `0x60f830` does not do.
+#[test]
+fn a_ground_target_veto_refuses_the_hit_without_disabling_the_mouse() {
+    let mut s = vm();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.mouse_move(500.0, 384.0);
+    assert!(s.hovered_nameplate().is_some(), "the plate takes the mouse");
+
+    s.set_nameplate_hit_test_veto(true);
+    s.mouse_move(500.0, 384.1);
+    assert_eq!(
+        s.hovered_nameplate(),
+        None,
+        "the reticle must be placeable through a plate"
+    );
+    // …and the press falls through with it, which is what lets the WorldFrame win the gesture and
+    // the ground cast commit where the player clicked.
+    s.mouse_button(500.0, 384.1, "LeftButton", true);
+    s.mouse_button(500.0, 384.1, "LeftButton", false);
+    assert!(
+        s.take_nameplate_clicks().is_empty(),
+        "a vetoed plate takes no click either"
+    );
+    // The bit the veto must NOT have touched — an addon asking is told the truth.
+    assert_eq!(
+        s.eval::<i64>("local p = WorldFrame:GetChildren() return p:IsMouseEnabled()")
+            .unwrap(),
+        1,
+        "the veto refuses the hit test, it does not disable the mouse"
+    );
+
+    s.set_nameplate_hit_test_veto(false);
+    s.mouse_move(500.0, 384.0);
+    assert!(
+        s.hovered_nameplate().is_some(),
+        "and the plate takes it back when the cast is gone"
     );
 }

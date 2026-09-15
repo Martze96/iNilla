@@ -1294,7 +1294,38 @@ mod pointer_arbiter_tests {
         );
         assert!(
             !app.world().resource::<PointerOverUiPanel>().0,
-            "…and the camera and the wheel look straight through it"
+            "…and the WHEEL looks straight through it"
+        );
+    }
+
+    /// …and what each of the two bits is now FOR, which is the half 2233 moved.
+    ///
+    /// The camera reads the raw flag: a press landing on a plate is the plate's, because
+    /// `0x7662c0` delivers a mouse-down to exactly one frame and stops the bus walk, so the
+    /// binding that starts mouselook is never reached. The wheel reads the chrome flag: it is the
+    /// one genuine fall-through in the frame system and walks **past** a frame that merely takes
+    /// the mouse, so scroll-zoom still works with the cursor on a plate. Two different reference
+    /// laws, which is why there are two bits and not one — and 2159 had the camera on the wrong
+    /// one for two days.
+    #[test]
+    fn the_camera_yields_to_a_plate_and_the_wheel_does_not() {
+        let mut app = app();
+        let plate = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
+        app.world_mut()
+            .resource_mut::<crate::vplates::PlateHover>()
+            .0 = Some(plate);
+        app.update();
+        // `latch_world_mouse` reads this one; `world_press` is `!over_ui`, so the press never
+        // becomes the world's and no look session starts.
+        assert!(
+            app.world().resource::<PointerOverUi>().0,
+            "the camera must yield the press to the plate"
+        );
+        // …and `bindings`' wheel branch reads this one.
+        assert!(
+            !app.world().resource::<PointerOverUiPanel>().0,
+            "the wheel must still reach the world over a plate"
         );
     }
 

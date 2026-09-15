@@ -163,6 +163,24 @@ pub(crate) enum DamageSource {
     Pet,
 }
 
+/// The color law's `B` bit — "this damage is melee-STYLED" — from the spell record the emitting
+/// call site pushes: `(recordPtr == 0) || sign(byte[SpellRec+0x25])`, i.e. no record at all, or
+/// `AttributesEx3` bit 15 ([`benilla_formats::SpellDisplay::melee_white_damage`]). `display` is
+/// the row the site resolved; `None` stands for BOTH "the site pushed NULL" (a melee swing, a
+/// damage shield) and "we have no catalog" — the client degrades a NULL record to melee-styled,
+/// so a missing catalog degrades the same way.
+///
+/// **It is the WORD emitter's bit as much as the number's** (decision 2229). `0x607140` and
+/// `0x6128b0` are separate functions — different arg counts, different register allocation, not
+/// the "byte-identical twins" an earlier reading called them — but they compute `B` and `K`
+/// identically, and seven of the eight `0x607140` call sites push a resolved SpellRec. Only the
+/// melee swing's word site (`0x624511`, whose seven predecessors are all `6a 00 push 0x0`) pushes
+/// NULL. So a spell's "Miss"/"Resist" is spell-GOLD exactly like its number, and only a white
+/// hit's miss is white.
+pub(crate) fn melee_styled(display: Option<&benilla_formats::SpellDisplay>) -> bool {
+    display.is_none_or(benilla_formats::SpellDisplay::melee_white_damage)
+}
+
 /// The color branch (`0x6128b0` `6128f6`–`612964`): the effective override for a qualifying
 /// source, by `B` (`melee` = record NULL; the AttributesEx bit-15 leg is a named divergence) and
 /// `K`. `None` = the whole emit is gated off (CombatDamage master, or the pet path's Pet* cvar);

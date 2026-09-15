@@ -856,7 +856,7 @@ fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
         .unwrap());
     assert!(s.eval::<i64>("return GetNumTrainerServices()").unwrap() < 6);
 
-    s.reset_trainer_filter(0);
+    s.reset_trainer_list_state(0);
     assert!(
         !s.eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
             .unwrap(),
@@ -875,7 +875,7 @@ fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
     );
 
     // A mount trainer wants available|used instead — what makes a known mount visible at all.
-    s.reset_trainer_filter(1);
+    s.reset_trainer_list_state(1);
     assert!(s
         .eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
         .unwrap());
@@ -1049,7 +1049,7 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
     // The trainer feed (`ui_trainer::feed_trainer`), reduced to the part this bug lives in.
     fn feed(s: &mut UiScript, open: &mut TrainerOpen, state: TrainerState, event: &str) {
         if open.fresh_list {
-            s.reset_trainer_filter(open.trainer_type);
+            s.reset_trainer_list_state(open.trainer_type);
             open.fresh_list = false;
         }
         s.set_trainer(Some(state));
@@ -1138,5 +1138,117 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
         0,
         "his saved choice is still the global's, for the next session's first trainer"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The detail pane after learning a spell** — the director's report: the trained row vanished, the
+/// highlight landed on the row that slid into its place, and the name/icon/cost/`Requires:` block
+/// below went on describing the spell that was gone.
+///
+/// The stock Lua repaints that pane on `TRAINER_UPDATE` through **one** door:
+/// `ClassTrainer_SelectFirstLearnableSkill`, the only thing that restores
+/// `ClassTrainerFrame.showSkillDetails` after `ClassTrainerTrainButton_OnClick` cleared it —
+/// `ClassTrainer_SetSelection` early-returns while it is nil. Which door `TRAINER_UPDATE` takes is
+/// decided entirely by the engine's `GetTrainerSelectionIndex()`, and the reference's answer for a
+/// service that has gone off screen is its index in the hidden **tail** — past
+/// `GetNumTrainerServices()`, never a live row (`0x4d7520`; see `benilla_ui`'s `selected_row`). So
+/// the reference takes the `> 1` branch, resets the scroll, and hides the pane.
+///
+/// **What a player sees after training, in the reference and now here: an empty detail pane and no
+/// highlighted row.** It does not advance to the next spell — that is the *fresh window's*
+/// behaviour, which is what a selection reading 0 or 1 would have produced.
+///
+/// Driven through the real [`crate::ui_trainer::TrainerOpen`] like B256's test above, for the same
+/// reason: the packet-vs-repaint decision under test is the app's own.
+#[test]
+fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_one() {
+    use crate::ui_trainer::TrainerOpen;
+    const DAZALAR: u64 = 0xabc;
+
+    let mut s = trainer_script();
+    // The reference's own file-scope defaults (1128) — "already known" OFF, which is what makes a
+    // learned service leave the list at all.
+    s.run("TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 0")
+        .unwrap();
+    s.fire_event(
+        "ADDON_LOADED",
+        vec![ScriptValue::Str("Blizzard_TrainerUI".into())],
+    );
+    s.set_money(5000);
+
+    // The trainer feed (`ui_trainer::feed_trainer`), reduced to the part this bug lives in.
+    fn feed(s: &mut UiScript, open: &mut TrainerOpen, state: TrainerState, event: &str) {
+        if open.fresh_list {
+            s.reset_trainer_list_state(open.trainer_type);
+            open.fresh_list = false;
+        }
+        s.set_trainer(Some(state));
+        s.fire_event(event, vec![ScriptValue::Str("Dazalar".into())]);
+    }
+    let pane = |s: &mut UiScript| -> (bool, String) {
+        s.eval::<(bool, String)>(
+            "return ClassTrainerSkillName:IsVisible() and true or false, \
+                    ClassTrainerSkillName:GetText() or ''",
+        )
+        .unwrap()
+    };
+    let row_name = |s: &mut UiScript, row: i64| {
+        s.eval::<String>(&format!("return (GetTrainerServiceInfo({row})) or ''"))
+            .unwrap()
+    };
+
+    let mut open = TrainerOpen::default();
+    open.open(DAZALAR, 0, vec![], "Hello, warrior!".into());
+    feed(&mut s, &mut open, menu(), "TRAINER_SHOW");
+
+    // Row 2 is the first learnable — the row the window opens on, and the one he trains.
+    assert_eq!(row_name(&mut s, 2), "Heroic Strike");
+    assert_eq!(
+        pane(&mut s),
+        (true, "Heroic Strike".into()),
+        "the window opens describing its own selection"
+    );
+    s.run("ClassTrainerTrainButton:Click()").unwrap();
+    assert_eq!(
+        s.take_trainer_buys(),
+        vec![78],
+        "the Train button bought the selected row"
+    );
+
+    // The app re-asks for the list and marks its answer the repaint it is (B256); the bought
+    // service comes back gray and, with "already known" off, leaves the list. Cleave slides up into
+    // row 2 under where the selection used to be.
+    let mut learned = menu();
+    learned.services[0].category = TrainerServiceCategory::Used;
+    open.refresh_pending = true;
+    open.open(DAZALAR, 0, vec![], "Hello, warrior!".into());
+    feed(&mut s, &mut open, learned, "TRAINER_UPDATE");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    assert_eq!(
+        row_name(&mut s, 2),
+        "Cleave",
+        "the trained row is gone from the list and the next one took its place"
+    );
+    assert!(
+        !pane(&mut s).0,
+        "and the pane below is empty rather than still describing the spell he just learned: {:?}",
+        pane(&mut s).1
+    );
+    assert!(
+        !s.eval::<bool>("return ClassTrainerSkillHighlightFrame:IsVisible()")
+            .unwrap(),
+        "nothing is highlighted either — the selection is off screen, not on Cleave"
+    );
+    assert!(
+        s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap()
+            > s.eval::<i64>("return GetNumTrainerServices()").unwrap(),
+        "because the engine answers with the hidden row, which is what steers the window there"
+    );
+
+    // And he can pick the next one up by hand, which is the whole of the recovery.
+    s.run("this = ClassTrainerSkill2 ClassTrainerSkillButton_OnClick('LeftButton')")
+        .unwrap();
+    assert_eq!(pane(&mut s), (true, "Cleave".into()));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

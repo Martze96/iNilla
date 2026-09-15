@@ -47,11 +47,17 @@
 //! At the other types a service whose group key is `0` (unresolved skill line) is still dropped,
 //! matching the client.
 //!
-//! `GetNumTrainerServices`/every getter index the **visible** rows: headers always show, but a
-//! service hides when its state fails the dropdown filter ([`Model::trainer_filter`]) or its group is
-//! collapsed ([`Model::trainer_collapsed`]). `Collapse/ExpandTrainerSkillLine(id)` take the **display
-//! index of a header row** (`id == 0` = all groups — the collapse-all button); they toggle that
-//! group's visibility, never reorder.
+//! A service hides when its state fails the dropdown filter ([`Model::trainer_filter`]) or its group
+//! is collapsed ([`Model::trainer_collapsed`]) — but **hiding is not removing**: the client parks a
+//! hidden record in a tail behind the visible ones and keeps its index, so `GetNumTrainerServices`
+//! answers with the *visible* count while every getter's index space is the *whole* array ([`rows`]).
+//! An index past the count is a legal hidden row, and the stock window is handed exactly one after a
+//! purchase ([`selected_row`]). `Collapse/ExpandTrainerSkillLine(id)` take the **display index of a
+//! header row** (`id == 0` = all groups — the collapse-all button); they toggle that group's
+//! visibility, never reorder.
+//!
+//! The **selection** is likewise the selected service's **spell id** (`ds:0xb73a0c`), re-resolved to
+//! a position on every `GetTrainerSelectionIndex` — never a stored row number ([`selected_row`]).
 //!
 //! ## Faithful stubs (no wire data yet — kept so the ported XML runs)
 //!
@@ -266,7 +272,7 @@ impl super::UiScript {
         let mut model = self.model_mut();
         match state {
             None => {
-                model.trainer_selection = 0;
+                model.trainer_selection = None;
                 model.trainer_collapsed.clear();
                 model.trainer = None;
             }
@@ -279,7 +285,8 @@ impl super::UiScript {
         }
     }
 
-    /// **Reset the state filter and the collapse set — one `SMSG_TRAINER_LIST` arriving.**
+    /// **Reset what one `SMSG_TRAINER_LIST` arriving resets — the state filter, the collapse set,
+    /// and the selection.**
     ///
     /// Byte-verified (wow-re `system/ui/scratch/trainer-service-suppression.md`, decision 1128): the
     /// list builder writes the filter mask itself on every packet — `0x4d75d9 mov ds:0xb73a1c,3`
@@ -289,10 +296,23 @@ impl super::UiScript {
     /// lives in the saved variable `TRAINER_FILTER_*`, and the window's show handler pushes it back
     /// over this reset (decision 1128; `TrainerFrame.xml`'s `BenillaTrainerFrame_ApplyFilter`).
     ///
+    /// **The selection is the same edge and the same law.** `0x4d7560`'s tail selects record 0 —
+    /// `0x4d7b40 xor ecx,ecx` → `0x4d7b42 call 0x4d74f0`, after the sort — and since row 0 is always
+    /// a group header, whose record carries the id `0xffffffff` (`0x4d7b05`), the getter's scan
+    /// finds the first header and answers **1**. Clearing is the same thing to every caller: the
+    /// stock window only ever asks `GetTrainerSelectionIndex() > 1`, which 0 and 1 both fail, so
+    /// both send it down `ClassTrainer_SelectFirstLearnableSkill`. Without this a re-opened trainer
+    /// could inherit a selection from the last visit — the same spell id, still in the list, still
+    /// resolving — which the reference cannot do.
+    ///
+    /// The repaint path `0x4d7d40` touches **none** of the three (a `ds:0xb73a0c` census over the
+    /// whole image returns four references, all in the setter/getter/teardown), which is why a
+    /// purchase leaves the selection sitting on the service it just greyed out.
+    ///
     /// This is the **packet** edge, not the content edge — [`Self::set_trainer`] runs on every
     /// snapshot change (an item template landing, a name resolving), and the reference's repaint path
     /// `0x4d7d40` does not touch either mask. Reset there and a filter would evaporate mid-window.
-    pub fn reset_trainer_filter(&mut self, trainer_type: u32) {
+    pub fn reset_trainer_list_state(&mut self, trainer_type: u32) {
         let mut model = self.model_mut();
         // Mask 5 at a mount/"talent" trainer: available + already-known, which is what makes a
         // known mount visible under its "My Talents" header at all (decision 1124's group -1).
@@ -302,6 +322,7 @@ impl super::UiScript {
             [true, true, false]
         };
         model.trainer_collapsed.clear();
+        model.trainer_selection = None;
     }
 
     /// Drain the **spell ids** `BuyTrainerService` queued since the last call (the engine resolves each
@@ -446,9 +467,31 @@ fn build_groups(services: &[TrainerService], trainer_type: u32) -> Vec<TrainerGr
     groups
 }
 
-/// The visible rows in display order (decisions 0247/1124). Per group, in order: the header — **only
-/// if at least one of the group's services passes the state filter** — then, when the group is not
-/// collapsed, those services. The Lua's 1-based `index` is a position in *this* list.
+/// The client's whole row array, and how much of its front is **on screen** — the visible rows in
+/// display order (decisions 0247/1124), then every hidden one in a **tail** behind them.
+///
+/// **Hiding a row is not removing it**, and that is the shape of the real array rather than a
+/// convenience here. The finalizer `0x4d8410` writes only a per-record visible flag — `[+0x34] = 1`
+/// at `0x4d84c6`, `= 0` at `0x4d8546` — decrements the *visible* count `ds:0xb73a18` (`0x4d8549`),
+/// and then `qsort`s **all `ds:0xb73a10`** records (`0x4d857e`) with that flag as the comparator's
+/// PRIMARY key (`0x4d85ce` … `0x4d8744 setne al` / `0x4d874e lea eax,[eax+eax-1]` → ±1). A hidden
+/// row therefore keeps a record, a position and an index — it is simply parked behind the visible
+/// ones. `GetNumTrainerServices` (`0x4d8d90`) answers with the visible count `ds:0xb73a18`, while
+/// the index space every getter is bounds-checked against is the **total** `ds:0xb73a10`: the
+/// thirteen service getters all route through one shared accessor gate, `0x4d89b0`'s
+/// `cmp ecx, dword ptr [0xb73a10]`, and `GetTrainerServiceInfo` (`0x4d8dc0`) reaches the same gate
+/// through its four siblings (`0x4d8aa2`, `0x4d8b52`, `0x4d8ba2`, `0x4d8c32`). The visible count has
+/// **five references image-wide** — the finalizer seeding and decrementing it, the buy-ALL loop, and
+/// `GetNumTrainerServices` — and **no getter is among them**. So an index past
+/// `GetNumTrainerServices()` is a legal, resolvable, *hidden* row — which is exactly the index the
+/// stock window is handed after a purchase, and reading it as out-of-range is what used to strand
+/// the detail pane ([`selected_row`]). An all-boxes-off window is empty because the Lua stops
+/// iterating, not because the rows stopped existing.
+///
+/// The tail's own ORDER is the comparator's remaining keys in the client and tree order here. It is
+/// unobservable through the stock window — nothing iterates past `GetNumTrainerServices()`, and the
+/// single index that ever reaches in is the selection's, resolved by identity — so the difference
+/// costs nothing until something walks the tail.
 ///
 /// **The filter and the collapse are deliberately asymmetric**, and that asymmetry is structural in
 /// the client rather than incidental. The finalizer builds a per-group flag `hdr[+0x1c]` by walking
@@ -460,28 +503,36 @@ fn build_groups(services: &[TrainerService], trainer_type: u32) -> Vec<TrainerGr
 /// (`hdr[+0x20]`), so a collapsed group keeps its header — which is what makes it re-expandable.
 /// benilla had both cases keeping the header, with a test asserting it; 1124 inverted the filter
 /// half.
-fn rows(model: &Model) -> Vec<Row> {
+fn rows(model: &Model) -> (Vec<Row>, usize) {
     let Some(t) = model.trainer.as_ref() else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let mut out = Vec::new();
+    let mut shown = Vec::new();
+    let mut tail = Vec::new();
     for (gi, g) in t.groups.iter().enumerate() {
-        let mut shown = g
+        let (passes, filtered): (Vec<usize>, Vec<usize>) = g
             .services
             .iter()
             .copied()
-            .filter(|&si| model.trainer_filter[t.services[si].category.filter_slot()])
-            .peekable();
-        if shown.peek().is_none() {
-            continue;
+            .partition(|&si| model.trainer_filter[t.services[si].category.filter_slot()]);
+        if passes.is_empty() {
+            // The whole group is filtered away — header with it (1124's inverted half).
+            tail.push(Row::Header(gi));
+        } else {
+            shown.push(Row::Header(gi));
+            // A collapsed group keeps its header on screen and parks its services behind.
+            let into = if model.trainer_collapsed.contains(&g.key) {
+                &mut tail
+            } else {
+                &mut shown
+            };
+            into.extend(passes.into_iter().map(Row::Service));
         }
-        out.push(Row::Header(gi));
-        if model.trainer_collapsed.contains(&g.key) {
-            continue;
-        }
-        out.extend(shown.map(Row::Service));
+        tail.extend(filtered.into_iter().map(Row::Service));
     }
-    out
+    let visible = shown.len();
+    shown.extend(tail);
+    (shown, visible)
 }
 
 /// The service at a 1-based visible index, or `None` when that row is a **header** (or OOB / no
@@ -490,21 +541,72 @@ fn rows(model: &Model) -> Vec<Row> {
 /// the same VISIBLE mapping, never a raw `services[]` position.
 pub(super) fn service(model: &Model, index: usize) -> Option<&TrainerService> {
     let n = index.checked_sub(1)?;
-    match rows(model).get(n)? {
+    match rows(model).0.get(n)? {
         Row::Service(si) => model.trainer.as_ref()?.services.get(*si),
         Row::Header(_) => None,
     }
 }
 
-/// The count of visible rows (headers + unfiltered, uncollapsed services).
+/// `GetNumTrainerServices`' answer — the count of rows **on screen** (headers + unfiltered,
+/// uncollapsed services), which is the client's `ds:0xb73a18` and not the length of the row array
+/// the indices run over ([`rows`]).
 fn num_services(model: &Model) -> usize {
-    rows(model).len()
+    rows(model).1
+}
+
+/// The selected service's 1-based position in the row array ([`rows`]) — which is **past
+/// `GetNumTrainerServices()` when that service is hidden**, and `None` only when nothing is selected
+/// or the service has left the trainer's list altogether.
+///
+/// **The selection is the service, not the row it happens to sit on.** `SelectTrainerService`
+/// (`0x4d8e60` → `0x4d74f0`) stores the record's **spell id** at `ds:0xb73a0c` — 0 when the index is
+/// out of range, never a clamp — and this getter (`0x4d8f10` → `0x4d7520`) finds it again by linear
+/// scan over the whole array, `cmp dword ptr [edi], esi` at `0x4d7543`, answering `-1` → Lua `0`
+/// only when the scan runs out. Three separate things renumber the rows under a stored number — the
+/// state filter, a collapse, a re-list — so an index stored on Monday is a different service on
+/// Tuesday, and one merely *clamped* to the row count is the worst answer available: plausible, in
+/// range, and wrong. benilla stored the number.
+///
+/// It is load-bearing far beyond bookkeeping, because the stock `Blizzard_TrainerUI.lua` repaints
+/// its detail pane through exactly **one** door. `ClassTrainerTrainButton_OnClick` clears
+/// `ClassTrainerFrame.showSkillDetails`, and `ClassTrainer_SetSelection` early-returns while that is
+/// nil — so on `TRAINER_UPDATE` only the `GetTrainerSelectionIndex() > 1` **else** branch,
+/// `ClassTrainer_SelectFirstLearnableSkill`, puts the flag back and rewrites the name, icon,
+/// `Requires:` line and cost. Answering with a *live, visible* row number for a service that has
+/// left the screen therefore takes the silent branch and leaves the pane describing the spell the
+/// player just learned, under a highlight sitting on the row that slid up into its place — the
+/// director's report.
+///
+/// The reference's own answer there is the hidden row's index, and its consequence is worth stating
+/// because it is what a player sees: `> 1` is true, so the window resets the scroll, calls
+/// `ClassTrainer_SetSelection` on a row nothing displays, and the update loop — which asks only
+/// whether the selection is *on screen* — finds it is not and hides the detail pane. **After you
+/// train a spell the reference blanks the pane and highlights nothing**; it does not advance to the
+/// next spell. Answering `0` instead would select the first learnable and repaint, which is the
+/// fresh-window behaviour, not the post-purchase one.
+fn selected_row(model: &Model) -> Option<usize> {
+    let want = model.trainer_selection?;
+    let t = model.trainer.as_ref()?;
+    rows(model)
+        .0
+        .iter()
+        .position(|r| match r {
+            Row::Service(si) => t.services.get(*si).is_some_and(|s| s.spell_id == want),
+            Row::Header(_) => false,
+        })?
+        .checked_add(1)
 }
 
 /// Collapse (`collapse = true`) or expand a skill line by the **display index of its header row**
 /// (decision 0247's `Collapse/ExpandTrainerSkillLine`). `id == 0` targets **all** groups (the
-/// collapse-all button); `id > 0` resolves the header at that visible index to its skill line. A
-/// non-header (or OOB) index is a no-op.
+/// collapse-all button); `id > 0` resolves the header at that index to its skill line. A non-header
+/// (or out-of-range) index is a no-op.
+///
+/// Like every other index in this surface it runs over the whole row array, so a header sitting in
+/// the hidden tail resolves too ([`rows`]). That is the shape of the accessor gate the service
+/// getters were carved to share (`0x4d89b0`, bounded by the total); these two bindings' own gate was
+/// **not** carved, and the difference is unobservable through the stock window, which only ever
+/// passes a visible header's index or `0`.
 fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
     if id == 0 && !collapse {
         model.trainer_collapsed.clear();
@@ -517,7 +619,7 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
             .map(|t| t.groups.iter().map(|g| g.key).collect())
             .unwrap_or_default()
     } else {
-        match rows(model).get(id - 1) {
+        match rows(model).0.get(id - 1) {
             Some(Row::Header(gi)) => model
                 .trainer
                 .as_ref()
@@ -577,13 +679,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(n) = index.checked_sub(1) else {
                 return Ok(MultiValue::from_vec(vec![Value::Nil]));
             };
-            let Some(row) = rows(&model).get(n).copied() else {
+            let Some(row) = rows(&model).0.get(n).copied() else {
                 return Ok(MultiValue::from_vec(vec![Value::Nil]));
             };
             let t = model
                 .trainer
                 .as_ref()
-                .expect("a visible row ⇒ an open trainer");
+                .expect("a resolved row ⇒ an open trainer");
             match row {
                 Row::Header(gi) => {
                     let g = &t.groups[gi];
@@ -622,13 +724,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(n) = index.checked_sub(1) else {
                 return Ok(Value::Nil);
             };
-            let Some(Row::Service(si)) = rows(&model).get(n).copied() else {
+            let Some(Row::Service(si)) = rows(&model).0.get(n).copied() else {
                 return Ok(Value::Nil);
             };
             let t = model
                 .trainer
                 .as_ref()
-                .expect("a visible row ⇒ an open trainer");
+                .expect("a resolved row ⇒ an open trainer");
             Ok(Value::String(
                 lua.create_string(&t.services[si].group_name)?,
             ))
@@ -835,41 +937,55 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SelectTrainerService(index) — set the engine-held selection (1-based filtered; 0/OOB clears it).
+    // SelectTrainerService(index) — select the SERVICE at that row, by its spell id. An index out
+    // of range clears the selection (`0x4d74f0`'s `cmp ecx, ds:0xb73a10` / `mov [0xb73a0c], 0` —
+    // cleared, never clamped); [`selected_row`] is why the id and not the row number.
+    //
+    // A HEADER row clears here too, where the reference would store the header record's own id,
+    // `0xffffffff` (`0x4d7b05`), and find the FIRST header again on the way back out — answering 1
+    // rather than 0. The two are the same answer to the only question the stock window asks of this
+    // number (`GetTrainerSelectionIndex() > 1`), and nothing else reads it.
     g.set(
         "SelectTrainerService",
-        lua.create_function(|lua, index: u32| {
+        lua.create_function(|lua, index: usize| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let count = num_services(&model) as u32;
-            model.trainer_selection = if index >= 1 && index <= count {
-                index
-            } else {
-                0
-            };
+            model.trainer_selection = service(&model, index).map(|s| s.spell_id);
             Ok(())
         })?,
     )?;
 
-    // GetTrainerSelectionIndex() → the selected 1-based filtered row, or 0 if nothing is selected
-    // (the ref reads it as a plain number: `GetTrainerSelectionIndex() > 1`). Clamped to the current
-    // filtered count so a selection left over from a previous filter/trainer reads as 0.
+    // GetTrainerSelectionIndex() → the selected service's current 1-based row — **past
+    // `GetNumTrainerServices()` while that service is hidden**, and 0 only when nothing is selected
+    // or the service has left the list entirely ([`selected_row`] has the law and what rides on it).
     g.set(
         "GetTrainerSelectionIndex",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let count = num_services(&model) as u32;
-            let sel = model.trainer_selection;
-            Ok(i64::from(if sel >= 1 && sel <= count { sel } else { 0 }))
+            Ok(selected_row(&model).map_or(0i64, |r| r as i64))
         })?,
     )?;
 
-    // BuyTrainerService(index) — queue the selected filtered row's SPELL ID for purchase (the app
-    // sends CMSG_TRAINER_BUY_SPELL). Out of range → ignored.
+    // BuyTrainerService(index) — queue that row's SPELL ID for purchase (the app sends
+    // CMSG_TRAINER_BUY_SPELL). A header row, an out-of-range index, or an ALREADY-KNOWN row is
+    // silently ignored: the single-row path `0x4d89d0` resolves through the same total-bounded
+    // accessor gate as every getter, then refuses on the state byte — `0x4d89e1 cmp esi,ebx; je`
+    // (no record) and `0x4d89e5 cmp byte ptr [esi+0x30], bl; jne` (state != 0, i.e. anything but
+    // `available`), both jumping to the same do-nothing exit.
+    //
+    // Deliberately NOT built: the reference's buy-ALL convenience `0x4d8a70`, the one
+    // visible-count-bounded loop in the whole surface (`0x4d8a71`/`0x4d8a88` read `ds:0xb73a18`).
+    // The split `0x4da244 dec eax; 0x4da245 jns` is SIGNED, so it is every Lua index **<= 0** that
+    // lands there — `BuyTrainerService(0)` buys the player's entire visible list in one call. Here
+    // index 0 is a no-op instead. Nothing in the stock window passes a non-positive index, and a
+    // verb that spends the whole purse on a typo is not one to reproduce on the strength of that.
     g.set(
         "BuyTrainerService",
         lua.create_function(|lua, index: usize| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(spell_id) = service(&model, index).map(|s| s.spell_id) {
+            let buyable = service(&model, index)
+                .filter(|s| s.category == TrainerServiceCategory::Available)
+                .map(|s| s.spell_id);
+            if let Some(spell_id) = buyable {
                 model.trainer_buys.push(spell_id);
             }
             Ok(())

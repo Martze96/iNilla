@@ -93,8 +93,8 @@ pub(crate) use collision_height::CollisionHeight;
 /// Spell-visual effect models (decision 0099 phase 3): a casting unit's attach-point `.mdx` glows,
 /// spawned under the same attach-point joints as held items, lifetime per the kit stage.
 mod missile;
-pub(crate) use missile::MissileSound;
 use missile::{attach_missile_models, move_missiles, spawn_missiles};
+pub(crate) use missile::{MissileMiss, MissileSound};
 
 /// WMO-display GameObject doodad props (the ship's sails / the zeppelin's rotor): the WMO's MODD
 /// M2s spawned as children of the streamed gameobject, so they ride a moving transport.
@@ -803,6 +803,8 @@ impl Plugin for EntitiesPlugin {
         .init_resource::<missile::PendingMissiles>()
         // The projectile flight-loop edges (`crate::sound::missile` consumes them).
         .add_message::<MissileSound>()
+        // A travelling spell's DEFERRED outcome word (`crate::combat_text`, decision 2229).
+        .add_message::<MissileMiss>()
         // The cast router's dest one-shot orders (`dest_fx`, decision 0797).
         .add_message::<dest_fx::GroundBurst>()
         // A live display-id swap's rebuild edge — consumed by the morph-latch replay

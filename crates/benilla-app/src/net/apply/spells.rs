@@ -379,6 +379,9 @@ pub(super) fn spell_go(
     pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
+    // The three floating-text CVars, read inside the word emitter `0x607140` itself — so they
+    // gate the miss words below exactly as they gate a damage number (decision 2229).
+    text_gates: crate::combat_text::DamageTextGates,
     go_lid: &mut MessageWriter<crate::go_anim::GoLidOpen>,
     // The client-local loot-target latch — armed here for a chest (decision 1477, §6 above).
     loot_latch: &mut crate::ui_loot::LootLatch,
@@ -612,26 +615,46 @@ pub(super) fn spell_go(
     // The miss list's floating words (0137 phase 2, the `0x6e7a70` handler): one outcome word
     // over each missed target — except REFLECT, which re-anchors to the caster (`0x6e7e51`).
     // Gate A applies to whichever unit the word lands over. Source-classified first (the color
-    // law's K, inside every emitter twin): another caster's misses draw nothing. The words keep
-    // the row-default white (this site's record push is unpinned — flagged open).
-    if !misses.is_empty()
-        && super::combat_log::classify_source(caster, index, self_guid, stores).is_some()
-    {
-        for &(guid, code) in &misses {
-            let anchor_guid = if code == 11 { caster } else { guid };
-            if self_guid.0 == Some(anchor_guid) {
-                continue;
-            }
-            if let (Some(&anchor), Some((word, category))) = (
-                index.0.get(&anchor_guid),
-                crate::combat_text::miss_word(code),
-            ) {
-                text.write(crate::combat_text::CombatTextSpawn {
-                    anchor,
-                    text: word.to_string(),
-                    category,
-                    color: None,
-                });
+    // law's K, inside every emitter): another caster's misses draw nothing.
+    //
+    // **Two laws phase 2 left open, both closed by the 2229 §5.**
+    //
+    // *Timing* — `0x6e7d4e fld [SpellRec+0x94]; fcomp 0.0; test ah,0x44; jp 0x6e7e71` skips this
+    // inline emit whenever `Spell.dbc` Speed is nonzero. A TRAVELLING spell's word is floated by
+    // the projectile's own arrival instead ([`crate::entities::MissileMiss`]), so a resisted
+    // Fireball reads "Resist" when the ball lands; a Speed-0 ability prints here, now. No
+    // catalog degrades to printing here, the way a NULL record degrades everywhere else.
+    //
+    // *Colour* — `0x6e7d73 mov edi,[ebp-0x8]` / `0x6e7dcc push edi` pushes the resolved SpellRec,
+    // not NULL, so the word runs the same B/K override as a number: a bit-15-clear spell's "Miss"
+    // is spell-GOLD. The three CVar gates come with it — they are read inside `0x607140`, which
+    // every word path calls, so `CombatDamage 0` silences these words too.
+    if !misses.is_empty() && display.is_none_or(|d| d.speed == 0.0) {
+        if let Some(color) = super::combat_log::classify_source(caster, index, self_guid, stores)
+            .and_then(|source| {
+                crate::combat_text::damage_color(
+                    text_gates,
+                    source,
+                    crate::combat_text::melee_styled(display),
+                )
+            })
+        {
+            for &(guid, code) in &misses {
+                let anchor_guid = if code == 11 { caster } else { guid };
+                if self_guid.0 == Some(anchor_guid) {
+                    continue;
+                }
+                if let (Some(&anchor), Some((word, category))) = (
+                    index.0.get(&anchor_guid),
+                    crate::combat_text::miss_word(code),
+                ) {
+                    text.write(crate::combat_text::CombatTextSpawn {
+                        anchor,
+                        text: word.to_string(),
+                        category,
+                        color,
+                    });
+                }
             }
         }
     }
@@ -1131,6 +1154,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (
@@ -1168,6 +1192,177 @@ mod tests {
             "the in-flight cast's own GO finishes the bar"
         );
         assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
+    }
+
+    /// **The GO's inline miss word: gold, gated, and only for an INSTANT spell** (decision 2229).
+    ///
+    /// Phase 2 shipped this emit unconditional and hardcoded white. The §5 closed both halves:
+    /// - `0x6e7d4e fld [SpellRec+0x94]; fcomp 0.0; test ah,0x44; jp 0x6e7e71` — a spell with a
+    ///   **travel Speed** prints nothing here; its word rides the projectile's arrival instead
+    ///   ([`crate::entities::MissileMiss`]). Sinister Strike (Speed 0) prints now; Fireball
+    ///   (Speed 24) does not;
+    /// - `0x6e7d73`/`0x6e7dcc` push the resolved SpellRec, so the word takes the same B/K
+    ///   override a number would — **spell gold**, not the category-3 row default;
+    /// - and the `CombatDamage` gate lives inside `0x607140`, which this path calls, so it
+    ///   silences the word too — the leg this site was missing entirely.
+    #[test]
+    fn the_gos_inline_miss_word_is_gold_instant_only_and_cvar_gated() {
+        use crate::combat_text::{CombatTextSpawn, COLOR_SPELL_GOLD};
+        use crate::creature_anim::Casting;
+        use crate::go_anim::GoLidOpen;
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const SINISTER_STRIKE: u32 = 1752; // Speed 0 — an instant melee ability
+        const FIREBALL: u32 = 133; // Speed 24 — it travels
+
+        let make_spells = || crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [
+                    (
+                        SINISTER_STRIKE,
+                        benilla_formats::SpellDisplay {
+                            name: "Sinister Strike".into(),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        FIREBALL,
+                        benilla_formats::SpellDisplay {
+                            name: "Fireball".into(),
+                            speed: 24.0,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+
+        // Our cast (guid 10) misses a creature (guid 20). Returns the words it floated.
+        let fire = |spell: u32, combat_damage: bool| {
+            let mut app = App::new();
+            app.add_message::<CastEvent>()
+                .add_message::<SpellGoTargets>()
+                .add_message::<CombatTextSpawn>()
+                .add_message::<GoLidOpen>()
+                .add_message::<crate::creature_anim::SheathRequest>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<CastBarFeed>()
+                .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::items::Items>();
+            let self_e = app
+                .world_mut()
+                .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
+                .id();
+            let victim_e = app
+                .world_mut()
+                .spawn((Guid(20), ObjectStore::default()))
+                .id();
+            {
+                let mut index = app.world_mut().resource_mut::<GuidIndex>();
+                index.0.insert(10, self_e);
+                index.0.insert(20, victim_e);
+            }
+            app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let spells = make_spells();
+            let gates = crate::combat_text::DamageTextGates {
+                combat_damage,
+                ..Default::default()
+            };
+            app.world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          casting: Query<&Casting>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          mut go_targets: MessageWriter<SpellGoTargets>,
+                          self_guid: Res<SelfGuid>,
+                          stores: Query<&mut ObjectStore>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>,
+                          mut queued_melee: ResMut<QueuedMeleeSpell>,
+                          mut text: MessageWriter<CombatTextSpawn>,
+                          mut go_lid: MessageWriter<GoLidOpen>,
+                          mut cooldowns: ResMut<Cooldowns>,
+                          mut pet_bar: ResMut<crate::ui_pet::PetBar>,
+                          mut items: ResMut<crate::items::Items>,
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                        let net_commands = crate::net::NetCommands(tx.clone());
+                        spell_go(
+                            10,
+                            spell,
+                            0,
+                            vec![],
+                            vec![(20, 1)], // one MISS
+                            Some(20),
+                            None,
+                            None,
+                            None,
+                            None,
+                            &mut commands,
+                            &index,
+                            &casting,
+                            &mut cast_events,
+                            &mut go_targets,
+                            &self_guid,
+                            &stores,
+                            &mut cast_bar,
+                            &mut pending,
+                            &mut queued_melee,
+                            &mut text,
+                            gates,
+                            &mut go_lid,
+                            &mut crate::ui_loot::LootLatch::default(),
+                            (
+                                &mut cooldowns,
+                                Some(&spells),
+                                &mut items,
+                                &net_commands,
+                                &mut pet_bar,
+                            ),
+                            (
+                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut sheath,
+                                false,
+                            ),
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+            app.world_mut()
+                .resource_mut::<Messages<CombatTextSpawn>>()
+                .drain()
+                .map(|s| (s.text, s.category, s.color))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            fire(SINISTER_STRIKE, true),
+            vec![("Miss".to_string(), 3, Some(COLOR_SPELL_GOLD))],
+            "an instant ability's miss word prints here, in spell gold — not white"
+        );
+        assert!(
+            fire(FIREBALL, true).is_empty(),
+            "Speed 24: `0x6e7d4e` skips the inline emit — the projectile floats it on arrival"
+        );
+        assert!(
+            fire(SINISTER_STRIKE, false).is_empty(),
+            "CombatDamage 0 gates the word emitter, not just the number emitter"
+        );
     }
 
     /// **The GO handler's PET leg** (decision 1031): a spell going off on a unit WE own arms the
@@ -1289,6 +1484,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (
@@ -1433,6 +1629,7 @@ mod tests {
                         &mut pending,
                         &mut queued_melee,
                         &mut text,
+                        crate::combat_text::DamageTextGates::default(),
                         &mut go_lid,
                         &mut crate::ui_loot::LootLatch::default(),
                         (
@@ -1739,6 +1936,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (

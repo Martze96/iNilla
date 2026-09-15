@@ -63,18 +63,12 @@ pub(super) fn classify_source(
 // attacker swing clip's impact keyframe with the rest of the victim feedback
 // (`crate::combat_text::melee_impact_text`, fed by `creature_anim::impact`).
 
-/// The color law's `B` bit for a spell-packet emit (`0x6128b0`: `recordPtr == 0 ||
-/// sign(byte[SpellRec+0x25])`): melee-styled (white) when the spell id resolves to no record —
-/// the client's NULL-record half — or the record carries `AttributesEx3 & 0x8000`
-/// ([`benilla_formats::SpellDisplay::melee_white_damage`] — how a ranged basic shot's
-/// `SMSG_SPELLNONMELEEDAMAGELOG` floats white; decision 0376). No catalog at all degrades the
-/// same way the client degrades with no record: melee-styled.
-fn melee_styled(spells: Option<&crate::ui_action::Spells>, spell_id: u32) -> bool {
-    let Some(spells) = spells else { return true };
-    spells
-        .catalog
-        .get(spell_id)
-        .is_none_or(|d| d.melee_white_damage())
+/// The color law's `B` bit for a spell-packet emit, over the catalog the arms carry: resolve the
+/// spell's record and hand it to [`crate::combat_text::melee_styled`] (which owns the law and its
+/// NULL-record degradation). This is how a ranged basic shot's `SMSG_SPELLNONMELEEDAMAGELOG`
+/// floats white (decision 0376) while an ordinary spell floats gold.
+pub(super) fn melee_styled(spells: Option<&crate::ui_action::Spells>, spell_id: u32) -> bool {
+    crate::combat_text::melee_styled(spells.and_then(|s| s.catalog.get(spell_id)))
 }
 
 /// The spell arms' shared `UNIT_COMBAT` split: a landed amount is `WOUND` (`CRITICAL` descriptor
@@ -529,8 +523,9 @@ fn miss_action(code: u8) -> Option<&'static str> {
 
 /// `SMSG_SPELLLOGMISS` → one outcome word per missed target (`0x5e7e00`). Disjoint from the
 /// SPELL_GO miss list in practice: vmangos routes only impact-time outcomes (immune, evade) here.
-/// Source-classified like every emitter (the classifier lives inside the word twin too); the
-/// site's record push is unpinned, so the words keep the row-default white (flagged open).
+/// Source-classified like every emitter (the classifier lives inside the word twin too), and
+/// **coloured by the same B/K law as a number** — `0x5e7f63 mov ecx,[ebp-0x8]; 0x5e7f66 push ecx`
+/// pushes the resolved SpellRec, not NULL, so this site's words are spell-GOLD (decision 2229).
 #[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn spell_log_miss(
     s: SpellLogMiss,
@@ -574,14 +569,9 @@ pub(super) fn spell_log_miss(
     let Some(source) = classify_source(s.caster, index, self_guid, stores) else {
         return; // K = other: never drawn
     };
-    let Some(_override_color) = damage_color(gates, source, melee_styled(spells, s.spell_id))
-    else {
+    let Some(color) = damage_color(gates, source, melee_styled(spells, s.spell_id)) else {
         return; // the CombatDamage / Pet* gates
     };
-    // The colour it picks is deliberately NOT applied here — that is the doc comment's "unpinned
-    // record push", and closing it is a visible change that belongs to whoever is looking at
-    // combat-text colour, not to the CVar wiring. (`melee_impact_text` already applies the
-    // override to ITS words, so the inconsistency is ours, not the reference's.)
     for &(target, code) in &s.misses {
         if let (Some(anchor), Some((word, category))) =
             (gated_anchor(target, index, self_guid), miss_word(code))
@@ -590,7 +580,7 @@ pub(super) fn spell_log_miss(
                 anchor,
                 text: word.to_string(),
                 category,
-                color: None,
+                color,
             });
         }
     }
@@ -689,4 +679,105 @@ pub(super) fn level_up(l: LevelUpInfo, chat_log: &mut ChatLog) {
     // from each side). A deliberate temporary that outlives its trigger is indistinguishable from
     // a permanent one; this is what one looks like when it is found.
     chat_log.push_level_up_gains(&l, talent_points);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::combat_text::COLOR_SPELL_GOLD;
+    use crate::net::{Guid, SelfPlayer};
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// **`SMSG_SPELLLOGMISS`'s word is spell GOLD** (decision 2229) — the third and last of the
+    /// three word paths this client had drawing white on a hardcoded `color: None`.
+    ///
+    /// `0x5e7f63 mov ecx,[ebp-0x8]` / `0x5e7f66 push ecx` hands `0x607140` the resolved SpellRec,
+    /// not the literal NULL the melee swing site pushes — so the emitter's `B` bit comes from the
+    /// spell's own `AttributesEx3` and an ordinary spell's word is gold, exactly like its number.
+    /// Unlike the GO's inline emit there is **no Speed test** at this site: the word prints on
+    /// receipt whatever the spell's travel time.
+    #[test]
+    fn the_spell_log_miss_word_is_spell_gold() {
+        const IMMOLATE: u32 = 348;
+
+        let spells = crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [(
+                    IMMOLATE,
+                    benilla_formats::SpellDisplay {
+                        name: "Immolate".into(),
+                        speed: 24.0, // travels, and it still prints here
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+
+        let mut app = App::new();
+        app.add_message::<CombatTextSpawn>()
+            .add_message::<UnitCombatFeedback>()
+            .add_message::<CombatTextEvent>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<SelfGuid>();
+        let self_e = app
+            .world_mut()
+            .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
+            .id();
+        let victim_e = app
+            .world_mut()
+            .spawn((Guid(20), ObjectStore::default()))
+            .id();
+        {
+            let mut index = app.world_mut().resource_mut::<GuidIndex>();
+            index.0.insert(10, self_e);
+            index.0.insert(20, victim_e);
+        }
+        app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+        app.world_mut()
+            .run_system_once(
+                move |index: Res<GuidIndex>,
+                      self_guid: Res<SelfGuid>,
+                      stores: Query<&mut ObjectStore>,
+                      mut text: MessageWriter<CombatTextSpawn>,
+                      mut feedback: MessageWriter<UnitCombatFeedback>,
+                      mut center: MessageWriter<CombatTextEvent>| {
+                    spell_log_miss(
+                        SpellLogMiss {
+                            spell_id: IMMOLATE,
+                            caster: 10,
+                            misses: vec![(20, 7)], // IMMUNE — the outcome vmangos routes here
+                        },
+                        &index,
+                        &self_guid,
+                        &stores,
+                        Some(&spells),
+                        DamageTextGates::default(),
+                        &mut text,
+                        &mut feedback,
+                        &mut center,
+                    );
+                },
+            )
+            .unwrap();
+
+        let spawned: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<CombatTextSpawn>>()
+            .drain()
+            .map(|s| (s.text, s.category, s.color, s.anchor))
+            .collect();
+        assert_eq!(
+            spawned,
+            vec![("Immune".to_string(), 3, Some(COLOR_SPELL_GOLD), victim_e)],
+            "gold, category 3, over the immune target"
+        );
+    }
 }

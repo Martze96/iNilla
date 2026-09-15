@@ -582,7 +582,9 @@ pub(crate) enum CastEventKind {
     /// — the `0x60d450` fallback a basic shot's impact kit resolves through (decision 0370).
     Impact { weapon_visual: Option<u32> },
     /// A projectile arrived at a **ground point** instead of on a unit — the client's per-tick
-    /// missile dispatch taking its ground arm (`0x61e1d0` → `0x61d870`), reached by the single
+    /// missile dispatch taking `0x61e1d0` → `0x61d870`, which is the **no-live-target** arm, not
+    /// a ground arm as such (a target that despawned mid-flight lands there too; wow-re
+    /// `missile-arrival-dispatch.md`). Ours is reached only by the single
     /// missile a dest-targeted GO with an empty hit list launches
     /// ([`spell_visual::MissileSpawn::ground_aim`]). `entity` is the **caster** — `0x61d870`
     /// plays the kit on it, not on anything at the point — and `pos` is the arrival position,
