@@ -499,6 +499,21 @@ impl Plate {
         // app through [`UiScript::hovered_nameplate`] and [`UiScript::take_nameplate_clicks`].
         // `EnableMouse`/`IsMouseEnabled` are in the corpus's own call set, and pfUI's vanilla
         // click-through block drives them.
+        //
+        // **And it takes BOTH buttons, on the UP edge**: `RegisterForClicks(0x500)` at `0x7cb637`
+        // (`0x779730` → `[this+0x330] = 0x500` = LeftButtonUp | RightButtonUp). The arena's Button
+        // default is `{"LeftButtonUp"}` alone, so without this a physical right-click on a plate
+        // fired no click at all — [`super::button::wants_click`] refused the release, the funnel
+        // never ran, and since 2233 took the camera off a press that lands on a plate there was no
+        // other path left: right-clicking a nameplate did nothing. The reference's own slot
+        // (`0x7cb910`) takes mask 1 → `0x4925d0` select and mask 4 → `0x492820` select+interact.
+        if let Some(KindState::Button(bs)) = model.arena.frame_mut(frame).map(|f| &mut f.kind_state)
+        {
+            bs.registered_clicks = ["LeftButtonUp", "RightButtonUp"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        }
 
         // The blend modes are the ctor's own, one `0x7703f0` call per texture (wow-re
         // `nameplate-vkey.md` §8.1, byte-arbitrated): everything is BLEND(2) except the **glow,

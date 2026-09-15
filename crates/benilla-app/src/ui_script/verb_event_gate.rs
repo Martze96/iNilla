@@ -58,11 +58,6 @@ struct Pair {
 const ELSEWHERE: &[(&str, &str, &str)] = &[
     // The sell slot's diff (`auction_sell_item` moved, or `sell_slot_dirty`).
     (
-        "CalculateAuctionDeposit",
-        "NEW_AUCTION_UPDATE",
-        "benilla-app/src/ui_auction/mod.rs",
-    ),
-    (
         "ClickAuctionSellItemButton",
         "NEW_AUCTION_UPDATE",
         "benilla-app/src/ui_auction/mod.rs",
@@ -146,12 +141,6 @@ const ELSEWHERE: &[(&str, &str, &str)] = &[
         "UPDATE_BINDINGS",
         "benilla-app/src/bindings.rs",
     ),
-    // A `SessionRequest::StopCinematic`; the player stops, and the flip to not-playing fires.
-    (
-        "StopCinematic",
-        "CINEMATIC_STOP",
-        "benilla-app/src/cinematic.rs",
-    ),
     // The toggle goes to the wire and the bar's pushed key changes on the reply — one round trip
     // later than the reference, which fires locally from the toggle.
     (
@@ -172,54 +161,54 @@ const GAP: &[(&str, &str, &str)] = &[
     (
         "CancelSkillUps",
         "SKILL_LINES_CHANGED",
-        "resets temp skill points over a table this model keeps empty (`skills.rs`), so nothing \
-         moves and `ui_char.rs`'s feed has nothing to announce; the reference fires from \
-         0x4d3e3a regardless",
+        "the reference's verb (0x4d3e30) calls the temp-point reset and fires unconditionally at \
+         0x4d3e35; here the reset runs over a table this model keeps empty (`skills.rs`), so \
+         nothing moves and `ui_char.rs`'s feed has nothing to announce — the stock SkillFrame \
+         would only repaint under its own Close",
     ),
     (
         "ClickTargetTradeButton",
         "TRADE_REPLACE_ENCHANT",
-        "the trade-window enchant leg (0592 P3) is not built; the verb is the money arm only",
+        "the reference runs the enchant clash check 0x496170 when a spell is on the cursor and \
+         fires this for the replace dialog (wow-re staticpopup-dialog-bindings.md §3.1); casting \
+         an enchant onto the partner's slot is not built here — `ui_trade.rs` only mirrors the \
+         wire's enchant slot — so the verb is the money arm alone",
     ),
     (
         "CloseTrade",
         "PLAYER_TRADE_MONEY",
-        "`ui_trade.rs` announces money only while the trade is open; the reference's close zeroes \
-         the offer and fires from 0x4bfdce, under a frame that TRADE_CLOSED hides first",
+        "fired only when the trade did not complete (`[0xb71748] == 0`, wow-re \
+         incoming-trade-request-law.md), zeroing the cancelled offer under a frame TRADE_CLOSED \
+         hides; here `TradeSession::begin` resets the whole session at the next trade, so the \
+         next window opens at zero either way",
     ),
     (
         "CollapseCraftSkillLine",
         "CRAFT_UPDATE",
-        "a no-op here: the craft list is flat, the header law was never ported from TradeSkill \
-         (0446, 0530's follow-up), so there is nothing to repaint",
+        "the reference commits through the 21-byte thunk 0x4f6be0 (the trainer's 0x4d8c90 shape); \
+         a no-op here because the craft list is flat — the header law was never ported from \
+         TradeSkill (0446, 0530's follow-up) — so there is nothing to repaint. Whether any 1.12 \
+         craft list carries more than one group is not established: 0446 covers Enchanting, \
+         Beast Training is unchecked",
     ),
     (
         "ExpandCraftSkillLine",
         "CRAFT_UPDATE",
-        "the same no-op as CollapseCraftSkillLine",
+        "the same thunk and the same no-op as CollapseCraftSkillLine",
     ),
     (
         "PetDismiss",
         "PET_DISMISS_START",
-        "no shipped file listens; the dismiss reaches the wire through the app's drain and the \
-         pet frame follows the unit's departure",
+        "the worker 0x4bd6e0 sends the dismiss and fires this with a duration (`%d`, 10000 — \
+         wow-re pet-action-bar-api.md §10.8); no shipped file listens, the dismiss reaches the \
+         wire through the app's drain, and the pet frame follows the unit's departure",
     ),
     (
         "SelectGossipOption",
         "GOSSIP_ENTER_CODE",
-        "the code-entry gossip option kind is not modelled (`reference_ui`'s UNPRODUCED row)",
-    ),
-    (
-        "SetPetStablePaperdoll",
-        "PET_STABLE_UPDATE_PAPERDOLL",
-        "inert by design: the stable's model pane is an app-side booth that follows the selection \
-         every frame (1676), so the VM has nothing to point",
-    ),
-    (
-        "UpdateMapHighlight",
-        "CLOSE_WORLD_MAP",
-        "0x4a7620 fires it (site 0x4a7835, id 373) on a path the highlight verb reaches under a \
-         condition nobody has read; unbuilt until carved",
+        "a coded option raises the code-entry popup in the reference (the worker 0x4e2320); here \
+         coded options are greyed and unselectable (0081 v1, `reference_ui`'s UNPRODUCED row), and \
+         vmangos's `gossip_menu_option` carries zero coded rows, so no NPC on this server reaches it",
     ),
 ];
 

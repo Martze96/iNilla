@@ -703,6 +703,50 @@ fn a_completed_click_on_a_plate_reaches_the_app() {
     );
 }
 
+/// **The right button too** — `RegisterForClicks(0x500)` is LeftButtonUp | **RightButtonUp**
+/// (`0x7cb637` → `[this+0x330]`), and the reference's slot forks on it: mask 1 → `0x4925d0`
+/// select, mask 4 → `0x492820` select **and interact** (decision 2233, wow-re
+/// `ui/scratch/mouselook-mouseover-and-nameplate-click-law.md` §6.4).
+///
+/// The regression this pins: a plate is created as a plain `Button`, whose default registered set
+/// is `{"LeftButtonUp"}` alone, so the release was refused before the click funnel — and with 2233
+/// taking the camera off a press that lands on a plate, that left right-clicking a nameplate doing
+/// nothing whatsoever.
+#[test]
+fn a_physical_right_click_on_a_plate_reaches_the_app() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+    s.mouse_move(500.0, 384.0);
+
+    s.mouse_button(500.0, 384.0, "RightButton", true);
+    assert!(
+        s.take_nameplate_clicks().is_empty(),
+        "the UP lane only: `0x500` has no ButtonDown bit"
+    );
+    s.mouse_button(500.0, 384.0, "RightButton", false);
+    let clicks = s.take_nameplate_clicks();
+    assert_eq!(clicks.len(), 1);
+    assert_eq!(clicks[0].key, key);
+    assert_eq!(clicks[0].button, "RightButton");
+}
+
+/// A button the plate never registered fires nothing — the mask is exactly `0x500`, not "any
+/// button".
+#[test]
+fn a_middle_click_on_a_plate_fires_nothing() {
+    let mut s = vm();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.mouse_move(500.0, 384.0);
+    s.mouse_button(500.0, 384.0, "MiddleButton", true);
+    s.mouse_button(500.0, 384.0, "MiddleButton", false);
+    assert!(
+        s.take_nameplate_clicks().is_empty(),
+        "`0x500` is Left|Right on the up edge and nothing else"
+    );
+}
+
 /// pfUI's click-through calls `plate:Click("LeftButton")` (`nameplates.lua:1274`), and
 /// CustomNameplates and `_Nameplates` do the same. A scripted click has to select the unit like a
 /// physical one — in the reference both go through the button's one click slot, and here they go
