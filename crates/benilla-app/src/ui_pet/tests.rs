@@ -2,8 +2,6 @@
 //! fixtures (a packed word, a slot view, a `PetSpells` state) and splitting them per module would
 //! fork those three ways.
 
-use bevy::prelude::*;
-
 use benilla_protocol::messages::{
     PetActionEntry, PetSpells, PET_ACT_COMMAND, PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE,
     PET_ACT_REACTION, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW,

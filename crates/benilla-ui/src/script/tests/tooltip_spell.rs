@@ -1056,12 +1056,18 @@ fn quest_reward_spell_getters_and_hovers() {
     );
 
     s.set_quest_log(QuestLogState {
-        detail: Some(QuestLogDetail {
-            reward_spell: Some(reward),
+        entries: vec![QuestLogEntryView {
+            quest_id: 7,
+            detail: Some(QuestLogDetail {
+                reward_spell: Some(reward),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
+        }],
         ..Default::default()
     });
+    // The detail hangs on the row now, so both readers go through the selection (2247).
+    s.run("SelectQuestLogEntry(1)").unwrap();
     assert_eq!(
         s.eval::<(String, String, Option<i64>)>("return GetQuestLogRewardSpell()")
             .unwrap()

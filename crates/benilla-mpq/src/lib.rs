@@ -141,7 +141,9 @@ type Result<T> = std::result::Result<T, Error>;
 /// Reinterpret a byte buffer (length a multiple of 4) as a `Vec<u32>` (little-endian) for table decrypt.
 fn to_u32s(bytes: &[u8]) -> Vec<u32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -302,7 +304,9 @@ impl Archive {
         let mut otab = vec![0u8; otab_cap * 4]; // == otab_len * 4, proven <= avail above
         file.read_exact(&mut otab)?;
         let offsets: Vec<u32> = otab
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
                 c.u32_at(0)
                     .ok_or_else(|| Error::Corrupt(format!("{name}: corrupt sector offset table")))

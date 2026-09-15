@@ -216,7 +216,7 @@ impl ChunkMesh {
             .iter()
             .find_map(|tri| triangle_z_at(tri, wow[0], wow[1]));
         }
-        self.indices.chunks_exact(3).find_map(|t| {
+        self.indices.as_chunks::<3>().0.iter().find_map(|t| {
             let tri = [
                 *self.positions.get(t[0] as usize)?,
                 *self.positions.get(t[1] as usize)?,
@@ -950,7 +950,7 @@ mod tests {
         // The raw walk the cell lookup replaced: every triangle of every chunk, in index order.
         let walk = |chunks: &[ChunkMesh], wow: [f32; 3]| {
             chunks.iter().find_map(|c| {
-                c.indices.chunks_exact(3).find_map(|t| {
+                c.indices.as_chunks::<3>().0.iter().find_map(|t| {
                     let tri = [
                         c.positions[t[0] as usize],
                         c.positions[t[1] as usize],

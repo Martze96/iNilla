@@ -34,7 +34,9 @@ struct Face {
 
 fn faces(sub: &RenderSubmesh) -> Vec<Face> {
     sub.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter_map(|t| {
             let p: Vec<[f32; 3]> = t.iter().map(|&i| sub.positions[i as usize]).collect();
             let (u, v) = (sub3(p[1], p[0]), sub3(p[2], p[0]));

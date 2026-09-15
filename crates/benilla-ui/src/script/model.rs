@@ -1775,6 +1775,18 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// The detail pane of the row `SelectQuestLogEntry` currently names — resolved HERE, per call,
+    /// never baked into the pushed snapshot (decision 2247). The reference's detail bindings read
+    /// the selection variable and peek the quest cache inside the same call, so a select-then-read
+    /// pair within one frame answers about the row just selected; the app's push only supplies the
+    /// per-row data those reads land on. `None` for no selection, an out-of-range one, or a header.
+    pub(crate) fn selected_quest_detail(&self) -> Option<&quest_log::QuestLogDetail> {
+        let index = usize::try_from(self.quest_log_selection.checked_sub(1)?).ok()?;
+        self.quest_log.entries.get(index)?.detail.as_ref()
+    }
+}
+
+impl Model {
     /// A unit token's snapshot, **case-folded the way the client folds it**.
     ///
     /// 1.12's resolver `0x515970` compares each of its literals with `SStrCmpI` → `_strnicmp`,

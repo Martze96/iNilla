@@ -57,7 +57,9 @@ pub fn parse_m2_collision_hull(bytes: &[u8]) -> Result<CollisionMesh> {
     let rd = &format.model().raw_data;
     let positions: Vec<[f32; 3]> = rd
         .bounding_vertices
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .map(|c| {
             [
                 f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
@@ -69,7 +71,9 @@ pub fn parse_m2_collision_hull(bytes: &[u8]) -> Result<CollisionMesh> {
     let n = positions.len() as u32;
     let indices: Vec<u32> = rd
         .bounding_triangles
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u32::from(u16::from_le_bytes([c[0], c[1]])))
         .collect();
     // Guard (verified true on every real 1.12 hull): whole triangles, all indices in range. Bail to

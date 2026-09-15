@@ -1743,8 +1743,10 @@ mod tests {
         // Byte-exact, but reported as a texel count and a name — a raw 32 KiB `assert_eq!` dump of a
         // 128×64 RGBA tile is unreadable, and the useful fact is *which* of the three it is not.
         let differing = |got: &[u8], want: &[u8]| {
-            got.chunks_exact(4)
-                .zip(want.chunks_exact(4))
+            got.as_chunks::<4>()
+                .0
+                .iter()
+                .zip(want.as_chunks::<4>().0)
                 .filter(|(a, b)| a != b)
                 .count()
         };
@@ -1883,8 +1885,10 @@ mod tests {
                 .any(|(tx, ty, tw, th)| x >= *tx && x < tx + tw && y >= *ty && y < ty + th)
         };
         let moved: Vec<usize> = plain.mips[0]
-            .chunks_exact(4)
-            .zip(crested.mips[0].chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(crested.mips[0].as_chunks::<4>().0)
             .enumerate()
             .filter(|(_, (a, b))| a != b)
             .map(|(i, _)| i)

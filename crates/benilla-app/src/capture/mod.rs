@@ -1088,7 +1088,9 @@ fn drive_capture(
             if watch.stable >= stable_frames() || capped {
                 if let Some(px) = watch.prev.as_deref() {
                     if px
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
                     {
                         error!(

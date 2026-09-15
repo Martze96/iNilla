@@ -262,7 +262,7 @@ pub fn footprint_tri_grids(footprints: &[Option<FootprintTris>]) -> Vec<Option<C
         .iter()
         .map(|fp| {
             let fp = fp.as_ref()?;
-            let tris: Vec<&[u16]> = fp.indices.chunks_exact(3).collect();
+            let tris: Vec<&[u16; 3]> = fp.indices.as_chunks::<3>().0.iter().collect();
             ColumnGrid::build(tris.len(), |i| {
                 let mut lo = [f32::MAX; 2];
                 let mut hi = [f32::MIN; 2];
@@ -589,7 +589,7 @@ impl AssetLoader for WmoModelLoader {
             let mut gidx: Vec<u32> = Vec::new();
             accumulate_wmo_group_collision(&gbytes, &mut gpos, &mut gidx);
             if let Some(tris) = group_collision_tris.get_mut(gi as usize) {
-                for t in gidx.chunks_exact(3) {
+                for t in gidx.as_chunks::<3>().0 {
                     if let (Some(&a), Some(&b), Some(&c)) = (
                         gpos.get(t[0] as usize),
                         gpos.get(t[1] as usize),
@@ -608,7 +608,7 @@ impl AssetLoader for WmoModelLoader {
             let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
             if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
-                for t in didx.chunks_exact(3) {
+                for t in didx.as_chunks::<3>().0 {
                     if let (Some(&a), Some(&b), Some(&c)) = (
                         dpos.get(t[0] as usize),
                         dpos.get(t[1] as usize),

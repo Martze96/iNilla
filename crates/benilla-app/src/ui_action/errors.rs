@@ -18,9 +18,9 @@
 //! All four drain in `super::feed_actions` into the one sink [`show_messages`], which puts each
 //! resolved line on the surface its message record names — read from the catalog
 //! ([`benilla_ui::messages`], decision 1770) rather than carried to the call site by hand.
-//! Every string comes from the VM's own loaded `GlobalStrings.lua`, never hardcoded, so an
-//! absent key shows nothing (the reference's data-suppression face) and localization rides
-//! for free.
+//! Every string comes from the VM's own loaded `GlobalStrings.lua`, never hardcoded, so
+//! localization rides for free. An absent key shows **nothing**, which is a deliberate
+//! divergence and not the reference's behaviour — see [`ui_error_text`].
 
 use benilla_ui::messages::MessageRecord;
 use benilla_ui::script::{ScriptValue, UiScript};
@@ -278,8 +278,23 @@ impl UiErrorTexts {
 
 /// Resolve one [`UiError`] to its displayed text — `GetText(key)` + the `%s`/`%d` argText
 /// substitution ("Requires %s" + "Herbalism" → "Requires Herbalism", cursor-system.md §8.8).
-/// `None` (absent or empty key) = show nothing: GlobalStrings data-suppression, faithfully
-/// (the ref's own `[record+0x00]` null/empty guard at `0x4967bd`/`0x4967c5`).
+/// `None` (the key resolves to nothing, or the filled text is empty) = show nothing — a
+/// **NAMED DIVERGENCE**, corrected from a false citation this doc carried until 2246.
+///
+/// The claim was that this is the reference's own guard at `0x4967bd`/`0x4967c5`. It is not.
+/// Those two test the **catalog row's key field** — `0x4967b6 mov ecx,[edx*4 + 0xb4b498]`, the
+/// row's `+0x00`, null then first-byte-empty — i.e. whether the *record names a key at all*. In
+/// benilla that field is a `&'static str` literal in a generated table, so the guard they model
+/// can never fire, and the guard actually implemented here is one the reference does not have:
+/// between the resolve (`0x4967d7 call 0x703bf0`) and the dispatch (`0x496842`) there is **no
+/// test of the resolved string**. A key the player's `GlobalStrings.lua` does not define resolves
+/// to the empty string and the reference emits an **empty** line — `0x49a870`'s own entry test
+/// (`0x49a881 test esi,esi`) is on the buffer *pointer*, not its contents.
+///
+/// Kept because it only bites on a chain missing a stock key, where silence beats a blank line in
+/// the log — but kept **named**, because the shape of the old comment (bytes cited for behaviour
+/// those bytes do not justify) is the same shape as the `removed_spell` error 2246 corrects.
+/// [`keyed_line`] and [`keyed_line_s`] carry the same divergence.
 pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     // Through the one shared filler (2045). This used `str::replace`, which fills EVERY `%s`
     // with the same argument — latent only because no message on this queue carried two yet.
@@ -359,8 +374,9 @@ impl Shown {
 }
 
 /// Resolve a message key against the VM's own `GlobalStrings.lua` into a [`Shown`] — or `None`
-/// when the key has no string there, which is the reference's own data-suppression face
-/// (`0x4967bd`/`0x4967c5`) and the reason every raise site carries a *key* rather than text.
+/// when the key has no string there. Carrying a *key* rather than text at every raise site is the
+/// reference's shape; suppressing on an **absent** one is [`ui_error_text`]'s named divergence,
+/// not the `0x4967bd`/`0x4967c5` guard this line used to cite.
 ///
 /// Lives here rather than in each window because every keyed raise site needs exactly this and
 /// four of them had grown their own copy (decision 1821).

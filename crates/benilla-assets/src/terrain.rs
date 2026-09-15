@@ -442,7 +442,12 @@ mod tests {
             layer.chain.len(),
             mip_chain_byte_size(LAYER_TEX_SIZE, LAYER_MIP_COUNT)
         );
-        assert!(layer.chain.chunks_exact(4).all(|px| px == [10, 20, 30, 40]));
+        assert!(layer
+            .chain
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| *px == [10, 20, 30, 40]));
     }
 
     #[test]
@@ -582,7 +587,7 @@ mod tests {
             .remove(0);
             // RGB565 is what a solid colour costs in any block form; assert within one quantisation
             // step per channel rather than pretending the round trip is exact.
-            for px in top.chunks_exact(4) {
+            for px in top.as_chunks::<4>().0 {
                 for (got, want) in px[..3].iter().zip(&rgba[..3]) {
                     assert!(
                         got.abs_diff(*want) <= 8,
@@ -594,7 +599,7 @@ mod tests {
             // and samples opaque, which is the documented limitation of the placeholder.
             let alpha_ok = match form {
                 BlpTexels::Bc1 => true,
-                _ => top.chunks_exact(4).all(|px| px[3] == rgba[3]),
+                _ => top.as_chunks::<4>().0.iter().all(|px| px[3] == rgba[3]),
             };
             assert!(alpha_ok, "{form:?} must carry the fallback's alpha");
         }

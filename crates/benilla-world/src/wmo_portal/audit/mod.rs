@@ -242,7 +242,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         let mut cp: Vec<[f32; 3]> = Vec::new();
         let mut ci: Vec<u32> = Vec::new();
         accumulate_wmo_group_collision(&gbytes, &mut cp, &mut ci);
-        for t in ci.chunks_exact(3) {
+        for t in ci.as_chunks::<3>().0 {
             if let (Some(&a), Some(&b), Some(&c)) = (
                 cp.get(t[0] as usize),
                 cp.get(t[1] as usize),
@@ -258,7 +258,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         // exactly as the asset loader stores it (decision 0692).
         let (mut dp, mut di): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
         benilla_formats::accumulate_wmo_group_camera_only_collision(&gbytes, &mut dp, &mut di);
-        for t in di.chunks_exact(3) {
+        for t in di.as_chunks::<3>().0 {
             if let (Some(&a), Some(&b), Some(&c)) = (
                 dp.get(t[0] as usize),
                 dp.get(t[1] as usize),
@@ -458,7 +458,7 @@ fn nearest_hit_mesh(
     max_t: f32,
 ) -> Option<f32> {
     let mut best: Option<f32> = None;
-    for t in indices.chunks_exact(3) {
+    for t in indices.as_chunks::<3>().0 {
         let (Some(&a), Some(&b), Some(&c)) = (
             positions.get(t[0] as usize),
             positions.get(t[1] as usize),

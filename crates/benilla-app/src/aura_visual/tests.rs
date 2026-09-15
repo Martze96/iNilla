@@ -9,7 +9,6 @@ use benilla_formats::{
     char_proc_type, CharProc, SpellVisualCatalog, VisualKit, VisualStages, KIT_CHAR_PROCS,
 };
 use benilla_protocol::messages::ObjectFields;
-use bevy::prelude::*;
 
 use super::*;
 use crate::creature_anim::SpellVisuals;

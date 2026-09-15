@@ -414,7 +414,7 @@ fn ray_submesh(
         })
     };
     let mut nearest: Option<(f32, [Vec3; 3])> = None;
-    for t in geo.indices.chunks_exact(3) {
+    for t in geo.indices.as_chunks::<3>().0 {
         let (Some(a), Some(b), Some(c)) = (pos(t[0]), pos(t[1]), pos(t[2])) else {
             continue; // an out-of-range index — corrupt authoring; skip the triangle, not the model
         };
@@ -514,11 +514,15 @@ pub fn ray_posed_mesh(
     };
     let hits = match mesh.indices()? {
         Indices::U16(ix) => ix
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter_map(|c| tri(c[0] as usize, c[1] as usize, c[2] as usize))
             .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.min(t)))),
         Indices::U32(ix) => ix
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter_map(|c| tri(c[0] as usize, c[1] as usize, c[2] as usize))
             .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.min(t)))),
     };

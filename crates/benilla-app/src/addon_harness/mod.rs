@@ -1812,7 +1812,6 @@ fn seat_a_session(script: &mut UiScript) {
         script.set_quest_log(QuestLogState {
             entries: vec![header, in_progress, done],
             num_quests: 2,
-            detail: None,
         });
     }
 

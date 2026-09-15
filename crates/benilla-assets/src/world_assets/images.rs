@@ -131,7 +131,7 @@ fn flatten_frame_dc(data: &mut [u8], spans: &[Vec<(usize, usize)>], levels: usiz
         let mut texels = 0usize;
         for frame in spans {
             let (start, len) = frame[level];
-            for px in data[start..start + len].chunks_exact(4) {
+            for px in data[start..start + len].as_chunks::<4>().0 {
                 for c in 0..4 {
                     sums[c] += i64::from(px[c]);
                 }
@@ -149,7 +149,9 @@ fn flatten_frame_dc(data: &mut [u8], spans: &[Vec<(usize, usize)>], levels: usiz
             }
             for c in 0..4 {
                 let have: i64 = data[start..start + len]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|px| i64::from(px[c]))
                     .sum();
                 // The exact integer total this channel must move by to sit on the loop mean.

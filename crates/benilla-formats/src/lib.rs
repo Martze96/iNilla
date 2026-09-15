@@ -414,7 +414,7 @@ pub fn blp_mip_stats(blp_bytes: &[u8]) -> Result<Vec<BlpMipStats>> {
             let mut outside = (0usize, u8::MAX, 0u64, u8::MIN);
             let mut inside = (0usize, u8::MAX, 0u64, u8::MIN);
             let mut below_128 = 0usize;
-            for px in m.rgba.chunks_exact(4) {
+            for px in m.rgba.as_chunks::<4>().0 {
                 let luma = ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8;
                 if luma < 128 {
                     below_128 += 1;

@@ -127,7 +127,7 @@ fn occluders(subs: &[RenderSubmesh], all: bool) -> Vec<([f32; 3], [f32; 3], [f32
         if !all && (s.no_depth_write || s.no_depth_test) {
             continue;
         }
-        for t in s.indices.chunks_exact(3) {
+        for t in s.indices.as_chunks::<3>().0 {
             tris.push((
                 s.positions[t[0] as usize],
                 s.positions[t[1] as usize],

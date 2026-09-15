@@ -667,9 +667,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let id = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
-                    .quest_log
-                    .detail
-                    .as_ref()
+                    .selected_quest_detail()
                     .and_then(|d| d.reward_spell.as_ref())
                     .map(|s| (s.spell_id, s.name.clone()))
             };

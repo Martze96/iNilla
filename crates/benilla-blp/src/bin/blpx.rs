@@ -14,7 +14,7 @@ fn main() {
         return;
     }
     let mut ppm = format!("P6\n{} {}\n255\n", mip.width, mip.height).into_bytes();
-    for px in mip.rgba.chunks_exact(4) {
+    for px in mip.rgba.as_chunks::<4>().0 {
         let a = px[3] as u32;
         for (c, mag) in px[..3].iter().zip([255u32, 0, 255]) {
             ppm.push(((*c as u32 * a + mag * (255 - a)) / 255) as u8);

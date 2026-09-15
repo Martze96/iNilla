@@ -226,12 +226,18 @@ fn quest_item_hovers_render_the_rows_item_by_id() {
     assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
 
     s.set_quest_log(QuestLogState {
-        detail: Some(QuestLogDetail {
-            rewards: vec![row()],
+        entries: vec![QuestLogEntryView {
+            quest_id: 7,
+            detail: Some(QuestLogDetail {
+                rewards: vec![row()],
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
+        }],
         ..Default::default()
     });
+    // The detail hangs on the row now, so the tooltip reads it through the selection (2247).
+    s.run("SelectQuestLogEntry(1)").unwrap();
     s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestLogItem("reward", 1)"#)
         .unwrap();
     assert_eq!(lines_of(&mut s)[0].0, "Militia Hammer");

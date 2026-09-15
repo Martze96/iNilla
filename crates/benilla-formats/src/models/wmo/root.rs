@@ -205,7 +205,9 @@ fn parse_wmo_group_infos(bytes: &[u8]) -> Vec<WmoGroupInfo> {
     let Some(mogi) = find_wmo_chunk(bytes, b"IGOM") else {
         return Vec::new();
     };
-    mogi.chunks_exact(32)
+    mogi.as_chunks::<32>()
+        .0
+        .iter()
         .map(|rec| {
             let f = |i: usize| f32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
             let flags = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
@@ -268,14 +270,18 @@ pub fn parse_wmo_portals(bytes: &[u8]) -> WmoPortals {
 
     let vertices = find_wmo_chunk(bytes, b"VPOM") // MOPV
         .map(|c| {
-            c.chunks_exact(12)
+            c.as_chunks::<12>()
+                .0
+                .iter()
                 .map(|r| [f(r, 0), f(r, 4), f(r, 8)])
                 .collect()
         })
         .unwrap_or_default();
     let infos = find_wmo_chunk(bytes, b"TPOM") // MOPT
         .map(|c| {
-            c.chunks_exact(20)
+            c.as_chunks::<20>()
+                .0
+                .iter()
                 .map(|r| WmoPortalInfo {
                     start_vertex: u16(r, 0),
                     count: u16(r, 2),
@@ -286,7 +292,9 @@ pub fn parse_wmo_portals(bytes: &[u8]) -> WmoPortals {
         .unwrap_or_default();
     let refs = find_wmo_chunk(bytes, b"RPOM") // MOPR
         .map(|c| {
-            c.chunks_exact(8)
+            c.as_chunks::<8>()
+                .0
+                .iter()
                 .map(|r| WmoPortalRef {
                     portal: u16(r, 0),
                     group: u16(r, 2),
@@ -338,7 +346,9 @@ pub fn parse_wmo_fogs(bytes: &[u8]) -> Vec<WmoFog> {
     };
     let f = |b: &[u8], i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
     let u = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-    mfog.chunks_exact(48)
+    mfog.as_chunks::<48>()
+        .0
+        .iter()
         .map(|r| WmoFog {
             flags: u(r, 0),
             pos: [f(r, 4), f(r, 8), f(r, 12)],
@@ -386,7 +396,7 @@ fn parse_wmo_doodads(bytes: &[u8]) -> (Vec<WmoDoodad>, Vec<WmoDoodadSet>) {
 
     let mut doodads = Vec::new();
     if let Some(modd) = find_wmo_chunk(bytes, b"DDOM") {
-        for rec in modd.chunks_exact(40) {
+        for rec in modd.as_chunks::<40>().0 {
             let f = |i: usize| f32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
             let name_and_flags = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
             doodads.push(WmoDoodad {
@@ -402,7 +412,7 @@ fn parse_wmo_doodads(bytes: &[u8]) -> (Vec<WmoDoodad>, Vec<WmoDoodadSet>) {
 
     let mut doodad_sets = Vec::new();
     if let Some(mods) = find_wmo_chunk(bytes, b"SDOM") {
-        for rec in mods.chunks_exact(32) {
+        for rec in mods.as_chunks::<32>().0 {
             let u = |i: usize| u32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
             doodad_sets.push(WmoDoodadSet {
                 start: u(20),

@@ -1224,8 +1224,8 @@ mod tests {
             let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(bytes.len() > 44, "{name} has no audio");
             let (mut peak, mut over) = (0.0f32, 0u64);
-            for c in bytes[44..].chunks_exact(4) {
-                let v = f32::from_le_bytes(c.try_into().unwrap()).abs();
+            for c in bytes[44..].as_chunks::<4>().0 {
+                let v = f32::from_le_bytes(*c).abs();
                 peak = peak.max(v);
                 over += u64::from(v > 1.0);
             }

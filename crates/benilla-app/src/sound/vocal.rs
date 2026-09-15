@@ -330,13 +330,11 @@ mod tests {
             race: Some(1),
             ..Default::default()
         };
-        for slot in &mut s.table {
-            *slot = Slot {
-                normal,
-                annoyed,
-                annoyed_variations: variations,
-            };
-        }
+        s.table.fill(Slot {
+            normal,
+            annoyed,
+            annoyed_variations: variations,
+        });
         s
     }
 

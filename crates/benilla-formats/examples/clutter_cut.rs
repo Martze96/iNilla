@@ -106,7 +106,12 @@ fn main() -> anyhow::Result<()> {
         // What an AVERAGED chain would carry, for comparison — mip0's alpha box-filtered down.
         // This is the control for a binary chain: it says how much of the flat coverage is the
         // art's own and how much is the authored mip pyramid throwing the gradient away.
-        let mip0_alpha: Vec<u8> = mips.mips[0].chunks_exact(4).map(|p| p[3]).collect();
+        let mip0_alpha: Vec<u8> = mips.mips[0]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
         let mut averaged: Vec<Vec<u8>> = vec![mip0_alpha];
         for i in 1..5usize {
             let (pw, ph) = mips.mip_size(i as u32 - 1);
@@ -133,7 +138,7 @@ fn main() -> anyhow::Result<()> {
         let mut binary_below_zero = false;
         for (i, mip) in mips.mips.iter().enumerate().take(5) {
             let (w, h) = mips.mip_size(i as u32);
-            let alpha: Vec<u8> = mip.chunks_exact(4).map(|p| p[3]).collect();
+            let alpha: Vec<u8> = mip.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
             if alpha.len() != (w * h) as usize {
                 println!(
                     "  mip{i}: SIZE MISMATCH — {} texels for {w}x{h}",

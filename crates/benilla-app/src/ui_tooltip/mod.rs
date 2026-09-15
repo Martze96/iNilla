@@ -838,7 +838,11 @@ fn drive_mouseover_tooltip(
             .then(|| {
                 window.iter().next().and_then(|w| {
                     let s = crate::ui_script::seam_scale(w.height(), ui_scale.0);
+                    // The headless probe's aim stands in for a cursor the window does not have
+                    // (2250), so an automated run can carry a GENERIC plate — which is
+                    // cursor-seated — all the way to the screen. A person's pointer always wins.
                     w.cursor_position()
+                        .or_else(|| crate::target::hover_probe_point(w))
                         .map(|c| (c.x / s, (w.height() - c.y) / s))
                 })
             })
@@ -852,6 +856,13 @@ fn drive_mouseover_tooltip(
         }
         if cursor_seated && cursor_ui.is_none() {
             return; // cursor off-window: nothing to seat the pointer-anchored plate against
+        }
+        if crate::target::hover_probe_armed() {
+            info!(
+                "hover probe/tooltip: guid {guid:#x} cursor_seated {cursor_seated} cursor_ui \
+                 {cursor_ui:?} template {:?}",
+                go_inputs.templates.get(guid).map(|t| t.name.clone()),
+            );
         }
         let Some(template) = go_inputs.templates.get(guid).cloned() else {
             // Template in flight: ask once and retry next frame (`last` stays, so the show

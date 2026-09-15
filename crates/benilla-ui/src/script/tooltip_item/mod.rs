@@ -346,7 +346,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest_log.detail.as_ref().and_then(|d| {
+                model.selected_quest_detail().and_then(|d| {
                     let v = match kind.as_str() {
                         "choice" => Some(&d.choices),
                         "reward" => Some(&d.rewards),

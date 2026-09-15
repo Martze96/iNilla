@@ -69,7 +69,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::CameraOutputMode;
 use bevy::image::Image;
 use bevy::math::Rect;
-use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
+use bevy::mesh::{Indices, Mesh, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
@@ -380,7 +380,10 @@ struct UiWhiteTexture(Handle<Image>);
 
 /// The quad material: a texture + the blend-mode flag, drawn through one PREMULTIPLIED-alpha
 /// pipeline (`ui_quad.wgsl`) so straight-alpha and WoW-ADD quads share the pipeline and differ
-/// only per-material. Vertex colors carry the per-quad tint.
+/// only per-material. Vertex colors carry the per-quad tint, and a run with ONE colour carries it
+/// on the batch entity's [`MeshTag`] instead (see [`tint_tag`]) — so **nothing about a colour is
+/// in here**, and a material is its identity key alone: the same texture and flags are the same
+/// asset for as long as the image lives, and a steady frame re-prepares none.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub(crate) struct UiQuadMaterial {
     #[uniform(0)]
@@ -418,14 +421,34 @@ pub(crate) struct UiQuadMaterial {
     /// **per axis**, with `min > max` on an axis disabling that axis. See [`UiQuad::uv_clamp`].
     #[uniform(11)]
     uv_clamp: Vec4,
-    /// A whole-run colour multiplier, `ONE` for a pooled material. A run of ONE quad with one
-    /// colour carries that colour here and draws white vertices (decision 1979): the stock
-    /// PlayerFrame status glow pulses its colour every frame, and as a vertex colour that was
-    /// one `Assets<Mesh>` write a frame — which arms bevy's asset-changed probes over every
-    /// `Mesh3d` row in the scene (~44 k at the Stormwind pin, six material families' worth).
-    /// A material write arms only the 2D quad family's probe (~110 rows).
-    #[uniform(12)]
-    tint: Vec4,
+}
+
+/// **A run's one colour, packed for the batch entity's [`MeshTag`]** — the per-instance `u32`
+/// bevy's Mesh2d uniform carries and re-uploads with the transform every frame, which
+/// `ui_quad.wgsl`'s vertex stage unpacks into the run's tint. A run whose quads all share one
+/// colour stores WHITE vertices and puts the colour here, so a colour pulse (the stock
+/// PlayerFrame status glow, every frame at rest) is one component write on one entity: not an
+/// `Assets<Mesh>` write, which arms bevy's asset-changed probes over every `Mesh3d` row in the
+/// scene (1982), and not a material write, which re-creates the material's bind group and
+/// uniform buffers on the render thread — 2–3 of them a frame at a parked pin priced at ~9 ms
+/// on Intel's DX12 driver (2236).
+///
+/// One BYTE per channel, `×255 + 0.5`: exactly how the reference packs a vertex colour
+/// (`CImVector`; `SetVertexColor` at `0x79abd0`, the frame-alpha fold at `0x77fac0` in bytes —
+/// wow-re `system/ui/scratch/texture-color-composition.md`), so this is the precision the real
+/// client draws with, not a step down from it. Stored COMPLEMENTED: an entity with no `MeshTag`
+/// reads 0 in bevy's extract, and the complement makes 0 unpack to opaque white — untinted —
+/// so a Mesh2d that draws with this material and never asked for a tint (the minimap's
+/// interior tiles) is right without knowing this exists.
+fn tint_tag(color: [f32; 4]) -> u32 {
+    let byte = |v: f32| {
+        // Round half up on a clamped value — `0x40a2b0`'s `×255.0 + 0.5` then truncate; the
+        // clamp is the binding's own `[0, 1]` marshal. The cast cannot overflow after it.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let b = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        b
+    };
+    !(byte(color[0]) | byte(color[1]) << 8 | byte(color[2]) << 16 | byte(color[3]) << 24)
 }
 
 impl UiQuadMaterial {
@@ -452,13 +475,18 @@ impl UiQuadMaterial {
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
             mask: None,
             // A tile samples its whole image; there is no cell to stay inside of.
-            tint: Vec4::ONE,
             uv_clamp: UV_CLAMP_OFF,
         }
     }
 }
 
 impl Material2d for UiQuadMaterial {
+    /// Our own vertex stage, in the same file: bevy's carries no per-instance data past the
+    /// transform, and the run's tint rides the instance tag (see [`tint_tag`]).
+    fn vertex_shader() -> ShaderRef {
+        "embedded://benilla_app/shaders/ui_quad.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_app/shaders/ui_quad.wgsl".into()
     }
@@ -828,7 +856,10 @@ impl Run {
 /// for exactly each `Added`/`Modified` event, and nothing else re-prepares one (2236: two or three
 /// such events a frame at a parked pin cost 9.5 traced ms on Intel's DX12 driver, which prices one
 /// re-prepared material in milliseconds there). So this count is the render side's material work
-/// for the frame, read where it is caused.
+/// for the frame, read where it is caused — and since a colour left the material for the
+/// instance tag ([`tint_tag`]) it reads ZERO on a parked frame, pulsing glow or not: a line here
+/// after the interface has settled is a material being built or rebuilt for something other than
+/// a new texture, and that is a regression to find, not a cost to price.
 fn count_material_events(
     mut events: MessageReader<AssetEvent<UiQuadMaterial>>,
     materials: Res<Assets<UiQuadMaterial>>,
@@ -845,7 +876,7 @@ fn count_material_events(
             AssetEvent::Added { .. } => added += 1,
             AssetEvent::Modified { id } => {
                 modified += 1;
-                // The first hundred name themselves: the texture and the tint the write left.
+                // The first hundred name themselves: the texture the rewritten material binds.
                 if *named < 100 {
                     *named += 1;
                     if let Some(m) = materials.get(*id) {
@@ -854,10 +885,7 @@ fn count_material_events(
                             .as_ref()
                             .and_then(|t| server.get_path(t.id()))
                             .map(|p| p.to_string());
-                        info!(
-                            "[ui-mat] modified {id:?} texture={path:?} tint={:?}",
-                            m.tint
-                        );
+                        info!("[ui-mat] modified {id:?} texture={path:?}");
                     }
                 }
             }
@@ -877,9 +905,6 @@ fn count_material_events(
 /// material asset forever, so `prepare_assets` re-prepares nothing on a steady frame). Before
 /// this, every rebuild despawned every batch and allocated fresh meshes + materials — ~9 ms/frame
 /// of render-side churn in a live city (0365).
-/// A solo run's material with the key and tint it was built for.
-type SoloMaterial = (Handle<UiQuadMaterial>, MatKey, [f32; 4]);
-
 #[derive(Default)]
 struct BatchPools {
     entities: Vec<Entity>,
@@ -897,14 +922,11 @@ struct BatchPools {
     /// Goldshire pin).
     offsets: Vec<Vec2>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
-    /// Per slot: the solo-run material (key + tint it was built with), `None` while pooled.
-    solo: Vec<Option<SoloMaterial>>,
-    /// Solo materials a slot let go of, by key — taken before a fresh one is built, so a run
-    /// shifting slots (a tooltip opening above it) re-points at a material that exists
-    /// instead of adding one and dropping one per shifted slot per frame (review 2026-09-04).
-    solo_free: std::collections::HashMap<MatKey, Vec<SoloMaterial>>,
     /// Per slot: the material the batch entity currently carries.
     bound: Vec<Option<AssetId<UiQuadMaterial>>>,
+    /// Per slot: the [`MeshTag`] the batch entity currently carries — the run's one colour
+    /// ([`tint_tag`]), rewritten only when it moves.
+    tags: Vec<Option<u32>>,
 }
 
 /// One pooled batch slot's full identity: the mesh bytes plus everything the entity was last
@@ -1103,15 +1125,6 @@ fn rebuild_ui_mesh(
         .collect();
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
-        for slot in &mut pools.solo {
-            if slot
-                .as_ref()
-                .is_some_and(|(_, k, _)| retired.contains(&k.0))
-            {
-                *slot = None;
-            }
-        }
-        pools.solo_free.retain(|k, _| !retired.contains(&k.0));
     }
     let (hidden, mesh_cost, cost_wanted) =
         (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
@@ -1331,7 +1344,6 @@ fn rebuild_ui_mesh(
     // on their next miss.
     if pools.materials.len() > 256 {
         pools.materials.clear();
-        pools.solo_free.clear();
     }
     let mut used = 0usize;
     let mut n_rewrites = 0usize;
@@ -1383,12 +1395,17 @@ fn rebuild_ui_mesh(
         // GPU mesh allocator's free+realloc each frame (0.86 ms/frame at the Stormwind pin).
         // Full content compare, not a hash — a stale batch drawn over a collision would be a
         // rendering bug no one could reproduce.
-        // A solo run (one quad, one colour) hands its colour to the material's `tint` and
-        // stores white vertices — so a colour pulse is a material write, never a mesh write.
-        let solo_tint = (run.positions.len() == 4 && run.colors.windows(2).all(|w| w[0] == w[1]))
-            .then(|| run.colors[0]);
-        let colors = match solo_tint {
-            Some(_) => vec![[1.0; 4]; 4],
+        // A run whose quads all share ONE colour stores white vertices and carries the colour on
+        // the batch entity's tag ([`tint_tag`]) — so a colour pulse, or a whole string fading,
+        // is a component write: never a mesh write, never a material write.
+        let one_colour = run
+            .colors
+            .first()
+            .filter(|&&c| run.colors.iter().all(|&o| o == c))
+            .copied();
+        let tag = tint_tag(one_colour.unwrap_or([1.0; 4]));
+        let colors = match one_colour {
+            Some(_) => vec![[1.0; 4]; run.colors.len()],
             None => run.colors,
         };
         let stored = StoredRun {
@@ -1399,92 +1416,33 @@ fn rebuild_ui_mesh(
             z_bits: z.to_bits(),
             key,
         };
-        while pools.solo.len() <= used {
-            pools.solo.push(None);
+        while pools.bound.len() <= used {
             pools.bound.push(None);
+            pools.tags.push(None);
         }
-        let material_handle = match solo_tint {
-            Some(tint) => {
-                let fresh = |materials: &mut Assets<UiQuadMaterial>| {
-                    materials.add(UiQuadMaterial {
-                        additive: u32::from(run.additive),
-                        texture: Some(run.texture.clone()),
-                        circular: u32::from(run.circular),
-                        desaturate: u32::from(run.desaturated),
-                        premultiplied: u32::from(run.premultiplied),
-                        alpha_ref,
-                        gamma_texel: u32::from(run.gamma_texel),
-                        mask_rect,
-                        mask: mask.clone(),
-                        uv_clamp,
-                        tint: Vec4::from_array(tint),
-                    })
-                };
-                let BatchPools {
-                    solo, solo_free, ..
-                } = &mut *pools;
-                match &mut solo[used] {
-                    Some((handle, k, t)) if *k == key => {
-                        if *t != tint {
-                            if let Some(m) = materials.get_mut(&*handle) {
-                                m.tint = Vec4::from_array(tint);
-                            }
-                            *t = tint;
-                        }
-                        handle.clone()
-                    }
-                    slot => {
-                        if let Some(old) = slot.take() {
-                            solo_free.entry(old.1).or_default().push(old);
-                        }
-                        let reused =
-                            solo_free
-                                .get_mut(&key)
-                                .and_then(Vec::pop)
-                                .map(|(handle, k, t)| {
-                                    if t != tint {
-                                        if let Some(m) = materials.get_mut(&handle) {
-                                            m.tint = Vec4::from_array(tint);
-                                        }
-                                    }
-                                    (handle, k, tint)
-                                });
-                        let (handle, k, t) =
-                            reused.unwrap_or_else(|| (fresh(materials), key, tint));
-                        *slot = Some((handle.clone(), k, t));
-                        handle
-                    }
-                }
-            }
-            None => {
-                if let Some(old) = pools.solo[used].take() {
-                    pools.solo_free.entry(old.1).or_default().push(old);
-                }
-                pools
-                    .materials
-                    .entry(key)
-                    .or_insert_with(|| {
-                        materials.add(UiQuadMaterial {
-                            additive: u32::from(run.additive),
-                            texture: Some(run.texture.clone()),
-                            circular: u32::from(run.circular),
-                            desaturate: u32::from(run.desaturated),
-                            premultiplied: u32::from(run.premultiplied),
-                            alpha_ref,
-                            gamma_texel: u32::from(run.gamma_texel),
-                            mask_rect,
-                            mask: mask.clone(),
-                            uv_clamp,
-                            tint: Vec4::ONE,
-                        })
-                    })
-                    .clone()
-            }
-        };
+        let material_handle = pools
+            .materials
+            .entry(key)
+            .or_insert_with(|| {
+                materials.add(UiQuadMaterial {
+                    additive: u32::from(run.additive),
+                    texture: Some(run.texture.clone()),
+                    circular: u32::from(run.circular),
+                    desaturate: u32::from(run.desaturated),
+                    premultiplied: u32::from(run.premultiplied),
+                    alpha_ref,
+                    gamma_texel: u32::from(run.gamma_texel),
+                    mask_rect,
+                    mask: mask.clone(),
+                    uv_clamp,
+                })
+            })
+            .clone();
         // The pan gate (1463): a run that matches its slot's base up to one constant XY delta
         // moves on the batch entity's `Transform` — no mesh write, no `AssetChanged` arming.
         // `Some(ZERO)` is the bit-identical case (1361's old skip gate), where even the
-        // `Transform` write is skipped unless a previous pan is being undone.
+        // `Transform` write is skipped unless a previous pan is being undone. The colour rides
+        // the same way: a moved tag is one component write on the slot's entity.
         let pan = pools
             .stored
             .get(used)
@@ -1496,6 +1454,12 @@ fn rebuild_ui_mesh(
                     commands
                         .entity(entity)
                         .insert(MeshMaterial2d(material_handle.clone()));
+                }
+            }
+            if pools.tags[used] != Some(tag) {
+                pools.tags[used] = Some(tag);
+                if let Some(&entity) = pools.entities.get(used) {
+                    commands.entity(entity).insert(MeshTag(tag));
                 }
             }
             if pools.offsets[used] != d {
@@ -1581,13 +1545,15 @@ fn rebuild_ui_mesh(
             }
         };
         pools.bound[used] = Some(material_handle.id());
+        pools.tags[used] = Some(tag);
         // Reuse the batch entity at this slot — same Mesh2d handle (the pooled asset), a material
-        // handle that only changes when the run's identity does, a fresh z.
+        // handle that only changes when the run's identity does, the run's colour tag, a fresh z.
         match pools.entities.get(used) {
             Some(&entity) => {
                 commands.entity(entity).insert((
                     Mesh2d(mesh_handle),
                     MeshMaterial2d(material_handle),
+                    MeshTag(tag),
                     Transform::from_xyz(0.0, 0.0, z),
                 ));
             }
@@ -1597,6 +1563,7 @@ fn rebuild_ui_mesh(
                         UiQuadBatch,
                         Mesh2d(mesh_handle),
                         MeshMaterial2d(material_handle),
+                        MeshTag(tag),
                         Transform::from_xyz(0.0, 0.0, z),
                         ui_render_layers(),
                     ))
@@ -1956,6 +1923,130 @@ mod tests {
             flags,
             vec![0, 1],
             "one material greys and one does not — the uniform the shader branches on"
+        );
+    }
+
+    /// **The tag is the reference's byte colour, complemented.** `SetVertexColor` quantises
+    /// `×255 + 0.5` into one byte per channel (wow-re `texture-color-composition.md`), and the
+    /// complement is what makes bevy's untagged 0 read as opaque white (the minimap's interior
+    /// tiles never set one).
+    #[test]
+    fn tint_tag_is_the_reference_byte_colour_complemented() {
+        assert_eq!(tint_tag([1.0; 4]), 0, "white is the untagged default");
+        assert_eq!(
+            tint_tag([0.0; 4]),
+            u32::MAX,
+            "transparent black is a real colour, not a missing tag"
+        );
+        // Gold at half alpha: 255, 224 (224.9 truncated), 64 (64.25), 128 (128.0) — the bytes the
+        // reference packs, r in the low byte the way `unpack4x8unorm` reads them back.
+        assert_eq!(
+            tint_tag([1.0, 0.88, 0.25, 0.5]),
+            !(255 | 224 << 8 | 64 << 16 | 128 << 24)
+        );
+        assert_eq!(
+            tint_tag([2.0, -1.0, 0.5, 1.0]),
+            !(255 | 128 << 16 | 255 << 24),
+            "clamped to [0, 1] first, as the Lua binding clamps"
+        );
+    }
+
+    /// **A colour pulse is one component write** — no `Assets<Mesh>` write and no material
+    /// write (decision 2236's gate: the `WOW_UI_COST=1` material-event count must be ZERO on a
+    /// parked frame with a pulsing element, not merely cheaper). The stock PlayerFrame status
+    /// glow pulses its alpha every frame at rest; on Intel's DX12 driver each material it
+    /// re-prepared cost milliseconds, and as a vertex colour it had cost an asset-changed sweep
+    /// over every mesh in the scene. So the colour goes on the batch entity's `MeshTag`, the
+    /// mesh stays white and untouched, and the material — its identity alone — is never
+    /// rewritten.
+    #[test]
+    fn a_colour_pulse_writes_the_tag_and_neither_asset() {
+        let mut app = rebuild_app();
+        // The rebuild's own meter is off unless asked (a player's frame pays one bool for it);
+        // this test reads its `rewrites`, so it asks.
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        assert_eq!(batches(&mut app), 1);
+        // Read through a cursor, not the "current update" buffer: `TimePlugin` only lets the
+        // message buffers swap after a FIXED step (`signal_message_update_system`), and this
+        // harness ticks faster than one, so frame 1's events are still "current" on frame 2.
+        let mut cursor = bevy::ecs::message::MessageCursor::<AssetEvent<UiQuadMaterial>>::default();
+        let mut material_events = |app: &App| {
+            let (mut added, mut modified) = (0, 0);
+            for e in cursor.read(
+                app.world()
+                    .resource::<Messages<AssetEvent<UiQuadMaterial>>>(),
+            ) {
+                match e {
+                    AssetEvent::Added { .. } => added += 1,
+                    AssetEvent::Modified { .. } => modified += 1,
+                    _ => {}
+                }
+            }
+            (added, modified)
+        };
+        assert_eq!(
+            material_events(&app),
+            (1, 0),
+            "the first frame builds the run's one material (and this harness hears it)"
+        );
+        let (batch, tag0) = app
+            .world_mut()
+            .query_filtered::<(Entity, &MeshTag), With<UiQuadBatch>>()
+            .single(app.world())
+            .expect("one batch");
+        assert_eq!(
+            **tag0,
+            tint_tag([1.0; 4]),
+            "a white quad carries the white tag"
+        );
+
+        // The pulse: the same quad, another colour.
+        let gold = [1.0, 0.88, 0.25, 0.5];
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads[0].color = gold;
+            q.dirty = true;
+        }
+        app.update();
+
+        let cost = app.world().resource::<UiMeshCost>();
+        assert!(cost.rebuilt, "the dirty flag ran the rebuild");
+        assert_eq!(
+            cost.rewrites, 0,
+            "no pooled mesh was rewritten for a colour"
+        );
+        assert_eq!(
+            material_events(&app),
+            (0, 0),
+            "no material was built or rebuilt for a colour — the count 2236 gates on"
+        );
+        assert_eq!(
+            app.world().resource::<Assets<UiQuadMaterial>>().len(),
+            1,
+            "still the one material: colour is not part of its identity"
+        );
+        let tag = app
+            .world()
+            .get::<MeshTag>(batch)
+            .expect("the batch keeps its tag");
+        assert_eq!(**tag, tint_tag(gold), "the colour went to the instance tag");
+        let mesh_handle = app.world().get::<Mesh2d>(batch).expect("the batch's mesh");
+        let mesh = app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&mesh_handle.0)
+            .expect("the pooled mesh");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the run's vertex colours are Float32x4");
+        };
+        assert!(
+            colors.iter().all(|c| *c == [1.0; 4]),
+            "the vertices stay white: the colour is the tag's, not the mesh's"
         );
     }
 

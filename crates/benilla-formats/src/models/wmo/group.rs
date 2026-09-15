@@ -199,7 +199,7 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
     let mut indices = Vec::new();
     let mut mopy_flags = Vec::new();
     let mut mopy_material = Vec::new();
-    for (ti, tri) in group.vertex_indices.chunks_exact(3).enumerate() {
+    for (ti, tri) in group.vertex_indices.as_chunks::<3>().0.iter().enumerate() {
         let flags = group.material_info.get(ti).map_or(0, |m| m.flags);
         if flags & FOOTPRINT_REJECT != 0 {
             continue;
@@ -256,7 +256,9 @@ fn find_mogp_subchunk<'a>(group_bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a 
 pub fn wmo_group_doodad_refs(group_bytes: &[u8]) -> Vec<u16> {
     find_mogp_subchunk(group_bytes, b"RDOM")
         .map(|c| {
-            c.chunks_exact(2)
+            c.as_chunks::<2>()
+                .0
+                .iter()
                 .map(|r| u16::from_le_bytes([r[0], r[1]]))
                 .collect()
         })
@@ -271,7 +273,9 @@ pub fn wmo_group_doodad_refs(group_bytes: &[u8]) -> Vec<u16> {
 pub fn wmo_group_light_refs(group_bytes: &[u8]) -> Vec<u16> {
     find_mogp_subchunk(group_bytes, b"RLOM")
         .map(|c| {
-            c.chunks_exact(2)
+            c.as_chunks::<2>()
+                .0
+                .iter()
                 .map(|r| u16::from_le_bytes([r[0], r[1]]))
                 .collect()
         })

@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     // is a doubled face, wherever its copies live.
     let mut buckets: HashMap<[[i64; 3]; 3], Vec<Tri>> = HashMap::new();
     for (bi, s) in subs.iter().enumerate() {
-        for t in s.indices.chunks_exact(3) {
+        for t in s.indices.as_chunks::<3>().0 {
             let p: Vec<[f32; 3]> = t.iter().map(|&i| s.positions[i as usize]).collect();
             let (u, v) = (sub3(p[1], p[0]), sub3(p[2], p[0]));
             let n = cross(u, v);

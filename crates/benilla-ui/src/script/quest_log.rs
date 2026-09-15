@@ -10,8 +10,12 @@
 //!   selection is native and *synchronous* — `QuestLogTitleButton_OnClick` calls
 //!   `SelectQuestLogEntry(i)` then immediately re-reads `GetQuestLogSelection()` in the same click
 //!   (ref `QuestLogFrame.lua:318,308-346`); a drain-next-frame intent would read stale. The app
-//!   reads it back each frame ([`super::UiScript::quest_log_selection`]) and pushes the matching
-//!   detail; the refresh lands as a `QUEST_LOG_UPDATE` event, exactly like the ref's async data.
+//!   reads it back each frame ([`super::UiScript::quest_log_selection`]) only to RE-POINT it across
+//!   a rebuild. The **detail that selection names is resolved at call time**, off the row's own
+//!   [`QuestLogEntryView::detail`] — never from a selection baked into the push (decision 2247).
+//!   The reference's detail bindings peek its quest cache inside the same call, so
+//!   `SelectQuestLogEntry(i)` immediately changes what `GetQuestLogQuestText()` answers; resolving
+//!   one detail per push instead made a whole log walk answer with a single row's text.
 //! - **The abandon mark** (`SetAbandonQuest`/`GetAbandonQuestName`/`AbandonQuest`) — the ref's
 //!   two-step confirm (mark on button click, act on the popup's Yes — ref `QuestLogFrame.xml:463-472`,
 //!   `StaticPopup.lua:749-761`). The mark pins the *entry index at click time* so a log shuffle
@@ -96,6 +100,15 @@ pub struct QuestLogEntryView {
     /// [`QuestLogDetail`] carries only what exists for the selection alone
     /// (description/rewards/money).
     pub objectives: Vec<QuestLogObjectiveView>,
+    /// This row's detail pane — description, money, rewards, reward spell. **Per row, not per
+    /// selection** (decision 2247): the reference's detail bindings read `ds:0xbb7480` (what
+    /// `SelectQuestLogEntry 0x4dfae0` wrote, synchronously) and then PEEK the quest cache in the
+    /// same call (`0x4e1130` -> `0xc0e1b0`/`0x562a40`, wow-re `ui/ledger.tsv`), so a
+    /// select-then-read pair inside ONE frame answers about the row just selected. Carrying one
+    /// detail for "the selection" instead made `SelectQuestLogEntry` inert until the next push:
+    /// every entry of an addon's log walk answered with whichever row the snapshot happened to be
+    /// built against. `None` on a header row.
+    pub detail: Option<QuestLogDetail>,
 }
 
 /// One objective ("leaderboard") line of the selected quest — the `GetQuestLogLeaderBoard` tuple.
@@ -155,9 +168,6 @@ pub struct QuestLogState {
     /// The total quest count INCLUDING quests hidden under collapsed headers — the "Quests: N/20"
     /// pill must not shrink when a header collapses (`GetNumQuestLogEntries` return 2).
     pub num_quests: u32,
-    /// The detail pane for the current selection (`None` = nothing selected, selection out of
-    /// range, or the template still in flight).
-    pub detail: Option<QuestLogDetail>,
 }
 
 impl super::UiScript {
@@ -386,9 +396,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (desc, obj) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
-                    .quest_log
-                    .detail
-                    .as_ref()
+                    .selected_quest_detail()
                     .map(|d| (d.description.clone(), d.objectives_text.clone()))
                     .unwrap_or_default()
             };
@@ -449,7 +457,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, ()| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(model.quest_log.detail.as_ref().map(pick).unwrap_or(0))
+                Ok(model.selected_quest_detail().map(pick).unwrap_or(0))
             })?,
         )
     }
@@ -474,9 +482,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let item = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     model
-                        .quest_log
-                        .detail
-                        .as_ref()
+                        .selected_quest_detail()
                         .and_then(|d| i.checked_sub(1).and_then(|n| pick(d).get(n)).cloned())
                 };
                 let Some(it) = item else {
@@ -518,7 +524,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (kind, index): (String, usize)| {
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest_log.detail.as_ref().and_then(|d| {
+                model.selected_quest_detail().and_then(|d| {
                     let v = match kind.as_str() {
                         "choice" => &d.choices,
                         "reward" => &d.rewards,
@@ -700,9 +706,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let spell = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
-                    .quest_log
-                    .detail
-                    .as_ref()
+                    .selected_quest_detail()
                     .and_then(|d| d.reward_spell.clone())
             };
             super::quest::reward_spell_returns(lua, spell)
@@ -859,6 +863,23 @@ mod tests {
                         cur: 3,
                         req: 10,
                     }],
+                    detail: Some(QuestLogDetail {
+                        description: "Speak with Marshal McBride.".into(),
+                        objectives_text: "Report to Marshal McBride.".into(),
+                        required_money: 0,
+                        reward_money: 40,
+                        choices: vec![],
+                        rewards: vec![QuestItemView {
+                            item_id: 2024,
+                            name: Some("Militia Hammer".into()),
+                            texture: None,
+                            count: 1,
+                            quality: 1,
+                            usable: true,
+                            link: Some("|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r".into()),
+                        }],
+                        reward_spell: None,
+                    }),
                     ..Default::default()
                 },
                 QuestLogEntryView {
@@ -873,26 +894,18 @@ mod tests {
                         cur: 10,
                         req: 10,
                     }],
+                    detail: Some(QuestLogDetail {
+                        description: "The kobolds have overrun the camp.".into(),
+                        objectives_text: "Kill 10 Kobold Vermin.".into(),
+                        required_money: 0,
+                        reward_money: 250,
+                        choices: vec![],
+                        rewards: vec![],
+                        reward_spell: None,
+                    }),
                     ..Default::default()
                 },
             ],
-            detail: Some(QuestLogDetail {
-                description: "Speak with Marshal McBride.".into(),
-                objectives_text: "Report to Marshal McBride.".into(),
-                required_money: 0,
-                reward_money: 40,
-                choices: vec![],
-                rewards: vec![QuestItemView {
-                    item_id: 2024,
-                    name: Some("Militia Hammer".into()),
-                    texture: None,
-                    count: 1,
-                    quality: 1,
-                    usable: true,
-                    link: Some("|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r".into()),
-                }],
-                reward_spell: None,
-            }),
         }
     }
 
@@ -1047,6 +1060,78 @@ mod tests {
             2
         );
         assert_eq!(s.quest_log_selection(), 2);
+    }
+
+    /// **The bug decision 2247 fixes, in the shape every addon hits it.** The classic quest-log
+    /// walk — `SelectQuestLogEntry(i)` then `GetQuestLogQuestText()`, once per entry, all inside
+    /// ONE frame with no push between — must answer about the row just selected. It used to answer
+    /// with whichever row the snapshot had been built against, for every entry: Questie 3.7.1 fed
+    /// that text to its `getQuestHash` Levenshtein match and wrote the WRONG same-name chain step
+    /// into a character's saved history (two of the director's Tirisfal quests, both resolved to
+    /// the shortest sibling — the signature of matching against an unrelated string).
+    #[test]
+    fn a_log_walk_answers_per_entry_without_a_push_between() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(two_quests());
+        let walk: String = s
+            .eval(
+                "local out = ''\n\
+                 for i = 1, GetNumQuestLogEntries() do\n\
+                   SelectQuestLogEntry(i)\n\
+                   local desc, obj = GetQuestLogQuestText()\n\
+                   out = out .. i .. '=' .. desc .. '|'\n\
+                 end\n\
+                 return out",
+            )
+            .unwrap();
+        assert_eq!(
+            walk, "1=Speak with Marshal McBride.|2=The kobolds have overrun the camp.|",
+            "each entry must answer with its OWN detail inside a single frame"
+        );
+    }
+
+    /// The same seam for the money/reward getters, which read the detail through their own path.
+    #[test]
+    fn the_detail_counts_follow_the_selection_too() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(two_quests());
+        assert_eq!(
+            s.eval::<i64>("SelectQuestLogEntry(1); return GetQuestLogRewardMoney()")
+                .unwrap(),
+            40
+        );
+        assert_eq!(
+            s.eval::<i64>("SelectQuestLogEntry(2); return GetQuestLogRewardMoney()")
+                .unwrap(),
+            250
+        );
+        assert_eq!(
+            s.eval::<i64>("SelectQuestLogEntry(2); return GetNumQuestLogRewards()")
+                .unwrap(),
+            0
+        );
+    }
+
+    /// A header row has no quest under it, so its detail reads as nothing at all rather than as
+    /// the previous selection's — the same staleness, one row over.
+    #[test]
+    fn a_header_selection_has_no_detail() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries.insert(
+            0,
+            QuestLogEntryView {
+                title: "Elwynn Forest".into(),
+                is_header: true,
+                ..Default::default()
+            },
+        );
+        s.set_quest_log(state);
+        assert!(s
+            .eval::<bool>(
+                "SelectQuestLogEntry(1); local d = GetQuestLogQuestText(); return d == ''"
+            )
+            .unwrap());
     }
 
     #[test]

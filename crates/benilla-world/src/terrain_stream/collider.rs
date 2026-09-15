@@ -204,7 +204,9 @@ pub fn placement_collider_data(
         .collect();
     let tris: Vec<[u32; 3]> = hull
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     Some((verts, tris))
@@ -229,7 +231,9 @@ pub(super) fn terrain_collider_data(
         tris.extend(
             chunk
                 .indices
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| [base + c[0], base + c[1], base + c[2]]),
         );
     }

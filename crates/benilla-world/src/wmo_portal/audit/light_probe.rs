@@ -163,7 +163,7 @@ fn face_stack(model: &WmoModel, x: f32, y: f32, max_z: f32) {
     let mut hits: Vec<(f32, usize, u8)> = Vec::new();
     for (gi, fp) in model.group_footprints.iter().enumerate() {
         let Some(fp) = fp else { continue };
-        for (ti, tri) in fp.indices.chunks_exact(3).enumerate() {
+        for (ti, tri) in fp.indices.as_chunks::<3>().0.iter().enumerate() {
             let (Some(&a), Some(&b), Some(&c)) = (
                 fp.positions.get(tri[0] as usize),
                 fp.positions.get(tri[1] as usize),

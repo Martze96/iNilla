@@ -118,7 +118,7 @@ fn main() -> anyhow::Result<()> {
             let (w, h) = chainx.mip_size(i as u32);
             let n = mip.len() / 4;
             let (mut zero, mut low, mut mid, mut high, mut full) = (0u32, 0u32, 0u32, 0u32, 0u32);
-            for px in mip.chunks_exact(4) {
+            for px in mip.as_chunks::<4>().0 {
                 match px[3] {
                     0 => zero += 1,
                     1..=63 => low += 1,

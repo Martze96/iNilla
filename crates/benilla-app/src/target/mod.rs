@@ -70,6 +70,18 @@ pub(crate) mod cursor_mode;
 mod flash;
 mod highlight;
 pub(crate) mod hover;
+/// The headless hover probe (2250) — see its header.
+mod hover_probe;
+
+/// The probe's aim for a window with no OS cursor, for the tooltip's cursor-seated arm (2250).
+pub(crate) fn hover_probe_point(window: &bevy::window::Window) -> Option<bevy::math::Vec2> {
+    hover_probe::point(window, 0)
+}
+
+/// Is the headless hover probe armed? (Gates its own log lines outside this module.)
+pub(crate) fn hover_probe_armed() -> bool {
+    hover_probe::armed()
+}
 pub(crate) mod lock;
 mod relations;
 mod reticle;

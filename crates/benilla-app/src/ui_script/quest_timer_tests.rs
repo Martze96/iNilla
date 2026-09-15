@@ -71,7 +71,6 @@ fn log(entries: Vec<QuestLogEntryView>) -> QuestLogState {
     QuestLogState {
         num_quests: entries.len() as u32,
         entries,
-        detail: None,
     }
 }
 

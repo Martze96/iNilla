@@ -261,7 +261,7 @@ fn collect_quads(
             .flat_map(|r| quads.verts[r.start as usize..r.end as usize].iter())
             .map(|v| v.pos)
             .collect();
-        for (index, quad) in pos.chunks_exact(4).enumerate() {
+        for (index, quad) in pos.as_chunks::<4>().0.iter().enumerate() {
             let mut corners = [Vec2::ZERO; 4];
             let (mut dmin, mut dmax, mut center) = (f32::MAX, f32::MIN, Vec3::ZERO);
             let mut behind = false;

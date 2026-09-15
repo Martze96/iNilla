@@ -23,7 +23,69 @@
 // and would also move bilinear filtering into gamma (as the reference filters), but it forces the
 // booth to emit gamma — a contained follow-up, not a look change.
 
-#import bevy_sprite::mesh2d_vertex_output::VertexOutput
+#import bevy_sprite::mesh2d_functions as mesh_functions
+
+// The mesh's own vertex layout, at bevy's fixed Mesh2d locations (`Mesh2dPipeline::specialize`
+// binds POSITION at 0, UV_0 at 2, COLOR at 4 and defines `VERTEX_UVS` / `VERTEX_COLORS` for the
+// attributes the mesh actually carries — the minimap's composite tile quad has no colours).
+struct Vertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+#ifdef VERTEX_UVS
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(4) color: vec4<f32>,
+#endif
+}
+
+struct VertexOutput {
+    // Clip position out of the vertex stage, the FRAGMENT COORDINATE (physical px) into the
+    // fragment — the screen mask below compares against it.
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+#ifdef VERTEX_COLORS
+    @location(1) color: vec4<f32>,
+#endif
+    // The instance's whole-run colour, read off bevy's per-instance mesh TAG (`MeshTag`, a u32 the
+    // mesh uniform carries for every Mesh2d entity, re-uploaded with its transform each frame).
+    // A run with one colour draws WHITE vertices and carries that colour here — so a colour
+    // pulse is one component write on the batch entity: not an `Assets<Mesh>` write (which arms
+    // bevy's asset-changed probes over every `Mesh3d` row in the scene, 1982) and not a material
+    // write (which re-creates the material's bind group and uniform buffers on the render thread,
+    // 2–3 of them a frame at a parked pin costing ~9 ms on Intel's DX12 driver, 2236).
+    //
+    // Packed as the reference packs a vertex colour: one BYTE per channel — `CImVector`, the
+    // client's `SetVertexColor` quantising `×255 + 0.5` and folding the frame's alpha in bytes
+    // (wow-re `system/ui/scratch/texture-color-composition.md`) — so this carries exactly the
+    // precision the real client draws with. Stored COMPLEMENTED (`!packed`): an entity with no
+    // `MeshTag` reads 0 from bevy, and the complement makes that opaque white, i.e. untinted,
+    // rather than transparent black — every Mesh2d that draws with this material and never
+    // asked for a tint (the minimap's interior tiles) is right by default.
+    @location(2) @interpolate(flat) tint: vec4<f32>,
+}
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+    let world_position = mesh_functions::mesh2d_position_local_to_world(
+        world_from_local,
+        vec4<f32>(vertex.position, 1.0),
+    );
+    out.position = mesh_functions::mesh2d_position_world_to_clip(world_position);
+#ifdef VERTEX_UVS
+    out.uv = vertex.uv;
+#else
+    out.uv = vec2<f32>(0.0);
+#endif
+#ifdef VERTEX_COLORS
+    out.color = vertex.color;
+#endif
+    // `unpack4x8unorm` reads byte 0 into `.x`: r, g, b, a from the low byte up.
+    out.tint = unpack4x8unorm(~mesh_functions::get_tag(vertex.instance_index));
+    return out;
+}
 
 @group(2) @binding(0) var<uniform> additive: u32;
 @group(2) @binding(1) var quad_texture: texture_2d<f32>;
@@ -110,9 +172,6 @@
 // standalone clamped texture of it would. Producers leave it off for UVs that run past `[0,1]` —
 // that is the backdrop's tiling idiom, not a cell.
 @group(2) @binding(11) var<uniform> uv_clamp: vec4<f32>;
-// A whole-run colour multiplier (ONE for pooled materials): a solo quad's colour rides here
-// instead of in its vertices, so a per-frame colour pulse is a material write, not a mesh write.
-@group(2) @binding(12) var<uniform> tint: vec4<f32>;
 
 // ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
 // `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
@@ -150,10 +209,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let hi = max(uv_clamp.xy, uv_clamp.zw);
     let uv = select(in.uv, clamp(in.uv, lo, hi), uv_clamp.xy <= uv_clamp.zw);
     let t = textureSample(quad_texture, quad_sampler, uv);
+    // The quad's colour: its vertex colour (white for a one-colour run) times the run's tint off
+    // the instance tag (see `VertexOutput::tint`) — a mesh without colours is the tint alone.
 #ifdef VERTEX_COLORS
-    let c = in.color * tint;
+    let c = in.color * in.tint;
 #else
-    let c = vec4<f32>(1.0);
+    let c = in.tint;
 #endif
     // Back to the client's byte space, then tint there: `UiQuad.color` is already a client-space
     // sRGB value (FrameXML's `<Color>`, `|cff…`, quality colors), so this multiply IS the FFP's

@@ -24,8 +24,34 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
+thread_local! {
+    /// The reward/description pane the quest-log FrameXML tests paint. It hangs on every row
+    /// (decision 2247 moved the detail from the snapshot onto the entry), so a test may select
+    /// any index and still read it — which is what the state-level field used to give them.
+    static DETAIL_FIXTURE: QuestLogDetail = QuestLogDetail {
+            description: "Speak with Marshal McBride.".into(),
+            objectives_text: "Report to Marshal McBride.".into(),
+            required_money: 0,
+            reward_money: 40,
+            choices: vec![],
+            rewards: vec![QuestItemView {
+                item_id: 2024,
+                name: Some("Militia Hammer".into()),
+                texture: Some("Interface\\Icons\\INV_Hammer_15".into()),
+                count: 1,
+                quality: 1,
+                usable: true,
+                // The reward row's ctrl/shift payload (`GetQuestLogItemLink`, decisions 1059/1060)
+                // — `ui_quest_log.rs` builds it through `ui_items::item_link` once the template
+                // lands, so the fixture carries that exact shape.
+                link: Some(HAMMER_LINK.into()),
+            }],
+            reward_spell: None,
+        };
+}
+
 /// 8 flat quest entries (exercises the 6-row faux-scroll), the first carrying one objective line
-/// (the auto-picked first selection reads it), + a resolved detail for that selection (no choices,
+/// (the auto-picked first selection reads it), each carrying the same resolved detail (no choices,
 /// 1 fixed reward + money) — the fixture every test below shares. Each entry gets a distinct
 /// `quest_id` (the watch set's stable key — `benilla-ui`'s `quest_log.rs` module doc) so the
 /// watch/tracker tests below can tell entries apart across a scroll/reselect.
@@ -47,32 +73,13 @@ fn eight_entries() -> QuestLogState {
             } else {
                 vec![]
             },
+            detail: Some(DETAIL_FIXTURE.with(Clone::clone)),
             ..Default::default()
         })
         .collect();
     QuestLogState {
         num_quests: 8,
         entries,
-        detail: Some(QuestLogDetail {
-            description: "Speak with Marshal McBride.".into(),
-            objectives_text: "Report to Marshal McBride.".into(),
-            required_money: 0,
-            reward_money: 40,
-            choices: vec![],
-            rewards: vec![QuestItemView {
-                item_id: 2024,
-                name: Some("Militia Hammer".into()),
-                texture: Some("Interface\\Icons\\INV_Hammer_15".into()),
-                count: 1,
-                quality: 1,
-                usable: true,
-                // The reward row's ctrl/shift payload (`GetQuestLogItemLink`, decisions 1059/1060)
-                // — `ui_quest_log.rs` builds it through `ui_items::item_link` once the template
-                // lands, so the fixture carries that exact shape.
-                link: Some(HAMMER_LINK.into()),
-            }],
-            reward_spell: None,
-        }),
     }
 }
 
@@ -914,7 +921,9 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     let mut state = eight_entries();
-    state.detail = Some(QuestLogDetail {
+    // The detail hangs on the rows now (2247), so override every row's — the window paints
+    // whichever one the auto-selection lands on.
+    let detail = QuestLogDetail {
         description: "Speak with Marshal McBride.".into(),
         objectives_text: "Report to Marshal McBride.".into(),
         required_money: 0,
@@ -949,7 +958,10 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
             ..Default::default()
         }],
         reward_spell: None,
-    });
+    };
+    for e in &mut state.entries {
+        e.detail = Some(detail.clone());
+    }
     s.set_quest_log(state);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1059,25 +1071,25 @@ fn overflowing_entry() -> QuestLogState {
             level: 5,
             complete: 0,
             objectives,
+            detail: Some(QuestLogDetail {
+                description: "A very long description. ".repeat(20),
+                objectives_text: "Report back once every objective below is complete.".into(),
+                required_money: 0,
+                reward_money: 0,
+                choices: vec![],
+                rewards: vec![QuestItemView {
+                    item_id: 0,
+                    name: Some("Militia Hammer".into()),
+                    texture: None,
+                    count: 1,
+                    quality: 1,
+                    usable: true,
+                    ..Default::default()
+                }],
+                reward_spell: None,
+            }),
             ..Default::default()
         }],
-        detail: Some(QuestLogDetail {
-            description: "A very long description. ".repeat(20),
-            objectives_text: "Report back once every objective below is complete.".into(),
-            required_money: 0,
-            reward_money: 0,
-            choices: vec![],
-            rewards: vec![QuestItemView {
-                item_id: 0,
-                name: Some("Militia Hammer".into()),
-                texture: None,
-                count: 1,
-                quality: 1,
-                usable: true,
-                ..Default::default()
-            }],
-            reward_spell: None,
-        }),
     }
 }
 

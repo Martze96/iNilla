@@ -604,7 +604,7 @@ impl WorldAssets {
         }
         let loaded =
             decode_sprite(&self.chain, self.loose_root.as_deref(), path).map(|(w, h, mut rgba)| {
-                for px in rgba.chunks_exact_mut(4) {
+                for px in rgba.as_chunks_mut::<4>().0 {
                     px[0] = 0xFF;
                     px[1] = 0xFF;
                     px[2] = 0xFF;

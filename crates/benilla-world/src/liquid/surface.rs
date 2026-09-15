@@ -319,7 +319,9 @@ pub(crate) fn spawn_liquids<'a>(
 fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
     let tris: Vec<[u32; 3]> = lq
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     if tris.is_empty() {

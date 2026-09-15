@@ -2525,7 +2525,9 @@ mod inside_a_hull {
         let verts: Vec<Vec3> = hull.positions.iter().map(|p| wow_to_bevy(*p)).collect();
         let tris: Vec<[u32; 3]> = hull
             .indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect();
         let mut app = world();

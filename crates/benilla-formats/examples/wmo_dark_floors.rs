@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
                     .get(start..start + batch.count as usize)
                     .unwrap_or(&[]);
                 let (mut dark_area, mut total_area) = (0.0f32, 0.0f32);
-                for t in idx.chunks_exact(3) {
+                for t in idx.as_chunks::<3>().0 {
                     let p: Vec<[f32; 3]> = t
                         .iter()
                         .filter_map(|&i| group.vertex_positions.get(i as usize))

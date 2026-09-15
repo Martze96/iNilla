@@ -38,7 +38,7 @@ struct Gather {
 
 fn gather(positions: &[[f32; 3]], indices: &[u32]) -> Gather {
     let (mut walkable, mut min_z, mut max_z) = (0usize, f32::MAX, f32::MIN);
-    for t in indices.chunks_exact(3) {
+    for t in indices.as_chunks::<3>().0 {
         let p: [[f32; 3]; 3] = [
             positions[t[0] as usize],
             positions[t[1] as usize],

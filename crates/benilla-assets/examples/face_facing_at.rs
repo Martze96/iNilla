@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|p| transform.transform_point(wow_to_bevy(*p)))
                 .collect();
-            for t in idx.chunks_exact(3) {
+            for t in idx.as_chunks::<3>().0 {
                 let (Some(&a), Some(&b), Some(&c)) = (
                     verts.get(t[0] as usize),
                     verts.get(t[1] as usize),

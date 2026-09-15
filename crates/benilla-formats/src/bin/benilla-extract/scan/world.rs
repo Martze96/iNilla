@@ -141,7 +141,9 @@ fn mods_set_names(bytes: &[u8]) -> Vec<String> {
         }
         if &bytes[off..off + 4] == b"SDOM" {
             return bytes[off + 8..data_end]
-                .chunks_exact(32)
+                .as_chunks::<32>()
+                .0
+                .iter()
                 .map(|rec| {
                     let name = &rec[..20];
                     let end = name.iter().position(|&b| b == 0).unwrap_or(20);

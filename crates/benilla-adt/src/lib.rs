@@ -342,14 +342,16 @@ fn split_strings(blob: &[u8]) -> Vec<String> {
 
 /// `name` tags the truncation error with the chunk this record list came from (MMID/MWID).
 fn read_u32_list(data: &[u8], name: &'static str) -> Result<Vec<u32>> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| c.u32_at(0).ok_or(Error::Truncated(name)))
         .collect()
 }
 
 fn read_mddf(data: &[u8]) -> Result<Vec<DoodadPlacement>> {
     let mut out = Vec::new();
-    for r in data.chunks_exact(36) {
+    for r in data.as_chunks::<36>().0 {
         out.push(DoodadPlacement {
             name_id: r.u32_at(0).ok_or(Error::Truncated("MDDF"))?,
             unique_id: r.u32_at(4).ok_or(Error::Truncated("MDDF"))?,
@@ -372,7 +374,7 @@ fn read_mddf(data: &[u8]) -> Result<Vec<DoodadPlacement>> {
 
 fn read_modf(data: &[u8]) -> Result<Vec<WmoPlacement>> {
     let mut out = Vec::new();
-    for r in data.chunks_exact(64) {
+    for r in data.as_chunks::<64>().0 {
         out.push(WmoPlacement {
             name_id: r.u32_at(0).ok_or(Error::Truncated("MODF"))?,
             unique_id: r.u32_at(4).ok_or(Error::Truncated("MODF"))?,
@@ -503,7 +505,7 @@ fn read_mcnk(data: &[u8]) -> Result<McnkChunk> {
     .filter(|&(_, n)| n > 0)
     {
         let mut layers = Vec::new();
-        for l in slice(p, n).chunks_exact(16) {
+        for l in slice(p, n).as_chunks::<16>().0 {
             layers.push(MclyLayer {
                 texture_id: l.u32_at(0).ok_or(Error::Truncated("MCLY"))?,
                 flags: MclyFlags {

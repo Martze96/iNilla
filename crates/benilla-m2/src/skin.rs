@@ -93,7 +93,7 @@ impl M2Model {
         let read_u16s = |n: usize, o: usize| -> Result<Vec<u16>> {
             let slice = bytes.bytes_at(o, n * 2).ok_or(Error::Truncated)?;
             let mut v = Vec::with_capacity(n);
-            for c in slice.chunks_exact(2) {
+            for c in slice.as_chunks::<2>().0 {
                 v.push(c.u16_at(0).ok_or(Error::Truncated)?);
             }
             Ok(v)

@@ -356,7 +356,9 @@ fn meshes_an_elwynn_terrain_tile() {
     assert_eq!(alpha.len(), size * size * 4, "alpha map is RGBA size²");
     assert!(
         alpha
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0),
         "a multi-layer chunk's alpha map should have some non-zero blend weight"
     );
@@ -443,7 +445,7 @@ fn terrain_fans_wind_ccw_seen_from_above() {
     let (mut pairs, mut disagreeing) = (0usize, 0usize);
     for chunk in &tile.chunks {
         let shading = (chunk.normals.len() == chunk.positions.len()).then_some(&chunk.normals);
-        for t in chunk.indices.chunks_exact(3) {
+        for t in chunk.indices.as_chunks::<3>().0 {
             let (i, j, k) = (t[0] as usize, t[1] as usize, t[2] as usize);
             let (a, b, c) = (chunk.positions[i], chunk.positions[j], chunk.positions[k]);
             let (u, v) = (

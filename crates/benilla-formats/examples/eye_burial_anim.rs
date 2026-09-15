@@ -124,7 +124,7 @@ fn shell(subs: &[RenderSubmesh], pal: &[Mat4], probe: Vec3) -> (Vec<[Vec3; 3]>, 
         for &p in &pos {
             near = near.min(p.distance(probe));
         }
-        for t in s.indices.chunks_exact(3) {
+        for t in s.indices.as_chunks::<3>().0 {
             tris.push([pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]]);
         }
     }

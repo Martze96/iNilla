@@ -351,7 +351,7 @@ impl<F: FnMut(Cycle<'_>) + Send + 'static> Callback<F> {
 fn spread<T: SizedSample + FromSample<f32>>(stereo: &[f32], out: &mut [T], channels: usize) {
     match channels {
         1 => {
-            for (frame, slot) in stereo.chunks_exact(2).zip(out.iter_mut()) {
+            for (frame, slot) in stereo.as_chunks::<2>().0.iter().zip(out.iter_mut()) {
                 *slot = T::from_sample((frame[0] + frame[1]) * 0.5);
             }
         }
@@ -361,7 +361,12 @@ fn spread<T: SizedSample + FromSample<f32>>(stereo: &[f32], out: &mut [T], chann
             }
         }
         n => {
-            for (frame, slot) in stereo.chunks_exact(2).zip(out.chunks_exact_mut(n)) {
+            for (frame, slot) in stereo
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(out.chunks_exact_mut(n))
+            {
                 slot[0] = T::from_sample(frame[0]);
                 slot[1] = T::from_sample(frame[1]);
                 for quiet in &mut slot[2..] {

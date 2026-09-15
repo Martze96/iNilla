@@ -559,6 +559,11 @@ pub(super) struct GoPickSet<'w, 's> {
     /// taken as its own `SystemParam` because [`update_hovered_object`] is at Bevy's 16-param
     /// function-system ceiling.
     cards: Query<'w, 's, &'static BillboardCard>,
+    /// The headless probe's frame counter and its say-once report ([`super::hover_probe`], 2250).
+    /// `Local`s: in a player run the probe is unarmed, so these are one `u64` and one `None` that
+    /// nothing ever reads.
+    frame: Local<'s, u64>,
+    report: Local<'s, super::hover_probe::ProbeReport>,
 }
 
 /// The number of `ChildOf` hops [`net_entity_of`] will climb before giving up — a malformed-data
@@ -634,6 +639,7 @@ pub(super) fn update_hovered_object(
     // 16-param ceiling): the pick-set cache, its stream edges, and the sticky-hover memory.
     mut cache: GoPickSet,
 ) {
+    *cache.frame = cache.frame.wrapping_add(1);
     let added_parts = &cache.added;
     let removed_parts = &mut cache.removed;
     let pickable = &mut *cache.cache;
@@ -678,7 +684,13 @@ pub(super) fn update_hovered_object(
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    // The aim. A person's pointer always wins; the probe (2250) answers only for a window that has
+    // no cursor at all, which is every automated run — see [`super::hover_probe`].
+    let probing = super::hover_probe::armed();
+    let Some(cursor) = window
+        .cursor_position()
+        .or_else(|| super::hover_probe::point(window, *cache.frame))
+    else {
         return;
     };
     if pickable.is_empty() {
@@ -689,6 +701,38 @@ pub(super) fn update_hovered_object(
         return;
     };
     let self_store = self_q.single().ok();
+
+    // The probe's census (2250): once a second, where the pickable GameObjects actually ARE on
+    // screen. Without it a headless "no hit" is unreadable — it cannot tell a pick fault from a
+    // camera that is simply not looking at the thing, which is the single question a person with a
+    // mouse never has to ask.
+    if probing && (*cache.frame).is_multiple_of(60) {
+        let rows: Vec<String> = pickable
+            .iter()
+            .filter_map(|&e| {
+                let (_, gt, vis, ..) = parts.get(e).ok()?;
+                let world = gt.translation();
+                let screen = camera.world_to_viewport(cam_tf, world).ok();
+                Some(format!(
+                    "{:?}{} → {}",
+                    resolve_net(e),
+                    if vis.get() { "" } else { " (unseen)" },
+                    screen.map_or_else(
+                        || "off-camera".to_string(),
+                        |p| format!("{:.0},{:.0}", p.x, p.y)
+                    ),
+                ))
+            })
+            .take(8)
+            .collect();
+        info!(
+            "hover probe census: window {:.0}x{:.0}, {} pickable — {}",
+            window.width(),
+            window.height(),
+            pickable.len(),
+            rows.join(" · ")
+        );
+    }
 
     // Pass 1 — the exact resident geometry, pure nearest-wins (priority-independent).
     let mut best: Option<(f32, Entity)> =
@@ -750,6 +794,12 @@ pub(super) fn update_hovered_object(
     let picked = best.map(|(t, e)| (t, resolve_net(e)));
     *last_pick = picked.map(|(_, net)| net);
     let Some((distance, net_entity)) = picked else {
+        if probing {
+            cache.report.say(format!(
+                "aim {cursor:?} — no GameObject hit (pickable {})",
+                pickable.len()
+            ));
+        }
         return;
     };
     let Ok(guid) = guids.get(net_entity) else {
@@ -789,7 +839,28 @@ pub(super) fn update_hovered_object(
                 ),
             },
         ) {
+            if probing {
+                cache.report.say(format!(
+                    "guid {:#x} type {} at {distance:.1} yd — hover ✗ (tmpl {:?}, highlight {:?}): \
+                     the eligibility gate refused it, so there is no tooltip BY DESIGN",
+                    guid.0,
+                    store.0.gameobject_type_id(),
+                    tmpl.map(|t| t.name.as_str()),
+                    tmpl.map(|t| t.highlight_column),
+                ));
+            }
             return;
+        }
+        if probing {
+            cache.report.say(format!(
+                "guid {:#x} type {} at {distance:.1} yd — hover ✓, published (tmpl {:?}, highlight \
+                 {:?}, occlusion {:.1})",
+                guid.0,
+                store.0.gameobject_type_id(),
+                tmpl.map(|t| t.name.as_str()),
+                tmpl.map(|t| t.highlight_column),
+                occlusion.distance,
+            ));
         }
     }
     hovered.target = Some(net_entity);

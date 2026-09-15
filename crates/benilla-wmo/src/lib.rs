@@ -243,7 +243,7 @@ fn parse_root(b: &[u8]) -> Result<WmoRoot> {
             }
             // MOMT entry is 64 bytes: flags@0, shader@4, blend_mode@8, texture_1@12, sidnColor@16, …
             b"TMOM" => {
-                for m in p.chunks_exact(64) {
+                for m in p.as_chunks::<64>().0 {
                     // CImVector — BGRA bytes on disk, so the LE u32 reads B | G<<8 | R<<16 | A<<24.
                     let sidn = m.u32_at(0x10).ok_or(Error::Truncated("MOMT"))?;
                     let diff = m.u32_at(0x1c).ok_or(Error::Truncated("MOMT"))?;
@@ -311,7 +311,7 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
     for (magic, s) in chunks(&mogp[68..]) {
         match &magic {
             b"TVOM" => {
-                for c in s.chunks_exact(12) {
+                for c in s.as_chunks::<12>().0 {
                     g.vertex_positions.push(Vec3 {
                         x: c.f32_at(0).ok_or(Error::Truncated("MOVT"))?,
                         y: c.f32_at(4).ok_or(Error::Truncated("MOVT"))?,
@@ -320,7 +320,7 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
                 }
             }
             b"RNOM" => {
-                for c in s.chunks_exact(12) {
+                for c in s.as_chunks::<12>().0 {
                     g.vertex_normals.push(Vec3 {
                         x: c.f32_at(0).ok_or(Error::Truncated("MONR"))?,
                         y: c.f32_at(4).ok_or(Error::Truncated("MONR"))?,
@@ -329,7 +329,7 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
                 }
             }
             b"VTOM" => {
-                for c in s.chunks_exact(8) {
+                for c in s.as_chunks::<8>().0 {
                     g.texture_coords.push(Uv {
                         u: c.f32_at(0).ok_or(Error::Truncated("MOTV"))?,
                         v: c.f32_at(4).ok_or(Error::Truncated("MOTV"))?,
@@ -337,14 +337,14 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
                 }
             }
             b"IVOM" => {
-                for c in s.chunks_exact(2) {
+                for c in s.as_chunks::<2>().0 {
                     g.vertex_indices
                         .push(c.u16_at(0).ok_or(Error::Truncated("MOVI"))?);
                 }
             }
             // MOBA: bbox_min[i16;3] bbox_max[i16;3] start_index(u32@12) count(u16@16) min/max(u16) flags(u8@22) material_id(u8@23)
             b"ABOM" => {
-                for c in s.chunks_exact(24) {
+                for c in s.as_chunks::<24>().0 {
                     g.render_batches.push(Batch {
                         start_index: c.u32_at(12).ok_or(Error::Truncated("MOBA"))?,
                         count: c.u16_at(16).ok_or(Error::Truncated("MOBA"))?,
@@ -353,7 +353,7 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
                 }
             }
             b"VCOM" => {
-                for c in s.chunks_exact(4) {
+                for c in s.as_chunks::<4>().0 {
                     g.vertex_colors.push(Color {
                         b: c[0],
                         g: c[1],
@@ -364,7 +364,7 @@ fn parse_group(mogp: &[u8]) -> Result<WmoGroup> {
             }
             // MOPY: 2 bytes/face — flags + material id, one per triangle (collision filtering).
             b"YPOM" => {
-                for c in s.chunks_exact(2) {
+                for c in s.as_chunks::<2>().0 {
                     g.material_info.push(MopyEntry {
                         flags: c[0],
                         material_id: c[1],

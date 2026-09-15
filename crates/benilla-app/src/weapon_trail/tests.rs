@@ -459,7 +459,7 @@ fn an_armed_trail_commits_a_strip_to_the_effect_stream() {
     assert!((hi - 95.0 / 255.0).abs() < 1e-6, "the opaque end: {hi}");
     assert!(hi - lo > 0.1, "a real ramp, not one flat alpha: {alphas:?}");
     // Each quad is `[b0, b1, t1, t0]` — the two ends of one segment, so its corners pair up.
-    for q in verts.chunks_exact(4) {
+    for q in verts.as_chunks::<4>().0 {
         assert_eq!(
             q[0].color[3], q[3].color[3],
             "the older pair shares an alpha"

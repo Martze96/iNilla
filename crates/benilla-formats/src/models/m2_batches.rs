@@ -311,7 +311,7 @@ fn separable_billboard_bones(
     };
     // (2) a triangle whose vertices don't all sit wholly on one bone disqualifies every bone it
     // touches — including the hard (weight-1 vs weight-1) straddle that check (1) can't see.
-    for t in tris.chunks_exact(3) {
+    for t in tris.as_chunks::<3>().0 {
         let g: Vec<usize> = t
             .iter()
             .filter_map(|&i| lookup.get(i as usize).map(|&x| x as usize))
@@ -632,7 +632,7 @@ pub fn parse_m2_render_submeshes(
             .then_some(b)
         };
         let mut groups: Vec<(Option<usize>, Vec<u32>)> = Vec::new();
-        for tri in global_indices.chunks_exact(3) {
+        for tri in global_indices.as_chunks::<3>().0 {
             let key = primary_billboard_bone(tri[0]);
             if let Some(pos) = groups.iter().position(|(k, _)| *k == key) {
                 groups[pos].1.extend_from_slice(tri);

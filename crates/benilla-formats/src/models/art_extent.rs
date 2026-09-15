@@ -258,7 +258,7 @@ impl<'c> CoverageReader<'c> {
                     return Ok(known.clone());
                 }
                 let (width, height, rgba) = crate::read_texture_rgba(self.chain, path)?;
-                let alpha: Vec<u8> = rgba.chunks_exact(4).map(|px| px[3]).collect();
+                let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
                 let cov = if alpha.iter().all(|&a| a >= ALPHA_KEY_REF) {
                     Some(Coverage::Full)
                 } else if alpha.iter().all(|&a| a < ALPHA_KEY_REF) {
@@ -339,7 +339,7 @@ impl Grid {
 
     /// Rasterise every front-facing, near-clipped triangle of `sub` into the grid.
     fn paint_batch(&mut self, sub: &RenderSubmesh, frame: &EyeFrame, near: f32, cov: &Coverage) {
-        for tri in sub.indices.chunks_exact(3) {
+        for tri in sub.indices.as_chunks::<3>().0 {
             let Some(eye) = tri
                 .iter()
                 .map(|&i| {
@@ -522,7 +522,7 @@ pub fn batch_footprint(sub: &RenderSubmesh, cam: &M2PortraitCamera) -> BatchFoot
         return fp;
     };
     let near = cam.near_clip.max(1e-3);
-    for tri in sub.indices.chunks_exact(3) {
+    for tri in sub.indices.as_chunks::<3>().0 {
         let Some(eye) = tri
             .iter()
             .map(|&i| {
