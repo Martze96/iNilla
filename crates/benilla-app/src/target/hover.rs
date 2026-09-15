@@ -564,6 +564,9 @@ pub(super) struct GoPickSet<'w, 's> {
     /// nothing ever reads.
     frame: Local<'s, u64>,
     report: Local<'s, super::hover_probe::ProbeReport>,
+    /// `WOW_HOVER_PROBE=lock`'s held target (2255) — the object the probe rests its aim on for the
+    /// remainder of the run.
+    lock: Local<'s, super::hover_probe::LockedAim>,
 }
 
 /// The number of `ChildOf` hops [`net_entity_of`] will climb before giving up — a malformed-data
@@ -677,20 +680,32 @@ pub(super) fn update_hovered_object(
     hovered.target = None;
     hovered.guid = None;
     hovered.distance = f32::MAX;
-    if rig.is_looking() || pointer_over_ui.0 {
+    // The sticky-hover cache drops the moment the pointer is not ours, exactly as before — the
+    // probe's aim below must not change *when* that happens.
+    let yielded = rig.is_looking() || pointer_over_ui.0;
+    if yielded {
         *last_pick = None;
-        return;
     }
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
     // The aim. A person's pointer always wins; the probe (2250) answers only for a window that has
     // no cursor at all, which is every automated run — see [`super::hover_probe`].
+    //
+    // **Resolved and PUBLISHED ahead of the yield below** (2255), because the UI mouse feed reads
+    // the published aim as its pointer: a frame that returned early without publishing would take
+    // the pointer off the UI, drop `PointerOverUi`, and unlatch the very gate that skipped the
+    // pick — the probe would flicker the interface on and off instead of resting on it.
     let probing = super::hover_probe::armed();
-    let Some(cursor) = window
-        .cursor_position()
-        .or_else(|| super::hover_probe::point(window, *cache.frame))
-    else {
+    let probe_aim = cache
+        .lock
+        .point(camera, cam_tf, |e| parts.get(e).ok().map(|(_, gt, ..)| *gt))
+        .or_else(|| super::hover_probe::point(window, *cache.frame));
+    super::hover_probe::publish(probe_aim);
+    if yielded {
+        return;
+    }
+    let Some(cursor) = window.cursor_position().or(probe_aim) else {
         return;
     };
     if pickable.is_empty() {
@@ -861,6 +876,17 @@ pub(super) fn update_hovered_object(
                 tmpl.map(|t| t.highlight_column),
                 occlusion.distance,
             ));
+            // `lock` takes its target here and nowhere else: past the eligibility gate, so the
+            // probe holds something that actually publishes a mouseover rather than the first
+            // lamp-post the grid grazed. The hit point is re-expressed in the PART's frame so the
+            // aim survives the camera settling and the object moving (see [`LockedAim`]).
+            if super::hover_probe::locks() {
+                if let Some((t, part)) = best {
+                    if let Ok((_, gt, ..)) = parts.get(part) {
+                        cache.lock.hold(part, gt, ray.origin + *ray.direction * t);
+                    }
+                }
+            }
         }
     }
     hovered.target = Some(net_entity);

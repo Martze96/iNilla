@@ -612,34 +612,38 @@ fn feed_quest_log(
             .filter(|t| !t.is_empty())
     };
 
-    // ── The IN-FLIGHT GATE — all of the log, or none of it ──────────────────────────────────────
-    // The reference's rebuild (`0x4de510`) counts cache misses into `[0xbb7498]`, skips the row
-    // for each miss entirely (`0x4de66b`/`0x4de67e` — no row AND no header for its group), and
-    // then `0x4de545` makes any FURTHER rebuild a total no-op — not even `QUEST_LOG_UPDATE` —
-    // while the counter is non-zero. Only the arriving response decrements it, rebuilding once
-    // when it reaches 0. So a cold cache shows an EMPTY log (`GetNumQuestLogEntries()` → `0, 0`,
-    // and the stock UI paints `EmptyQuestLogFrame`), and then the whole thing appears in ONE step,
-    // complete. **It is never partially filled** (wow-re `ui/scratch/questlog-list-rebuild.md`,
-    // §5 trio + arbitration; our B3 claim — a placeholder row per in-flight quest — was REFUTED).
+    // ── The IN-FLIGHT SKIP — the cached rows, and only those ────────────────────────────────────
+    // The reference's rebuild (`0x4de510`) counts cache misses into `[0xbb7498]` and skips the
+    // MISSING QUEST — not the pass. The miss at `0x4de67e` is a `jmp 0x4de729`, which is the slot
+    // loop's own increment block, one instruction above the back-edge: every later slot is still
+    // visited and every later cache hit still appends its row at `0x4de68e`. The hit path's own
+    // "this group already has a header" branch (`0x4de6f1`) jumps to the same address right after
+    // appending a row, which a discard could not do. The tail past the loop is unconditional —
+    // both sorts, the collapse restore, the watch prune, and `QUEST_LOG_UPDATE` (`0x4de811`).
+    // `0x4de545` then makes any FURTHER rebuild a no-op until the last outstanding response
+    // decrements the counter to 0 and `0x4de8b0` rebuilds once more.
     //
-    // The empty window is the COLD case only: the reference loads `WDB/questcache.wdb` into this
-    // same cache before world-enter (`0x554f9b`), so a returning character's rows are there
-    // immediately. We have no such disk cache yet, so ours is the cold path every login — which is
-    // exactly the reference's own behaviour on a fresh `WDB`, not a deviation.
+    // So `GetNumQuestLogEntries()` answers `(visible rows, CACHED quest count)`, and `0, 0` is the
+    // all-cold extreme rather than the general law. Skipping the whole log on any miss — what this
+    // did, on a note that read the cold case as the rule — blanked the entire window for a round
+    // trip every time a quest whose template we had never seen entered the log. That took the
+    // engine selection with it (`remap_selection` reads an empty list as "your quest is gone"), so
+    // the detail pane jumped to row 1 on every single pickup, and addons reading the log across
+    // the blank saw a log that briefly held nothing. Settled at the bytes by wow-re, whose
+    // `scratch/questlog-list-rebuild.md` §1.1 now carries the partial case (decision 2256).
     //
-    // `template()` is still called for every row first, because the miss is what SENDS the query
-    // (the reference's rebuild sends `CMSG_QUEST_QUERY` too, once per id ever — our `pending` set
-    // is that same dedupe).
-    // Deliberately a loop and NOT `.all(..)`: `template()` is what SENDS the query, and the
-    // reference asks for every missing id, not just the first. Short-circuiting here would leave
-    // the rest of a cold log unrequested — and then nothing would ever arrive to un-gate it.
-    let mut all_cached = true;
-    for r in &rows {
-        if quest_log.template(r.quest_id, &commands).is_none() {
-            all_cached = false;
-        }
-    }
-    let rows: Vec<Row> = if all_cached { rows } else { Vec::new() };
+    // `template()` is called for EVERY row before any filtering, because the miss is what SENDS
+    // the query (our `pending` set is the reference's once-per-id dedupe) — short-circuiting would
+    // leave the rest of a cold log unrequested, and then nothing would arrive to fill it in.
+    let cached: Vec<bool> = rows
+        .iter()
+        .map(|r| quest_log.template(r.quest_id, &commands).is_some())
+        .collect();
+    let rows: Vec<Row> = rows
+        .into_iter()
+        .zip(cached)
+        .filter_map(|(r, hit)| hit.then_some(r))
+        .collect();
 
     // ── Section headers (the ref's zone/sort groups) ────────────────────────────────────────────
     // One header per distinct `ZoneOrSort` (positive → AreaTable zone, negative → QuestSort sort —

@@ -2357,12 +2357,6 @@ mod tests {
                  flow works without it",
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
-            (
-                "LEARNED_SPELL_IN_TAB",
-                "SpellBookFrame.lua — the tab flash when a new spell lands in it; the reference \
-                 fires it with the tab index on spell add, which benilla's spellbook feed does not \
-                 derive yet (1952)",
-            ),
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),

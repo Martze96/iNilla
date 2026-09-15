@@ -642,6 +642,27 @@ enum LastHover {
 
 /// The snapshot fields the unit tooltip's LINES read (everything except the bar's
 /// health/power) — the rebuild key: a change here means the rendered lines are stale.
+/// The world-hover driver's own memory, bundled — which plate it put up, the line-affecting fields
+/// that plate was built from, and the headless probe's say-once-on-change trace line (2255).
+///
+/// One [`SystemParam`](bevy::ecs::system::SystemParam) rather than three parameters for the reason
+/// [`crate::target::hover::GoPickSet`] is one: [`drive_mouseover_tooltip`] sits at Bevy's 16-param
+/// function-system ceiling. A bare tuple did the same job and tripped `clippy::type_complexity`,
+/// which is the lint asking for exactly this.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HoverMemo<'s> {
+    /// Which world plate is currently up — the driver's "do not rebuild this every frame" memo.
+    /// **Faithful**: on an unchanged mouseover the reference makes no call at all (`0x482090`
+    /// returns at `0x4820b5`), so a plate Lua takes mid-hover staying gone is reference behaviour
+    /// and not a bug to fix here. See 2255.
+    last: Local<'s, crate::ui_script::VmMemo<LastHover>>,
+    /// The line-affecting fields the current unit plate was built from, so a late-arriving name or
+    /// creature-info rebuilds it under the same hover.
+    last_lines: Local<'s, crate::ui_script::VmMemo<Option<UnitState>>>,
+    /// The headless probe's last trace line, so a stationary probe says it once (2255).
+    trace: Local<'s, String>,
+}
+
 fn lines_view(s: &UnitState) -> UnitState {
     UnitState {
         health: 0,
@@ -701,8 +722,7 @@ fn drive_mouseover_tooltip(
     player_actions: Res<crate::ui_action::PlayerActions>,
     // The cursor seat crosses the VM seam (0582/0584): the anchor below is UI units, not px.
     ui_scale: Res<crate::ui_script::UiScaleCvar>,
-    mut last: Local<crate::ui_script::VmMemo<LastHover>>,
-    mut last_lines: Local<crate::ui_script::VmMemo<Option<UnitState>>>,
+    mut memo: HoverMemo,
     // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
     // failed to load, in which case no class reads as having a relic slot.
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,
@@ -710,6 +730,7 @@ fn drive_mouseover_tooltip(
     let Some(mut script) = script else {
         return;
     };
+    let (last, last_lines, trace) = (&mut memo.last, &mut memo.last_lines, &mut *memo.trace);
     let last = last.get(&script);
     let last_lines = last_lines.get(&script);
     let self_store = self_q.iter().next();
@@ -829,6 +850,15 @@ fn drive_mouseover_tooltip(
         // pick out the same set here. They diverge only for the three always-eligible types
         // (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25), which is exactly where a pin would
         // settle it. Flagged INTERIM in 0766 rather than presented as verified.
+        //
+        // **THE PIN HAS ARRIVED, AND IT IS NARROWER THAN THIS LINE** (2255): `[vtbl+0x5c]` is
+        // `0x5f8630` = `template.data[0x621b00(type, 0x13)] != 0`, and semantic key `0x13` exists
+        // on exactly ONE of the 31 types — GENERIC(5), at `data[0]`. So the cursor arm is "GENERIC
+        // **with `data[0]` set**", and a GENERIC with it clear is corner-seated; the three
+        // always-eligible types above are corner-seated too, so 0766's "GENERIC" reading wins over
+        // its "not interactable" one. Applying it moves 190 of the 1387 hoverable type-5 templates
+        // from the cursor to the corner — a visible change, so it is its own slice and not a
+        // passenger on a bug fix (2255 carries the counts and the reasoning).
         let cursor_seated =
             stores.get(entity).map(|s| s.0.gameobject_type_id()) == Ok(GO_TYPE_GENERIC);
         // Window px → the VM's y-up 768-virtual units (÷s, the input seam's own conversion) —
@@ -842,12 +872,22 @@ fn drive_mouseover_tooltip(
                     // (2250), so an automated run can carry a GENERIC plate — which is
                     // cursor-seated — all the way to the screen. A person's pointer always wins.
                     w.cursor_position()
-                        .or_else(|| crate::target::hover_probe_point(w))
+                        .or_else(crate::target::hover_probe_point)
                         .map(|c| (c.x / s, (w.height() - c.y) / s))
                 })
             })
             .flatten();
         if *last == LastHover::Go(guid) {
+            if crate::target::hover_probe_armed() {
+                let line = format!(
+                    "held Go({guid:#x}) — plate up {}",
+                    script.world_tooltip_up()
+                );
+                if *trace != line {
+                    info!("hover probe/tooltip: {line}");
+                    *trace = line;
+                }
+            }
             // The cursor arm follows the pointer; the corner arm has nothing to re-seat.
             if let Some((x, y)) = cursor_ui {
                 script.world_tooltip_move(x, y);

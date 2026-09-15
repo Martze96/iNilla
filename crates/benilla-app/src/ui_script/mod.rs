@@ -1019,6 +1019,12 @@ mod shape_gate;
 #[cfg(test)]
 mod event_shape_gate;
 
+/// The VERB-FIRED event gate (decision 2251) — the third question on the same seam: 1883/1889
+/// compare names and 2140 compares arguments; this asks WHO fires it, because a stock file that
+/// calls a verb for its side effect of an event repaints nothing when the verb fires nothing.
+#[cfg(test)]
+mod verb_event_gate;
+
 /// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
 /// none of which benilla itself calls: every test enters from Lua the way an addon does.
 #[cfg(test)]

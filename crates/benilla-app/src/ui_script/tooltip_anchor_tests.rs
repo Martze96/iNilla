@@ -515,3 +515,53 @@ fn buff_hover_hangs_below_left_of_the_button() {
         "buff tooltip hangs its TOPRIGHT on the button's BOTTOMLEFT"
     );
 }
+
+/// **The cursor-seated GameObject plate carries an OWNER** — the store the reference's publisher
+/// makes through the SetOwner core (`0x492a01 → 0x52ffe0(owner, 6, 0, 0)`, whose `0x53000c`
+/// writes `+0x314`), and the one arm of ours that used to skip it (decision 2255).
+///
+/// Every other world plate reached an owner by accident, through Lua: the corner arm and the unit
+/// flow both fire `OnTooltipSetDefaultAnchor`, and the stock handler calls
+/// `GameTooltip:SetOwner(UIParent, …)`. The cursor arm fires nothing, so `IsOwned` answered false
+/// for exactly the GENERIC(5) objects — a signpost, a mailbox — and the next test is what that
+/// cost.
+#[test]
+fn a_cursor_seated_gameobject_plate_is_owned() {
+    let mut s = harness(&[]);
+    assert!(s.world_tooltip_gameobject("Brill", &[], Some((512.0, 384.0))));
+    let owned: bool = s.eval("return GameTooltip:IsOwned(UIParent)").unwrap();
+    assert!(
+        owned,
+        "the signpost plate is owned; errors: {:?}",
+        s.errors()
+    );
+}
+
+/// **An addon's `OnShow` hook must not hide the plate the world hover just built** — the
+/// director's signpost with no tooltip (decision 2255).
+///
+/// `!Questie` installs an `OnShow` on GameTooltip at PLAYER_LOGIN (`Questie:hookTooltip` — it
+/// installs one precisely *because* the stock plate has none) whose handler ends in
+/// `GameTooltip:Show()`. Lua's `:Show()` is the reference's EXISTENCE GATE `0x530a80`: owner and
+/// line count both non-zero, or it takes the effective-hide `0x530a60` instead. So an unowned
+/// plate hides itself the instant it is shown — through our own faithful implementation of that
+/// gate, ~26 ms after the engine built it, on every signpost, for the whole session.
+///
+/// The reference cannot reach that state, because its publisher writes the owner *before* the
+/// plate is ever shown. With the owner written, so do we.
+#[test]
+fn a_cursor_seated_gameobject_plate_survives_an_addons_on_show_hook() {
+    let mut s = harness(&[]);
+    // Questie's hook, in one line: the plate's own show event calls Show() again.
+    s.run(r#"GameTooltip:SetScript("OnShow", function() GameTooltip:Show() end)"#)
+        .unwrap();
+    assert!(s.world_tooltip_gameobject("Brill", &[], Some((512.0, 384.0))));
+    let shown: bool = s
+        .eval("return GameTooltip:IsShown() and true or false")
+        .unwrap();
+    assert!(
+        shown,
+        "the signpost plate is still up; errors: {:?}",
+        s.errors()
+    );
+}

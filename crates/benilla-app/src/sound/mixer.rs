@@ -732,6 +732,13 @@ impl symphonia::core::io::MediaSource for PromotingSource {
 const STREAM_STARVED_MIN_SECS: f64 = 0.1;
 /// The accounting window [`StreamWatch`] compares over.
 const STREAM_WATCH_WINDOW_SECS: f64 = 1.0;
+/// How long a stream may sit audible with its position still pinned where it was constructed
+/// before the watch says it never played at all (decision 2253).
+///
+/// Well past any spin-up this machine produces — the login theme's is the worst of them, because
+/// the output device opens in the same frame — and short enough that a cue which never arrives is
+/// named while it should still be playing.
+const STREAM_START_MAX_SECS: f64 = 3.0;
 
 /// Position-freeze watch over a live stream — the starvation meter [`MixHealth`] lacks (decision
 /// 1109; `poll_mix_health`'s docs name this exact blind spot).
@@ -743,6 +750,18 @@ const STREAM_WATCH_WINDOW_SECS: f64 = 1.0;
 /// and WARNs when more than [`STREAM_STARVED_MIN_SECS`] went missing. Playback rate is always
 /// 1.0 here (WoW pitches no music), so the two clocks agree to drift well under the threshold.
 ///
+/// **Every stream opens with a frozen position, and that is not a dropout** (decision 2253).
+/// kira's `Shared::new` publishes `state = Playing` and `position = 0.0` when `play()` returns, so
+/// the handle reads audible before the renderer has ever seen the sound; and
+/// `StreamingSound::process` opens with `if self.frame_consumer.slots() < 2 { out.fill(ZERO);
+/// return; }` — it zero-fills *without advancing the position* until the decode thread has two
+/// frames ready. The interval between `play()` and the first sample heard is therefore a frozen
+/// position by construction, and it is spin-up latency (the cue begins a fraction of a second
+/// late), never silence punched into audio that was already playing. So the watch does not start
+/// counting until the position has actually moved ([`Phase::Starting`]), and says at `debug!` what
+/// it skipped. Before that it charged the spin-up as loss: the 2026-09-15 login reported the glue
+/// theme's own first ~235 ms as "injected silence", which is what a crackle does *not* sound like.
+///
 /// **Known blind spot (1112, deliberate):** the watch samples on the main thread, so a stream
 /// that starves *during a main-thread stall* and reaches `Stopped` before the next frame is
 /// never accounted — the window is discarded by the reset. Reconstructing it from the stop
@@ -751,32 +770,67 @@ const STREAM_WATCH_WINDOW_SECS: f64 = 1.0;
 /// thread was doing.
 pub(crate) struct StreamWatch {
     label: &'static str,
-    last_pos: Option<f64>,
+    phase: Phase,
+    /// Wall time counted into the open window, summed from the fed frame deltas.
     expected: f64,
+    /// Stream position gained over those same frames.
     advanced: f64,
-    /// When the open window began, in WALL time — carried so the report can state the span it
-    /// actually covered beside the time it counted.
+}
+
+/// Where a watched stream is in its life: nothing to watch, spinning up, or playing.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// No stream on the slot, or one that is not audible. Position legitimately holds.
+    Idle,
+    /// Audible, and the position has not moved off `pos` yet — the spin-up (see [`StreamWatch`]).
+    /// Nothing is counted here; `warned` holds [`STREAM_START_MAX_SECS`] to one line per stream.
+    Starting {
+        since: std::time::Instant,
+        pos: f64,
+        warned: bool,
+    },
+    /// Advancing. `window_start` is the WALL instant this window's counting began — stamped at
+    /// that same instant and only there, so the counted time and the reported span are two
+    /// measurements of one interval and *cannot* disagree.
     ///
-    /// **Because the two disagreed and nothing could say why.** A 2026-09-06 login closed a 1.0 s
-    /// window 0.756 s of wall after the stream started, which is arithmetically impossible if the
-    /// fed `dt` is the real frame delta — and the fix that put this watch on `Time<Real>` did not
-    /// change it. Rather than reason further from log timestamps, the line now carries both
-    /// numbers: if they disagree the caller's clock is still wrong, and if they agree the
-    /// starvation is real and the timestamps were the misreading.
-    window_start: Option<std::time::Instant>,
-    /// The closing window's counted totals, kept for the report (`observe` zeroes them).
-    closed: (f64, f64),
+    /// **They did disagree, across three runs, and that is why this is a field rather than an
+    /// `Instant::now()` taken in the report.** It used to be stamped lazily, on the first frame
+    /// that found `expected == 0.0` — which is the frame *after* the one the first delta reaches
+    /// back to, so the span dropped exactly one frame of the interval it claimed to cover. Two
+    /// 2026-09-06 logins called the result arithmetically impossible (a 1.0 s window closing
+    /// 0.81 s and 0.756 s of wall after the stream started) and suspected the fed clock; the
+    /// 2026-09-15 login that first carried the span printed `counted 1.00 s` over a `0.70 s`
+    /// window, and the missing 0.30 s is the 298 ms frame hitch stamped in that same instant.
+    /// The clock was right all along; the span was one frame short of what was counted.
+    Running {
+        last_pos: f64,
+        window_start: std::time::Instant,
+    },
+}
+
+/// What [`StreamWatch::observe`] found this frame. Returned rather than logged so the accounting
+/// stays pure and the tests can drive it without a device.
+enum Verdict {
+    /// A window closed having lost more than [`STREAM_STARVED_MIN_SECS`] of audible time.
+    Starved {
+        lost: f64,
+        counted: f64,
+        advanced: f64,
+        span: f64,
+    },
+    /// The stream went audible and its position never moved — nothing from it was ever heard.
+    NeverStarted { waited: f64 },
+    /// The stream began advancing this long after it went audible: its spin-up.
+    Began { after: f64 },
 }
 
 impl StreamWatch {
     pub(crate) fn new(label: &'static str) -> Self {
         Self {
             label,
-            last_pos: None,
+            phase: Phase::Idle,
             expected: 0.0,
             advanced: 0.0,
-            window_start: None,
-            closed: (0.0, 0.0),
         }
     }
 
@@ -784,62 +838,149 @@ impl StreamWatch {
     pub(crate) fn feed(&mut self, handle: &StreamingSoundHandle<FromFileError>, dt: f64) {
         use kira::sound::PlaybackState as S;
         let audible = matches!(handle.state(), S::Playing | S::Stopping);
-        if audible && self.expected == 0.0 {
-            self.window_start = Some(std::time::Instant::now());
-        }
-        if let Some(lost) = self.observe(audible, handle.position(), dt) {
-            let span = self
-                .window_start
-                .take()
-                .map_or(f64::NAN, |t| t.elapsed().as_secs_f64());
-            let (counted, advanced) = self.closed;
-            // **No cause is named.** This used to say "(decode thread outrun)", which is one of
-            // three mechanisms that freeze a stream's position identically — a starved decoder, a
-            // render thread that did not run, or a closed/rebuilding device — and the meter cannot
-            // tell them apart. Asserting one of the three in the line is how a log hands a reader
-            // a conclusion the instrument never reached.
-            warn!(
-                "audio: {} stream starved — ~{:.0} ms of injected silence over a {span:.2} s \
-                 window (counted {counted:.2} s, position advanced {advanced:.2} s) — this is \
-                 what a crackle sounds like",
+        match self.observe(audible, handle.position(), dt, std::time::Instant::now()) {
+            Some(Verdict::Starved {
+                lost,
+                counted,
+                advanced,
+                span,
+            }) => {
+                // **No cause is named.** This used to say "(decode thread outrun)", which is one
+                // of three mechanisms that freeze a stream's position identically — a starved
+                // decoder, a render thread that did not run, or a closed/rebuilding device — and
+                // the meter cannot tell them apart. Asserting one of the three in the line is how
+                // a log hands a reader a conclusion the instrument never reached.
+                warn!(
+                    "audio: {} stream starved — ~{:.0} ms of injected silence over a {span:.2} s \
+                     window (counted {counted:.2} s, position advanced {advanced:.2} s) — this is \
+                     what a crackle sounds like",
+                    self.label,
+                    lost * 1000.0,
+                );
+            }
+            Some(Verdict::NeverStarted { waited }) => warn!(
+                "audio: {} has been audible {waited:.1} s with its position still at the start — \
+                 not one sample of it has been heard",
                 self.label,
-                lost * 1000.0,
-            );
+            ),
+            // A bound, not a stopwatch, and it says which bound: the clock starts when the WATCH
+            // first saw the handle (within a frame of `play()`, but that frame can be a long one
+            // during a login burst), and it can only stop on a frame, so a spin-up that ends
+            // inside a long frame is reported as that whole frame.
+            Some(Verdict::Began { after }) => debug!(
+                "audio: {} took {:.0} ms to start advancing after the watch first saw it — \
+                 spin-up, not counted",
+                self.label,
+                after * 1000.0,
+            ),
+            None => {}
         }
     }
 
     /// Drop the baseline — call when the watched handle is dropped/replaced, so the next
     /// stream's position (starting at 0, i.e. *behind* the old one's) can't read as a freeze.
     pub(crate) fn reset(&mut self) {
-        self.last_pos = None;
+        self.phase = Phase::Idle;
         self.expected = 0.0;
         self.advanced = 0.0;
-        self.window_start = None;
     }
 
-    /// The accounting core, pure so the tests below can drive it without a device. Returns
-    /// `Some(lost_secs)` when a window closes starved.
-    fn observe(&mut self, audible: bool, pos: f64, dt: f64) -> Option<f64> {
+    /// Open a counting window at `now` — which is both the position baseline and the wall origin.
+    /// The pair is set together on purpose; see [`Phase::Running`] for what happened when it
+    /// wasn't.
+    fn begin(&mut self, pos: f64, now: std::time::Instant) {
+        self.phase = Phase::Running {
+            last_pos: pos,
+            window_start: now,
+        };
+        self.expected = 0.0;
+        self.advanced = 0.0;
+    }
+
+    /// The accounting core, pure so the tests below can drive it without a device.
+    fn observe(
+        &mut self,
+        audible: bool,
+        pos: f64,
+        dt: f64,
+        now: std::time::Instant,
+    ) -> Option<Verdict> {
         // Non-audible states (stopped, paused) drop the baseline: position legitimately holds.
         if !audible {
             self.reset();
             return None;
         }
-        let Some(last) = self.last_pos.replace(pos) else {
-            return None; // first audible frame — baseline only
-        };
-        self.expected += dt;
-        // `max(0.0)`: a track replaced on the slot mid-window jumps backwards once (the new
-        // stream starts at 0); count it as no advance for that one frame, not as negative.
-        self.advanced += (pos - last).max(0.0);
-        if self.expected < STREAM_WATCH_WINDOW_SECS {
-            return None;
+        match self.phase {
+            Phase::Idle => {
+                self.phase = Phase::Starting {
+                    since: now,
+                    pos,
+                    warned: false,
+                };
+                None
+            }
+            Phase::Starting {
+                since,
+                pos: start,
+                warned,
+            } => {
+                let waited = now.duration_since(since).as_secs_f64();
+                if pos > start {
+                    self.begin(pos, now);
+                    return Some(Verdict::Began { after: waited });
+                }
+                if !warned && waited > STREAM_START_MAX_SECS {
+                    self.phase = Phase::Starting {
+                        since,
+                        pos: start,
+                        warned: true,
+                    };
+                    return Some(Verdict::NeverStarted { waited });
+                }
+                None
+            }
+            Phase::Running {
+                last_pos,
+                window_start,
+            } => {
+                // A track swapped onto the slot mid-window starts at 0 — *behind* the one it
+                // replaced. That is a new stream, not a freeze, so it goes back to `Starting` and
+                // gets its own spin-up excluded exactly like a fresh one. No watched stream ever
+                // loops in place: `loop_region` belongs to the static path, never a streamed one
+                // (see `stream_from_bytes`), so a backwards jump has no other reading.
+                if pos < last_pos {
+                    self.phase = Phase::Starting {
+                        since: now,
+                        pos,
+                        warned: false,
+                    };
+                    self.expected = 0.0;
+                    self.advanced = 0.0;
+                    return None;
+                }
+                self.expected += dt;
+                self.advanced += pos - last_pos;
+                self.phase = Phase::Running {
+                    last_pos: pos,
+                    window_start,
+                };
+                if self.expected < STREAM_WATCH_WINDOW_SECS {
+                    return None;
+                }
+                let (counted, advanced) = (self.expected, self.advanced);
+                let span = now.duration_since(window_start).as_secs_f64();
+                // The next window's origin is THIS instant — the one its first delta reaches back
+                // to.
+                self.begin(pos, now);
+                let lost = counted - advanced;
+                (lost > STREAM_STARVED_MIN_SECS).then_some(Verdict::Starved {
+                    lost,
+                    counted,
+                    advanced,
+                    span,
+                })
+            }
         }
-        let lost = self.expected - self.advanced;
-        self.closed = (self.expected, self.advanced);
-        self.expected = 0.0;
-        self.advanced = 0.0;
-        (lost > STREAM_STARVED_MIN_SECS).then_some(lost)
     }
 }
 
@@ -1367,20 +1508,32 @@ mod tests {
         );
     }
 
-    /// The starvation accounting (decision 1109): a stream that advances in lockstep with wall
-    /// time stays quiet; one whose position freezes mid-window (kira's zero-fill) reports the
-    /// missing time; a slot swap's one-frame backward jump never reads as a freeze; and going
+    /// Frame `i`'s wall instant, so a test reads as a timeline rather than as bookkeeping.
+    fn wall(t0: std::time::Instant, secs: f64) -> std::time::Instant {
+        t0 + std::time::Duration::from_secs_f64(secs)
+    }
+
+    /// The starvation accounting (decisions 1109, 2253): a stream that advances in lockstep with
+    /// wall time stays quiet; one whose position freezes mid-window (kira's zero-fill) reports the
+    /// missing time; a slot swap's backward jump is a new stream, not a freeze; and going
     /// non-audible drops the baseline so a later stream starts clean.
     #[test]
     fn stream_watch_accounts_freezes_not_swaps() {
         let dt = 1.0 / 60.0;
+        let t0 = std::time::Instant::now();
 
-        // Healthy: position tracks wall time exactly — a full window closes clean.
+        // Healthy: position tracks wall time exactly — every window closes clean.
         let mut w = StreamWatch::new("test");
         let mut pos = 0.0;
-        for _ in 0..90 {
-            assert_eq!(w.observe(true, pos, dt), None, "healthy stream reported");
+        for i in 0..90 {
             pos += dt;
+            assert!(
+                !matches!(
+                    w.observe(true, pos, dt, wall(t0, f64::from(i) * dt)),
+                    Some(Verdict::Starved { .. })
+                ),
+                "healthy stream reported"
+            );
         }
 
         // Starved: 18 frames (~0.3 s) frozen inside the window → that window reports ~0.3 s.
@@ -1391,26 +1544,35 @@ mod tests {
             if !(30..48).contains(&i) {
                 pos += dt;
             }
-            if let Some(lost) = w.observe(true, pos, dt) {
-                reports.push(lost);
+            if let Some(Verdict::Starved {
+                lost,
+                counted,
+                span,
+                ..
+            }) = w.observe(true, pos, dt, wall(t0, f64::from(i) * dt))
+            {
+                reports.push((lost, counted, span));
             }
         }
         assert_eq!(reports.len(), 1, "one starved window: {reports:?}");
         assert!(
-            (reports[0] - 0.3).abs() < 0.05,
+            (reports[0].0 - 0.3).abs() < 0.05,
             "lost ≈ 0.3 s, got {reports:?}"
         );
 
-        // Slot swap: position jumps backwards once (new track starts at 0) — no report.
+        // Slot swap: the position jumps backwards once (the new track starts at 0). That is a new
+        // stream, not a freeze — it re-enters the spin-up, and nobody is charged for the jump.
         let mut w = StreamWatch::new("test");
         let mut pos = 40.0;
-        for i in 0..90 {
+        for i in 0..120 {
             if i == 30 {
                 pos = 0.0;
             }
-            assert_eq!(
-                w.observe(true, pos, dt),
-                None,
+            assert!(
+                !matches!(
+                    w.observe(true, pos, dt, wall(t0, f64::from(i) * dt)),
+                    Some(Verdict::Starved { .. })
+                ),
                 "slot swap reported as freeze"
             );
             pos += dt;
@@ -1420,16 +1582,166 @@ mod tests {
         // the old one's) opens a fresh window instead of inheriting a phantom freeze.
         let mut w = StreamWatch::new("test");
         let mut pos = 70.0;
-        for _ in 0..30 {
-            assert_eq!(w.observe(true, pos, dt), None);
+        for i in 0..30 {
+            assert!(w
+                .observe(true, pos, dt, wall(t0, f64::from(i) * dt))
+                .is_none_or(|v| matches!(v, Verdict::Began { .. })));
             pos += dt;
         }
-        assert_eq!(w.observe(false, pos, dt), None);
+        assert!(w.observe(false, pos, dt, wall(t0, 0.5)).is_none());
         let mut pos = 0.0;
-        for _ in 0..90 {
-            assert_eq!(w.observe(true, pos, dt), None, "restart read as freeze");
+        for i in 30..120 {
+            assert!(
+                !matches!(
+                    w.observe(true, pos, dt, wall(t0, f64::from(i) * dt)),
+                    Some(Verdict::Starved { .. })
+                ),
+                "restart read as freeze"
+            );
             pos += dt;
         }
+    }
+
+    /// **The span is the interval that was counted** — the pin on decision 2253's off-by-one.
+    ///
+    /// The window used to be wall-stamped lazily, on the first frame that found nothing counted
+    /// yet — one frame *after* the frame its first delta reaches back to. So a hitch at the head
+    /// of a window was counted but not spanned, and the line contradicted itself: the 2026-09-15
+    /// login printed `counted 1.00 s` over a `0.70 s` window with a 298 ms hitch in the gap, and
+    /// two earlier logins had called the same arithmetic impossible and suspected the clock.
+    /// Here the head of the window *is* that hitch, and the stream froze through it.
+    #[test]
+    fn stream_watch_spans_the_window_it_counted() {
+        let dt = 1.0 / 60.0;
+        let t0 = std::time::Instant::now();
+        let hitch = 0.298;
+        let mut w = StreamWatch::new("test");
+
+        // `play()` has returned; nothing has been heard yet, so nothing is counted yet.
+        assert!(w.observe(true, 0.0, dt, wall(t0, 0.0)).is_none());
+        // The first sample lands: the window opens here, at this instant.
+        assert!(matches!(
+            w.observe(true, 0.001, dt, wall(t0, 0.010)),
+            Some(Verdict::Began { .. })
+        ));
+        // The hitch — 298 ms of wall in one frame, the stream frozen through it. Its delta
+        // reaches back to the instant the window opened, so the span must contain it.
+        assert!(w
+            .observe(true, 0.001, hitch, wall(t0, 0.010 + hitch))
+            .is_none());
+
+        let mut pos = 0.001;
+        let mut report = None;
+        for i in 0..90 {
+            pos += dt;
+            let t = 0.010 + hitch + f64::from(i + 1) * dt;
+            if let Some(v) = w.observe(true, pos, dt, wall(t0, t)) {
+                report = Some(v);
+                break;
+            }
+        }
+        let Some(Verdict::Starved {
+            lost,
+            counted,
+            span,
+            ..
+        }) = report
+        else {
+            panic!("the frozen hitch went unreported");
+        };
+        assert!(
+            (counted - span).abs() < 1e-6,
+            "the window must span the interval it counted: counted {counted}, span {span}"
+        );
+        assert!(
+            (lost - hitch).abs() < 0.01,
+            "the hitch is the whole loss: {lost}"
+        );
+    }
+
+    /// **A stream's spin-up is not a dropout** (decision 2253), driven here on the timeline of
+    /// the 2026-09-15 login that reported the glue theme's own first 235 ms as injected silence.
+    ///
+    /// kira publishes `Playing` with `position = 0.0` the moment `play()` returns, and
+    /// `StreamingSound::process` zero-fills *without advancing the position* until the decode
+    /// thread has two frames ready. So every stream opens frozen, and that interval is latency
+    /// before the first sample — never silence cut into audio that was already playing.
+    ///
+    /// That login's shape, relative to the frame the theme started on: the output device opened
+    /// and the stream was played inside a frame that then blocked for 298 ms, and the first
+    /// sample landed 233 ms in (~100 ms of mix-ahead, ~11 ms of IO buffer, the rest decode).
+    /// The old accounting charged all of it, closed its first window at 1.00 s counted against
+    /// 0.77 s advanced, and called the difference a crackle.
+    #[test]
+    fn stream_watch_does_not_charge_a_stream_for_starting() {
+        let dt = 1.0 / 60.0;
+        let t0 = std::time::Instant::now();
+        let hitch = 0.298;
+        let first_sample = 0.233;
+        // Position as the handle reports it: pinned where it was constructed until the renderer
+        // has audio to consume, then advancing with wall time.
+        let pos_at = |t: f64| (t - first_sample).max(0.0);
+
+        let mut w = StreamWatch::new("test");
+        let mut began = Vec::new();
+        let mut starved = 0;
+        // The frame the theme started on — audible, position still 0 — and then the hitch.
+        let mut ticks = vec![0.0, hitch];
+        // Then three seconds of ordinary frames.
+        for i in 1..=180 {
+            ticks.push(hitch + f64::from(i) * dt);
+        }
+        for (i, t) in ticks.iter().enumerate() {
+            let delta = if i == 0 { dt } else { t - ticks[i - 1] };
+            match w.observe(true, pos_at(*t), delta, wall(t0, *t)) {
+                Some(Verdict::Began { after }) => began.push(after),
+                Some(Verdict::Starved {
+                    lost,
+                    counted,
+                    span,
+                    ..
+                }) => {
+                    starved += 1;
+                    eprintln!("starved: lost {lost} counted {counted} span {span}");
+                }
+                Some(Verdict::NeverStarted { .. }) => {
+                    panic!("a playing stream read as never started")
+                }
+                None => {}
+            }
+        }
+        assert_eq!(
+            starved, 0,
+            "the login's own spin-up was charged as injected silence again"
+        );
+        assert_eq!(began.len(), 1, "one spin-up line per stream: {began:?}");
+        // Frame-quantized: the first advance is only visible on the frame after the hitch.
+        assert!(
+            (began[0] - hitch).abs() < 1e-6,
+            "the skipped spin-up, stated as the bound it is: {began:?}"
+        );
+    }
+
+    /// Excluding the spin-up must not mean excluding a spin-up that never ends: a stream that
+    /// goes audible and never plays a sample is still named, once (decision 2253).
+    #[test]
+    fn stream_watch_names_a_stream_that_never_starts() {
+        let dt = 1.0 / 60.0;
+        let t0 = std::time::Instant::now();
+        let mut w = StreamWatch::new("test");
+        let mut waited = Vec::new();
+        for i in 0..600 {
+            if let Some(Verdict::NeverStarted { waited: s }) =
+                w.observe(true, 0.0, dt, wall(t0, f64::from(i) * dt))
+            {
+                waited.push(s);
+            }
+        }
+        assert_eq!(waited.len(), 1, "one line per stream, not one per frame");
+        assert!(
+            waited[0] > STREAM_START_MAX_SECS && waited[0] < STREAM_START_MAX_SECS + 0.1,
+            "named as soon as the wait is past the bound: {waited:?}"
+        );
     }
 
     /// The fade contract every transition rests on: `stop(tween)` fades the channel to silence

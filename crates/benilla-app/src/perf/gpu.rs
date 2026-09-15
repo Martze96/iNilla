@@ -8,14 +8,24 @@
 //! bevy's own `RenderDiagnosticsPlugin` needs INSIDE_PASSES and reads zero GPU spans here — the
 //! `perf` module header's ⚠ note, measured in 1389).
 //!
-//! **The resolve rides its own submission, one frame later.** 1389's recorded trap: resolving
-//! the query set in the SAME command buffer as the timed work returns zeros on Metal (5 of 6
-//! reads; the 6th a plausible-looking near-miss). So the cleanup system resolves last frame's
-//! set into a small ring of MAP_READ buffers via a fresh encoder, and reads the mapping two
-//! frames behind. The published number is the freshest mapped delta, nanoseconds in one
-//! `AtomicU64` shared with the main world — `FPS_PROBE` samples it per frame under the same env
-//! and prints its own percentiles, so a leg gets `gpu_p50/gpu_p99` beside `cpu_ms` with zero
-//! cost when the env is off (nothing registers).
+//! **The resolve rides the NEXT frame's command buffer, ahead of that frame's own stamps.**
+//! 1389's recorded trap: resolving the query set in the SAME command buffer as the timed work
+//! returns zeros on Metal (5 of 6 reads; the 6th a plausible-looking near-miss) — resolve on a
+//! later submission. The first build of this meter did that with a submission of its own: a
+//! fresh encoder, a second `queue.submit` and an explicit `device.poll` in `Cleanup`, every
+//! frame — a per-frame poll that traced at 1.8 ms on Intel's DX12 driver (2236) and priced
+//! untraced in 2254. So the query set holds TWO stamp pairs and the frames alternate between
+//! them ([`pairs`]): the `begin` node first resolves the pair the previous frame wrote — a later
+//! submission, 1389's rule kept — and copies it into a free slot of a small ring of MAP_READ
+//! buffers, on the graph's own shared encoder; then it writes this frame's pair. `Cleanup` only
+//! kicks the map on the slot the graph just filled, and that map lands inside the NEXT frame's
+//! own `queue.submit`, which runs wgpu's device maintenance as part of every submit
+//! (`wgpu_core::device::queue::Queue::submit` ends in `Device::maintain(Poll)`) — the shape of
+//! bevy's own `DiagnosticsRecorder`, and no submission or poll of the meter's own. The
+//! published number is the freshest mapped delta, nanoseconds in one `AtomicU64` shared with
+//! the main world — `FPS_PROBE` samples it per frame under the same env and prints its own
+//! percentiles, so a leg gets `gpu_p50/gpu_p99` beside `cpu_ms` with zero cost when the env is
+//! off (nothing registers).
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -29,13 +39,11 @@ use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
 use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
-use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode,
-};
+use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferUsages, MapMode};
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::ui_render::TransparentUi;
-use wgpu::{PollType, QuerySet, QuerySetDescriptor, QueryType};
+use wgpu::{QuerySet, QuerySetDescriptor, QueryType};
 
 /// Is the meter armed? One read; everything registers behind it.
 pub(crate) fn enabled() -> bool {
@@ -167,7 +175,19 @@ const FREE: u8 = 0;
 const PENDING: u8 = 1;
 const MAPPED: u8 = 2;
 
-/// Render-world state: the query set, its resolve buffer, and the mapping ring.
+/// Which stamp pair a graph run writes and which it resolves, for the [`GpuStamp::frame`] it
+/// runs under: the two pairs alternate, and a run resolves the pair the run before it wrote —
+/// a later submission than the timed work (1389's rule), and one whose queries the previous
+/// command buffer reset before writing (a resolve of a never-reset query is 2211's hang). Pair
+/// `p` is queries `2p` (begin) and `2p + 1` (end).
+fn pairs(frame: usize) -> (u32, u32) {
+    #[allow(clippy::cast_possible_truncation)]
+    let write = (frame % 2) as u32;
+    (write, 1 - write)
+}
+
+/// Render-world state: the query set (two stamp pairs, alternating by frame), the resolve
+/// buffer, and the mapping ring.
 #[derive(Resource)]
 struct GpuStamp {
     query_set: QuerySet,
@@ -176,16 +196,23 @@ struct GpuStamp {
     sentinel_view: wgpu::TextureView,
     resolve: Buffer,
     ring: Vec<(Buffer, Arc<AtomicU8>)>,
-    /// Frames this resource has seen a `readback` for. **Zero means the stamps have never been
-    /// written**: `init_stamp` inserts the resource in `Cleanup`, the scheduler's sync point
-    /// applies it before `readback` runs in the same set, and the sentinel nodes that write —
-    /// and, in wgpu, reset — the two queries only run in the NEXT frame's graph. A resolve on
-    /// that first pass reads a query pool no command has ever reset, which Vulkan forbids
-    /// (`VUID-vkCmdCopyQueryPoolResults-None-09402`) and answers, on NVIDIA's driver, by
-    /// waiting on it forever — a GPU hang, the TDR, and the lost device 2205 met at the
-    /// swapchain acquire. Metal hands back zeros for the same read, which is why the meter's
-    /// first live runs (1389) saw "zeros" and never a hang. Decision 2211.
+    /// `Cleanup`s this resource has seen, counting the one that created it; the graph run that
+    /// follows each writes pair `frame % 2` and resolves the other ([`pairs`]). **The creation
+    /// `Cleanup` precedes the first stamped frame**: `init_stamp` inserts the resource in
+    /// `Cleanup`, the scheduler's sync point applies it before `readback` runs in the same set,
+    /// and the sentinel nodes that write — and, in wgpu, reset — the queries only run in the
+    /// NEXT frame's graph. A resolve on that first run would read a query pool no command has
+    /// ever reset, which Vulkan forbids (`VUID-vkCmdCopyQueryPoolResults-None-09402`) and
+    /// answers, on NVIDIA's driver, by waiting on it forever — a GPU hang, the TDR, and the
+    /// lost device 2205 met at the swapchain acquire. Metal hands back zeros for the same read,
+    /// which is why the meter's first live runs (1389) saw "zeros" and never a hang. Decision
+    /// 2211. So the first run is armed with no [`Self::slot`] and resolves nothing.
     frame: usize,
+    /// The ring slot the NEXT graph run copies the previous run's stamps into: chosen in
+    /// `Cleanup` from the FREE slots — `None` while no run has written a pair yet, or while the
+    /// ring is full (that sample is skipped; the meter is a meter). The `begin` node reads it,
+    /// the `Cleanup` after that run maps it.
+    slot: Option<usize>,
     period: f32,
     shared: Arc<AtomicU64>,
 }
@@ -207,14 +234,30 @@ impl Node for GpuStampNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         if let Some(stamp) = world.get_resource::<GpuStamp>() {
+            let (write, resolve) = pairs(stamp.frame);
+            if self.index == 0 {
+                if let Some(slot) = stamp.slot {
+                    // The previous run's pair, resolved and copied out on the graph's own
+                    // encoder: a later submission than the stamps it reads (1389), and none of
+                    // the meter's own.
+                    let encoder = render_context.command_encoder();
+                    encoder.resolve_query_set(
+                        &stamp.query_set,
+                        resolve * 2..resolve * 2 + 2,
+                        &stamp.resolve,
+                        0,
+                    );
+                    encoder.copy_buffer_to_buffer(&stamp.resolve, 0, &stamp.ring[slot].0, 0, 16);
+                }
+            }
             // A SENTINEL PASS, not a bare `write_timestamp`: Apple Silicon samples counters only
             // at stage boundaries, and an encoder-level stamp with no stages around it resolves
             // to zero (measured on this meter's first live run — 1389's "two sentinel nodes"
             // meant exactly this). An empty compute pass is the cheapest stage boundary there is.
             let (begin, end) = if self.index == 0 {
-                (Some(0), None)
+                (Some(write * 2), None)
             } else {
-                (None, Some(1))
+                (None, Some(write * 2 + 1))
             };
             render_context
                 .command_encoder()
@@ -261,7 +304,7 @@ fn init_stamp(
     let query_set = device.wgpu_device().create_query_set(&QuerySetDescriptor {
         label: Some("gpu-ms stamps"),
         ty: QueryType::Timestamp,
-        count: 2,
+        count: 4,
     });
     let resolve = device.create_buffer(&BufferDescriptor {
         label: Some("gpu-ms resolve"),
@@ -304,40 +347,32 @@ fn init_stamp(
         resolve,
         ring,
         frame: 0,
+        slot: None,
         period: queue.get_timestamp_period(),
         shared: shared.0.clone(),
     });
 }
 
-/// After the graph's own submission: resolve LAST frame's stamps on a fresh encoder (its own
-/// command buffer — the 1389 trap), kick the map, and publish the oldest mapped delta.
-fn readback(stamp: Option<ResMut<GpuStamp>>, device: Res<RenderDevice>, queue: Res<RenderQueue>) {
+/// `Cleanup`, after the graph's own submission: kick the map on the slot the graph just filled,
+/// publish every landed mapping, and arm a slot for the next run. No encoder, no submit and no
+/// poll of the meter's own — the map lands in the next frame's `queue.submit`, which maintains
+/// the device (the module header).
+fn readback(stamp: Option<ResMut<GpuStamp>>) {
     let Some(mut stamp) = stamp else { return };
-    // The first cleanup after creation precedes the first stamped frame: nothing to resolve
-    // yet, and resolving anyway is the Vulkan device loss above (see `frame`).
-    if stamp.frame == 0 {
-        stamp.frame = 1;
-        return;
-    }
-    // Copy into a FREE slot only (none free → skip this frame's sample; the meter is a meter).
-    if let Some(i) = (0..RING).find(|&i| stamp.ring[i].1.load(Ordering::Relaxed) == FREE) {
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("gpu-ms resolve"),
-        });
-        encoder.resolve_query_set(&stamp.query_set, 0..2, &stamp.resolve, 0);
-        encoder.copy_buffer_to_buffer(&stamp.resolve, 0, &stamp.ring[i].0, 0, 16);
-        queue.submit([encoder.finish()]);
+    // The slot the graph run just copied into: FREE when armed, so that submission is the only
+    // one in flight on it, and it is out of the arming below until the mapping is read and
+    // released — submitting into a mapped or map-pending buffer is a wgpu validation error,
+    // which the first live run demonstrated.
+    if let Some(i) = stamp.slot.take() {
         let flag = stamp.ring[i].1.clone();
         flag.store(PENDING, Ordering::Relaxed);
-        let cb_flag = flag.clone();
         stamp.ring[i]
             .0
             .slice(..)
             .map_async(MapMode::Read, move |r| {
-                cb_flag.store(if r.is_ok() { MAPPED } else { FREE }, Ordering::Relaxed);
+                flag.store(if r.is_ok() { MAPPED } else { FREE }, Ordering::Relaxed);
             });
     }
-    let _ = device.poll(PollType::Poll);
     // Publish every landed mapping; slots return to FREE.
     for i in 0..RING {
         if stamp.ring[i].1.load(Ordering::Relaxed) == MAPPED {
@@ -353,6 +388,11 @@ fn readback(stamp: Option<ResMut<GpuStamp>>, device: Res<RenderDevice>, queue: R
                 stamp.shared.store(ns as u64, Ordering::Relaxed);
             }
         }
+    }
+    // Arm the next run — which resolves the pair the run that just finished wrote — unless no
+    // run has written one yet (the creation `Cleanup`; see `frame`). None FREE → no sample.
+    if stamp.frame >= 1 {
+        stamp.slot = (0..RING).find(|&i| stamp.ring[i].1.load(Ordering::Relaxed) == FREE);
     }
     stamp.frame += 1;
 }
@@ -381,4 +421,21 @@ pub(crate) fn plugin(app: &mut App) {
     graph.add_node(GpuStampEndLabel, GpuStampNode { index: 1 });
     graph.add_node_edge(GpuStampBeginLabel, CameraDriverLabel);
     graph.add_node_edge(CameraDriverLabel, GpuStampEndLabel);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pairs;
+
+    /// The ordering law the Vulkan hang (2211) and the Metal zeros (1389) both hang on: a run
+    /// never resolves the pair it writes, and always resolves the one the run before it wrote.
+    #[test]
+    fn a_run_resolves_the_pair_the_run_before_it_wrote() {
+        for frame in 1..12 {
+            let (write, resolve) = pairs(frame);
+            assert_ne!(write, resolve);
+            assert!(write < 2 && resolve < 2);
+            assert_eq!(resolve, pairs(frame - 1).0);
+        }
+    }
 }

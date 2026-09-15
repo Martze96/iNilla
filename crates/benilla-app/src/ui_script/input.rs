@@ -139,8 +139,14 @@ pub(super) fn feed_ui_input(
     // nobody can see must not eat the click or arm a tooltip, and the else-arm below is exactly the
     // "no pointer here" bookkeeping (leave the hovered frame once, disarm any press/drag every
     // frame) that keeps a stale gesture from firing when the UI comes back.
+    // The headless hover probe's aim stands in for a cursor the window does not have (2250/2255),
+    // so `PointerOverUi` rises over a panel and falls off it in an automated run exactly as it does
+    // for a person — which is what lets a rig run reproduce "open the map, close it, and the world
+    // under it goes quiet". A person's pointer always wins; an unarmed probe answers `None` and
+    // nothing here changes.
     if let Some(cursor) = window
         .cursor_position()
+        .or_else(crate::target::hover_probe_point)
         .filter(|_| !ui_hidden && !synthetic)
     {
         // Window cursor is logical px, y-down from top-left; the UI is y-up 768-virtual units

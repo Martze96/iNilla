@@ -14,6 +14,7 @@ use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
 use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
 use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
+use crate::ui_spellbook::LearnedInTab;
 
 use super::super::{GuidIndex, ObjectStore, SelfGuid};
 
@@ -60,12 +61,14 @@ pub(super) fn learned_spell(
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
     errors: &mut UiErrorKeys,
+    tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: learned spell {spell_id}");
     if actions.spells.insert(spell_id) {
         actions.dirty = true;
     }
     announce_learn(spell_id, spells, errors);
+    tab_flash.0.push(spell_id);
 }
 
 /// **The learn announcement** — the `ERR_LEARN_*` chat line the registrar `0x4b25b0` prints at
@@ -162,6 +165,7 @@ pub(super) fn superceded_spell(
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
     errors: &mut UiErrorKeys,
+    tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
     actions.spells.remove(&old_spell_id);
@@ -171,6 +175,9 @@ pub(super) fn superceded_spell(
     // calls the unlearn `0x4b2c50` and then the registrar `0x4b25b0` with `mov edx,0x1`
     // (`0x4b2f61`), and the unlearn half holds no `DisplayError` call at all (decision 2243).
     announce_learn(new_spell_id, spells, errors);
+    // The rank-up reaches the registrar with the same flag set (`0x4b2f61 mov edx,0x1`), so it
+    // flashes the tab too — for the NEW rank, whose tab is the one it lands in (2252).
+    tab_flash.0.push(new_spell_id);
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
@@ -1121,11 +1128,14 @@ mod tests {
         );
         let mut actions = PlayerActions::default();
         let mut errors = UiErrorKeys::default();
-        learned_spell(78, &mut actions, Some(&spells), &mut errors);
+        let mut flash = LearnedInTab::default();
+        learned_spell(78, &mut actions, Some(&spells), &mut errors, &mut flash);
 
         assert_eq!(errors.0.len(), 1, "one line, once");
         assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
         assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 1)"));
+        // The same live-mutation flag gates the tab flash, so the queue takes it too (2252).
+        assert_eq!(flash.0, vec![78], "queued for LEARNED_SPELL_IN_TAB");
     }
 
     /// The other two arms of the same block, from the same entry point: a plain row is a *spell*,
@@ -1148,6 +1158,7 @@ mod tests {
             &mut PlayerActions::default(),
             Some(&spells),
             &mut errors,
+            &mut LearnedInTab::default(),
         );
         assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
         assert_eq!(errors.0[0].arg_s(), Some("Fireball (Rank 1)"));
@@ -1167,6 +1178,7 @@ mod tests {
             &mut PlayerActions::default(),
             Some(&spells),
             &mut errors,
+            &mut LearnedInTab::default(),
         );
         assert_eq!(errors.0[0].key, "ERR_LEARN_RECIPE_S");
         assert_eq!(
@@ -1209,9 +1221,22 @@ mod tests {
         let mut actions = PlayerActions::default();
         actions.spells.insert(78);
         let mut errors = UiErrorKeys::default();
-        superceded_spell(78, 284, &mut actions, Some(&spells), &mut errors);
+        let mut flash = LearnedInTab::default();
+        superceded_spell(
+            78,
+            284,
+            &mut actions,
+            Some(&spells),
+            &mut errors,
+            &mut flash,
+        );
 
         assert_eq!(errors.0.len(), 1, "one line for a rank-up, not two");
+        assert_eq!(
+            flash.0,
+            vec![284],
+            "the NEW rank's tab flashes, not the old one's"
+        );
         assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
         assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 2)"));
     }
@@ -1235,12 +1260,14 @@ mod tests {
             &mut PlayerActions::default(),
             Some(&spells),
             &mut errors,
+            &mut LearnedInTab::default(),
         );
         learned_spell(
             99999,
             &mut PlayerActions::default(),
             Some(&spells),
             &mut errors,
+            &mut LearnedInTab::default(),
         );
         assert!(
             errors.0.is_empty(),
@@ -1252,12 +1279,24 @@ mod tests {
     fn learned_spell_adds_to_the_book_once() {
         let mut actions = PlayerActions::default();
         let mut errors = UiErrorKeys::default();
-        learned_spell(6603, &mut actions, None, &mut errors);
+        learned_spell(
+            6603,
+            &mut actions,
+            None,
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
         assert!(actions.spells.contains(&6603));
         assert!(actions.dirty, "a new spell dirties the feed");
 
         actions.dirty = false;
-        learned_spell(6603, &mut actions, None, &mut errors);
+        learned_spell(
+            6603,
+            &mut actions,
+            None,
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
         assert!(
             !actions.dirty,
             "re-learning a known spell is a no-op (insert returns false)"
@@ -1279,7 +1318,14 @@ mod tests {
             },
         );
 
-        superceded_spell(78, 284, &mut actions, None, &mut UiErrorKeys::default());
+        superceded_spell(
+            78,
+            284,
+            &mut actions,
+            None,
+            &mut UiErrorKeys::default(),
+            &mut LearnedInTab::default(),
+        );
 
         assert!(
             !actions.spells.contains(&78),
@@ -2129,6 +2175,7 @@ mod tests {
             &mut PlayerActions::default(),
             Some(&spells),
             &mut errors,
+            &mut LearnedInTab::default(),
         );
         assert_eq!(errors.0.len(), 1, "the learn block never reads castUI");
         assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");

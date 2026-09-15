@@ -31,7 +31,7 @@
 use mlua::{Lua, Table};
 
 use super::object::frame_handle_of;
-use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empty};
+use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empty, tip_mut};
 // The grey band + trivial/GREY check (`0x5f0700`, the CIVILIAN line's last gate: a green-or-
 // better con never warns of a dishonorable kill) and the "??" gate live in one shared home
 // (`unit.rs`), alongside `UnitLevel`'s −1 return and the `GetQuestGreenRange` binding.
@@ -397,7 +397,7 @@ impl super::UiScript {
         lines: &[(String, TooltipTint)],
         cursor: Option<(f32, f32)>,
     ) -> bool {
-        let (h, id, root_id) = {
+        let (h, id, root, root_id) = {
             let mut model = self.model_mut();
             let Some(h) = model.arena.lookup("GameTooltip") else {
                 return false;
@@ -406,13 +406,37 @@ impl super::UiScript {
                 return false;
             };
             let (id, root_id) = (model.frame_id(h), model.frame_id(root));
-            (h, id, root_id)
+            (h, id, root, root_id)
         };
         match cursor {
             // The cursor arm: seated centred above the pointer, clamped by the tooltip frame's own
             // flag. Compare-then-touch so a still pointer never re-layouts.
             Some((ui_x, ui_y)) => {
                 let mut model = self.model_mut();
+                // **The OWNER, which this arm used to skip** (decision 2255). The
+                // reference's cursor arm is `0x492a01 → 0x52ffe0(owner, 6, 0, 0)` — the SetOwner
+                // CORE, not a bare re-anchor — and the core's `0x53000c` stores that owner into
+                // `+0x314`. Every OTHER world plate we build reaches an owner by accident: the
+                // corner arm below and the unit flow both fire `OnTooltipSetDefaultAnchor`, whose
+                // FrameXML handler calls `GameTooltip:SetOwner(UIParent, …)` in Lua. This arm
+                // fires nothing, so `+0x314` stayed NULL on exactly the cursor-seated objects —
+                // a signpost, a mailbox, every GENERIC(5).
+                //
+                // A null owner is not cosmetic, because **`:Show()` is an existence gate**:
+                // `0x530a80` shows only when `+0x314` AND `+0x31c` are both non-zero, and
+                // otherwise takes the effective-hide `0x530a60` — which we implement faithfully
+                // (see the `Show` verb). So any Lua that reached `GameTooltip:Show()` while one of
+                // these plates was up HID IT, and hid it through our own correct code.
+                //
+                // That is not hypothetical: `!Questie` hooks GameTooltip's `OnShow` at
+                // PLAYER_LOGIN (`Questie:hookTooltip`, installed because stock GameTooltip has no
+                // OnShow of its own) and its handler ends in `GameTooltip:Show()`. So the plate's
+                // own show event hid the plate, ~26 ms after the engine built it, on every
+                // signpost, for the whole session — the director's report. The reference cannot
+                // reach that state: `0x492a01` writes the owner before the plate is ever shown.
+                if let Ok(t) = tip_mut(&mut model, h) {
+                    t.owner = Some(root);
+                }
                 let input = model.layout_inputs.entry(h).or_default();
                 let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
                 let same = input.anchors.len() == 1
@@ -583,6 +607,24 @@ impl super::UiScript {
             input.anchors = vec![new];
             model.touch_layout();
         }
+    }
+
+    /// **Is `GameTooltip` still the plate a world hover put up?** — world-owned (no Lua
+    /// `SetOwner`, no content `Set*` and no `Hide` has taken it since) and still shown.
+    ///
+    /// The world-hover driver keeps a host-side memo of which plate it put up so it does not
+    /// rebuild one per frame; that memo is about the HOVER, and this is the other half of the
+    /// question — whether the plate that memo describes is still on the screen.
+    pub fn world_tooltip_up(&mut self) -> bool {
+        let model = self.model_mut();
+        let Some(h) = model.arena.lookup("GameTooltip") else {
+            return false;
+        };
+        model
+            .arena
+            .frame(h)
+            .map(|f| matches!(&f.kind_state, KindState::Tooltip(t) if t.world_owned) && f.shown)
+            .unwrap_or(false)
     }
 
     /// Arm the mouseover tooltip's fade-out (hover loss — the byte law arms a timestamped fade,
