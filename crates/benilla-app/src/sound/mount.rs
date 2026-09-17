@@ -8,12 +8,9 @@
 //! mounted→unmounted transition of any visible unit; first sight of an unmounted unit records
 //! silently, and a remount (id→id′) is not a dismount.
 
-use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use benilla_protocol::EntityKind;
-
-use crate::net::{NetEntity, ObjectStore};
+use crate::net::FieldChanged;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
@@ -28,10 +25,12 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 /// as `SpiritWolf_DONOTRENAME` — a transcription-level difference, the row is unambiguous.
 const DISMOUNT_KIT: &str = "SpiritWolf (DONOTRENAME)";
 
-/// Play the fixed dismount kit on a live mounted→unmounted transition of any streamed unit.
+/// Play the fixed dismount kit on a live mounted→unmounted transition of any streamed unit —
+/// the `UNIT_FIELD_MOUNTDISPLAYID` edge with a zero NEW value (decision 2297: the field-edge
+/// stream is create-suppressed, so streaming in unmounted is not a dismount by construction).
 fn dismount_sounds(
-    changed: Query<(Entity, &NetEntity, &ObjectStore, &Transform), Changed<ObjectStore>>,
-    mut known_mount: Local<EntityHashMap<u32>>,
+    mut edges: MessageReader<FieldChanged>,
+    poses: Query<&Transform>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     mut out: NonSendMut<SoundOutput>,
@@ -42,21 +41,15 @@ fn dismount_sounds(
         return;
     };
     let listener = listener.pos;
-    for (entity, net, store, transform) in &changed {
-        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+    for e in edges.read() {
+        if !e.unit_field(benilla_protocol::field::FIELD_UNIT_MOUNTDISPLAYID) || e.new != 0 {
             continue;
         }
-        let mount = store.0.unit_mount_display_id();
-        let was = known_mount.insert(entity, mount);
-        // Only the live mounted→unmounted edge sounds — streaming in unmounted is not a dismount.
-        if !(was.is_some_and(|w| w != 0) && mount == 0) {
+        let Ok(transform) = poses.get(e.entity) else {
             continue;
-        }
-        debug!(
-            "dismount kit on {entity:?} (was mount {})",
-            was.unwrap_or(0)
-        );
-        if let Err(e) = play_kit(
+        };
+        debug!("dismount kit on {:?} (was mount {})", e.entity, e.old);
+        if let Err(err) = play_kit(
             &mut kits,
             &assets,
             &mut out,
@@ -66,7 +59,7 @@ fn dismount_sounds(
             Some(transform.translation),
             SoundCategory::Sfx,
         ) {
-            warn!("dismount kit ({DISMOUNT_KIT}): {e:#}");
+            warn!("dismount kit ({DISMOUNT_KIT}): {err:#}");
         }
     }
 }

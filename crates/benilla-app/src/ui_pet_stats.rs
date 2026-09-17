@@ -742,6 +742,7 @@ mod tests {
             .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
             .init_resource::<crate::ui_action::AutoRepeatActive>()
             .add_message::<crate::creature_anim::SheathRequest>()
+            .add_message::<crate::net::FieldChanged>()
             .insert_resource(NetCommands(tx))
             .add_plugins((UiPetStatsPlugin, UiPetPlugin));
 

@@ -862,13 +862,30 @@ pub(super) fn sync_glue_scene(
         ResMut<benilla_world::model_forms::ModelForms>,
         ResMut<Assets<Mesh>>,
         ResMut<benilla_world::instance_tint::InstanceTintMirrors>,
+        // …and the scene's **material-animation lane**: the UV and tint registries and the shared
+        // delta table its samples land in (decisions 1381/2295). Here rather than beside, for the
+        // same ceiling — the param list is already full.
+        ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+        ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
+        ResMut<benilla_world::mat_anim_table::MatAnimTable>,
+        ResMut<benilla_world::mat_anim_table::MatAnimMirrors>,
     ),
     // The swap gate's two inputs ([`PendingSwap`]) — the character assembly this stage must land
     // beside, and the real clock its bound is measured on. One tuple param: the 16-SystemParam
     // ceiling, same reason as `particle_assets` above.
     swap: (Res<GluePreviewBake>, Res<Time<bevy::time::Real>>),
 ) {
-    let (mut palettes, mut mirrors, mut forms, mut mesh_assets, mut tint_mirrors) = particle_assets;
+    let (
+        mut palettes,
+        mut mirrors,
+        mut forms,
+        mut mesh_assets,
+        mut tint_mirrors,
+        mut uv_reg,
+        mut tint_reg,
+        mut anim_table,
+        mut anim_mirrors,
+    ) = particle_assets;
     let (bake, real) = swap;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
@@ -1060,6 +1077,18 @@ pub(super) fn sync_glue_scene(
         // is the one off-world buffer that carries it — see
         // [`benilla_world::instance_tint::InstanceTintMirrors`] for why the portrait booths do not.
         tint_mirrors.0.insert("glue_scene", light.clone());
+        // …and the **mat-anim delta table** beside them (decisions 1381/2023): the scene's
+        // materials sample `matanim[slot]` out of THIS buffer, so registering a batch's loop is
+        // only half the act — without the mirror the rows are written every frame into a region
+        // only the world's materials ever read, and the scene samples its zero-initialised
+        // identity. That is verbatim 2023's cooldown-sweep failure, and it is what an A/B of this
+        // screen with the lane frozen against the lane running showed: byte-identical images,
+        // with 2 of UI_Human's 29 batches registered and marked.
+        //
+        // The portrait booths stay off this list on purpose ([`MatAnimMirrors`]'s own note): a
+        // bake photographs one instant, and its studio buffer's zeroed region IS that instant.
+        // The create screen is not a bake.
+        anim_mirrors.0.insert("glue_scene", light.clone());
         blob.write(&queue, &light);
         scene.fog = fog;
         scene.ghost = ghost;
@@ -1095,6 +1124,49 @@ pub(super) fn sync_glue_scene(
                 // and its street tied, and the tie re-broke every frame.
                 let order = u16::try_from(pi + 1).unwrap_or(u16::MAX);
                 let material = mats.off_world(s, s.texture.clone(), order, &light, true);
+                // **The scene's texture transforms and M2Color tint actually run** — the clouds
+                // drift, the water and lava creep, the fire sheets scroll. `off_world(rig: true)`
+                // has always *seeded* the UV at `sample(0.0)`, but seeding is not playing: nothing
+                // outside the world streamer, the entity dressing path and the effect lane had
+                // ever been registered, so every one of these froze on its first key while the
+                // comment above claimed they scrolled.
+                //
+                // Not a bake question, which is why it is decided here rather than deferred to
+                // 0130's bake law: a create/main-menu screen is a LIVE render, and the reference
+                // runs the texture transform inside the per-model-per-frame animate kernel
+                // (`0x715f25`-`0x7163bc` over the MD20 `+0x74` table, wow-re
+                // `modelframe-texanim-and-sequence-law.md` §3.1) — it is what an animated CM2Model
+                // does, not a lane a host opts into. The portrait and dressing-room bakes are the
+                // opposite case and stay still (`BoothPart::mat_anim`).
+                //
+                // **Shared lane only, and that is measured, not assumed** (`benilla-extract
+                // uvslotscan interface\glues`): 13 models, 261 batches, **15 live UV loops over 6
+                // models and 2 live RGB**, and PER-PLACEMENT is empty on both channels — every
+                // glue batch bakes one loop across its slots, so there is no sequence to key by
+                // and `host: None` is exact rather than a fallback.
+                let loops = benilla_world::doodad_anim::UvLoops::of(s);
+                let mut mat_anim = false;
+                if loops.animates() {
+                    benilla_world::doodad_anim::register_entity_uv(
+                        &mut uv_reg,
+                        &mut anim_table,
+                        mats.materials(),
+                        material.id(),
+                        &loops,
+                        None,
+                    );
+                    mat_anim = true;
+                }
+                if let Some(rgb) = s.rgb_anim.as_ref().filter(|a| a.period > 0.0) {
+                    benilla_world::doodad_anim::register_tint(
+                        &mut tint_reg,
+                        &mut anim_table,
+                        mats.materials(),
+                        material.id(),
+                        benilla_world::doodad_anim::TintLoop::Shared(rgb.clone()),
+                    );
+                    mat_anim = true;
+                }
                 BoothPart {
                     skinned: skin_forms.get(pi).cloned(),
                     static_mesh: stat_forms
@@ -1108,9 +1180,15 @@ pub(super) fn sync_glue_scene(
                     // corners — B121.
                     alpha_anim: s.alpha_anim.clone(),
                     twins: BoothTwins::default(),
+                    mat_anim,
                 }
             })
             .collect();
+        info!(
+            "create scene: UI_{token} material lane — {} of {} batches animate (UV/tint registered)",
+            scene_parts.iter().filter(|p| p.mat_anim).count(),
+            scene_parts.len(),
+        );
         let mut scene_rig = spawn_booth_model(
             &mut commands,
             &mut palettes,
@@ -1457,6 +1535,7 @@ pub(super) fn sync_glue_booth(
                 // previews at 1.0 here. Closing it means threading `alpha_anim` through the
                 // appearance-assembly layer — deliberately not folded into the B121 fix.
                 alpha_anim: None,
+                mat_anim: false,
             });
         }
         // The equipment riders (a Select look — helm/shoulders/sheathed weapons, decision 0465):
@@ -1702,6 +1781,7 @@ pub(super) fn sync_glue_pet(
             material: relight(&p.material, &mut scene.variants),
             alpha_anim: p.alpha_anim.clone(),
             twins: BoothTwins::default(),
+            mat_anim: false,
         })
         .collect();
     let booth_billboards: Vec<BoothBillboardSpec> = pet

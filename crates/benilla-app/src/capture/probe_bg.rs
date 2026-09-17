@@ -18,7 +18,7 @@
 //! — and then, from inside, prints a structured census every [`CENSUS_EVERY`] until
 //! [`census_samples`] are in. Every later battleground round is judged against these lines.
 //!
-//! ## The one server-side lever, and why it is needed
+//! ## The one server-side lever, and why it is needed — and why it is turned back off
 //!
 //! A battleground does not start until `min_players_per_team` bodies are queued on each side —
 //! four for Warsong Gulch on this server's patch, twenty for Alterac Valley
@@ -34,6 +34,13 @@
 //! Note that `.debug bg` is a **toggle, not a set**, and it announces itself to the whole realm
 //! (`LANG_DEBUG_BG_ON`/`_OFF`). Both facts are reported on the probe's own lines so a run that
 //! started from the wrong state reads as such rather than as a broken queue.
+//!
+//! **It is turned back off once the match is running** (see `DOORS_SAMPLE`), because leaving it on
+//! makes a solo battleground unendable: vmangos decrements its premature-finish countdown inside an
+//! `else if (!sBattleGroundMgr.isTesting())` branch (`BattleGround.cpp:337`), so while testing is on
+//! the countdown is armed and then **frozen**. Decision 2290 said the opposite, from reading
+//! `GetPrematureFinishTime()` without the branch that consumes it; 2296 corrects it, having watched
+//! a run sit in Warsong Gulch for 492 s with `GetBattlefieldWinner()` nil the whole way.
 //!
 //! ## What the census reports, and why each column is there
 //!
@@ -196,6 +203,10 @@ const GHOST_SAMPLES: u32 = 11;
 /// How many 3 s samples the flag leg takes after the use.
 const FLAG_SAMPLES: u32 = 5;
 
+/// The census sample by which the doors have opened (they drop ~116 s after entry, and the census
+/// ticks every 12 s). The testing flag is turned back off here — see the `Inside` arm.
+const DOORS_SAMPLE: u32 = 11;
+
 /// `SPIRITGUIDE` — `UNIT_NPC_FLAGS` bit 6, the flag the reference's area-spirit-healer acquire
 /// scan keys on (wow-re `interact-dead-fork-and-npc-service-ladder.md` §C row 6).
 const NPC_FLAG_SPIRITGUIDE: u32 = 1 << 6;
@@ -349,6 +360,7 @@ fn bg_probe(
     states: Res<WorldStates>,
     dropped: Res<DroppedOpcodes>,
     go_templates: Res<crate::go_templates::GameObjectTemplates>,
+    mut idle: ResMut<crate::ui_chat::idle::LastInput>,
     mut script: Option<NonSendMut<UiScript>>,
 ) {
     let Ok(store) = me.single() else {
@@ -356,6 +368,15 @@ fn bg_probe(
     };
     let arena = arena();
     let now = time.elapsed_secs_f64();
+
+    // **This probe stands in for a player who is AT the keyboard.** benilla implements the
+    // reference's idle handler faithfully (`ui_chat::idle`: auto-sit then auto-AFK at 300 000 ms
+    // of no input), and vmangos removes an AFK player from a battleground outright
+    // (`Player::ToggleAFK` → `LeaveBattleground`). Two correct behaviours, one on each side, and
+    // together they eject an unattended probe five minutes in — which is exactly what the first
+    // long run hit: at t=300 s the census read Stormwind, not Warsong Gulch, and the chat said
+    // "You are now AFK". A battleground match cannot be watched to its end without this.
+    idle.stamp_present(std::time::Duration::from_secs_f64(now));
 
     // **The tap goes in as soon as there is a VM to put it in, and not before.** The probe's own
     // first frame is a world-entry frame: the in-game interface has not materialized yet, so an
@@ -619,6 +640,26 @@ fn bg_probe(
                 &mut script,
             );
             let samples = samples + 1;
+
+            // **Flip the testing flag back OFF once the match is running**, which is the only way
+            // a solo battleground can ever end. vmangos decrements `m_prematureCountDownTimer`
+            // inside an `else if (!sBattleGroundMgr.isTesting())` branch (`BattleGround.cpp:337`),
+            // so while testing is on the countdown is armed and **frozen** — the arm above it runs
+            // once, the fire below it never reaches its condition, and a one-player Warsong Gulch
+            // runs forever (vanilla WSG has no time limit; three captures is its only other end).
+            // A run that measured this stayed in for 492 s with `winner` nil the whole way.
+            //
+            // Turned off at the first sample past the doors, so the flag is only on for the queue
+            // that needed it. The countdown then runs its full `BattleGround.PrematureFinishTimer`
+            // (5 min) from that moment, which is what [`census_samples`] has to cover.
+            if samples == DOORS_SAMPLE {
+                info!(
+                    "PROBE bg: TESTING off — the premature-finish countdown is frozen while it is \
+                     on, so a solo match could never end"
+                );
+                gm(&net, ".debug bg");
+            }
+
             if samples >= census_samples() {
                 // **The graveyard leg.** `.die` is the one thing that clears the probe's god
                 // shield by design (0677), so a probe CAN die on purpose; a battleground death is
@@ -1056,6 +1097,22 @@ fn census(
 fn report(arena: &Arena, net: &NetCommands, queue: &BattlefieldQueue, script: &mut UiScript) {
     // The scoreboard and the battlefield minimap: both are LoadOnDemand-shaped roads nothing in
     // this tree has ever walked. A raise here is the finding.
+    // **Read both windows BEFORE toggling them.** The scoreboard shows itself when a match ends —
+    // `WorldStateScoreFrame_Update` does `if (GetBattlefieldWinner()) then ShowUIPanel(...)`,
+    // driven by `UPDATE_BATTLEFIELD_SCORE` — so after a real ending the toggle below *hides* it,
+    // and reading only the post-toggle state reports `IsShown=nil` for the run where the feature
+    // worked. That is the wrong way round, and it cost a round of inference to notice.
+    //
+    // Through `getglobal`, because `BattlefieldMinimap` is LoadOnDemand: indexing it before the
+    // toggle that loads it is a nil-index raise, and "not loaded yet" is a reading, not an error.
+    for name in ["WorldStateScoreFrame", "BattlefieldMinimap"] {
+        let shown = script
+            .eval::<String>(&format!(
+                "local f = getglobal(\"{name}\")                  if not f then return \"not-loaded\" end return tostring(f:IsShown())"
+            ))
+            .unwrap_or_else(|e| format!("<raised: {e}>"));
+        info!("PROBE bg: BEFORE-TOGGLE {name}:IsShown={shown}");
+    }
     for (what, chunk) in [
         ("SCOREFRAME", "ToggleWorldStateScoreFrame()"),
         ("BFMINIMAP", "ToggleBattlefieldMinimap()"),
@@ -1092,7 +1149,7 @@ fn report(arena: &Arena, net: &NetCommands, queue: &BattlefieldQueue, script: &m
     );
     let _ = script.eval::<()>("LeaveBattlefield()");
     gm(net, ".recall");
-    // Put the lever back. A toggle, so this run's second `.debug bg` undoes this run's first.
-    gm(net, ".debug bg");
-    info!("PROBE bg: DONE — `.debug bg` toggled back off");
+    // The lever was already put back at `DOORS_SAMPLE` (see the `Inside` arm) — a second toggle
+    // here would turn it back ON and leave it that way for the next run.
+    info!("PROBE bg: DONE");
 }

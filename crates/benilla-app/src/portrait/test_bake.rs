@@ -129,6 +129,7 @@ fn bake_test(
                     // right here — an eyeball bake should show the batch dimming the artist wrote.
                     alpha_anim: s.alpha_anim.clone(),
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect::<Vec<BoothPart>>()
         };

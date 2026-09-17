@@ -60,6 +60,25 @@ use super::feed::ChatLog;
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub(crate) struct LastInput(Duration);
 
+impl LastInput {
+    /// Stamp the clock as an **unattended probe** — the one caller outside [`stamp_input`].
+    ///
+    /// A probe is a client with nobody at the keyboard, and this timer is the one place where that
+    /// is not a harmless difference: a probe that stands still in a battleground goes AFK at five
+    /// minutes exactly as the reference would, and vmangos then removes an AFK player from the
+    /// battleground outright (`Player::ToggleAFK` → `LeaveBattleground`). Two faithful behaviours,
+    /// one on each side, combining to eject an instrument before a match can end — which is what
+    /// `capture::probe_bg`'s first long run found, at t=300 s, with the census reading Stormwind.
+    ///
+    /// So a probe that means to stand in for a **present** player says so here, rather than the
+    /// alternative dodges: turning the idle handler off (it would stop testing the thing the
+    /// reference does), or having the probe jiggle the mouse (a synthetic input event to fool our
+    /// own dispatcher, which is a lie told one layer lower down and harder to see).
+    pub(crate) fn stamp_present(&mut self, now: Duration) {
+        self.0 = now;
+    }
+}
+
 /// **5 minutes** — `0x482ecd lea ecx,[eax-0x493e0]`, `0x493e0` = 300 000 ms.
 const AUTO_AFK_AFTER: Duration = Duration::from_millis(300_000);
 

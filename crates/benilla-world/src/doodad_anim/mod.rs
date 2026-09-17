@@ -46,44 +46,6 @@ pub use mat_anim::{
 };
 pub(crate) use mat_anim::{register_uv, UvLoop};
 
-/// The client's single global `rand()` stream — the MSVC LCG at `0x7400e5`, returning `[0, 32767]`
-/// (wow-re `doodad-anim-host.md` §5, decision 0768). Every doodad's variation roll draws from **one**
-/// shared stream, which is what de-syncs a stand of identical props: not a per-placement seed, just
-/// consecutive draws off one sequence.
-///
-/// This replaced a position-derived hash. The hash de-synced instances correctly but was *permanent* —
-/// the same placement rolled the same variation on every re-stream and every run — which is exactly
-/// how the Blasted Lands lightning ended up striking from one fixed spot for ever instead of wandering
-/// the Tainted Scar (bug B63's residual). Captures are unaffected: [`spawn_anim_host`] returns `None`
-/// under a capture scenario, so no doodad animates in a golden frame and determinism is untouched.
-#[derive(Resource)]
-pub(crate) struct AnimRng(u32);
-
-impl Default for AnimRng {
-    fn default() -> Self {
-        Self(1) // the CRT's own initial seed
-    }
-}
-
-impl AnimRng {
-    /// One `rand()` draw: `seed = seed·214013 + 2531011`, result `(seed >> 16) & 0x7fff`.
-    fn draw(&mut self) -> u16 {
-        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
-        ((self.0 >> 16) & 0x7fff) as u16
-    }
-
-    /// The play-window's replay count `R = max(1, min + ((rand()·(max−min)) >> 15))` — the reference's
-    /// `windowHi = now + span·R` (wow-re §5). `replay = (0, 0)`, the overwhelming majority and the
-    /// lightning's own value, always yields `R = 1`: one loop per window, so the variation re-rolls
-    /// every single pass. The draw is taken unconditionally — it is one sub-expression of the
-    /// reference's formula, so the shared stream advances the same way whatever the span.
-    fn replay_count(&mut self, replay: (u32, u32)) -> u32 {
-        let (lo, hi) = replay;
-        let r = lo + ((u32::from(self.draw()) * hi.saturating_sub(lo)) >> 15);
-        r.max(1)
-    }
-}
-
 /// What a placed doodad model animates — decision 0130's content gate, decided per model at spawn.
 pub enum DoodadAnimTier<'a> {
     /// No animated bone channel: today's static path, untouched (no joints, no player — the ~90%
@@ -439,7 +401,7 @@ impl DoodadAnimHost {
 /// window rolled.
 fn reroll_doodad_variation(
     time: Res<Time>,
-    mut rng: ResMut<AnimRng>,
+    mut rng: ResMut<benilla_assets::AnimRng>,
     mut hosts: Query<(
         &mut DoodadAnimHost,
         &ModelAnimations,
@@ -654,7 +616,16 @@ impl Plugin for DoodadAnimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UvAnimMaterials>();
         app.init_resource::<TintAnimMaterials>();
-        app.init_resource::<AnimRng>();
+        // The client's ONE `rand()` stream (`benilla_assets::AnimRng`), seeded here because this
+        // is where the engine boots and where `deterministic_run` is knowable — the reference's
+        // own `srand(GetTickCount())` runs once per process from CRT static init, pre-`WinMain`
+        // (wow-re `net/scratch/crt-rand-stream-seeding.md`; decision 2301). A capture keeps the
+        // CRT's pre-`srand` value, so golden frames stay reproducible.
+        app.init_resource::<benilla_assets::AnimRng>();
+        let deterministic = crate::dev_state::deterministic_run();
+        app.world_mut()
+            .resource_mut::<benilla_assets::AnimRng>()
+            .seed_for_session(deterministic);
         // The re-roll runs BEFORE the draw gate: a window that expires this frame must arm its new
         // clip before the gate decides what to resume, or a host re-appearing on the same frame
         // resumes the previous window's variation for one frame.
@@ -910,33 +881,6 @@ mod tests {
         ));
     }
 
-    /// The client's `rand()` is the MSVC LCG, and its seed-1 stream is the textbook one. Pinning the
-    /// first draws keeps the weighted roll on the reference's actual sequence rather than on "some
-    /// uniform generator" (wow-re `_rand 0x7400e5`, decision 0768).
-    #[test]
-    fn the_anim_rng_is_the_reference_msvc_stream() {
-        let mut rng = AnimRng::default();
-        let first: Vec<u16> = (0..6).map(|_| rng.draw()).collect();
-        assert_eq!(first, vec![41, 18467, 6334, 26500, 19169, 15724]);
-        assert!(first.iter().all(|&v| v <= 0x7fff), "range is [0, 32767]");
-    }
-
-    /// `R = max(1, min + ((rand()·(max−min)) >> 15))`. `(0, 0)` — the overwhelming majority, and the
-    /// lightning's own value — pins to 1, so the window is exactly one loop and the variation
-    /// re-rolls every pass.
-    #[test]
-    fn the_replay_window_is_one_loop_for_the_common_case() {
-        let mut rng = AnimRng::default();
-        for _ in 0..32 {
-            assert_eq!(rng.replay_count((0, 0)), 1);
-        }
-        // A real range stays inside it, and never degenerates to 0 windows.
-        for _ in 0..64 {
-            let r = rng.replay_count((2, 5));
-            assert!((2..=5).contains(&r), "R = {r} outside [2, 5]");
-        }
-    }
-
     /// The lightning's own chain, read off the bytes (`benilla-extract m2seq` on
     /// `World\Generic\PassiveDoodads\ParticleEmitters\BlastedLandsLightningbolt01.M2`): two
     /// variations of animation id 0, weights 31129 / 1638 — so slot 1, which is where all four
@@ -955,7 +899,7 @@ mod tests {
         // would clobber the manual advance these tests need to step whole play-windows.
         let mut app = App::new();
         app.init_resource::<Time>();
-        app.init_resource::<AnimRng>();
+        app.init_resource::<benilla_assets::AnimRng>();
         app.add_systems(Update, reroll_doodad_variation);
         app
     }

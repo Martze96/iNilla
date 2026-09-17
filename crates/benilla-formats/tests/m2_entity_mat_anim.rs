@@ -128,6 +128,63 @@ fn a_gameobjects_slots_bake_different_loops() {
     );
 }
 
+/// **And slot 1 is REACHABLE — the other half of the same asset's story.** A per-sequence UV loop
+/// only ever runs if the arm picks that sequence, so "slot 1 sweeps the sheet" is half a fact: the
+/// bubbling is live exactly as often as the weighted variation walk lands on take 1.
+///
+/// The pool's two takes are one `Stand` (`AnimationData.dbc` id 0) chain — and a GameObject whose
+/// model owns *none* of the door-family ids collapses its substate to Stand and re-arms it every
+/// window, with a fresh `variationIdx = -1` roll each time (wow-re `gameobject-anim-arm.md`
+/// §6c/§6d; `crate::go_anim`'s rest arm). So these two frequencies are the duty cycle of every
+/// blood pool in the Plaguelands: `roll < 16384` takes the still sheet, `16384..=32766` takes the
+/// bubbling one, and the single leftover draw (`32767`) exhausts the chain back to the head — the
+/// authored convention, frequencies summing to 32767 against 32768 outcomes.
+///
+/// It is pinned here rather than left to arithmetic because the failure it guards is silent: an
+/// asset re-read that dropped `frequency` to 0, or a walk that took the head, would leave this
+/// file's neighbour above passing unchanged while every pool in the game went still.
+#[test]
+fn the_bubbling_take_is_half_the_pools_duty_cycle() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let bytes = chain
+        .read_file("World\\Lordaeron\\Plagueland\\PassiveDoodads\\BloodOfHeroes\\BloodOfHeroes.m2")
+        .expect("in the chain");
+    let seqs = benilla_formats::parse_m2_animations(&bytes);
+
+    assert_eq!(
+        seqs.len(),
+        2,
+        "one two-take variation chain and nothing else"
+    );
+    assert!(
+        seqs.iter().all(|s| s.anim_id == 0),
+        "both takes are Stand — which is what the §2c collapse-to-0 leg arms"
+    );
+    let freqs: Vec<u16> = seqs.iter().map(|s| s.frequency).collect();
+    assert_eq!(
+        freqs,
+        vec![16_384, 16_383],
+        "the still sheet and the bubbling one, at even odds"
+    );
+    // The walk is `roll < freq` (strict, unsigned) node by node, else `roll -= freq` — so the
+    // counts below ARE the duty cycle, not an approximation of it.
+    let bubbling = (0u32..32_768)
+        .filter(|&roll| {
+            let mut roll = roll;
+            freqs.iter().position(|&f| {
+                let win = roll < u32::from(f);
+                roll = roll.saturating_sub(u32::from(f));
+                win
+            }) == Some(1)
+        })
+        .count();
+    assert_eq!(
+        bubbling, 16_383,
+        "the bubbling take wins 16383 of 32768 draws — 49.997 %, re-rolled every 3.3 s window"
+    );
+}
+
 /// **The same shape on the TINT channel**, and worse: four of the corpus's five animated entity
 /// tints bake *nothing* in file slot 0, so `rgb_anim` is `None` for them and a shared material can
 /// only ever seed white however faithfully it is ticked. `G_FreezingTrap` is the one with play

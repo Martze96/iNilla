@@ -47,6 +47,7 @@ fn app() -> App {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -210,6 +211,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -489,6 +491,7 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>();
+    app.add_message::<crate::net::FieldChanged>();
     // The watcher's other fan-outs: the kit's CharProc edges (`crate::aura_visual`) and its
     // sound leg (0852). Food's kit 409 carries neither, so nothing is asserted here — the
     // messages just have to exist for the writers.
@@ -553,7 +556,12 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     let eating = ObjectFields::from_pairs(&[(47, FOOD), (95, 0x0E)]);
     let fasted = ObjectFields::from_pairs(&[(95, 0)]);
 
-    let unit = app.world_mut().spawn(crate::net::ObjectStore(eating)).id();
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            eating.into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
+        .id();
     app.update();
     {
         let log = &app.world().resource::<FxLog>().0;
@@ -591,9 +599,11 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     );
 
     // The aura leaves the slots: one AuraState reap.
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(fasted));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        fasted.into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     {
         let log = &app.world().resource::<FxLog>().0;
@@ -639,6 +649,7 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -747,6 +758,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -861,6 +873,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -1055,6 +1068,7 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>();
+    app.add_message::<crate::net::FieldChanged>();
     app.insert_resource(SpellVisuals(
         SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new()).with_hardcoded(
             "HARDCODED Mount Poof",
@@ -1064,10 +1078,14 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     ));
     app.add_systems(Update, super::arm_mount_poof_fx);
 
-    let store =
-        |v: u32| crate::net::ObjectStore(ObjectFields::from_pairs(&[(FIELD_MOUNTDISPLAYID, v)]));
-    // Streams in ALREADY mounted: first sight arms the memory, silently.
-    let unit = app.world_mut().spawn(store(2404)).id();
+    let fields = |v: u32| ObjectFields::from_pairs(&[(FIELD_MOUNTDISPLAYID, v)]);
+    // Streams in ALREADY mounted: the create block is no edge (decision 2297), so silence.
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            fields(2404).into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
+        .id();
     app.update();
     let puffs = |app: &mut App| -> Vec<super::FxSlot> {
         let mut out = Vec::new();
@@ -1090,12 +1108,12 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     );
 
     // Dismount — the NEW value is 0, so the build leg (and the whole allocation) is skipped.
-    app.world_mut().entity_mut(unit).insert(store(0));
+    crate::net::apply_fields_for_test(app.world_mut(), unit, fields(0));
     app.update();
     assert!(puffs(&mut app).is_empty(), "no poof on the way down");
 
     // Mount: 0 → N.
-    app.world_mut().entity_mut(unit).insert(store(2404));
+    crate::net::apply_fields_for_test(app.world_mut(), unit, fields(2404));
     app.update();
     assert_eq!(
         puffs(&mut app),
@@ -1108,12 +1126,12 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     );
 
     // A steady mounted frame is not an edge — the watcher fires on the field CHANGING.
-    app.world_mut().entity_mut(unit).insert(store(2404));
+    crate::net::apply_fields_for_test(app.world_mut(), unit, fields(2404));
     app.update();
     assert!(puffs(&mut app).is_empty(), "no re-puff while just riding");
 
     // A swap (N → N′) is a change, and the reference rebuilds and puffs again.
-    app.world_mut().entity_mut(unit).insert(store(2405));
+    crate::net::apply_fields_for_test(app.world_mut(), unit, fields(2405));
     app.update();
     assert_eq!(
         puffs(&mut app),
@@ -1234,7 +1252,8 @@ fn a_kit_with_a_chain_char_proc_asks_for_a_beam_from_both_dispatcher_sites() {
     let channeller = app
         .world_mut()
         .spawn(crate::net::ObjectStore(
-            benilla_protocol::ObjectFields::from_pairs(&[(144, BEAM_SPELL)]),
+            benilla_protocol::ObjectFields::from_pairs(&[(144, BEAM_SPELL)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
         ))
         .id();
     app.update();
@@ -1351,6 +1370,7 @@ fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -1523,11 +1543,12 @@ fn a_shooter_with_no_ranged_weapon_resolves_no_clip_at_all() {
         return;
     };
     // Strip the equipment field — the wire's "nothing in slot 17".
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(
-            benilla_protocol::ObjectFields::from_pairs(&[(VISIBLE_RANGED_ENTRY_FIELD, 0)]),
-        ));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        benilla_protocol::ObjectFields::from_pairs(&[(VISIBLE_RANGED_ENTRY_FIELD, 0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.world_mut()
         .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Start));
     app.world_mut()
@@ -1580,6 +1601,7 @@ fn a_state_kits_anim_is_a_recompute_and_never_a_second_play() {
         .add_message::<crate::weapon_trail::TrailArm>()
         .add_message::<super::BaseAnimRecompute>()
         .add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<super::ChainProcPlay>()
@@ -1678,6 +1700,7 @@ fn an_anim_only_state_kit_still_arms_on_the_aura_add_edge() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
         .add_message::<crate::aura_visual::AuraProc>()
         .add_message::<SpellKitSound>()
         .add_message::<super::BaseAnimRecompute>();
@@ -1711,10 +1734,10 @@ fn an_anim_only_state_kit_still_arms_on_the_aura_add_edge() {
 
     let unit = app
         .world_mut()
-        .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
-            (47, SPELL),
-            (95, 0x0E),
-        ])))
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(47, SPELL), (95, 0x0E)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
         .id();
     app.update();
 

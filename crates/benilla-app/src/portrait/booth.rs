@@ -36,6 +36,30 @@ pub(super) struct BoothPart {
     /// the char composite's quint); the booth relights them beside the steady one and hands them
     /// here. `None` for a batch that cannot feather at all — the reference's own twin gate.
     pub(super) twins: BoothTwins,
+    /// Whether this batch's material was put on the **UV / tint lane** by the builder that made it
+    /// — i.e. whether [`benilla_world::doodad_anim::AnimMatPart`] belongs on the spawned child.
+    ///
+    /// **A statement about what was registered, never a re-test of the asset** (decision 2295's
+    /// lesson, 2038's bug class before it): the marker and the registration have to be one fact,
+    /// or the draw gate marks batches nothing samples — or samples batches it never marks, which
+    /// froze every waterfall in the game for three days.
+    ///
+    /// `false` for every booth but the **glue create / main-menu scene**. A portrait or
+    /// dressing-room bake is a still by design (0130's bake law — it photographs one instant);
+    /// the create screen is a live render, and the reference animates a texture transform inside
+    /// the per-model-per-frame animate kernel (`0x715f25`-`0x7163bc` over `md+0x74`, wow-re
+    /// `modelframe-texanim-and-sequence-law.md` §3.1), which is not a lane a host opts into.
+    pub(super) mat_anim: bool,
+}
+
+/// Put the draw gate's marker on a booth child when — and only when — its material went onto the
+/// UV / tint lane ([`BoothPart::mat_anim`]). `tick_anim_materials` writes a registered row only for
+/// a material some marked, visible part draws (decision 1375), so a registered booth batch that
+/// nobody marks stays frozen at its seed with a live table row behind it.
+fn mark_mat_anim(child: &mut bevy::ecs::system::EntityCommands<'_>, p: &BoothPart) {
+    if p.mat_anim {
+        child.insert(benilla_world::doodad_anim::AnimMatPart);
+    }
 }
 
 /// A batch's translucency twins as the bake sees them — see [`BoothPart::twins`]. Default (both
@@ -540,6 +564,7 @@ pub(super) fn spawn_booth_model(
                 layer.clone(),
                 ChildOf(root),
             ));
+            mark_mat_anim(&mut child, p);
             // The authored material alpha reaches the boneless bake too — it is a property of the
             // batch, not of the rig. The INSTANCE alpha multiplies into it, the reference's
             // `model+0x180 × the batch factor` (`0x707680`).
@@ -644,6 +669,7 @@ pub(super) fn spawn_booth_model(
             layer.clone(),
             ChildOf(root),
         ));
+        mark_mat_anim(&mut child, p);
         // The batch's authored material alpha, sampled onto the render-alpha tag field — the same
         // `MatAnim` the world lanes use, in its self-driving form (`drives_tag`: nothing else writes
         // a booth part's alpha). The rig field rides the same tag, so compose rather than overwrite;
@@ -866,7 +892,7 @@ fn arm_turn(
     player: &mut AnimationPlayer,
     anims: &benilla_assets::ModelAnimations,
     catalog: &benilla_formats::AnimDataCatalog,
-    rng: &mut u32,
+    rng: &mut benilla_assets::AnimRng,
     turn: &mut super::Turn,
     id: u16,
     now: f64,
@@ -881,8 +907,7 @@ fn arm_turn(
     if res.id != id {
         return false;
     }
-    let Some(clip) = anims.pick_variation(res.id, crate::creature_anim::select::msvc_rand(rng))
-    else {
+    let Some(clip) = anims.pick_variation(res.id, rng.draw()) else {
         return false;
     };
     let (node, looping, blend) = (clip.node, clip.looping, clip.blend_time.max(0.0));
@@ -983,7 +1008,7 @@ pub(super) fn drive_booth_turn(
     // The variation roll's state — the reference passes variation `-1` to `0x7121a0`, which is
     // "frequency-weighted random" off the CRT LCG (`0x71249a call 0x7400e5`). Same generator the
     // world lane's picks use, so a doll and a world unit roll their idles alike.
-    mut rng: Local<u32>,
+    mut rng: ResMut<benilla_assets::AnimRng>,
 ) {
     let Some(anim_data) = anim_data.as_deref() else {
         return;
@@ -1016,7 +1041,7 @@ fn step_turn(
     player: &mut AnimationPlayer,
     anims: &benilla_assets::ModelAnimations,
     catalog: &benilla_formats::AnimDataCatalog,
-    rng: &mut u32,
+    rng: &mut benilla_assets::AnimRng,
     turn: &mut super::Turn,
     now: f64,
 ) {
@@ -1426,6 +1451,7 @@ mod tests {
                 material: Handle::default(),
                 alpha_anim: None,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             },
             BoothPart {
                 skinned: None,
@@ -1433,6 +1459,7 @@ mod tests {
                 material: Handle::default(),
                 alpha_anim: None,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             },
         ];
 
@@ -1652,7 +1679,7 @@ mod tests {
             turning_model(),
             benilla_formats::AnimDataCatalog::from_rows([]),
         );
-        let (mut player, mut rng) = (baked(), 0u32);
+        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
         let mut turn = super::super::Turn {
             // Arrow down. The shuffle is armed but contributes NOTHING yet.
             spun: Some(SHUFFLE_LEFT),
@@ -1729,7 +1756,7 @@ mod tests {
         );
 
         // Reverse at 0.1 s of a 0.25 s blend — 60% still to run, λ = 0.648. REFUSED.
-        let (mut player, mut rng) = (baked(), 0u32);
+        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
         let mut turn = super::super::Turn {
             spun: Some(SHUFFLE_LEFT),
             ..Default::default()
@@ -1756,7 +1783,7 @@ mod tests {
         assert_eq!(turn.shuffle.map(|(id, _)| id), Some(SHUFFLE_RIGHT));
 
         // Reverse at 0.2 s instead — 20% still to run, λ = 0.104. The slot is taken.
-        let (mut player, mut rng) = (baked(), 0u32);
+        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
         let mut turn = super::super::Turn {
             spun: Some(SHUFFLE_LEFT),
             ..Default::default()
@@ -1784,7 +1811,7 @@ mod tests {
             turning_model(),
             benilla_formats::AnimDataCatalog::from_rows([]),
         );
-        let (mut player, mut rng) = (baked(), 0u32);
+        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
         let mut turn = super::super::Turn {
             spun: Some(SHUFFLE_LEFT),
             ..Default::default()
@@ -1833,7 +1860,7 @@ mod tests {
             usize::from(SHUFFLE_RIGHT) + 1
         ];
         let catalog = benilla_formats::AnimDataCatalog::from_rows([]);
-        let (mut player, mut rng) = (baked(), 0u32);
+        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
         let mut turn = super::super::Turn::default();
         for t in [1.0, 1.1, 1.2, 2.0] {
             turn.spun = Some(SHUFFLE_LEFT);

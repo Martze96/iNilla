@@ -244,6 +244,7 @@ fn app_with_chains() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<crate::creature_anim::SpellKitFx>();
+    app.add_message::<crate::net::FieldChanged>();
     app.add_message::<crate::creature_anim::SpellKitSound>();
     app.add_message::<AuraProc>();
     app.add_message::<crate::creature_anim::BaseAnimRecompute>();
@@ -354,7 +355,9 @@ fn a_proc_only_state_kit_arms_stealth_translucency() {
     let stealthed = ObjectFields::from_pairs(&[(47, STEALTH), (95, 0x0E)]);
     let unit = app
         .world_mut()
-        .spawn(crate::net::ObjectStore(stealthed))
+        .spawn(crate::net::ObjectStore(
+            stealthed.into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
         .id();
     app.update();
 
@@ -368,11 +371,12 @@ fn a_proc_only_state_kit_arms_stealth_translucency() {
     assert!(n.head_tint().is_none(), "kit 312 carries no tint");
 
     // The aura drops: the node goes and the target ramps back to opaque.
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     let n = app.world().entity(unit).get::<AuraNodes>().unwrap();
     assert!(n.alpha.is_empty(), "reaped on the aura-remove edge");
@@ -386,10 +390,10 @@ fn a_kit_with_both_procs_installs_both_nodes() {
     let mut app = app_with_chains();
     let unit = app
         .world_mut()
-        .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
-            (47, GHOST),
-            (95, 0x0E),
-        ])))
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
         .id();
     app.update();
 
@@ -404,7 +408,12 @@ fn a_kit_with_both_procs_installs_both_nodes() {
 fn two_auras_stack_and_unstack_through_the_slots() {
     let mut app = app_with_chains();
     let both = ObjectFields::from_pairs(&[(47, STEALTH), (48, GHOST), (95, 0xEE)]);
-    let unit = app.world_mut().spawn(crate::net::ObjectStore(both)).id();
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            both.into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
+        .id();
     app.update();
     let n = app.world().entity(unit).get::<AuraNodes>().unwrap();
     assert!(
@@ -413,12 +422,12 @@ fn two_auras_stack_and_unstack_through_the_slots() {
     );
 
     // Stealth alone drops (slot 0 cleared, slot 1 still occupied).
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[
-            (48, GHOST),
-            (95, 0xE0),
-        ])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(48, GHOST), (95, 0xE0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     let n = app.world().entity(unit).get::<AuraNodes>().unwrap();
     assert_eq!(n.alpha.as_slice(), [(GHOST, 0.5)]);
@@ -458,10 +467,10 @@ fn an_unmodelled_proc_only_kit_arms_nothing() {
 
     let unit = app
         .world_mut()
-        .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
-            (47, SAP),
-            (95, 0x0E),
-        ])))
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(47, SAP), (95, 0x0E)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
         .id();
     app.update();
     assert!(
@@ -606,7 +615,10 @@ fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             skin,
         ))
         .id();
@@ -623,11 +635,12 @@ fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
 
     // The aura leaves its slot: the reference drops the tint node (`0x5ff320`) with no ease, and the
     // channel goes back to identity — which is the shader's no-op word, not a colour.
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0x00,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0x00)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     let tints = app
         .world()
@@ -663,7 +676,10 @@ fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             body,
         ))
         .id();
@@ -683,11 +699,12 @@ fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
     );
 
     // The aura drops: both ends of the chain go back to identity, not just the unit's own slot.
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0x00,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0x00)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     let tints = app
         .world()
@@ -721,7 +738,10 @@ fn an_unchained_rig_inherits_nothing() {
     };
     let loose_slot = loose.slot;
     app.world_mut().spawn((
-        crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+        crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ),
         body,
     ));
     app.world_mut().spawn(loose);
@@ -753,7 +773,10 @@ fn the_rig_free_hook_clears_a_dead_units_tint() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             skin,
         ))
         .id();
@@ -821,7 +844,10 @@ fn ice_block_holds_the_clocks_and_the_drop_lets_them_go() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();
@@ -841,11 +867,12 @@ fn ice_block_holds_the_clocks_and_the_drop_lets_them_go() {
     app.update(); // idempotent
 
     // The aura leaves the slots.
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     assert!(app
         .world()
@@ -875,7 +902,10 @@ fn a_clip_armed_under_the_freeze_comes_back_at_its_own_speed() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();
@@ -902,11 +932,12 @@ fn a_clip_armed_under_the_freeze_comes_back_at_its_own_speed() {
     app.update();
     assert!(clip(&app, unit, 156).0, "held on arrival");
 
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     assert!(!clip(&app, unit, 156).0);
     assert_eq!(
@@ -928,7 +959,10 @@ fn the_freeze_reaches_the_mount_body() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             rig_playing(&[(91, 1.0), (54, 1.0)]),
             crate::entities::mount::MountChild(mount),
         ))
@@ -938,11 +972,12 @@ fn the_freeze_reaches_the_mount_body() {
     assert!(clip(&app, unit, 91).0, "the rider");
     assert!(clip(&app, mount, 5).0, "and the mount under them");
 
-    app.world_mut()
-        .entity_mut(unit)
-        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
-            95, 0,
-        )])));
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(95, 0)])
+            .into_created(benilla_protocol::messages::ObjectType::Unit),
+    );
     app.update();
     assert!(!clip(&app, mount, 5).0);
     assert_eq!(clip(&app, mount, 5).1, 2.0);
@@ -956,7 +991,10 @@ fn an_aura_without_the_proc_never_touches_a_clock() {
     let unit = app
         .world_mut()
         .spawn((
-            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, STEALTH), (95, 0x0E)])),
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(47, STEALTH), (95, 0x0E)])
+                    .into_created(benilla_protocol::messages::ObjectType::Unit),
+            ),
             rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();

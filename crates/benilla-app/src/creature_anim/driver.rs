@@ -363,7 +363,7 @@ pub(super) fn drive_animations(
     ),
     // The variation roll's LCG state (decision 0114 — the client's single CRT `_rand` stream,
     // shared by every play; [`select::msvc_rand`]).
-    mut rng: Local<u32>,
+    mut rng: ResMut<benilla_assets::AnimRng>,
     // The SELF unit's last-written anim state line of the `WOW_MOVE_TRACE` debug trace (the
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
@@ -685,9 +685,7 @@ pub(super) fn drive_animations(
                     let c = if first {
                         c
                     } else {
-                        anims
-                            .pick_variation(c.anim_id, select::msvc_rand(&mut rng))
-                            .unwrap_or(c)
+                        anims.pick_variation(c.anim_id, rng.draw()).unwrap_or(c)
                     };
                     let active =
                         tr.play(&mut player, c.node, Duration::from_secs_f32(c.blend_time));

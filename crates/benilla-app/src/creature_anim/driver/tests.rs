@@ -147,6 +147,8 @@ fn advance(app: &mut App, ms: u64) {
 
 fn app() -> App {
     let mut app = App::new();
+    // The client's ONE `rand()` stream (2301) — the play's variation and replay rolls.
+    app.init_resource::<benilla_assets::AnimRng>();
     // Asset + animation plugins so tests with REAL clip assets (the watchdog test) get Bevy's
     // `advance_animations` ticking completions; units without a graph handle are skipped by it,
     // so the asset-less tenants are unaffected.

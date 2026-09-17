@@ -14,7 +14,7 @@
 //! The bridge runs in [`WorldStage::Net`], before `Input`, so a server teleport snaps → streams →
 //! covers in one frame. Coordinates cross from raw WoW into Bevy space here (`wow_to_bevy`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use benilla_protocol::{
@@ -117,6 +117,7 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::items::Items>()
             .init_resource::<crate::world_state::WorldStates>()
             .add_message::<TeleportMessage>()
+            .add_message::<FieldChanged>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ClientControlMessage>()
@@ -288,6 +289,124 @@ pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
 /// + the `Transform`), not descriptor fields.
 #[derive(Component, Clone, Default)]
 pub(crate) struct ObjectStore(pub(crate) ObjectFields);
+
+/// **One descriptor dword moved on a streamed object** — the reference's `CMirrorHandler` edge
+/// (decision 2297). The real client keeps a shadow copy of every object's field array, and the
+/// values-apply notifier (`0x465330`) memcmps live against shadow over each registered span and
+/// calls the watcher with the OLD value (`0x465570` hands the mirror pointer as `param3` —
+/// wow-re `object-layer.md`); a first CREATE passes a notify-suppress flag and fires nothing, an
+/// in-place re-create of a live guid goes down the values path and fires like any delta.
+///
+/// benilla emits the same edge once, from the drain's merge, which is the one place that holds
+/// both sides: every consumer that used to poll `Changed<ObjectStore>` and re-derive "did THIS
+/// field move" against its own `Local<EntityHashMap>` shadow reads these instead, with no
+/// first-sight rule and no per-frame `retain` of its own (the create is never merged, so the
+/// suppression is structural). Unwatched fields cost one `Vec` push each; the consumers filter
+/// by `(kind, index)` through [`benilla_protocol::field`]'s named constants — the same constants
+/// the store's accessors read through, so a watch and its accessor cannot disagree.
+///
+/// `kind` is the store's own class off its create block: a raw index means different things per
+/// class (`36` is a unit's `BYTES_0` and a corpse's `DYNAMIC_FLAGS`), and a unit-field watcher
+/// must accept both `Unit` and `Player` ([`Self::unit_field`]).
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FieldChanged {
+    pub entity: Entity,
+    pub guid: u64,
+    pub kind: benilla_protocol::messages::ObjectType,
+    pub index: u16,
+    pub old: u32,
+    pub new: u32,
+}
+
+impl FieldChanged {
+    /// A unit-block edge — units and players share the UNIT block, so a watch registered for
+    /// the reference's TYPEID 3 sees both here.
+    pub fn is_unit(&self) -> bool {
+        use benilla_protocol::messages::ObjectType;
+        matches!(self.kind, ObjectType::Unit | ObjectType::Player)
+    }
+    /// The edge on one named unit field.
+    pub fn unit_field(&self, index: u16) -> bool {
+        self.is_unit() && self.index == index
+    }
+    /// The edge's slot inside a unit-block array starting at `base` with `len` dwords — the aura
+    /// arrays' shape (`UNIT_FIELD_AURA[48]`, `AURAAPPLICATIONS[12]`).
+    pub fn unit_array_slot(&self, base: u16, len: u16) -> Option<u16> {
+        (self.is_unit() && (base..base + len).contains(&self.index)).then(|| self.index - base)
+    }
+}
+
+/// The field edges one feed saw this run, keyed the way the unit feeds ask — "did THIS guid's
+/// field move" per token — so a per-token event rides the reference's own trigger (its notifier
+/// fans a moved field out to every token naming the unit, `0x515e50`) instead of a snapshot diff
+/// guarded by `prev.is_some()` (decision 2297). Collected once per run, off the reader.
+#[derive(Default)]
+pub(crate) struct FieldEdges(HashSet<(u64, u16)>);
+
+impl FieldEdges {
+    pub fn collect(reader: &mut MessageReader<FieldChanged>) -> Self {
+        Self(reader.read().map(|e| (e.guid, e.index)).collect())
+    }
+    /// Did `guid`'s dword at `index` move this run?
+    pub fn moved(&self, guid: u64, index: u16) -> bool {
+        self.0.contains(&(guid, index))
+    }
+    #[cfg(test)]
+    pub fn of(edges: &[(u64, u16)]) -> Self {
+        Self(edges.iter().copied().collect())
+    }
+}
+
+/// Fold a descriptor update onto a live store and report its field edges — the drain's merge
+/// body, shared with the test harness so a fixture drives a watcher through exactly the path
+/// the wire does. A store that is not there yet is seeded silently (the first create).
+pub(crate) fn merge_store_fields(
+    store: &mut ObjectFields,
+    delta: ObjectFields,
+    entity: Entity,
+    guid: u64,
+    mut emit: impl FnMut(FieldChanged),
+) {
+    let Some(kind) = store.created_as() else {
+        // No create seen for this store (a defensively seeded bare delta): nothing the reference
+        // would have an object to notify on. The fields still land.
+        store.merge(delta);
+        return;
+    };
+    store.merge_diff(delta, |index, old, new| {
+        emit(FieldChanged {
+            entity,
+            guid,
+            kind,
+            index,
+            old,
+            new,
+        });
+    });
+}
+
+/// Apply a descriptor update to `entity` the way the drain does — seed on first sight (no
+/// edges), merge and emit [`FieldChanged`] after — so a watcher test speaks the wire's language
+/// instead of poking the component. The fixture must be [`ObjectFields::into_created`] on its
+/// first application, like every real create block.
+#[cfg(test)]
+pub(crate) fn apply_fields_for_test(world: &mut World, entity: Entity, delta: ObjectFields) {
+    let guid = world.get::<Guid>(entity).map_or(0, |g| g.0);
+    let mut edges = Vec::new();
+    match world.get_mut::<ObjectStore>(entity) {
+        Some(mut store) => merge_store_fields(&mut store.0, delta, entity, guid, |e| edges.push(e)),
+        None => {
+            assert!(
+                delta.created_as().is_some(),
+                "a fixture's first descriptor is a create block: chain `.into_created(..)`"
+            );
+            world.entity_mut(entity).insert(ObjectStore(delta));
+        }
+    }
+    world
+        .resource_mut::<Messages<FieldChanged>>()
+        .write_batch(edges);
+}
 
 /// Marks our own player's streamed entity (guid == [`SelfGuid`]). This is **identity** — "my
 /// character", the thing whose bags, auras, quest log and paper doll are mine. It is deliberately
@@ -2751,6 +2870,71 @@ pub(crate) struct PetDismissSoundMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The field-edge contract at the one write that emits it (decision 2297), through the same
+    /// body the drain's merge calls: a first create seeds silently (the reference's create-time
+    /// notify-suppress), a values delta reports each moved dword with its old value and the
+    /// store's class, a value re-sent unchanged reports nothing, and an in-place re-create of a
+    /// live object notifies like any delta — including a field the fresh snapshot dropped.
+    #[test]
+    fn the_merge_emits_one_edge_per_moved_dword_and_none_for_a_first_create() {
+        use benilla_protocol::field::{FIELD_UNIT_HEALTH, FIELD_UNIT_LEVEL};
+        use benilla_protocol::messages::ObjectType;
+
+        let mut world = World::new();
+        world.init_resource::<Messages<FieldChanged>>();
+        let unit = world.spawn(Guid(0xF130_0000_0000_0042)).id();
+        let drain = |world: &mut World| -> Vec<FieldChanged> {
+            world
+                .resource_mut::<Messages<FieldChanged>>()
+                .drain()
+                .collect()
+        };
+
+        // The create block: seeds, says nothing.
+        apply_fields_for_test(
+            &mut world,
+            unit,
+            ObjectFields::from_pairs(&[(FIELD_UNIT_HEALTH, 100), (FIELD_UNIT_LEVEL, 9)])
+                .into_created(ObjectType::Unit),
+        );
+        assert!(drain(&mut world).is_empty(), "a create is not an edge");
+
+        // A values delta: the ding's dword and the health's, the level re-sent unchanged.
+        apply_fields_for_test(
+            &mut world,
+            unit,
+            ObjectFields::from_pairs(&[(FIELD_UNIT_LEVEL, 9), (FIELD_UNIT_HEALTH, 0)]),
+        );
+        assert_eq!(
+            drain(&mut world),
+            vec![FieldChanged {
+                entity: unit,
+                guid: 0xF130_0000_0000_0042,
+                kind: ObjectType::Unit,
+                index: FIELD_UNIT_HEALTH,
+                old: 100,
+                new: 0,
+            }],
+            "one edge for the dword that moved, carrying the old value; the resend is silent"
+        );
+
+        // A re-create of the live guid: the reference's in-place refresh notifies, and the
+        // replace makes the dropped health an explicit `0 → 0`... no: it was 0 already, so the
+        // level's rise is the only edge.
+        apply_fields_for_test(
+            &mut world,
+            unit,
+            ObjectFields::from_pairs(&[(FIELD_UNIT_LEVEL, 10)]).into_created(ObjectType::Unit),
+        );
+        let edges = drain(&mut world);
+        assert_eq!(edges.len(), 1);
+        assert!(edges[0].unit_field(FIELD_UNIT_LEVEL) && edges[0].old == 9 && edges[0].new == 10);
+        assert_eq!(
+            world.get::<ObjectStore>(unit).unwrap().0.unit_level(),
+            Some(10)
+        );
+    }
 
     /// **The kick sends the player back to the login screen** — decision 1262's whole promise,
     /// pinned at the one place that decides it, in the environment the director actually plays in.

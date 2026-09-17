@@ -121,7 +121,7 @@ pub(super) fn wound_trigger(
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
-    rng: &mut u32,
+    rng: &mut benilla_assets::AnimRng,
     id: u16,
     mv: &MovementState,
     mounted: bool,
@@ -136,7 +136,7 @@ pub(super) fn wound_trigger(
         // (`end = clock`, expired on arrival) — skip. No resolvable clip at all is the
         // `0x711a20` asset-presence abort.
         let clip = find_resolved(anims, id, catalog)
-            .and_then(|h| anims.pick_variation(h.anim_id, select::msvc_rand(rng)))
+            .and_then(|h| anims.pick_variation(h.anim_id, rng.draw()))
             .filter(|c| c.duration > 0.0);
         let node = clip.and_then(|c| {
             if full {

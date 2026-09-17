@@ -241,6 +241,68 @@ fn channel_counts_down_not_up() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **A completed channel closes on the BAR's own clock, because the server's stop runs a second
+/// late** — and that is the path every naturally-finished channel in the game takes.
+///
+/// vmangos does not send `MSG_CHANNEL_UPDATE(0)` when a channel simply runs out.
+/// `Spell::SendChannelUpdate(0, interrupted=false)` schedules a `ChannelResetEvent` **+1000 ms**
+/// ("Else, we have some visual bugs (arcane projectile, last tick)"), and only that event's
+/// `CancelSpellChannelingAnimationInstantly()` finally emits the packet. The *interrupt* path calls
+/// the same function inline, which is why a broken channel stops at once and a finished one does
+/// not.
+///
+/// So for a whole second after the fill empties there is no stop edge at all, and the stock
+/// `OnUpdate` is what ends it: once `GetTime()` reaches `endTime` it clamps, `time == this.endTime`
+/// trips, and the frame hands itself to `fadeOut` with **no green flash** — a finished channel
+/// fades, where a cast completes green. The late packet then lands on a hidden frame and both of
+/// `CastingBarFrame_OnEvent`'s stop-arm guards reject it.
+///
+/// Worth a test of its own because nothing else exercises it: the sibling test above fires
+/// `SPELLCAST_CHANNEL_STOP` by hand, which is the *interrupt* timing, not this one.
+#[test]
+fn a_finished_channel_fades_on_its_own_clock_and_the_late_stop_is_inert() {
+    let mut s = harness();
+    s.fire_event(
+        "SPELLCAST_CHANNEL_START",
+        vec![
+            ScriptValue::Int(1000),
+            ScriptValue::Str("Channeling".into()),
+        ],
+    );
+    assert!(s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap());
+
+    // The whole second the channel runs: still up, still orange, no stop packet has been sent.
+    for _ in 0..9 {
+        s.tick(0.1);
+    }
+    assert!(
+        s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap(),
+        "still channelling at 0.9 s of a 1 s channel"
+    );
+    let (r, g, b) = bar_color(&s);
+    assert!(
+        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        "never flashes green — a finished channel fades, it does not complete (got {r} {g} {b})"
+    );
+
+    // Past endTime with nothing from the server: the frame ends itself.
+    for _ in 0..40 {
+        s.tick(0.1);
+    }
+    assert!(
+        !s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap(),
+        "the bar closed on its own clock, a full second before the server says so"
+    );
+
+    // ~1 s after the fill emptied, the deferred ChannelResetEvent finally fires.
+    s.fire_event("SPELLCAST_CHANNEL_STOP", vec![]);
+    assert!(
+        !s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap(),
+        "the late stop lands on a hidden frame and does nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 // ── The draw list ────────────────────────────────────────────────────────────────────────────────
 
 const FLASH: &str = "UI-CastingBar-Flash";

@@ -19,7 +19,7 @@ use benilla_protocol::EntityKind;
 use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, NetEntity, ObjectStore};
+use crate::net::{FieldChanged, NetCommands, NetEntity, ObjectStore};
 use benilla_assets::{LockRecover, WorldAssets};
 
 use super::{
@@ -1322,14 +1322,24 @@ pub(super) fn route_cast_visuals(
 /// exactly that bug: Stealth's kit 312 carries no models, no anim and no attach at all (its whole
 /// visual is one proc-14 CharProc), so an effects-only test dropped it and the character showed
 /// nothing.
+/// The reference's one aura watch: `UNIT_FIELD_AURA` + `UNIT_FIELD_AURAFLAGS` as a single
+/// registration — `0x604d00`, registered `604226 mov edx,0xa4` / `604221 push 0xd8` for class 3
+/// (wow-re `object-layer.md`): field offset `0xa4` = dword 41 past the 6 OBJECT fields =
+/// `FIELD_UNIT_AURA`, length `0xd8` bytes = 54 dwords = the 48 slot ids and the 6 packed flag words.
+const AURA_WATCH_BASE: u16 = benilla_protocol::field::FIELD_UNIT_AURA;
+const AURA_WATCH_SPAN: u16 = 54;
+
 pub(crate) fn arm_aura_state_fx(
-    // The slot diff below is a pure function of the store's aura fields, so it re-runs only when
-    // the store was written — `arm_level_up_fx`'s idiom (decision 1357's sibling gate): at the
-    // LBRS pin this was ~800 full aura-slot walks/frame re-deriving an unchanged answer. The
+    // The slot diff below is a pure function of the store's aura fields, so it re-runs for a unit
+    // only when one of THOSE moved — the field edges inside the reference's own aura watch span
+    // (decision 2297; before that, any store write: at the LBRS pin ~800 full aura-slot walks per
+    // frame re-deriving an unchanged answer, most of them health ticks) — and on the unit's first
+    // sight, because a standing aura is a STATE the streamed-in unit wears, not an edge. The
     // unfiltered twin runs exactly once per DBC-resource arrival: a unit that streamed in before
-    // `SpellVisuals`/`Spells` landed carries standing auras no store write will re-announce.
+    // `SpellVisuals`/`Spells` landed carries standing auras no edge will re-announce.
     units: Query<(Entity, &ObjectStore)>,
-    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
+    arrived: Query<Entity, Added<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut fx: MessageWriter<SpellKitFx>,
@@ -1346,7 +1356,17 @@ pub(crate) fn arm_aura_state_fx(
     let scan = if full_sweep {
         units.iter().collect::<Vec<_>>()
     } else {
-        changed.iter().collect::<Vec<_>>()
+        let mut due: EntityHashSet = arrived.iter().collect();
+        due.extend(
+            edges
+                .read()
+                .filter(|e| {
+                    e.unit_array_slot(AURA_WATCH_BASE, AURA_WATCH_SPAN)
+                        .is_some()
+                })
+                .map(|e| e.entity),
+        );
+        due.into_iter().filter_map(|e| units.get(e).ok()).collect()
     };
     for (entity, store) in scan {
         let prev = armed.entry(entity).or_default();
@@ -1452,14 +1472,17 @@ pub(crate) fn arm_aura_state_fx(
 /// [`LOOT_FX_KEY`] — the client hangs loot art on the same `Effect_C` node type its spell
 /// visuals use, so sharing the one attach body is the faithful shape.
 pub(super) fn arm_loot_fx(
-    // Dead+lootable is a pure function of store fields — the same `Changed<ObjectStore>` gate as
-    // `arm_level_up_fx` below and `arm_aura_state_fx` above, with the same one-shot full sweep
-    // when the DBC resource lands after units already streamed in. `NetEntity` splits the two
-    // predicates: a **unit** answers `UNIT_DYNFLAG_LOOTABLE`, a **corpse object** answers its own
+    // Dead+lootable is a pure function of four store fields, so a unit is re-read on a field
+    // edge on any of them and on first sight (a body that streams in lootable wears the sparkle —
+    // the reference arms it at build, `0x5d6e30`, and re-arms off the field's own mirror handler),
+    // with the same one-shot full sweep as `arm_aura_state_fx` when the DBC resource lands after
+    // units already streamed in (decision 2297). `NetEntity` splits the two predicates: a **unit**
+    // answers `UNIT_DYNFLAG_LOOTABLE`, a **corpse object** answers its own
     // `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0 (decision 1723) — different fields at different indices,
-    // and a corpse descriptor has no UNIT block to ask at all.
+    // and a corpse descriptor has no UNIT block to ask at all; the edge's `kind` keeps them apart.
     units: Query<(Entity, &ObjectStore, &crate::net::NetEntity)>,
-    changed: Query<(Entity, &ObjectStore, &crate::net::NetEntity), Changed<ObjectStore>>,
+    arrived: Query<Entity, Added<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
     mut fx: MessageWriter<SpellKitFx>,
     mut armed: Local<EntityHashSet>,
@@ -1472,7 +1495,24 @@ pub(super) fn arm_loot_fx(
     let scan = if full_sweep {
         units.iter().collect::<Vec<_>>()
     } else {
-        changed.iter().collect::<Vec<_>>()
+        use benilla_protocol::field::{
+            FIELD_CORPSE_DYNAMIC_FLAGS, FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_HEALTH,
+            FIELD_UNIT_MAXHEALTH,
+        };
+        let mut due: EntityHashSet = arrived.iter().collect();
+        due.extend(
+            edges
+                .read()
+                .filter(|e| {
+                    e.unit_field(FIELD_UNIT_DYNAMIC_FLAGS)
+                        || e.unit_field(FIELD_UNIT_HEALTH)
+                        || e.unit_field(FIELD_UNIT_MAXHEALTH)
+                        || (e.kind == benilla_protocol::messages::ObjectType::Corpse
+                            && e.index == FIELD_CORPSE_DYNAMIC_FLAGS)
+                })
+                .map(|e| e.entity),
+        );
+        due.into_iter().filter_map(|e| units.get(e).ok()).collect()
     };
     for (entity, store, net) in scan {
         // The **corpse object**'s own sparkle (wow-re `corpse-decal-and-loot-sparkle.md` §Q2, §5
@@ -1537,51 +1577,46 @@ pub(super) fn arm_loot_fx(
 /// `UNIT_FIELD_LEVEL` **change** on any streamed unit (the client's descriptor change-watcher
 /// `CMirrorHandler 0x6045b0` → `SpawnHardcodedEffect(5)`) spawns [`LEVEL_UP_EFFECT`]
 /// (`Spells\LevelUp\LevelUp.mdl`) at the base attach — the ding visual is DECOUPLED from
-/// `SMSG_LEVELUP_INFO`, so anyone leveling nearby flashes too. First sight of a unit arms
-/// silently (it streamed in *carrying* a level, it didn't just gain one). The instance
-/// self-terminates on its own 1.867 s clip (spell id 0, the kit-push stage-0 shape — no reap
-/// key needed, unlike the persistent loot sparkle above), and its **sound is the model's own**
-/// `$SND(888)` event → `Sound\Spells\LevelUp.wav`, fired by
+/// `SMSG_LEVELUP_INFO`, so anyone leveling nearby flashes too. A unit that streams in
+/// *carrying* a level didn't just gain one — and the field-edge stream is create-suppressed, so
+/// that needs no memory here (decision 2297; this was the first `Local<EntityHashMap>` shadow
+/// to go). The instance self-terminates on its own 1.867 s clip (spell id 0, the kit-push
+/// stage-0 shape — no reap key needed, unlike the persistent loot sparkle above), and its
+/// **sound is the model's own** `$SND(888)` event → `Sound\Spells\LevelUp.wav`, fired by
 /// `crate::entities::spell_fx`'s event-track scanner.
 pub(super) fn arm_level_up_fx(
-    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
-    units: Query<(), With<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
-    mut levels: Local<EntityHashMap<u32>>,
     mut fx: MessageWriter<SpellKitFx>,
 ) {
-    for (entity, store) in &changed {
-        let Some(level) = store.0.unit_level() else {
+    for e in edges.read() {
+        if !e.unit_field(benilla_protocol::field::FIELD_UNIT_LEVEL) {
             continue;
-        };
-        match levels.insert(entity, level) {
-            Some(prev) if prev != level => {
-                let Some((effect, path)) = visuals
-                    .as_ref()
-                    .and_then(|v| v.0.hardcoded_effect(LEVEL_UP_EFFECT))
-                else {
-                    continue; // no client data / no such row (the DBC-resource degrade shape)
-                };
-                debug!("anim: level {prev} → {level}, the ding flashes ({entity})");
-                fx.write(SpellKitFx::Begin {
-                    entity,
-                    spell_id: 0,
-                    persistent: false,
-                    class: FxClass::Hold,
-                    // The ding self-terminates on its own 1.867 s clip — the stage-0 shape.
-                    stage: FxStage::OneShot,
-                    effects: vec![FxSlot {
-                        tag: HARDCODED_FX_ATTACH,
-                        effect,
-                        path: path.to_string(),
-                    }],
-                });
-            }
-            _ => {} // first sight arms; an unchanged write is a no-op
         }
+        let Some((effect, path)) = visuals
+            .as_ref()
+            .and_then(|v| v.0.hardcoded_effect(LEVEL_UP_EFFECT))
+        else {
+            continue; // no client data / no such row (the DBC-resource degrade shape)
+        };
+        debug!(
+            "anim: level {} → {}, the ding flashes ({})",
+            e.old, e.new, e.entity
+        );
+        fx.write(SpellKitFx::Begin {
+            entity: e.entity,
+            spell_id: 0,
+            persistent: false,
+            class: FxClass::Hold,
+            // The ding self-terminates on its own 1.867 s clip — the stage-0 shape.
+            stage: FxStage::OneShot,
+            effects: vec![FxSlot {
+                tag: HARDCODED_FX_ATTACH,
+                effect,
+                path: path.to_string(),
+            }],
+        });
     }
-    // Streamed units despawn on range-out — drop their level memory with them.
-    levels.retain(|e, _| units.contains(*e));
 }
 
 /// The **mount poof** — the cloud the director reports seeing at mount-up and we never drew.
@@ -1615,45 +1650,41 @@ pub(super) fn arm_level_up_fx(
 /// today (the mounted gate refuses a second mount spell) and bounded at "one extra puff", so it
 /// is named rather than modelled.
 pub(super) fn arm_mount_poof_fx(
-    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
-    units: Query<(), With<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
-    mut displays: Local<EntityHashMap<u32>>,
     mut fx: MessageWriter<SpellKitFx>,
 ) {
-    for (entity, store) in &changed {
-        let mount_display = store.0.unit_mount_display_id();
-        match displays.insert(entity, mount_display) {
-            // The build leg's gate is on the NEW value, so a dismount (`mount_display == 0`)
-            // spawns nothing — and first sight arms silently, exactly like the ding: a unit that
-            // streams in already mounted did not just mount.
-            Some(prev) if prev != mount_display && mount_display != 0 => {
-                let Some((effect, path)) = visuals
-                    .as_ref()
-                    .and_then(|v| v.0.hardcoded_effect(MOUNT_POOF_EFFECT))
-                else {
-                    continue; // no client data / no such row (the DBC-resource degrade shape)
-                };
-                debug!("anim: mount display {prev} → {mount_display}, the poof puffs ({entity})");
-                fx.write(SpellKitFx::Begin {
-                    entity,
-                    spell_id: 0,
-                    persistent: false,
-                    class: FxClass::Hold,
-                    // `0x5fbf50` — destroy at the first completion; the shipped model runs 2.8 s.
-                    stage: FxStage::OneShot,
-                    effects: vec![FxSlot {
-                        tag: HARDCODED_FX_ATTACH,
-                        effect,
-                        path: path.to_string(),
-                    }],
-                });
-            }
-            _ => {}
+    for e in edges.read() {
+        // The build leg's gate is on the NEW value, so a dismount (`new == 0`) spawns nothing —
+        // and a unit that streams in already mounted did not just mount, which the
+        // create-suppressed edge stream says for us, exactly as for the ding (2297).
+        if !e.unit_field(benilla_protocol::field::FIELD_UNIT_MOUNTDISPLAYID) || e.new == 0 {
+            continue;
         }
+        let Some((effect, path)) = visuals
+            .as_ref()
+            .and_then(|v| v.0.hardcoded_effect(MOUNT_POOF_EFFECT))
+        else {
+            continue; // no client data / no such row (the DBC-resource degrade shape)
+        };
+        debug!(
+            "anim: mount display {} → {}, the poof puffs ({})",
+            e.old, e.new, e.entity
+        );
+        fx.write(SpellKitFx::Begin {
+            entity: e.entity,
+            spell_id: 0,
+            persistent: false,
+            class: FxClass::Hold,
+            // `0x5fbf50` — destroy at the first completion; the shipped model runs 2.8 s.
+            stage: FxStage::OneShot,
+            effects: vec![FxSlot {
+                tag: HARDCODED_FX_ATTACH,
+                effect,
+                path: path.to_string(),
+            }],
+        });
     }
-    // Streamed units despawn on range-out — drop their mount memory with them.
-    displays.retain(|e, _| units.contains(*e));
 }
 
 /// The one-slot **pending-morph latch** — the reference's `[unit+0xd54]`, a `SpellRec*` (wow-re
@@ -1687,52 +1718,40 @@ fn is_morph_spell(spells: &crate::ui_action::Spells, spell_id: u32) -> bool {
     })
 }
 
-/// Arm [`MorphLatch`] from the aura-slot diff — the reference's TWO arm sites folded into the
-/// one place benilla sees both edges: the aura-add watcher and the aura-remove handler's tail
+/// Arm [`MorphLatch`] from the aura-slot edges — the reference's TWO arm sites folded into the
+/// one place benilla sees both: the aura-add watcher and the aura-remove handler's tail
 /// (`0x6123ad`) both call `0x5ff0c0(spellId)`, and a later arm overwrites an earlier one (one
-/// slot). First sight of a unit seeds the diff baseline silently — the reference's watchers
-/// fire on VALUES deltas, never on create, so a druid streaming in mid-form must not latch.
-/// Keyed to its own full-slot diff rather than [`arm_aura_state_fx`]'s `armed` map, which
-/// tracks only state-kit spells — the form spells carry none.
+/// slot). Each `UNIT_FIELD_AURA` slot edge is one dword of `0x604d00`'s watch (decision 2297):
+/// its old spell is a REMOVE arm, its new spell an ADD arm — remove first, add second, so a
+/// form→form swap in one slot latches the form being ENTERED (both resolve to the same cloud
+/// family regardless). A unit's first sight emits no edge, so a druid streaming in mid-form does
+/// not latch — the reference's watchers fire on VALUES deltas, never on create.
 pub(super) fn arm_morph_latch(
-    units: Query<(Entity, &ObjectStore)>,
-    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
+    units: Query<(), With<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut latch: ResMut<MorphLatch>,
-    mut seen: Local<EntityHashMap<Vec<u32>>>,
 ) {
-    for (entity, store) in &changed {
-        let mut cur: Vec<u32> = store.0.unit_auras().map(|a| a.spell_id).collect();
-        cur.sort_unstable();
-        cur.dedup();
-        match seen.entry(entity) {
-            bevy::platform::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(cur); // first sight arms silently
+    if let Some(spells) = spells.as_deref() {
+        for e in edges.read() {
+            if e.unit_array_slot(
+                benilla_protocol::field::FIELD_UNIT_AURA,
+                u16::from(benilla_protocol::messages::UNIT_AURA_SLOTS),
+            )
+            .is_none()
+            {
+                continue;
             }
-            bevy::platform::collections::hash_map::Entry::Occupied(mut e) => {
-                let prev = e.get_mut();
-                if *prev == cur {
-                    continue; // some other field moved
+            for spell_id in [e.old, e.new] {
+                if spell_id != 0 && is_morph_spell(spells, spell_id) {
+                    debug!("anim: morph latch armed ({}, spell {spell_id})", e.entity);
+                    latch.0.insert(e.entity, spell_id);
                 }
-                if let Some(spells) = spells.as_deref() {
-                    // Remove edges first, add edges second: a form→form swap latches the form
-                    // being ENTERED (both resolve to the same cloud family regardless).
-                    let removed = prev.iter().filter(|s| cur.binary_search(s).is_err());
-                    let added = cur.iter().filter(|s| prev.binary_search(s).is_err());
-                    for &spell_id in removed.chain(added) {
-                        if is_morph_spell(spells, spell_id) {
-                            debug!("anim: morph latch armed ({entity}, spell {spell_id})");
-                            latch.0.insert(entity, spell_id);
-                        }
-                    }
-                }
-                *prev = cur;
             }
         }
     }
-    // Streamed units despawn on range-out — the latch and the baseline die with them.
+    // Streamed units despawn on range-out — the latch dies with them.
     latch.0.retain(|e, _| units.contains(*e));
-    seen.retain(|e, _| units.contains(*e));
 }
 
 /// The rebuild's **impact-kit replay** — the tail of the reference's `0x60abe0` (wow-re

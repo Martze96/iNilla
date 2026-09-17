@@ -12,6 +12,7 @@ use crate::wire::{capacity_hint, read_packed_guid, read_u32_le, read_u8};
 mod fields;
 mod movement;
 
+pub use fields::field;
 pub use fields::{
     power_display_scale, quest_slot_state, CorpseLook, ObjectFields, OwnerFallback,
     PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,

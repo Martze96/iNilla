@@ -17,7 +17,7 @@ const FIELD_GAMEOBJECT_FLAGS: u16 = 9;
 // spawn's local-rotation quaternion (x, y, z, w), 4 floats. The type-11 transport evaluator
 // rotates its keyframe offsets by this (decision 0438 phase 3's second consumer).
 const FIELD_GAMEOBJECT_ROTATION: u16 = 10;
-const FIELD_GAMEOBJECT_STATE: u16 = 14;
+pub const FIELD_GAMEOBJECT_STATE: u16 = 14;
 const FIELD_GAMEOBJECT_POS_X: u16 = 15;
 const FIELD_GAMEOBJECT_POS_Y: u16 = 16;
 const FIELD_GAMEOBJECT_POS_Z: u16 = 17;
@@ -32,6 +32,11 @@ const FIELD_GAMEOBJECT_FACTION: u16 = 20;
 const FIELD_GAMEOBJECT_TYPE_ID: u16 = 21;
 // GAMEOBJECT_LEVEL = OBJECT_END(6) + 0x10 (vmangos UpdateFields_1_12_1.h:317).
 const FIELD_GAMEOBJECT_LEVEL: u16 = 22;
+/// `CORPSE_FIELD_DYNAMIC_FLAGS` = `OBJECT_END(6) + 0x1E` (vmangos `UpdateFields_1_12_1.h`) — bit 0
+/// is the lootable-insignia flag [`ObjectFields::corpse_lootable`] reads and the loot-art arm
+/// watches. Named because a watch keys on the raw index, and `36` is `UNIT_FIELD_BYTES_0` on a
+/// unit: the same number means two things, which is why a field edge carries its object class.
+pub const FIELD_CORPSE_DYNAMIC_FLAGS: u16 = 36;
 // UNIT descriptor fields (verified against wow-5875-re object-layer node, build 5875; FLAGS /
 // COMBATREACH / DYNAMIC_FLAGS / NPC_FLAGS additionally cross-checked against the cursor RE's client
 // offsets `+0xa0`/`+0x1f0`/`+0x224`/`+0x234` and vmangos `UpdateFields_1_12_1.h`).
@@ -64,31 +69,31 @@ const FIELD_UNIT_CREATEDBY: u16 = 14;
 /// caster itself). Public, so an **observer** renders another unit's channel loop from this field
 /// pair, not from the self-only `MSG_CHANNEL_START`/`UPDATE` UI packets (decision 0099 phase 1).
 const FIELD_UNIT_CHANNEL_OBJECT: u16 = 20;
-const FIELD_UNIT_HEALTH: u16 = 22;
+pub const FIELD_UNIT_HEALTH: u16 = 22;
 /// `UNIT_FIELD_POWER1` — first of 5 consecutive power slots (mana, rage, focus, energy, happiness);
 /// `MAXPOWER1..5` sit symmetrically after `MAXHEALTH` (vmangos `UpdateFields_1_12_1.h`).
 const FIELD_UNIT_POWER1: u16 = 23;
-const FIELD_UNIT_MAXHEALTH: u16 = 28;
+pub const FIELD_UNIT_MAXHEALTH: u16 = 28;
 const FIELD_UNIT_MAXPOWER1: u16 = 29;
-const FIELD_UNIT_LEVEL: u16 = 34;
-const FIELD_UNIT_FACTIONTEMPLATE: u16 = 35;
+pub const FIELD_UNIT_LEVEL: u16 = 34;
+pub const FIELD_UNIT_FACTIONTEMPLATE: u16 = 35;
 const FIELD_UNIT_BYTES_0: u16 = 36;
-const FIELD_UNIT_BYTES_1: u16 = 138;
-const FIELD_UNIT_FLAGS: u16 = 46;
+pub const FIELD_UNIT_BYTES_1: u16 = 138;
+pub const FIELD_UNIT_FLAGS: u16 = 46;
 // The aura block — four parallel arrays, all PUBLIC, so every unit we can see streams its full set
 // (vmangos `UpdateFields_1_12_1.h:67-70`, `OBJECT_END(6) + 0x29/0x59/0x5F/0x6B`). wow-re places the
 // same arrays in the client at `descriptor + 0xa4` / `+0x164` (= `0x29`/`0x59` × 4 — the same field
 // indices, derived independently from the binary: `object-layer/scratch/w2d1.md`, VERIFIED).
 // Duration and caster are NOT here and are not in any other field: duration reaches only the aura's
 // own target, over `SMSG_UPDATE_AURA_DURATION`; a caster guid never reaches anyone (decision 0255).
-const FIELD_UNIT_AURA: u16 = 47;
+pub const FIELD_UNIT_AURA: u16 = 47;
 /// Nibble-packed, 8 slots per `u32` (`SpellAuraHolder::SetAuraFlag`, `SpellAuras.cpp:7456-7462`).
-const FIELD_UNIT_AURAFLAGS: u16 = 95;
+pub const FIELD_UNIT_AURAFLAGS: u16 = 95;
 /// Byte-packed, 4 slots per `u32` — the *caster's level* (`SetAuraLevel`, `SpellAuras.cpp:7484`).
 const FIELD_UNIT_AURALEVELS: u16 = 101;
 /// Byte-packed, 4 slots per `u32`, holding `stack - 1` ("field expect count-1 for proper amount
 /// show" — `UpdateAuraApplication`, `SpellAuras.cpp:7500-7507`).
-const FIELD_UNIT_AURAAPPLICATIONS: u16 = 113;
+pub const FIELD_UNIT_AURAAPPLICATIONS: u16 = 113;
 /// `UNIT_FIELD_AURASTATE` (`OBJECT_END(6) + 0x77` = 125 — vmangos `UpdateFields_1_12_1.h`) — the
 /// aura-state bit set the usable walk's CasterAuraState/TargetAuraState legs test with
 /// `1 << (state-1)` (wow-re §2a; the client reads its parsed-descriptor copy at
@@ -119,7 +124,7 @@ const FIELD_UNIT_NATIVEDISPLAYID: u16 = 132;
 /// unit is riding, `0`/absent = not mounted. The server writes it on aura-78 apply and zeroes it
 /// on every dismount path (`Unit::Mount`/`Unmount`) — this field, not the aura, IS the mounted
 /// state (`Unit::IsMounted` reads it back; no flag or bytes field accompanies it). Decision 0441.
-const FIELD_UNIT_MOUNTDISPLAYID: u16 = 133;
+pub const FIELD_UNIT_MOUNTDISPLAYID: u16 = 133;
 /// `UNIT_FIELD_PETNUMBER` (`OBJECT_END(6) + 0x85` = 139, PUBLIC — vmangos
 /// `UpdateFields_1_12_1.h:84`; byte-verified client-side as `[unit+0x110]+0x214` = relative index
 /// `0x85`, the second gate inside the rank getter `0x605620` — decision 0782). Non-zero ⇒ this
@@ -146,10 +151,10 @@ const FIELD_UNIT_PETNEXTLEVELEXP: u16 = 142;
 /// `[unit+0x110]+0x23c` / `+0x23e`: `GetPetTrainingPoints 0x4be790` pushes the **high** word first
 /// and the low word second, which `PetPaperDollFrame.lua` names `totalPoints, spent`.
 const FIELD_UNIT_TRAINING_POINTS: u16 = 149;
-const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
+pub const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
 /// `UNIT_CHANNEL_SPELL` (idx 144, `OBJECT_END(6) + 0x8A`, PUBLIC — VERIFIED vmangos
 /// `UpdateFields_1_12_1.h:89`) — the spell id a unit is channeling (`0` = not channeling).
-const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
+pub const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
 /// `UNIT_CREATED_BY_SPELL` (idx 146, `OBJECT_END(6) + 0x8C`, PUBLIC — vmangos
 /// `UpdateFields_1_12_1.h`) — the spell that summoned this unit (`0` = not summoned by one). The
 /// **first** of the three gates on the reference's feed-pet path `0x6ea1e0`: a unit with no
@@ -159,7 +164,7 @@ const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
 /// already pins both ends of a contiguous run — `PETEXPERIENCE` 141, `PETNEXTLEVELEXP` 142,
 /// `DYNAMIC_FLAGS` 143, `CHANNEL_SPELL` 144, `MOD_CAST_SPEED` 145, then this, then `NPC_FLAGS` 147.
 const FIELD_UNIT_CREATED_BY_SPELL: u16 = 146;
-const FIELD_UNIT_NPC_FLAGS: u16 = 147;
+pub const FIELD_UNIT_NPC_FLAGS: u16 = 147;
 /// `UNIT_NPC_EMOTESTATE` (`OBJECT_END + 0x8E`; PUBLIC — VERIFIED vmangos `UpdateFields_1_12_1.h:93`)
 /// — the unit's looping **state emote** as an `Emotes.dbc` id (dance, NPC cooking/working flavor).
 /// For a player it's the server echo of a state-class text emote (`HandleEmote`,
@@ -288,7 +293,23 @@ const FIELD_PLAYER_BYTES_3: u16 = 195;
 // (MAX_QUEST_LOG_SIZE, vmangos `QuestDef.h:34`) × 3 fields (MAX_QUEST_OFFSET, `Player.h:439-444`):
 // +0 quest id, +1 packed objective counters + state byte, +2 timer. The `_1` id field is GROUP_ONLY
 // and the `_2` pair PRIVATE — both always stream for our own player, the exact consumer (the log).
-const FIELD_PLAYER_QUEST_LOG_1_1: u16 = 198;
+pub const FIELD_PLAYER_QUEST_LOG_1_1: u16 = 198;
+
+/// The descriptor indices a field watch names (decision 2297) — the very constants the accessors
+/// above read through, re-exported under one roof so a watch and the accessor it mirrors cannot
+/// disagree on a number. Anything watched lives here; anything only read stays private.
+pub mod field {
+    /// The one bit a watcher tests on a raw `UNIT_DYNAMIC_FLAGS` edge (the feign-death set edge).
+    pub use super::unit::UNIT_DYNFLAG_DEAD;
+    pub use super::{
+        FIELD_CORPSE_DYNAMIC_FLAGS, FIELD_GAMEOBJECT_STATE, FIELD_PLAYER_FIELD_COINAGE,
+        FIELD_PLAYER_FLAGS, FIELD_PLAYER_INV_SLOT_HEAD, FIELD_PLAYER_QUEST_LOG_1_1,
+        FIELD_PLAYER_SKILL_INFO_1_1, FIELD_UNIT_AURA, FIELD_UNIT_AURAAPPLICATIONS,
+        FIELD_UNIT_AURAFLAGS, FIELD_UNIT_BYTES_1, FIELD_UNIT_CHANNEL_SPELL,
+        FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH,
+        FIELD_UNIT_LEVEL, FIELD_UNIT_MAXHEALTH, FIELD_UNIT_MOUNTDISPLAYID, FIELD_UNIT_NPC_FLAGS,
+    };
+}
 
 /// The number of `PLAYER_QUEST_LOG` slots (vmangos `MAX_QUEST_LOG_SIZE`, `QuestDef.h:34`).
 pub const PLAYER_QUEST_LOG_SLOTS: u8 = 20;
@@ -330,7 +351,7 @@ const FIELD_CONTAINER_SLOT_1: u16 = 50; // ITEM_END + 0x2; 36 slots × 2
 // descriptor dump: with these bases One's shirt/legs/feet/mainhand/offhand/bags land on exactly
 // the slots the character visibly wears (visible-item cross-check below).
 const FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR: u16 = 258; // UNIT_END + 0x46; 12 fields per slot
-const FIELD_PLAYER_INV_SLOT_HEAD: u16 = 486; // 23 slots × 2 (equipment 0–18, bag bags 19–22)
+pub const FIELD_PLAYER_INV_SLOT_HEAD: u16 = 486; // 23 slots × 2 (equipment 0–18, bag bags 19–22)
 const FIELD_PLAYER_PACK_SLOT_1: u16 = 532; // 16 slots × 2 (the backpack)
 const FIELD_PLAYER_BANK_SLOT_1: u16 = 564; // 24 slots × 2
 const FIELD_PLAYER_BANK_BAG_SLOT_1: u16 = 612; // 564 + 24×2; 6 bag slots × 2 (item guids)
@@ -360,7 +381,7 @@ const FIELD_PLAYER_BUYBACK_TIMESTAMP_1: u16 = 1238; // 12 × u32 — the client'
                                                     // stale hex comment reads 0x492 = 1170 (decision 0081 quoted "field 1170" from it — 6 low).
                                                     // Cross-checked against the corrected neighbours: 486 (INV_SLOT_HEAD) + (0x3DC − 0x12A = 690) = 1176;
                                                     // 564 (BANK_SLOT_1) + (0x3DC − 0x178 = 612) = 1176. Both agree.
-const FIELD_PLAYER_FIELD_COINAGE: u16 = 1176;
+pub const FIELD_PLAYER_FIELD_COINAGE: u16 = 1176;
 // PLAYER_XP / PLAYER_NEXT_LEVEL_XP (INT, PRIVATE — sent only for our own player, the exact consumer:
 // the MainMenuBar XP bar). Derived by the same server enum arithmetic as COINAGE above:
 // PLAYER_XP = UNIT_END(0xBC = 188) + 0x210(528) = 716; PLAYER_NEXT_LEVEL_XP = 717. Cross-checked
@@ -472,7 +493,7 @@ const FIELD_PLAYER_SELF_RES_SPELL: u16 = 1224;
 // PLAYER_FLAGS = UNIT_END(188) + 0x2 (VERIFIED vmangos `UpdateFields_1_12_1.h:120`; the duel
 // arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
 // the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
-const FIELD_PLAYER_FLAGS: u16 = 190;
+pub const FIELD_PLAYER_FLAGS: u16 = 190;
 // PLAYER_DUEL_ARBITER = UNIT_END(188) + 0x0 (GUID, PUBLIC), PLAYER_DUEL_TEAM = UNIT_END + 0x8
 // (INT, PUBLIC) — VERIFIED vmangos `UpdateFields_1_12_1.h:119,126`. The arbiter opens the player
 // block, which is why the real client caches a pointer to that base (`[player+0xe68]`) and indexes
@@ -825,7 +846,7 @@ impl ObjectFields {
     /// handler) and the `CMSG_LOOT` route off the corpse's interact slot (wow-re
     /// `loot-anim-leg.md`).
     pub fn corpse_lootable(&self) -> bool {
-        self.get_u32(36).unwrap_or(0) & 0x01 != 0
+        self.get_u32(FIELD_CORPSE_DYNAMIC_FLAGS).unwrap_or(0) & 0x01 != 0
     }
 
     /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the flag that makes a body's
@@ -958,13 +979,80 @@ impl ObjectFields {
     /// dropped to zero since the last stream (an aura that expired out of view, durability that
     /// broke) — exactly the absent-vs-zero bug the `created` flag exists to kill.
     pub fn merge(&mut self, delta: ObjectFields) {
+        self.merge_diff(delta, |_, _, _| {});
+    }
+
+    /// [`Self::merge`] that also reports every dword the fold MOVED — the reference's
+    /// `CMirrorHandler` notify pass (`0x465330`: memcmp live-vs-shadow over each registered span,
+    /// fire only on a difference, the callback handed the OLD value — wow-re `object-layer.md`),
+    /// done in the one write that already holds both sides (decision 2297).
+    ///
+    /// `changed(index, old, new)` runs once per moved index, ascending, and only for a real
+    /// difference: a field re-sent with the value it already had reports nothing, exactly as the
+    /// reference's memcmp fires nothing. `old` reads an absent field as `0`, the reference's
+    /// zero-initialised array. A re-CREATE snapshot reports every index the replace moved, on
+    /// either side's mask — the reference's in-place refresh of an already-live guid goes down
+    /// its values-only path and notifies too — while a FIRST create is never merged at all (the
+    /// caller seeds the store with it), which is where the reference's create-time
+    /// notify-suppress flag lives here.
+    pub fn merge_diff(&mut self, delta: ObjectFields, mut changed: impl FnMut(u16, u32, u32)) {
         if delta.descriptor_end != 0 {
+            let words = self.present.len().max(delta.present.len());
+            for word in 0..words {
+                let mask = self.present.get(word).copied().unwrap_or(0)
+                    | delta.present.get(word).copied().unwrap_or(0);
+                if mask == 0 {
+                    continue;
+                }
+                for bit in 0..32u16 {
+                    if mask & (1u32 << bit) == 0 {
+                        continue;
+                    }
+                    let index = word as u16 * 32 + bit;
+                    let (old, new) = (
+                        self.get_raw(index).unwrap_or(0),
+                        delta.get_raw(index).unwrap_or(0),
+                    );
+                    if old != new {
+                        changed(index, old, new);
+                    }
+                }
+            }
             *self = delta;
         } else {
             for (index, value) in delta.raw_fields() {
+                let old = self.get_raw(index).unwrap_or(0);
+                if old != value {
+                    changed(index, old, value);
+                }
                 self.insert(index, value);
             }
         }
+    }
+
+    /// The object class this descriptor was CREATED as, read back off its own length ([`descriptor_len`]
+    /// is injective over the eight classes) — `None` for a bare `Values` delta or a hand-built
+    /// fixture that never went through [`Self::into_created`]. Distinct from
+    /// [`Self::object_type`], the typemask read, which cannot tell a corpse from an item: a field
+    /// edge carries THIS because a raw index means different things per class (`36`: a unit's
+    /// `BYTES_0`, a corpse's `DYNAMIC_FLAGS`).
+    pub fn created_as(&self) -> Option<ObjectType> {
+        const ALL: [ObjectType; 8] = [
+            ObjectType::Object,
+            ObjectType::Item,
+            ObjectType::Container,
+            ObjectType::Unit,
+            ObjectType::Player,
+            ObjectType::GameObject,
+            ObjectType::DynamicObject,
+            ObjectType::Corpse,
+        ];
+        (self.descriptor_end != 0)
+            .then(|| {
+                ALL.into_iter()
+                    .find(|&t| descriptor_len(t) == self.descriptor_end)
+            })
+            .flatten()
     }
 
     /// Whether this carried no fields — the codec skips emitting an empty `Values` delta.

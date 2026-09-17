@@ -18,7 +18,7 @@ use benilla_protocol::EntityKind;
 
 use crate::creature_anim::AnimSoundEvent;
 use crate::entities::mount::{MountBody, MountChild};
-use crate::net::{NetEntity, ObjectStore, SelfPlayer};
+use crate::net::{FieldChanged, NetEntity, ObjectStore, SelfPlayer};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
@@ -149,12 +149,16 @@ fn play_bark(
     }
 }
 
-/// Play the death vocal on a **live** death: a unit whose store transitions alive→dead. First
-/// sight already-dead records silently (a streamed corpse doesn't cry — the same distinction the
-/// animation driver makes for the settled-corpse pose).
+/// Play the death vocal on a **live** death — the reference's two triggers, each a field edge
+/// (decision 2297): the `UNIT_FIELD_HEALTH` watcher's alive→dead arm (`0x6046f0` at `0x6047a3`,
+/// `OLD > 0 && NEW ≤ 0` — the real death handler `0x605860`) and the `UNIT_DYNAMIC_FLAGS`
+/// watcher's `UNIT_DYNFLAG_DEAD` SET edge (`0x600543`), which fires the very same `0x623a40(4)`
+/// — so a feign drops the body with its death cry, exactly like a kill (decision 1022). A unit
+/// that streams in already dead cries nothing: the edge stream is create-suppressed, the same
+/// distinction the animation driver makes for the settled-corpse pose.
 fn death_vocals(
-    changed: Query<(Entity, &NetEntity, &ObjectStore, &Transform), Changed<ObjectStore>>,
-    mut known_dead: Local<EntityHashMap<bool>>,
+    mut edges: MessageReader<FieldChanged>,
+    units: Query<(&NetEntity, &Transform)>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -162,24 +166,22 @@ fn death_vocals(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
+    use benilla_protocol::field::{FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_HEALTH, UNIT_DYNFLAG_DEAD};
     let (Some(voices), Some(mut kits), Some(assets)) = (voices, kits, assets) else {
         return;
     };
     let listener = listener.pos;
-    for (entity, net, store, transform) in &changed {
-        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+    for e in edges.read() {
+        let died = (e.unit_field(FIELD_UNIT_HEALTH) && e.old > 0 && e.new == 0)
+            || (e.unit_field(FIELD_UNIT_DYNAMIC_FLAGS)
+                && e.old & UNIT_DYNFLAG_DEAD == 0
+                && e.new & UNIT_DYNFLAG_DEAD != 0);
+        if !died {
             continue;
         }
-        // Reads-dead, not really-dead (decision 1022): the reference's `UNIT_DYNAMIC_FLAGS` watcher
-        // fires `0x623a40(4)` — the death vocal state — on the `UNIT_DYNFLAG_DEAD` set edge
-        // (`0x600543`), the very same call its real death handler makes (`0x6251b0`). So a feign
-        // drops the body with its death cry, exactly like a kill.
-        let dead = store.0.unit_reads_dead();
-        let was = known_dead.insert(entity, dead);
-        let fresh_death = was == Some(false) && dead;
-        if !fresh_death {
+        let Ok((net, transform)) = units.get(e.entity) else {
             continue;
-        }
+        };
         let Some(voice) = net.display_id.and_then(|d| voices.0.for_display(d)) else {
             continue;
         };
@@ -189,7 +191,7 @@ fn death_vocals(
             &mut out,
             &config,
             listener,
-            entity,
+            e.entity,
             transform.translation,
             voice,
             BARK_DEATH,

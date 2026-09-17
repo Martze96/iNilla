@@ -23,8 +23,8 @@ use super::super::motion::{
     trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::super::{
-    Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, RemoteMotion, SelfGuid,
-    SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
+    merge_store_fields, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, ObjectStore,
+    RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
 /// A GameObject plays its one-shot **Custom** animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`, decision
@@ -81,6 +81,7 @@ pub(super) fn object_create(
     transforms: &mut Query<&mut Transform>,
     stores: &mut Query<&mut ObjectStore>,
     pending: &mut HashMap<u64, ObjectFields>,
+    edges: &mut MessageWriter<FieldChanged>,
     speed_stage: &mut SpeedStage,
     names: &NameCache,
     go_templates: &GameObjectTemplates,
@@ -242,8 +243,9 @@ pub(super) fn object_create(
             }
         }
         write_pose(commands, transforms, e, position, placement);
-        // Overlay the fresh snapshot's descriptor fields onto the existing store.
-        merge_fields(stores, pending, e, guid, fields);
+        // Overlay the fresh snapshot's descriptor fields onto the existing store — the reference's
+        // in-place refresh of a live guid, which notifies its field watchers like any delta.
+        merge_fields(stores, pending, edges, e, guid, fields);
     } else {
         // A transport spawns hidden: its create pose is the *stationary* spawn point (or worse,
         // the origin), not where the boat is in its cycle — the transport tick unhides it at the
@@ -440,10 +442,11 @@ pub(super) fn object_values(
     index: &GuidIndex,
     stores: &mut Query<&mut ObjectStore>,
     pending: &mut HashMap<u64, ObjectFields>,
+    edges: &mut MessageWriter<FieldChanged>,
     items: &mut Items,
 ) {
     if let Some(&e) = index.0.get(&guid) {
-        merge_fields(stores, pending, e, guid, fields);
+        merge_fields(stores, pending, edges, e, guid, fields);
     } else if guid::is_item(guid) {
         items.merge_object(guid, fields);
     }
@@ -814,17 +817,27 @@ pub(super) fn gameobject_info(
 /// created earlier this same drain (its spawn `Command` hasn't run, so it isn't queryable yet), else in
 /// place on the live component. The final `else` — in the index but neither live nor pending — should not
 /// happen (a create always seeds `pending` first), but seeds defensively rather than drop the delta.
+///
+/// Every merge reports its field edges ([`FieldChanged`], decision 2297) — into the pending seed
+/// too: a create and a values delta for the same guid in one drain are two wire blocks, and the
+/// reference notifies on the second. The seed itself is never merged, which is the reference's
+/// create-time notify-suppress.
 fn merge_fields(
     stores: &mut Query<&mut ObjectStore>,
     pending: &mut HashMap<u64, ObjectFields>,
+    edges: &mut MessageWriter<FieldChanged>,
     entity: Entity,
     guid: u64,
     delta: ObjectFields,
 ) {
     if let Some(f) = pending.get_mut(&guid) {
-        f.merge(delta);
+        merge_store_fields(f, delta, entity, guid, |e| {
+            edges.write(e);
+        });
     } else if let Ok(mut s) = stores.get_mut(entity) {
-        s.0.merge(delta);
+        merge_store_fields(&mut s.0, delta, entity, guid, |e| {
+            edges.write(e);
+        });
     } else {
         pending.insert(guid, delta);
     }

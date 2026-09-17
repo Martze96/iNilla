@@ -8,7 +8,7 @@ use super::*;
 /// reads it as "this body is a corpse" wherever it reads health for display; the server sets it for
 /// **feign death** and for `CREATURE_FLAG_EXTRA_APPEAR_DEAD` spawns, in both cases with health left
 /// intact. Every consumer goes through [`ObjectFields::unit_reads_dead`] (decision 1022).
-const UNIT_DYNFLAG_DEAD: u32 = 0x20;
+pub const UNIT_DYNFLAG_DEAD: u32 = 0x20;
 
 /// `UNIT_STAND_STATE_DEAD` (vmangos `UnitDefines.h:109`) — the third leg of the client's
 /// reads-dead predicate `0x605f90`. vmangos never writes it, so it is inert against our server.

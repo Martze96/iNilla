@@ -26,6 +26,9 @@ pub mod materials;
 pub mod minimap_grid;
 mod spatial_cache;
 pub mod trace;
+
+mod anim_rng;
+pub use anim_rng::AnimRng;
 pub use spatial_cache::SpatialCache;
 mod world_assets;
 pub use world_assets::*;

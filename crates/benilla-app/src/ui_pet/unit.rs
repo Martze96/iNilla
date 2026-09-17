@@ -62,7 +62,7 @@ pub(super) const UNIT_FLAG_PET_IN_COMBAT: u32 = 0x0000_0800;
 pub(super) fn feed_pet_unit(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
-    pet: PetUnit,
+    mut pet: PetUnit,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
     mut names: ResMut<NameCache>,
@@ -73,6 +73,7 @@ pub(super) fn feed_pet_unit(
         return;
     };
     let (memory, vm_reset) = memory.get_reset(&script);
+    let edges = crate::net::FieldEdges::collect(&mut pet.edges);
     // The gate (1439): the bar (the token's identity), any descriptor change or DESPAWN (the
     // snapshot, the combat flag, and the rename timestamp all live on the pet's store), and the
     // name cache by its landed counter.
@@ -140,7 +141,7 @@ pub(super) fn feed_pet_unit(
                         cur.max_health,
                     );
                 }
-                fire_transitions(&mut script, "pet", memory.pushed.as_ref(), cur);
+                fire_transitions(&mut script, "pet", memory.pushed.as_ref(), cur, &edges);
                 memory.pushed = Some(cur.clone());
             }
         }

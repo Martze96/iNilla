@@ -63,7 +63,7 @@ pub(super) fn run(
     drv: &mut AnimDriver,
     tr: &mut AnimationTransitions,
     player: &mut AnimationPlayer,
-    rng: &mut u32,
+    rng: &mut benilla_assets::AnimRng,
 ) {
     let Frame {
         entity,

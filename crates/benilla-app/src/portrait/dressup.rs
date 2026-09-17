@@ -266,6 +266,7 @@ pub(super) fn sync_dressup_booth(
                 // `None` — the same known gap as the glue preview's (decision 0807).
                 alpha_anim: None,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             })
             .collect();
         let booth_riders: Vec<BoothRider> = bake

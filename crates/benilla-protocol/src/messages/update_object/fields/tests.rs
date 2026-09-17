@@ -735,6 +735,72 @@ fn merge_overlays_deltas_and_replaces_on_recreate() {
     );
 }
 
+/// The field edges a merge reports (decision 2297) — the reference's per-field notifier, whose
+/// callback fires on a memcmp DIFFERENCE and receives the old value: only the dwords that moved,
+/// ascending, absent reading as `0` on either side, and a value re-sent unchanged reporting
+/// nothing at all.
+#[test]
+fn merge_diff_reports_each_moved_dword_once_with_its_old_value() {
+    let mut store =
+        ObjectFields::from_pairs(&[(22, 100), (28, 100), (34, 9)]).into_created(ObjectType::Unit);
+    let mut edges = Vec::new();
+    // Health drops, level rises, max-health re-sent as it was, a never-seen field appears.
+    store.merge_diff(
+        ObjectFields::from_pairs(&[(34, 10), (22, 40), (28, 100), (46, 8)]),
+        |i, old, new| edges.push((i, old, new)),
+    );
+    assert_eq!(
+        edges,
+        vec![(22, 100, 40), (34, 9, 10), (46, 0, 8)],
+        "moved dwords only, ascending; absent-before reads 0; an unchanged resend is silent"
+    );
+    assert_eq!(store.unit_health(), Some(40), "the delta still lands");
+    assert_eq!(store.unit_flags(), 8);
+}
+
+/// A re-CREATE is the reference's in-place refresh of a live guid — it notifies too, and here it
+/// notifies over BOTH masks: a field the fresh snapshot omits dropped to zero, and that is an edge
+/// the store's replace makes visible (`merge_overlays_deltas_and_replaces_on_recreate` above).
+#[test]
+fn merge_diff_on_a_recreate_reports_the_replace_on_both_masks() {
+    let mut store =
+        ObjectFields::from_pairs(&[(3, 2264), (46, 30), (47, 40)]).into_created(ObjectType::Item);
+    let mut edges = Vec::new();
+    store.merge_diff(
+        ObjectFields::from_pairs(&[(3, 2264), (47, 40), (12, 7)]).into_created(ObjectType::Item),
+        |i, old, new| edges.push((i, old, new)),
+    );
+    assert_eq!(
+        edges,
+        vec![(12, 0, 7), (46, 30, 0)],
+        "the omitted durability is a 30 → 0 edge; the identical entry and max are silent"
+    );
+    assert_eq!(store.item_durability(), Some(0));
+}
+
+/// The class a store was created as reads back off its length — every class round-trips, and a
+/// bare delta (no create seen) answers nothing, which is what keeps a field edge honest about
+/// which block its index belongs to.
+#[test]
+fn created_as_reads_back_off_the_created_length() {
+    for t in [
+        ObjectType::Object,
+        ObjectType::Item,
+        ObjectType::Container,
+        ObjectType::Unit,
+        ObjectType::Player,
+        ObjectType::GameObject,
+        ObjectType::DynamicObject,
+        ObjectType::Corpse,
+    ] {
+        assert_eq!(
+            ObjectFields::default().into_created(t).created_as(),
+            Some(t)
+        );
+    }
+    assert_eq!(ObjectFields::from_pairs(&[(22, 1)]).created_as(), None);
+}
+
 /// The `DYNAMICOBJECT_*` accessors against the exact live capture (vmangos, 2026-07-30, the
 /// B132 follow-up's `--groundfx 10` run): Blizzard's dynobj create — caster guid 26, BYTES 1
 /// (area spell), SPELLID 10, RADIUS 8.0, the cast point in POS, FACING never sent.

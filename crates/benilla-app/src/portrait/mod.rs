@@ -2123,6 +2123,7 @@ fn sync_portraits(
                     // mirrored `PortraitPart` doesn't carry the batch's alpha loops.
                     alpha_anim: None,
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect();
             let booth_riders: Vec<BoothRider> = riders
@@ -2636,6 +2637,7 @@ fn sync_body_booth(
                 // `None` — the same known gap as the glue preview's (decision 0807).
                 alpha_anim: None,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             })
             .collect();
         let booth_riders: Vec<BoothRider> = riders

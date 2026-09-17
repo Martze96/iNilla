@@ -15,14 +15,13 @@
 //! [`crate::creature_anim::arm_aura_state_fx`] uses for the aura state kits — and for the same
 //! reason: the *edge* is the event, and a descriptor snapshot is all the wire gives us.
 
-use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
 use super::{
     aura_gone_kind, classify, death_kind, in_range, periodic_kind, CombatLogRanges, Family, Fills,
     Named, PendingCombat, UnitClass, Variant,
 };
-use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid};
+use crate::net::{FieldChanged, GuidIndex, ObjectStore, Reputations, SelfGuid};
 use crate::target::ring::Factions;
 use crate::ui_chat::{ChatEventKind, ChatLog};
 use crate::ui_party::GroupState;
@@ -116,9 +115,11 @@ const DESTROYED_EFFECTS: [u32; 10] = [50, 74, 87, 88, 89, 90, 104, 105, 106, 107
 /// The unit-death reflex's chat line (`0x625190` → `0x62c160`).
 ///
 /// **The edge is the event.** The wire never says "this unit died"; it says the unit's health is
-/// zero, or sets its dead flag, in an ordinary descriptor update — so the line comes off a diff
-/// against the previous frame, and a unit that streams in *already* dead produces none (which is
-/// what the reference does too: its reflex fires on the transition, not on the state).
+/// zero in an ordinary descriptor update — so the line comes off the `UNIT_FIELD_HEALTH` field
+/// edge, the reference's own watcher `0x6046f0` whose alive→dead arm (`OLD > 0 && NEW ≤ 0` at
+/// `0x6047a3`) reaches the reflex (decision 2297), and a unit that streams in *already* dead
+/// produces none (the edge stream is create-suppressed: the reflex fires on the transition, not
+/// on the state).
 ///
 /// **The XP-award suppression is deliberately not modelled**, and is named rather than dropped:
 /// `[CGUnit+0xc58] bit 3`, set only in the `SMSG_LOG_XPGAIN` chain, makes the death reflex emit the
@@ -129,27 +130,18 @@ const DESTROYED_EFFECTS: [u32; 10] = [50, 74, 87, 88, 89, 90, 104, 105, 106, 107
 pub(crate) fn death_lines(
     ctx: WatchCtx,
     stores: Query<(Entity, &ObjectStore)>,
-    guids: Query<&crate::net::Guid>,
-    changed: Query<Entity, Changed<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     poses: Query<&Transform>,
     mut log: ResMut<ChatLog>,
-    mut was_dead: Local<EntityHashMap<bool>>,
 ) {
-    for entity in changed.iter() {
-        let Ok((_, store)) = stores.get(entity) else {
-            continue;
-        };
-        let dead = store.0.unit_is_dead();
-        let seen = was_dead.insert(entity, dead);
-        // No previous frame for this entity: it streamed in at whatever state it is in, which is
-        // not a death.
-        let Some(false) = seen else { continue };
-        if !dead {
+    for e in edges.read() {
+        if !(e.unit_field(benilla_protocol::field::FIELD_UNIT_HEALTH) && e.old > 0 && e.new == 0) {
             continue;
         }
-        let Ok(&crate::net::Guid(guid)) = guids.get(entity) else {
+        let Ok((_, store)) = stores.get(e.entity) else {
             continue;
         };
+        let guid = e.guid;
         let class = ctx.classify(guid, &stores);
         // A summoned thing is *destroyed*; a living one *dies*. The test is the creating spell's
         // first effect, which is why it needs the spell catalog at all.
@@ -177,23 +169,26 @@ pub(crate) fn death_lines(
             Named::Ready,
         );
     }
-    was_dead.retain(|e, _| stores.contains(*e));
 }
 
 /// The aura lines (`0x62b480` / `0x62b800`).
 ///
-/// **Three edges out of one diff**, because the reference reads two descriptor arrays through two
-/// callbacks and words three sentences:
+/// **Three edges out of two watches**, because the reference reads two descriptor arrays through
+/// two callbacks and words three sentences — and since decision 2297 those are literally the
+/// triggers here, one field edge each, with no snapshot of the slots kept anywhere:
 ///
-/// - a slot that filled → `AURAADDED{SELF,OTHER}{HARMFUL,HELPFUL}`, at the PERIODIC chat types
-///   (harmful takes the `…_DAMAGE` row, helpful the `…_BUFFS` one) — not the `AURA_GONE` block,
-///   which is the departure's alone;
-/// - a slot that emptied → `AURAREMOVED{SELF,OTHER}`, at `0x41`/`0x42`/`0x43`;
-/// - a slot whose stack count ROSE → `AURAAPPLICATIONADDED*`, and only when the spell can stack at
-///   all. We approximate the reference's `SpellRec->StackAmount > 1` gate with the observed count:
-///   a stack that rose past one is a spell that stacks. It differs only for a first application of
+/// - a `UNIT_FIELD_AURA` slot whose NEW value is a spell → `AURAADDED{SELF,OTHER}{HARMFUL,HELPFUL}`,
+///   at the PERIODIC chat types (harmful takes the `…_DAMAGE` row, helpful the `…_BUFFS` one) —
+///   not the `AURA_GONE` block, which is the departure's alone (`0x604d00`'s add arm);
+/// - a slot whose OLD value was a spell → `AURAREMOVED{SELF,OTHER}`, at `0x41`/`0x42`/`0x43`
+///   (the remove arm; a replace is one of each, the arrival worded first);
+/// - a `UNIT_FIELD_AURAAPPLICATIONS` byte that ROSE, on a slot whose spell did not move this
+///   frame → `AURAAPPLICATIONADDED*` (`0x604ea0`), and only when the spell can stack at all. We
+///   approximate the reference's `SpellRec->StackAmount > 1` gate with the observed count: a
+///   stack that rose past one is a spell that stacks. It differs only for a first application of
 ///   a stacking aura, which the reference words as a plain `AURAADDED*` — and so do we, because a
-///   0→1 step is a *fill*, not an increase.
+///   fresh slot's count is not a rise (its `AURA` dword moved in the same block, so its byte is
+///   skipped here).
 ///
 /// **HARMFUL is the SLOT INDEX, not a flag** (§4.4, three byte sites): slots `0x20`–`0x2f` are
 /// harmful, every other slot helpful. `UNIT_FIELD_AURAFLAGS` is only an occupancy predicate — using
@@ -201,121 +196,125 @@ pub(crate) fn death_lines(
 pub(crate) fn aura_lines(
     ctx: WatchCtx,
     stores: Query<(Entity, &ObjectStore)>,
-    guids: Query<&crate::net::Guid>,
-    changed: Query<Entity, Changed<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     poses: Query<&Transform>,
     mut log: ResMut<ChatLog>,
-    // Per entity, per slot: `(spell id, stacks)` as of the last frame. Slot-keyed rather than
-    // spell-keyed because the sentence's harmful/helpful half IS the slot.
-    mut seen: Local<EntityHashMap<Vec<(u8, u32, u8)>>>,
 ) {
+    use benilla_protocol::field::{FIELD_UNIT_AURA, FIELD_UNIT_AURAAPPLICATIONS};
     /// The first harmful aura slot — `0x20`. Slots below it are helpful (§4.4).
-    const FIRST_HARMFUL_SLOT: u8 = 0x20;
+    const FIRST_HARMFUL_SLOT: u16 = 0x20;
+    const SLOTS: u16 = benilla_protocol::messages::UNIT_AURA_SLOTS as u16;
+    let harmful = |slot: u16| slot >= FIRST_HARMFUL_SLOT;
 
-    for entity in changed.iter() {
-        let Ok((_, store)) = stores.get(entity) else {
-            continue;
-        };
-        let now: Vec<(u8, u32, u8)> = store
-            .0
-            .unit_auras()
-            .map(|a| (a.slot, a.spell_id, a.stacks))
-            .collect();
-        let prev = seen.insert(entity, now.clone());
-        // First sight of this unit: its standing auras are not arrivals.
-        let Some(prev) = prev else { continue };
-        let Ok(&crate::net::Guid(guid)) = guids.get(entity) else {
-            continue;
-        };
-        let class = ctx.classify(guid, &stores);
-        let harmful = |slot: u8| slot >= FIRST_HARMFUL_SLOT;
-        let find =
-            |list: &[(u8, u32, u8)], slot: u8| list.iter().find(|(s, _, _)| *s == slot).copied();
+    // The whole frame's batch first: the applications leg must know which slots' `AURA` dword
+    // moved in the same block, and the two arrays sit 66 dwords apart in the ascending walk.
+    let batch: Vec<FieldChanged> = edges.read().copied().collect();
+    let slot_edges: Vec<&FieldChanged> = batch
+        .iter()
+        .filter(|e| e.unit_array_slot(FIELD_UNIT_AURA, SLOTS).is_some())
+        .collect();
+    let slot_moved = |entity: Entity, slot: u16| {
+        slot_edges
+            .iter()
+            .any(|e| e.entity == entity && e.index - FIELD_UNIT_AURA == slot)
+    };
 
-        for &(slot, spell_id, stacks) in &now {
-            let Some(spell) = ctx.spell_name(spell_id) else {
-                continue;
-            };
-            let fills = |amount: i64| Fills {
-                spell: spell.clone(),
-                amount,
-                ..Default::default()
-            };
-            match find(&prev, slot) {
-                // The slot held a DIFFERENT spell, or nothing: this aura arrived.
-                Some((_, was, _)) if was == spell_id => {
-                    let Some((_, _, before)) = find(&prev, slot) else {
-                        continue;
-                    };
-                    if stacks <= before || stacks <= 1 {
-                        continue;
-                    }
-                    let Some(kind) = periodic_kind(class, !harmful(slot)) else {
-                        continue;
-                    };
-                    queue_one(
-                        &mut log,
-                        &ctx,
-                        &poses,
-                        kind,
-                        if harmful(slot) {
-                            super::AURAAPPLICATIONADDED_HARMFUL
-                        } else {
-                            super::AURAAPPLICATIONADDED_HELPFUL
-                        },
-                        (guid, class),
-                        ctx.ranges.class(class),
-                        fills(i64::from(stacks)),
-                        Named::Ready,
-                    );
-                }
-                _ => {
-                    let Some(kind) = periodic_kind(class, !harmful(slot)) else {
-                        continue;
-                    };
-                    queue_one(
-                        &mut log,
-                        &ctx,
-                        &poses,
-                        kind,
-                        if harmful(slot) {
-                            super::AURAADDED_HARMFUL
-                        } else {
-                            super::AURAADDED_HELPFUL
-                        },
-                        (guid, class),
-                        ctx.ranges.class(class),
-                        fills(0),
-                        Named::Ready,
-                    );
-                }
+    for e in &slot_edges {
+        let slot = e.index - FIELD_UNIT_AURA;
+        let class = ctx.classify(e.guid, &stores);
+        // Arrival first: the slot now holds a spell (a fill, or a replace's new half).
+        if e.new != 0 {
+            if let (Some(spell), Some(kind)) =
+                (ctx.spell_name(e.new), periodic_kind(class, !harmful(slot)))
+            {
+                queue_one(
+                    &mut log,
+                    &ctx,
+                    &poses,
+                    kind,
+                    if harmful(slot) {
+                        super::AURAADDED_HARMFUL
+                    } else {
+                        super::AURAADDED_HELPFUL
+                    },
+                    (e.guid, class),
+                    ctx.ranges.class(class),
+                    Fills {
+                        spell,
+                        ..Default::default()
+                    },
+                    Named::Ready,
+                );
             }
         }
-        // Departures: a slot that held a spell and no longer holds THAT spell.
-        for &(slot, spell_id, _) in &prev {
-            if find(&now, slot).is_some_and(|(_, id, _)| id == spell_id) {
+        // Departure: the slot held a spell and no longer holds THAT spell.
+        if e.old != 0 {
+            if let Some(spell) = ctx.spell_name(e.old) {
+                queue_one(
+                    &mut log,
+                    &ctx,
+                    &poses,
+                    aura_gone_kind(class),
+                    super::AURAREMOVED,
+                    (e.guid, class),
+                    ctx.ranges.class(class),
+                    Fills {
+                        spell,
+                        ..Default::default()
+                    },
+                    Named::Ready,
+                );
+            }
+        }
+    }
+
+    // The stack-count leg: byte-packed, four slots per dword, the wire byte `stack - 1`.
+    for e in batch.iter().filter(|e| {
+        e.unit_array_slot(FIELD_UNIT_AURAAPPLICATIONS, SLOTS / 4)
+            .is_some()
+    }) {
+        let word = e.index - FIELD_UNIT_AURAAPPLICATIONS;
+        let Ok((_, store)) = stores.get(e.entity) else {
+            continue; // gone in the same drain
+        };
+        for byte in 0..4u16 {
+            let slot = word * 4 + byte;
+            let (before, now) = ((e.old >> (byte * 8)) & 0xff, (e.new >> (byte * 8)) & 0xff);
+            // A rise past one, on a slot whose spell stayed put this block.
+            if now <= before || now == 0 || slot_moved(e.entity, slot) {
                 continue;
             }
-            let Some(spell) = ctx.spell_name(spell_id) else {
+            let Some(aura) = store.0.unit_aura(slot as u8) else {
+                continue;
+            };
+            let Some(spell) = ctx.spell_name(aura.spell_id) else {
+                continue;
+            };
+            let class = ctx.classify(e.guid, &stores);
+            let Some(kind) = periodic_kind(class, !harmful(slot)) else {
                 continue;
             };
             queue_one(
                 &mut log,
                 &ctx,
                 &poses,
-                aura_gone_kind(class),
-                super::AURAREMOVED,
-                (guid, class),
+                kind,
+                if harmful(slot) {
+                    super::AURAAPPLICATIONADDED_HARMFUL
+                } else {
+                    super::AURAAPPLICATIONADDED_HELPFUL
+                },
+                (e.guid, class),
                 ctx.ranges.class(class),
                 Fills {
                     spell,
+                    amount: i64::from(now + 1),
                     ..Default::default()
                 },
                 Named::Ready,
             );
         }
     }
-    seen.retain(|e, _| stores.contains(*e));
 }
 
 /// The pet-loyalty line (`0x5ff860` → `0x62d440`) — `UNIT_FIELD_BYTES_1` byte 1 moving.
@@ -326,26 +325,19 @@ pub(crate) fn aura_lines(
 pub(crate) fn pet_loyalty_lines(
     ctx: WatchCtx,
     stores: Query<(Entity, &ObjectStore)>,
-    guids: Query<&crate::net::Guid>,
-    changed: Query<Entity, Changed<ObjectStore>>,
+    mut edges: MessageReader<FieldChanged>,
     mut log: ResMut<ChatLog>,
-    mut seen: Local<EntityHashMap<u8>>,
 ) {
-    for entity in changed.iter() {
-        let Ok((_, store)) = stores.get(entity) else {
+    for e in edges.read() {
+        if !e.unit_field(benilla_protocol::field::FIELD_UNIT_BYTES_1) {
             continue;
-        };
-        let level = store.0.unit_loyalty_level();
-        let Some(before) = seen.insert(entity, level) else {
-            continue;
-        };
+        }
+        // Byte 1 of the word — the same shift `ObjectFields::unit_loyalty_level` reads through.
+        let (before, level) = (((e.old >> 8) & 0xff) as u8, ((e.new >> 8) & 0xff) as u8);
         if level == before || level == 0 || before == 0 {
             continue;
         }
-        let Ok(&crate::net::Guid(guid)) = guids.get(entity) else {
-            continue;
-        };
-        if ctx.classify(guid, &stores) != UnitClass::MyPet {
+        if ctx.classify(e.guid, &stores) != UnitClass::MyPet {
             continue;
         }
         log.push_combat(PendingCombat {
@@ -363,5 +355,4 @@ pub(crate) fn pet_loyalty_lines(
             tries: 0,
         });
     }
-    seen.retain(|e, _| stores.contains(*e));
 }

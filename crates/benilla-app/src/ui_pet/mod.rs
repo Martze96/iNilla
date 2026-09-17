@@ -182,6 +182,8 @@ pub(crate) struct PetUnit<'w, 's> {
     index: Res<'w, GuidIndex>,
     stores: Query<'w, 's, &'static ObjectStore>,
     self_guid: Res<'w, crate::net::SelfGuid>,
+    /// The per-field edges (decision 2297), for `fire_transitions`' watch-bridge arms.
+    pub(super) edges: MessageReader<'w, 's, crate::net::FieldChanged>,
 }
 
 impl PetUnit<'_, '_> {

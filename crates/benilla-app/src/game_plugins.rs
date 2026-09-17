@@ -739,7 +739,23 @@ pub(crate) mod schedule_tests {
             ("UiErrorKeys", TypeId::of::<crate::ui_action::UiErrorKeys>),
             ("UiErrorTexts", TypeId::of::<crate::ui_action::UiErrorTexts>),
         ];
-        const STREAMS: &[ClassRow] = &[("SoundKits", TypeId::of::<crate::sound::SoundKits>)];
+        const STREAMS: &[ClassRow] = &[
+            ("SoundKits", TypeId::of::<crate::sound::SoundKits>),
+            // The client's ONE `rand()` stream (decision 2301). Four lanes draw from it — the
+            // placed-doodad host, the creature driver, the GameObject arm and the portrait booth —
+            // and in the reference they draw from one TLS cell in whatever order the frame runs
+            // them. The interleaving IS the mechanism: a shared sequence is what de-syncs a stand
+            // of identical props, and no consumer can observe which draw it got, only that it got
+            // a fresh one. So an undeclared order here is not a missing `.after`; declaring one
+            // would be inventing a determinism the reference does not have.
+            //
+            // It reduces the count by **nothing** today, and that is not an oversight: the three
+            // Update-side lanes already conflict on `Query<&mut AnimationPlayer>`, which no class
+            // explains, so every pair this row would cover is counted for that instead. It is the
+            // standing claim about the resource — what keeps these pairs from surfacing the day
+            // that other conflict is declared — not a saving.
+            ("AnimRng", TypeId::of::<benilla_assets::AnimRng>),
+        ];
 
         /// Resolve the table against a world whose schedules have initialized (every param
         /// has registered its resource by then). A row that resolves to nothing is a stale
@@ -863,10 +879,22 @@ pub(crate) mod schedule_tests {
     /// boundary case decided early is decided again next frame. The target scanner carries the
     /// same class for the same reason.
     ///
+    /// **3,291 (decision 2300)** — the glue create/main-menu scene's material lane: exactly **one**
+    /// new pair, `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene`
+    /// over `MatAnimTable`, measured pair by pair on the tree that lands rather than assumed
+    /// additive (the scene builder's other three new resources add none — it already held
+    /// `RigPalettes` and `Assets<WowModelMaterial>`, so the systems they newly meet were already
+    /// ambiguous against it). Immaterial by construction, and narrowly: `MatAnimTable` is a slot
+    /// **allocator**, one owner per slot. A tile reaping its dead rows and the scene claiming
+    /// fresh ones touch disjoint slots and neither reads the other's; the only thing the order
+    /// decides is *which* free slot the scene is handed, and a slot number is not observable —
+    /// the row behind it is, and it is written by whoever owns it. A scene is also built **once**,
+    /// the frame its model asset lands, against a reaper that fires only when a tile dies.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_290;
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_291;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

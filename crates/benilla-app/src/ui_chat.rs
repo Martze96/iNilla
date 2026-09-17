@@ -34,7 +34,7 @@ mod event;
 mod feed;
 mod frames;
 /// The idle handler — the 5-minute auto-sit / auto-AFK and the 30-minute camp.
-mod idle;
+pub(crate) mod idle;
 mod input;
 /// The language gate — the exemptions and the fluency lookup behind the chat garble (B262).
 mod language;

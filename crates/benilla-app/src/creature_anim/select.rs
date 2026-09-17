@@ -1005,32 +1005,6 @@ pub(crate) fn blend_lambda(remaining_frac: f32) -> f32 {
     (3.0 - 2.0 * t) * t * t
 }
 
-/// The client's `_rand` — the MSVCRT LCG (`state × 214013 + 2531011`, output `(state >> 16) &
-/// 0x7fff`; byte-verified wow-re `rf36-rand-stub.md` at `0x7400e5`) — the roll feeding op4's
-/// per-play **variation pick** (`ModelAnimations::pick_variation`) and its **replay-count roll**
-/// ([`replay_count`] — the second `_rand` site). Owned exactly rather than delegating to a host
-/// RNG, per the determinism guidance in the same note; one stream shared by every play, like the
-/// client's single CRT stream.
-pub(crate) fn msvc_rand(state: &mut u32) -> u16 {
-    *state = state.wrapping_mul(214013).wrapping_add(2531011);
-    ((*state >> 16) & 0x7fff) as u16
-}
-
-/// The per-arm **replay-count roll** (wow-re `loop-replay-fidget.md`, op4's second `_rand` site
-/// `0x712692..0x7126cd`): `R = max(1, min + ⌊roll·(max−min)/32768⌋)` from the sequence's
-/// `(minReplay, maxReplay)`. The client multiplies `R` into the play window (`0x7126d8`) — a
-/// clamp-flag one-shot runs its timeline `R` times before freezing; loop-flag sequences ignore it.
-/// Benilla expresses the same window as a repeat count on the one-shot play. `(0, 0)` → 1.
-pub(super) fn replay_count(replay: (u32, u32), roll: u16) -> u32 {
-    let (min, max) = replay;
-    let extra = if max > min {
-        (u64::from(roll) * u64::from(max - min) / 32768) as u32
-    } else {
-        0
-    };
-    (min + extra).max(1)
-}
-
 /// The engaged standing idle (decision 0073 — the `0x5fd360` arm's weapon-class Ready pick,
 /// `0x5fcdc0`). Note the buckets differ from the swing table: fist **and** dagger ready as 1H.
 pub(super) fn ready_anim(main: Option<(u8, u8)>) -> u16 {

@@ -121,6 +121,7 @@ pub(crate) fn apply_net_updates(
         transports,
         casting: casting_units,
         engaged_self,
+        mut field_changes,
     } = objects;
     let ActionStores {
         mut player_actions,
@@ -417,6 +418,7 @@ pub(crate) fn apply_net_updates(
                     &mut transforms,
                     &mut stores,
                     &mut pending,
+                    &mut field_changes,
                     &mut speed_stage,
                     &names,
                     &go_templates,
@@ -498,7 +500,15 @@ pub(crate) fn apply_net_updates(
                 // reclaim latch is re-asked on that edge, as the reference's `FLAGS` mirror
                 // handler `0x5d6d60` does (1729).
                 death::recheck_corpse(guid, &fields, &self_guid, &mut death_net);
-                objects::object_values(guid, fields, &index, &mut stores, &mut pending, &mut items)
+                objects::object_values(
+                    guid,
+                    fields,
+                    &index,
+                    &mut stores,
+                    &mut pending,
+                    &mut field_changes,
+                    &mut items,
+                )
             }
             SessionEvent::ObjectDestroyed(guid) => {
                 death::forget_corpse(guid, &mut death_net);

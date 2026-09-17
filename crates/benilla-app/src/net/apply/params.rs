@@ -73,6 +73,9 @@ pub(crate) struct ObjectQueries<'w, 's> {
     /// [`crate::creature_anim::Engaged`] — read by the GO handler's deferred auto-attack start
     /// (`0x6e83e7`, decision 1593). Filter-only, so it conflicts with nothing else in the drain.
     pub engaged_self: Query<'w, 's, (), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
+    /// The per-field descriptor edges the merge reports (decision 2297) — the reference's
+    /// `CMirrorHandler` notify pass, emitted from the one write that holds both sides.
+    pub field_changes: MessageWriter<'w, super::super::FieldChanged>,
 }
 
 /// The session lifecycle: the glue-screen edges, the player's own teleports and mover
