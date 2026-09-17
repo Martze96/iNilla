@@ -488,7 +488,15 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// **nothing** in file slot 0, so a shared material can only ever seed white however faithfully it
 /// is ticked. They were already `pub` for the world streamer; what crosses here is the game naming
 /// them, and it is the same crossing the UV half makes one line up.
-const CEILING: usize = 189;
+/// And 189 → 190: `terrain_stream::CurrentArea`, taken by `capture/probe_bg.rs` (decision 2290).
+/// It is the engine's own area authority — the `AreaTable.dbc` leaf under the player's feet, which
+/// the engine already publishes for its own audio and zone-text consumers — and the probe reports
+/// it for one reason: a battleground census has to be able to say *where the body actually is*,
+/// and a map id alone cannot. "Map 489" is true of the pen, the field and the graveyard alike; the
+/// area id is what told this instrument that the port lands at Silverwing Hold and that the
+/// release lands at the graveyard. The alternative was to re-derive the leaf in the probe from
+/// tiles the engine already resolved, which is the copy-the-rule drift this wall exists to stop.
+const CEILING: usize = 190;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

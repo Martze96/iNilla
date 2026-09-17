@@ -214,6 +214,16 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
     // Every one below reads `time.elapsed_secs_f64()` into a `since`/`now` phase machine —
     // waits, settles and timeouts in wall seconds — so each arms the occlusion defence.
     ProbeVar {
+        name: "WOW_PROBE_BG_SAMPLES",
+        purpose: "n — how many 12 s census samples WOW_PROBE_BG takes inside the battleground (default 12; ~30 reaches vmangos's 5-minute premature finish, i.e. the end of a match)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_BG",
+        purpose: "wsg|ab|av — queue for that battleground, take the port through the stock verb and census the instance from inside",
+        wall_clock: true,
+    },
+    ProbeVar {
         name: "WOW_PROBE_BGQUEUE",
         purpose: "1 — level past the bracket floor, greet Stormwind's Warsong Gulch battlemaster and queue through his list",
         wall_clock: true,

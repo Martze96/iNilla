@@ -41,6 +41,7 @@ use std::time::Instant;
 
 use benilla_protocol::messages::{BattlefieldStatus, MeetingStoneNotice};
 use benilla_ui::script::{ScriptValue, UiScript};
+use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
@@ -120,10 +121,49 @@ impl InstanceBoot {
     }
 }
 
+/// `SPIRITGUIDE` — `UNIT_NPC_FLAGS` bit 6, the flag the acquire callback `0x4924c0` tests at
+/// `0x4924fc shr eax,0x6; test al,1` (wow-re `interact-dead-fork-and-npc-service-ladder.md` §C).
+const NPC_FLAG_SPIRITGUIDE: u32 = 1 << 6;
+
+/// The area spirit healer's aura, `0xA18` = 2584 — the one spell `0x4921c0`'s cancel leg and
+/// `CancelAreaSpiritHeal` both name, and the only spell id `0x6e7040` fires
+/// `AREA_SPIRIT_HEALER_OUT_OF_RANGE` for (`0x6e70b6 cmp esi,0xa18`).
+pub(crate) const AREA_SPIRIT_HEALER_AURA: u32 = 2584;
+
+/// The area spirit healer's **acquire** radius — the `.rdata` f32 `[0x8044d0] = 20.0`, compared
+/// squared in the enumerate callback `0x4924c0`.
+const SPIRIT_GUIDE_ACQUIRE_YD: f32 = 20.0;
+/// The **retain** radius: the same f32 times `[0x804580] = 1.1`, i.e. 22.0 (`0x492406`). A healer
+/// is adopted inside 20 yd and kept until 22 — the hysteresis is the reference's, and without it
+/// a body standing on the boundary would send a query every frame it jittered across.
+const SPIRIT_GUIDE_RETAIN_YD: f32 = SPIRIT_GUIDE_ACQUIRE_YD * 1.1;
+
+/// What [`AreaSpiritHealer::set_healer`] owes the rest of the frame.
+///
+/// The reference does both of these inside `0x4921c0` itself; here the resource is a plain data
+/// type with no access to the VM or the socket, so it *reports* them and the systems pay them.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub(crate) struct SetHealerOutcome {
+    /// A wave deadline was pending and the healer changed, so `0x4921fc mov ecx,0xa18;
+    /// call 0x6e7040` ran: `AREA_SPIRIT_HEALER_OUT_OF_RANGE` fires and `CMSG_CANCEL_AURA(2584)`
+    /// goes out. **This is how walking away from a graveyard closes the wave dialog** — no Lua
+    /// call is involved, which is why the event has no argument and no caller.
+    pub(crate) cancel_aura: bool,
+    /// The newly adopted healer, if the change landed on a non-zero guid: `CMSG 0x2E2` with it.
+    pub(crate) query: Option<u64>,
+}
+
 /// The current-area spirit healer (`[0xb4e330/334]`) and its wave clock (`[0xb4e338]`).
+///
+/// **The writer is [`Self::set_healer`], and it is the reference's `0x4921c0` to the branch.**
+/// 1963 shipped this resource with the note "no writer yet" because the acquire side was thought
+/// to be uncarved; it is not — wow-re recorded the whole trio, in two different nodes, before that
+/// record landed (`ui/scratch/staticpopup-dialog-bindings.md` §6 for the setter and the poll's
+/// radii, `object-layer/scratch/interact-dead-fork-and-npc-service-ladder.md` §C row 6 for the
+/// click arm). Both roads in are built here.
 #[derive(Resource, Default)]
 pub(crate) struct AreaSpiritHealer {
-    /// The cached healer. No writer yet — see the module doc.
+    /// The cached healer (`[0xb4e330/334]`), written only by [`Self::set_healer`].
     healer: Option<u64>,
     deadline: Option<Instant>,
     in_range: bool,
@@ -137,6 +177,60 @@ impl AreaSpiritHealer {
             self.deadline = Some(now + std::time::Duration::from_millis(u64::from(ms)));
             self.in_range = true;
         }
+    }
+
+    /// **`0x4921c0` — "set current area spirit healer"**, decoded at the branch:
+    ///
+    /// ```text
+    /// if (cached == new) return;            // 0x4921cf/0x4921dd — guards EVERYTHING below
+    /// cached = new;                         // 0x4921e5 / 0x4921f5
+    /// if (deadline != 0) CancelAura(0xA18); // 0x4921fc — fires _OUT_OF_RANGE, sends 0x136
+    /// deadline = 0;                         // 0x492211
+    /// if (cached != 0) send CMSG 0x2E2;     // 0x492217 / 0x492219
+    /// ```
+    ///
+    /// The early return at the top is the load-bearing part and the one a paraphrase loses: with
+    /// the guid unchanged this routine does **nothing at all** — no cancel, no deadline clear, no
+    /// packet. That is what lets the per-frame poll call it unconditionally (it clears by calling
+    /// `set_healer(None)` every frame it has no ghost) at zero cost.
+    pub(crate) fn set_healer(&mut self, new: Option<u64>) -> SetHealerOutcome {
+        // The reference keeps a 0:0 guid where we keep `None`; normalise so a zero guid arriving
+        // from the wire cannot masquerade as a real healer.
+        let new = new.filter(|&g| g != 0);
+        if self.healer == new {
+            return SetHealerOutcome::default();
+        }
+        self.healer = new;
+        let cancel_aura = self.deadline.take().is_some();
+        if cancel_aura {
+            // The cancel closes the dialog, so the `_IN_RANGE` this frame would have owed is
+            // stale — the reference cannot have one pending here either (the event is fired from
+            // the handler, which runs the poll first).
+            self.in_range = false;
+        }
+        SetHealerOutcome {
+            cancel_aura,
+            query: new,
+        }
+    }
+
+    /// The **spirit-guide click arm**'s two calls (`0x5df950`: `0x4921c0(0,0)` then
+    /// `0x4921c0(guid)`). The first is a deliberate cache-bust — its own early return suppresses
+    /// the send for a zero guid — so the second **always** transmits, even for the healer already
+    /// cached. Clicking the guide you are standing next to therefore re-asks for the clock, which
+    /// is exactly what a player does when the dialog has been dismissed.
+    pub(crate) fn click_guide(&mut self, guid: u64) -> SetHealerOutcome {
+        let bust = self.set_healer(None);
+        let set = self.set_healer(Some(guid));
+        SetHealerOutcome {
+            cancel_aura: bust.cancel_aura || set.cancel_aura,
+            query: set.query,
+        }
+    }
+
+    /// The cached healer — `AcceptAreaSpiritHeal`'s guid and the poll's retain subject.
+    pub(crate) fn healer(&self) -> Option<u64> {
+        self.healer
     }
 
     fn secs(&self, now: Instant) -> u32 {
@@ -734,7 +828,7 @@ pub(crate) fn feed_dialog_verbs(
     }
 
     let secs = spirit.secs(now);
-    script.set_area_spirit_healer(spirit.healer.is_some(), secs);
+    script.set_area_spirit_healer(spirit.healer().is_some(), secs);
     if std::mem::take(&mut spirit.in_range) {
         script.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
     }
@@ -791,7 +885,7 @@ fn drain_latch_verbs(
 
     // AcceptAreaSpiritHeal: the cached healer's guid (the binding was silent without one).
     let accepts = script.take_area_spirit_accepts();
-    if let Some(healer) = spirit.healer {
+    if let Some(healer) = spirit.healer() {
         for _ in 0..accepts {
             let _ = commands
                 .0
@@ -843,6 +937,127 @@ fn drain_queue_verbs(
     }
 }
 
+/// **The per-frame area-spirit-healer poll — `0x4923b0`**, which the reference runs from
+/// `CGWorldFrame`'s own `OnUpdate` (`0x4818ca`) on **every frame**, mouse focus or not.
+///
+/// ```text
+/// player = the active player object; none            -> set_healer(None); return
+/// not a GHOST ([[player+0xe68]+8] bit 4)              -> set_healer(None); return
+/// if cached:
+///     the cached guid no longer resolves to a unit    -> set_healer(None)
+///     else d²(player, healer) > 22²                   -> set_healer(None)
+/// if still cached: return                             // 0x492487
+/// enumerate every object: the first (last, really —   // 0x492495
+///   the callback never stops the walk) unit that is
+///   SPIRITGUIDE, CanAssist, and within 20 yd          -> set_healer(it)
+/// ```
+///
+/// **Ghost-gated at the top**, so a living player never holds a healer and never sends a query —
+/// the graveyard's wave clock only exists for the dead. That gate is why this costs nothing in
+/// ordinary play: one flag read per frame and out.
+///
+/// The callback `0x4924c0` returns 1 unconditionally, so the enumeration is **not** stopped by a
+/// match — the last qualifying unit in enumeration order is the one that sticks. `set_healer`'s
+/// own early return makes that harmless for a stable set (only a genuine change sends), and
+/// reproducing "last wins" rather than "nearest wins" matters at a graveyard with two guides in
+/// range: the reference does not pick the closer one, and neither does this.
+fn poll_area_spirit_healer(
+    mut spirit: ResMut<AreaSpiritHealer>,
+    me: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
+    units: Query<
+        (
+            &crate::net::Guid,
+            &crate::net::NetEntity,
+            &ObjectStore,
+            &Transform,
+        ),
+        Without<SelfPlayer>,
+    >,
+    factions: Option<Res<crate::target::Factions>>,
+    reputations: Res<crate::net::Reputations>,
+    index: Option<Res<crate::net::GuidIndex>>,
+    stores: Query<&ObjectStore>,
+    commands: Res<NetCommands>,
+    mut script: Option<NonSendMut<UiScript>>,
+) {
+    let mut apply = |outcome: SetHealerOutcome| {
+        if outcome.cancel_aura {
+            // `0x6e7040(0xA18)` does both halves, and both are the reference's: the event with no
+            // argument, and the packet with no guid.
+            if let Some(script) = script.as_deref_mut() {
+                script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+            }
+            let _ = commands.0.send(ClientCommand::CancelAura {
+                spell_id: AREA_SPIRIT_HEALER_AURA,
+            });
+        }
+        if let Some(healer) = outcome.query {
+            let _ = commands
+                .0
+                .send(ClientCommand::AreaSpiritHealerQuery { healer });
+        }
+    };
+
+    let Ok((self_store, self_tf)) = me.single() else {
+        apply(spirit.set_healer(None));
+        return;
+    };
+    if !self_store.0.player_is_ghost() {
+        apply(spirit.set_healer(None));
+        return;
+    }
+    let here = self_tf.translation;
+
+    // The retain leg. A cached guid that no longer streams to us is dropped exactly as one that
+    // walked out of range is — the reference's `ObjectPtr` miss falls into the same clear.
+    if let Some(cached) = spirit.healer() {
+        let still = units.iter().find(|(guid, ..)| guid.0 == cached);
+        let keep = still.is_some_and(|(_, _, _, tf)| {
+            tf.translation.distance_squared(here) <= SPIRIT_GUIDE_RETAIN_YD * SPIRIT_GUIDE_RETAIN_YD
+        });
+        if !keep {
+            apply(spirit.set_healer(None));
+        }
+    }
+    if spirit.healer().is_some() {
+        return;
+    }
+
+    // The acquire walk. `can_assist` is `0x6066f0`, the same predicate the target scanner and the
+    // buff gate already run — its owner chase wants a store by guid, which is what the index is
+    // for.
+    let store_of = |guid: u64| -> Option<ObjectStore> {
+        let entity = *index.as_ref()?.0.get(&guid)?;
+        stores.get(entity).ok().cloned()
+    };
+    let mut adopted = None;
+    for (guid, kind, store, tf) in units.iter() {
+        if kind.kind != benilla_protocol::EntityKind::Unit {
+            continue;
+        }
+        if store.0.unit_npc_flags() & NPC_FLAG_SPIRITGUIDE == 0 {
+            continue;
+        }
+        if tf.translation.distance_squared(here) > SPIRIT_GUIDE_ACQUIRE_YD * SPIRIT_GUIDE_ACQUIRE_YD
+        {
+            continue;
+        }
+        if !crate::target::can_assist(
+            Some(store),
+            factions.as_deref(),
+            &reputations,
+            Some(self_store),
+            store_of,
+        ) {
+            continue;
+        }
+        adopted = Some(guid.0); // last wins — the callback never stops the walk
+    }
+    if let Some(guid) = adopted {
+        apply(spirit.set_healer(Some(guid)));
+    }
+}
+
 pub(crate) struct UiDialogVerbsPlugin;
 
 impl Plugin for UiDialogVerbsPlugin {
@@ -867,6 +1082,34 @@ impl Plugin for UiDialogVerbsPlugin {
                     feed_dialog_verbs
                         .before(UiInput)
                         .run_if(crate::ui_script::ingame_ui_up),
+                    // **After the frame's pick, which is the reference's own order.** The poll
+                    // is `0x4923b0`, called from `CGWorldFrame`'s OnUpdate at `0x4818ca` — and
+                    // that same function ran the mouse pick eighty bytes earlier, at `0x48184a`.
+                    // So a right-click that adopts a spirit guide is decided BEFORE the poll gets
+                    // to look, not after; ordering it `.after(TargetUpdate)` (the set
+                    // `act_on_right_click` chains inside) reproduces that, and settles the one
+                    // real write-write pair this system has — both it and the click's
+                    // `ServiceArms` hold `AreaSpiritHealer`.
+                    //
+                    // The cost is that an adopt reaches `feed_dialog_verbs` on the NEXT frame
+                    // rather than this one, because `UiInput` sits before `WorldStage::Input` and
+                    // `TargetUpdate` after it — the two orders cannot both hold. That is the
+                    // right way round to lose: the event this system fires itself
+                    // (`_OUT_OF_RANGE`) is immediate, and what lags is one frame of a clock the
+                    // server ticks in seconds.
+                    //
+                    // **Gated on the interface being up** like its neighbour, and safely so: this
+                    // poll is LEVEL-triggered, not edge-triggered. It re-derives the whole cache
+                    // from the ghost flag, the streamed guides and the distances every frame, so a
+                    // frame it does not run is a frame it simply has not got to yet — the very
+                    // next one adopts and queries. That is what makes it exempt in substance from
+                    // the one-shot loss 2214's window causes (2220/2232): there is no edge here to
+                    // lose. The `_OUT_OF_RANGE` it can fire is the one thing that needs the VM,
+                    // and it can only follow an adopt this same system made.
+                    poll_area_spirit_healer
+                        .after(crate::target::TargetUpdate)
+                        .run_if(crate::ui_script::ingame_ui_up)
+                        .in_set(crate::char_select::InWorldGated),
                     // In-world only: the claim is about the VM, but the query is a world
                     // packet, and the boot VM exists at the glue screen too.
                     meeting_stone_enter_world
@@ -894,10 +1137,11 @@ impl Plugin for UiDialogVerbsPlugin {
     }
 }
 
-/// The area spirit healer's aura, `0xA18` — `CancelAreaSpiritHeal`'s one spell (the engine's
-/// `dialog_verbs::AREA_SPIRIT_HEALER_SPELL`), read here only to check its flags against the data.
+/// The area spirit healer's aura as the test below names it — the same 2584 as
+/// [`AREA_SPIRIT_HEALER_AURA`], kept under its own name because the test is about
+/// `CancelAreaSpiritHeal`'s spell and the constant above is about `0x4921c0`'s.
 #[cfg(test)]
-const AREA_SPIRIT_HEALER_SPELL: u32 = 2584;
+const AREA_SPIRIT_HEALER_SPELL: u32 = AREA_SPIRIT_HEALER_AURA;
 
 /// The generic cancel-aura routine's refusal (`0x6e7040`, wow-re `staticpopup-dialog-bindings.md`
 /// §6): it returns without sending when the spell's `AttributesEx` has bit 13 set and bit 2
@@ -914,6 +1158,122 @@ mod tests {
 
     /// `UNIT_FIELD_LEVEL`, absolute field 34.
     const LEVEL_FIELD: u16 = 34;
+
+    /// **`0x4921c0`'s early return guards everything.** The first two compares
+    /// (`0x4921cf cmp ecx,eax` / `0x4921dd cmp edx,ecx`) jump straight to the epilogue at
+    /// `0x492282` when the guid is unchanged — so a repeat call sends no packet, cancels no aura
+    /// and does **not** clear the pending deadline. That last one is the part a paraphrase loses,
+    /// and it is what lets the per-frame poll call this routine unconditionally.
+    #[test]
+    fn setting_the_same_healer_is_a_complete_no_op() {
+        let mut spirit = AreaSpiritHealer::default();
+        assert_eq!(
+            spirit.set_healer(Some(7)),
+            SetHealerOutcome {
+                cancel_aura: false,
+                query: Some(7)
+            },
+            "a fresh adopt asks for the clock"
+        );
+        let now = Instant::now();
+        spirit.on_time(7, 30_000, now);
+        assert_eq!(spirit.secs(now), 30, "the wave clock is armed");
+
+        assert_eq!(
+            spirit.set_healer(Some(7)),
+            SetHealerOutcome::default(),
+            "the same guid again: no query, no cancel"
+        );
+        assert_eq!(
+            spirit.secs(now),
+            30,
+            "and the deadline SURVIVES — 0x492211's clear sits past the early return"
+        );
+    }
+
+    /// The change legs, in the order the routine runs them: a pending deadline is cancelled
+    /// (`0x4921fc`, which is how walking out of range fires `_OUT_OF_RANGE` with no Lua call),
+    /// the deadline is zeroed unconditionally (`0x492211`), and only a **non-zero** new guid
+    /// sends (`0x492217`'s `je`).
+    #[test]
+    fn dropping_a_healer_cancels_the_wave_and_sends_nothing() {
+        let mut spirit = AreaSpiritHealer::default();
+        spirit.set_healer(Some(7));
+        let now = Instant::now();
+        spirit.on_time(7, 30_000, now);
+
+        assert_eq!(
+            spirit.set_healer(None),
+            SetHealerOutcome {
+                cancel_aura: true,
+                query: None
+            },
+            "walking away: the aura cancel, and no query for a zero guid"
+        );
+        assert_eq!(spirit.secs(now), 0, "the clock is zeroed");
+        assert_eq!(spirit.healer(), None);
+
+        // And a drop with no clock armed cancels nothing.
+        spirit.set_healer(Some(9));
+        assert_eq!(
+            spirit.set_healer(None),
+            SetHealerOutcome {
+                cancel_aura: false,
+                query: None
+            },
+            "no deadline pending — 0x4921fa's `je` skips the cancel"
+        );
+    }
+
+    /// `SMSG_AREA_SPIRIT_HEALER_TIME` is addressed: a clock for a healer that is **not** the
+    /// cached one is dropped (`0x4922a0 cmp eax,[ebp+8]`), which is what keeps a stale reply from
+    /// a graveyard you already left out of the dialog.
+    #[test]
+    fn a_clock_for_another_healer_is_ignored() {
+        let mut spirit = AreaSpiritHealer::default();
+        spirit.set_healer(Some(7));
+        let now = Instant::now();
+        spirit.on_time(8, 30_000, now);
+        assert_eq!(spirit.secs(now), 0, "not our healer");
+        spirit.on_time(7, 0, now);
+        assert_eq!(spirit.secs(now), 0, "a zero time arms nothing");
+        spirit.on_time(7, 25_000, now);
+        assert_eq!(spirit.secs(now), 25);
+    }
+
+    /// **The click's cache-bust.** `0x5df950` calls the setter twice — `(0,0)` then the guid —
+    /// precisely so the second call is never swallowed by the unchanged-guid early return. So
+    /// clicking the guide you are already standing next to DOES re-ask for the clock, which is
+    /// the behaviour a player relies on after dismissing the dialog.
+    #[test]
+    fn clicking_the_cached_guide_still_asks_again() {
+        let mut spirit = AreaSpiritHealer::default();
+        spirit.set_healer(Some(7));
+        let now = Instant::now();
+        spirit.on_time(7, 30_000, now);
+
+        let outcome = spirit.click_guide(7);
+        assert_eq!(
+            outcome.query,
+            Some(7),
+            "the bust makes the second call a real change"
+        );
+        assert!(
+            outcome.cancel_aura,
+            "and the bust's own leg cancelled the pending wave"
+        );
+        assert_eq!(spirit.healer(), Some(7));
+    }
+
+    /// The two radii are the reference's `.rdata` f32s, not round numbers someone picked:
+    /// `[0x8044d0] = 20.0` to acquire and `× [0x804580] = 1.1` to retain. The hysteresis is the
+    /// point — equal radii would re-send a query every frame a body jittered across the boundary.
+    #[test]
+    fn the_acquire_and_retain_radii_are_the_reference_pair() {
+        assert!((SPIRIT_GUIDE_ACQUIRE_YD - 20.0).abs() < f32::EPSILON);
+        assert!((SPIRIT_GUIDE_RETAIN_YD - 22.0).abs() < 1e-5);
+        const { assert!(SPIRIT_GUIDE_RETAIN_YD > SPIRIT_GUIDE_ACQUIRE_YD) };
+    }
 
     /// The four client-side refusals of MEETINGSTONE(23)'s use slot (`0x5f69d0`, decision 2283),
     /// in the reference's own order — and the pass that reaches `CMSG 0x292`.

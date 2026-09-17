@@ -1174,6 +1174,11 @@ mod quest_timer_tests;
 #[cfg(test)]
 mod battlefield_tests;
 
+/// The battle map — the reference's `Blizzard_BattlefieldMinimap` addon, demand-loaded the way
+/// SHIFT-M loads it, over the overlay/POI/position/arrow verbs it shares with the world map.
+#[cfg(test)]
+mod battlefield_minimap_tests;
+
 #[cfg(test)]
 mod tutorial_tests;
 

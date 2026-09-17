@@ -1323,6 +1323,13 @@ pub(crate) enum ClientCommand {
     AreaSpiritHealerQueue {
         healer: u64,
     },
+    /// The client ADOPTED a new area spirit healer — `CMSG_AREA_SPIRIT_HEALER_QUERY`, asking for
+    /// its wave clock. No Lua verb sends this: its only writer is the reference's own
+    /// "set current area spirit healer" routine `0x4921c0`, reached from the per-frame proximity
+    /// poll and from the spirit-guide click arm ([`crate::ui_dialog_verbs::AreaSpiritHealer`]).
+    AreaSpiritHealerQuery {
+        healer: u64,
+    },
     /// `AcceptBattlefieldPort(index, accept)` — `CMSG_BATTLEFIELD_PORT`: the slot's map id and
     /// the answer as one byte.
     BattlefieldPort {

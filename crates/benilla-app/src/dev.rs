@@ -319,6 +319,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_BGQUEUE").is_ok() {
                 app.add_plugins(crate::capture::ProbeBgQueuePlugin);
             }
+            // The inside-a-battleground live probe: `WOW_PROBE_BG=wsg|ab|av` walks the whole
+            // player road — level, greet, queue, take the port through the stock
+            // `AcceptBattlefieldPort` — and then censuses the battleground from inside. The
+            // interface arc (1963/1972/1974/1980) built everything up to the port button and
+            // nothing past it; this is the first instrument that looks (see `capture::ProbeBgPlugin`).
+            if std::env::var("WOW_PROBE_BG").is_ok() {
+                app.add_plugins(crate::capture::ProbeBgPlugin);
+            }
             // The mail-arc live probe: `WOW_PROBE_MAIL=1` GM-mails the probe's own character, opens the
             // Goldshire mailbox on the real wire, and drives the inbox/take/send/delete surface through
             // the live Lua VM — decisions 0544/0548's end-to-end instrument (see `capture::ProbeMailPlugin`).

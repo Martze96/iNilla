@@ -32,11 +32,17 @@ use std::path::{Path, PathBuf};
 ///   fifteen sibling probes that read the VM *on purpose*. A probe's whole value is that it asks
 ///   the **stock** binding (`IsInMeetingStoneQueue()`, `MiniMapMeetingStoneFrame:IsShown()`)
 ///   rather than our own mirror of it, so feeding it a model value would make it prove nothing.
+////// - **167 (decision 2290)** — `capture/probe_bg.rs`, the inside-a-battleground live probe, the
+///   same class again and for the same reason, sharpened: it takes the port through the stock
+///   `AcceptBattlefieldPort(slot, 1)` and reads the battleground back through
+///   `GetNumWorldStateUI()`, `GetBattlefieldStatus()` and a Lua event tap. A probe that asked our
+///   own model instead could not have found what this one did — that the battleground's
+///   `CHAT_MSG_BG_SYSTEM_NEUTRAL` lines reach the interface, which no app-side reading shows.
 ///
 /// The ratchet is for *production* feed code. Both numbers still went up, and both are written
 /// down — which is the whole point of it, and why two sessions raising it the same day collided
 /// here instead of quietly passing each other.
-const CEILING: usize = 166;
+const CEILING: usize = 167;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 8;

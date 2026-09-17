@@ -62,6 +62,15 @@ impl WorldStates {
         self.values.get(&key).copied().unwrap_or(0) as i32
     }
 
+    /// Every `(key, value)` currently in the table, in no particular order — the instrument
+    /// read, and only that. No reference function enumerates this hash: the client's own readers
+    /// are the point getter above and the `WorldStateUI.dbc` walk, both of which ask for a key
+    /// they already know. A battleground's whole score lives here as raw dwords nobody has a name
+    /// for yet, so a probe that cannot dump it cannot say what arrived (`capture::ProbeBgPlugin`).
+    pub(crate) fn pairs(&self) -> impl Iterator<Item = (u32, i32)> + '_ {
+        self.values.iter().map(|(&k, &v)| (k, v as i32))
+    }
+
     /// The `(map, area)` the last `SMSG_INIT_WORLD_STATES` scoped the table to — the reference's
     /// `[0xb71e84]`/`[0xb71ea8]`, and the filter its world-state UI list is built against. `None`
     /// before any init has arrived, which is the reference's `-1` (its rebuild trigger refuses to

@@ -823,7 +823,7 @@ pub(crate) mod schedule_tests {
     /// **Measured 2026-09-17 (decision 2287), 662 systems:** 16,548 pairs in all, 12,849 of
     /// them explained — 10,703 on the VM alone, 431 on the other non-`Send` owners, 556 on
     /// the pure caches, 87 on the sinks, 41 on the stream, 1,031 on a mix of those — and
-    /// 3,699 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
+    /// 3,705 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
     /// alone): populations that never intersect, which the filter algebra cannot see. A lane
     /// is not a class — the checker cannot tell a disjoint lane from two writers of the same
     /// entity — so they stay here, and each new one is a claim made at the registration with
@@ -851,10 +851,22 @@ pub(crate) mod schedule_tests {
     /// the pairs over the pure caches moved into the VM-only class, where the same systems still
     /// meet over the VM alone.
     ///
+    /// **3,290 (decision 2291)** — the area-spirit-healer poll's `&Transform` read against the frame's
+    /// movers (motion, transports, the portrait booths, the quest markers' bake): **+6**, measured
+    /// on the rebased tree rather than assumed additive, the same discipline 2295 used one
+    /// paragraph up. Its one write-write pair — against the click, which also holds
+    /// `AreaSpiritHealer` — is *declared*, and declared where the reference puts it: after the
+    /// frame's pick, because `0x4923b0` runs from the same `CGWorldFrame` OnUpdate that ran the
+    /// pick eighty bytes earlier at `0x48184a`. What is left is reading a unit's position one
+    /// mover early or late, which moves a 20 yd acquire decision by at most one frame of walking
+    /// — and the poll is **level**-triggered, re-deriving the whole cache every frame, so a
+    /// boundary case decided early is decided again next frame. The target scanner carries the
+    /// same class for the same reason.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_284;
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_290;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

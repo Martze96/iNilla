@@ -1386,6 +1386,9 @@ fn writer_loop(
                     ClientCommand::AreaSpiritHealerQueue { healer } => {
                         w.area_spirit_healer_queue(healer)
                     }
+                    ClientCommand::AreaSpiritHealerQuery { healer } => {
+                        w.area_spirit_healer_query(healer)
+                    }
                     ClientCommand::BattlefieldPort { map_id, accept } => {
                         w.battlefield_port(map_id, accept)
                     }

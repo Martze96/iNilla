@@ -236,6 +236,11 @@ pub(crate) struct ServiceArms<'w> {
     /// The spirit healer's XP-loss question (bit 5): `0x5df730` does the same, firing
     /// `CONFIRM_XP_LOSS`.
     pub(crate) death: ResMut<'w, crate::death::DeathNet>,
+    /// The spirit GUIDE's arm (bit 6) — the battleground graveyard's resurrect wave. Unlike its
+    /// two no-packet neighbours this one does send, and it sends through the cache the per-frame
+    /// proximity poll also writes, so the click and the poll cannot disagree about which healer
+    /// is current.
+    pub(crate) spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
     /// `[0xb4e2d0]/[0xb4e2d4]`'s mirror — the NPC whose window is open, which the dispatcher
     /// compares the clicked guid against *before* the ladder ([`interaction_already_open_on`]).
     pub(crate) interact: Res<'w, crate::ui_session::InteractNpc>,
@@ -944,6 +949,24 @@ pub(super) fn act_on_right_click(
                     debug!("right-click interact: {guid:#x} (spirit healer — CONFIRM_XP_LOSS, no packet)");
                     service.death.ask_spirit_healer(guid);
                 }
+                ServiceAction::AcquireSpiritGuide => {
+                    debug!("right-click interact: {guid:#x} (spirit guide — adopting, 0x2E2)");
+                    let outcome = service.spirit.click_guide(guid);
+                    if outcome.cancel_aura {
+                        if let Some(script) = service.script.as_deref_mut() {
+                            script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+                        }
+                        let _ = seam.net.0.send(ClientCommand::CancelAura {
+                            spell_id: crate::ui_dialog_verbs::AREA_SPIRIT_HEALER_AURA,
+                        });
+                    }
+                    if let Some(healer) = outcome.query {
+                        let _ = seam
+                            .net
+                            .0
+                            .send(ClientCommand::AreaSpiritHealerQuery { healer });
+                    }
+                }
                 ServiceAction::Silent(why) => {
                     debug!("right-click interact: {guid:#x} ({arm:?}) — silent: {why}");
                 }
@@ -1380,6 +1403,9 @@ pub(crate) enum ServiceAction {
     AskBinder,
     /// Raise `CONFIRM_XP_LOSS` locally and send nothing (`0x5df730`).
     AskSpiritHealer,
+    /// Adopt this spirit guide as the current-area spirit healer (`0x5df950` → two calls into
+    /// `0x4921c0`, the second of which always transmits) — `CMSG_AREA_SPIRIT_HEALER_QUERY`.
+    AcquireSpiritGuide,
     /// Nothing goes out. The payload is why, for the debug line.
     Silent(&'static str),
 }
@@ -1430,13 +1456,13 @@ pub(crate) fn service_action(
         ServiceArm::Trainer => ServiceAction::Send(ClientCommand::TrainerList { trainer: guid }),
         ServiceArm::SpiritHealer if ghost => ServiceAction::AskSpiritHealer,
         ServiceArm::SpiritHealer => ServiceAction::Silent("spirit healer, and we are alive"),
-        // Ghost-gated like its neighbour, and then a stated gap: the ghost's arm sends opcode
-        // `0x2E2` (the area spirit-healer time query) from one call deeper, and benilla has no
-        // battleground resurrect timer for the reply to fill. For a living player this IS the
-        // reference's answer; for a ghost it is the gap.
-        ServiceArm::SpiritGuide if ghost => {
-            ServiceAction::Silent("spirit guide — the 0x2E2 timer query is unbuilt")
-        }
+        // Ghost-gated like its neighbour. The arm sends `CMSG_AREA_SPIRIT_HEALER_QUERY 0x2E2`
+        // from one call deeper (`0x5df950` → `0x4921c0`), and it does it through the *same*
+        // "set current area spirit healer" routine the per-frame proximity poll uses — with a
+        // deliberate `(0,0)` cache-bust first, so a click on the guide you are already standing
+        // next to re-asks for the wave clock instead of being swallowed by the routine's
+        // unchanged-guid early return.
+        ServiceArm::SpiritGuide if ghost => ServiceAction::AcquireSpiritGuide,
         ServiceArm::SpiritGuide => ServiceAction::Silent("spirit guide, and we are alive"),
         ServiceArm::Innkeeper => ServiceAction::AskBinder,
         ServiceArm::Banker => ServiceAction::Send(ClientCommand::BankerActivate { guid }),
@@ -1922,6 +1948,7 @@ mod tests {
             ServiceAction::SellFromCursor(cmd) => format!("sell {cmd:?}"),
             ServiceAction::AskBinder => "ask-binder".to_string(),
             ServiceAction::AskSpiritHealer => "ask-spirit-healer".to_string(),
+            ServiceAction::AcquireSpiritGuide => "acquire-spirit-guide".to_string(),
             ServiceAction::Silent(_) => "silent".to_string(),
         };
         assert!(matches!(
@@ -2026,6 +2053,7 @@ mod tests {
                     ServiceAction::SellFromCursor(cmd) => format!("SELL {cmd:?}"),
                     ServiceAction::AskBinder => "ask-binder".into(),
                     ServiceAction::AskSpiritHealer => "ask-xp-loss".into(),
+                    ServiceAction::AcquireSpiritGuide => "acquire-spirit-guide".into(),
                     ServiceAction::Silent(w) => format!("silent {w}"),
                 };
                 let empty = describe(service_action(arm, VENDOR, ghost, None));
@@ -2336,6 +2364,7 @@ mod tests {
         world.init_resource::<crate::ui_quest::QuestGiver>();
         world.init_resource::<crate::ui_binder::BinderState>();
         world.init_resource::<crate::death::DeathNet>();
+        world.init_resource::<crate::ui_dialog_verbs::AreaSpiritHealer>();
         world.init_resource::<crate::ui_session::InteractNpc>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::ui_action::CastErrors>();
