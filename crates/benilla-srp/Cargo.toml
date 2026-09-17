@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "WoW 1.12.1 (build 5875) SRP6 client + vanilla world-header crypto — in-repo, decision 0021"
 
+[lints]
+workspace = true
+
 [dependencies]
 num-bigint = "0.4.6"
 sha1.workspace = true

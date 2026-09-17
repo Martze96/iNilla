@@ -111,7 +111,6 @@ pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: 
 /// The cursor is still a **whole-word** surface in one respect — every seam shows the `Cast`
 /// *kind*, only `unable` differs — which is why it reads [`SpellTargeting::spell`]. The reticle is
 /// per-seam and reads [`SpellTargeting::spell_for`] (decision 0943).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_targeting_cursor(
     targeting: Res<SpellTargeting>,
     occlusion: Res<PickOcclusion>,

@@ -36,7 +36,6 @@ impl WorldWriter {
     /// [`messages::auction_filter`]'s sentinels for the ones left unset. **No sort rides the
     /// wire**: sorting the returned page is entirely ours. `list_from` pages by
     /// [`messages::AUCTION_PAGE_SIZE`]. Answered by `SMSG_AUCTION_LIST_RESULT`.
-    #[allow(clippy::too_many_arguments)]
     pub fn auction_list_items(
         &mut self,
         auctioneer: u64,

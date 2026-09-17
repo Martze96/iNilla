@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "WMO (root + group) reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
 
+[lints]
+workspace = true
+
 [dependencies]
 benilla-bytes = { path = "../benilla-bytes" }

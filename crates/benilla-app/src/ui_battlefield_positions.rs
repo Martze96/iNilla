@@ -101,7 +101,6 @@ fn flag_token(faction: Option<&str>) -> Option<&'static str> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_battlefield_positions(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<BattlefieldPositions>,

@@ -30,7 +30,6 @@ use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 ///   `bonding == 2` item raises `AUTOEQUIP_BIND_CONFIRM` and sends NOTHING. `suppress` is the
 ///   reference's own parameter, set on the re-issue `EquipPendingItem` drives — which is what stops
 ///   the accept from asking the same question again forever.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_auto_equip(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
@@ -256,7 +255,6 @@ pub(super) fn drain_inventory_uses(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_container_uses(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -726,7 +724,6 @@ fn is_equip_position(bag_index: u8, slot: u8) -> bool {
 /// same body with `suppress` set, rather than a second copy of it that has to be kept agreeing.
 ///
 /// Returns whether the move was sent (`false` = deferred behind `EQUIP_BIND_CONFIRM`).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_container_move(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,

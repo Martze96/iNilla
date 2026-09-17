@@ -378,17 +378,42 @@ fn vendor_list_inventory_wire() {
     }
 
     // Empty stock: count = 0 followed by the trailing error byte (ItemHandler.cpp:728-733,
-    // 806-809) — the parser must tolerate it (the row loop simply never runs).
+    // 806-809) — consumed explicitly, so the decode leaves no tail to report.
     let mut empty_body = 0xDDu64.to_le_bytes().to_vec();
     empty_body.push(0); // count
     empty_body.push(0); // trailing errorByte(0)
-    match messages::parse_server(messages::opcode::SMSG_LIST_INVENTORY, &empty_body).unwrap() {
+    let (packet, tail) =
+        messages::parse_server_with_tail(messages::opcode::SMSG_LIST_INVENTORY, &empty_body)
+            .unwrap();
+    assert_eq!(tail, 0, "the error byte is part of the layout, not a tail");
+    match packet {
         ServerPacket::VendorList { vendor, items } => {
             assert_eq!(vendor, 0xDD);
             assert!(items.is_empty());
         }
         other => panic!("empty vendor list, got {}", other.name()),
     }
+    // …and the byte is REQUIRED: a count of 0 with nothing after it is the short read it is.
+    let truncated = &empty_body[..empty_body.len() - 1];
+    assert!(messages::parse_server(messages::opcode::SMSG_LIST_INVENTORY, truncated).is_err());
+}
+
+/// **The falsifier for decision 2265 §B1** on a `u32`-counted list: an option count of
+/// `0xFFFF_FFFF` followed by one valid option must come back as a short-read `Err` — the decoder
+/// must neither reserve the count nor abort.
+#[test]
+fn a_lying_gossip_option_count_is_a_short_read_not_an_allocation() {
+    let mut body = 0x77u64.to_le_bytes().to_vec(); // npc guid
+    body.extend_from_slice(&1u32.to_le_bytes()); // text id
+    body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // option count
+    body.extend_from_slice(&0u32.to_le_bytes()); // one valid option: index
+    body.push(0); // icon
+    body.push(0); // coded
+    body.extend_from_slice(b"Hello.\0"); // message
+    let err = messages::parse_server(messages::opcode::SMSG_GOSSIP_MESSAGE, &body)
+        .err()
+        .expect("the second option is missing, so the read is short");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 }
 
 #[test]

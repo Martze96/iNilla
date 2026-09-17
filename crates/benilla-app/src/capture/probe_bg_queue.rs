@@ -95,7 +95,6 @@ enum Phase {
 }
 
 // One Bevy system's full input set (the guard-poi probe's shape).
-#[allow(clippy::too_many_arguments)]
 fn bg_queue_probe(
     time: ProbeClock,
     mut probe: ResMut<BgQueueProbe>,

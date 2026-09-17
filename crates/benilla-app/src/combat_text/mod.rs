@@ -233,7 +233,6 @@ fn free_slot(texts: &[WorldText], anchor: Entity) -> Option<u8> {
 /// living into glyph quads appended to [`UiQuads`] after the script extract. Ordering (the
 /// [`UiQuadAppend`] set, after [`UiInput`]) guarantees the mesh rebuild never lands between the
 /// script's replace and our append — see `ui_pass`.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn float_combat_text(
     mut spawns: MessageReader<CombatTextSpawn>,
     mut texts: ResMut<WorldTexts>,

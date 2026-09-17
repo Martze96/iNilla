@@ -2,7 +2,6 @@ use super::*;
 use crate::script::UiScript;
 
 /// One recipe fixture — a single-reagent, single-tool row, distinct spell/product ids per name.
-#[allow(clippy::too_many_arguments)]
 fn recipe(
     spell_id: u32,
     name: &str,

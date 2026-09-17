@@ -65,6 +65,20 @@ pub(crate) enum ClientState {
     InWorld,
 }
 
+/// **The one "only while in the world" gate** (decision 2265 §C3). A system that has no business
+/// at a glue screen — an input reader, a world-packet feed, a per-character file watcher — joins
+/// this set instead of carrying its own `run_if(in_state(ClientState::InWorld))`: twenty-odd
+/// copies of that condition said one thing in twenty-odd places, and the condition a set carries
+/// ANDs with a member's own, so a member keeps whatever else it needs (the controller's
+/// capture-mode gate, say) and the conversion is exact.
+///
+/// Configured once, in [`CharSelectPlugin`] — the state's home — for `Update`, the only schedule
+/// a member lives in. A member in another schedule means configuring the set *there* as well
+/// (a set's conditions are per schedule; an unconfigured set gates nothing), never a fresh
+/// `run_if` at the site.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct InWorldGated;
+
 /// The character-select subsystem: the state machine + the select screen.
 pub(crate) struct CharSelectPlugin {
     /// The screen this session opens on.
@@ -94,6 +108,8 @@ fn publish_world_live(
 impl Plugin for CharSelectPlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(self.start)
+            // The in-world gate, configured beside the state it reads (see [`InWorldGated`]).
+            .configure_sets(Update, InWorldGated.run_if(in_state(ClientState::InWorld)))
             .init_resource::<Roster>()
             // **The engine's world-existence bit** (1160's wire (b)): the session owner is this
             // module, so this module tells the world whether there is one. Ordered ahead of every
@@ -105,8 +121,14 @@ impl Plugin for CharSelectPlugin {
             )
             .init_resource::<dialog::DeleteDialog>()
             .init_resource::<addons::AddonsPanel>()
-            .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
-            .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
+            .add_systems(
+                OnEnter(ClientState::CharSelect),
+                (screen::enter_select, stamp_select_entry),
+            )
+            .add_systems(
+                OnExit(ClientState::CharSelect),
+                (screen::exit_select, clear_select_entry),
+            )
             .add_systems(Update, (debug_glue_roundtrip, debug_logout_smoke))
             .add_systems(
                 Update,
@@ -783,7 +805,6 @@ fn debug_glue_roundtrip(
 /// hand-written `AppExit` from `Update` skipped that question for this smoke's whole life, and the
 /// bug it would have caught — every saved variable, every addon file and the camera pose lost on
 /// every window close — shipped underneath it.
-#[allow(clippy::too_many_arguments)] // a smoke test that drives the whole round trip
 fn debug_logout_smoke(
     state: Res<State<ClientState>>,
     player: Res<crate::player::Player>,
@@ -822,7 +843,7 @@ fn debug_logout_smoke(
         // world-live falling edge, not the state edge), so the probe was reading the count before
         // the thing it is checking had happened, and reporting the world it had just left.
         //
-        // It cost more than a wrong line: 1291 wrote the reading up as a live contradiction of
+        // It cost more than a wrong line: 2277 wrote the reading up as a live contradiction of
         // 0777's release-world claim, on the strength of it reproducing identically on an older
         // commit — which it did, because an instrument that measures too early does that reliably.
         // A number that is always wrong teaches everyone to skip the line (0777's own lesson about
@@ -844,7 +865,7 @@ fn debug_logout_smoke(
         },
         4 if *state.get() == ClientState::InWorld && player.active && now - *mark > 3.0 => {
             // **The suppressor reading is the point of the second entry, not a decoration on it**
-            // (B306, decision 1542). This leg has crossed the boundary on every run since 1291 and
+            // (B306, decision 1542). This leg has crossed the boundary on every run since 2277 and
             // could only ever report that it *happened* — tiles, UI rebuilds, error counts — none
             // of which a character who re-entered unable to move would disturb. `scripts/smoke.sh`
             // fails on anything but `none`, and separately reports whether the run's logout was
@@ -954,6 +975,31 @@ fn debug_select_walk(
     }
 }
 
+/// When the select screen came up: `Time::elapsed_secs()` at `OnEnter(CharSelect)`, gone again
+/// at `OnExit`. The one clock the screen's "a few seconds after the screen is up" instruments
+/// ([`debug_select_dialog`], [`debug_select_addons`], [`debug_select_shot`]) measure from, in
+/// place of a `Local` each stamped on its own first run (decision 2265 §C3). Those three run
+/// under `in_state(CharSelect)` in `Update`, so the resource is always there when they read it.
+#[derive(Resource, Clone, Copy)]
+struct CharSelectEnteredAt(f32);
+
+impl CharSelectEnteredAt {
+    /// Seconds the screen has been up.
+    fn elapsed(&self, time: &Time) -> f32 {
+        time.elapsed_secs() - self.0
+    }
+}
+
+/// `OnEnter(CharSelect)`: stamp the screen's entry.
+fn stamp_select_entry(mut commands: Commands, time: Res<Time>) {
+    commands.insert_resource(CharSelectEnteredAt(time.elapsed_secs()));
+}
+
+/// `OnExit(CharSelect)`: the screen is down, so is its clock.
+fn clear_select_entry(mut commands: Commands) {
+    commands.remove_resource::<CharSelectEnteredAt>();
+}
+
 /// The shot instrument's delete-dialog dial (`WOW_CHARSELECT_DIALOG=<typed>`): open the
 /// typed-confirm dialog for the selected character a few seconds after the screen is up, with
 /// `<typed>` pre-typed (may be empty) — so the dialog's geometry (the ChatInputBorder edit box,
@@ -963,7 +1009,7 @@ fn debug_select_dialog(
     roster: Res<Roster>,
     mut dialog: ResMut<dialog::DeleteDialog>,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -973,8 +1019,7 @@ fn debug_select_dialog(
         *done = true;
         return;
     };
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < 4.0 {
+    if entered_at.elapsed(&time) < 4.0 {
         return;
     }
     let Some(c) = roster.selected_char() else {
@@ -995,7 +1040,7 @@ fn debug_select_addons(
     roster: Res<Roster>,
     mut panel: ResMut<addons::AddonsPanel>,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -1005,8 +1050,7 @@ fn debug_select_addons(
         *done = true;
         return;
     }
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < 4.0 {
+    if entered_at.elapsed(&time) < 4.0 {
         return;
     }
     if roster.chars.is_empty() {
@@ -1041,7 +1085,7 @@ const SELECT_SHOT_AT: f32 = 8.0;
 fn debug_select_shot(
     mut commands: Commands,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -1055,8 +1099,7 @@ fn debug_select_shot(
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(SELECT_SHOT_AT);
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < at {
+    if entered_at.elapsed(&time) < at {
         return;
     }
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};

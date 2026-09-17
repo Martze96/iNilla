@@ -227,7 +227,7 @@ impl Plugin for UiChatPlugin {
                 )
                     .chain()
                     .after(UiInput)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    .in_set(crate::char_select::InWorldGated),
             )
             // The zone-channel auto-join (0288 P6): the client half of a handshake vmangos
             // deliberately leaves to us. In-world only, and it early-outs on an unchanged zone.
@@ -250,10 +250,8 @@ impl Plugin for UiChatPlugin {
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
-                    channels::auto_join_zone_channels
-                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
-                    recruitment::guild_recruitment_cascade
-                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    channels::auto_join_zone_channels.in_set(crate::char_select::InWorldGated),
+                    recruitment::guild_recruitment_cascade.in_set(crate::char_select::InWorldGated),
                 )
                     .chain()
                     .after(benilla_world::terrain_stream::AreaAuthoritySet),

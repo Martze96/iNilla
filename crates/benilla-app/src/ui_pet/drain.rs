@@ -53,7 +53,6 @@ pub(super) const UNIT_FLAG_POSSESSED: u32 = 0x0100_0000;
 ///
 /// The optimism is bounded by the same packet that owns everything else — the next
 /// `SMSG_PET_SPELLS` (a re-summon, a learn, a stable swap) replaces state and contents together.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn drain_pet_actions(
     script: Option<NonSendMut<UiScript>>,
     mut bar: ResMut<PetBar>,

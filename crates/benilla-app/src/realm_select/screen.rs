@@ -136,7 +136,6 @@ pub(super) struct OkButton;
 /// **Not a state transition.** The frame is shown over whatever glue screen is current and hidden
 /// again; nothing about that screen changes, which is the whole of `RealmList`'s lifecycle in the
 /// reference (see [`super`]).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_screen(
     mut commands: Commands,
     realms: Res<Realms>,

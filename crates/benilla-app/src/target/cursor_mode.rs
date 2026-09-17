@@ -780,7 +780,7 @@ fn corpse_cursor(f: CorpseFacts) -> Option<(CursorKind, bool)> {
 /// Resolve this frame's [`WorldCursor`] from the hovered unit — the reference's classifier order:
 /// interactable-NPC service ladder, else loot/skin/attack by state, each grayed by its own range
 /// gate. No hover (or anything unresolvable) → Point.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn classify_cursor(
     hovered: Res<Hovered>,
     hovered_object: Res<HoveredObject>,

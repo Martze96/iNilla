@@ -576,7 +576,6 @@ pub(crate) enum KitRef<'a> {
 /// Silently succeeds without playing when the kit is out of range or duplicate-suppressed
 /// (matching the client: gates are not errors) — `Ok(false)` is that outcome, see
 /// [`play_kit_ext`]'s return.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn play_kit(
     kits: &mut SoundKits,
     assets: &WorldAssets,
@@ -617,7 +616,6 @@ pub(crate) fn play_kit(
 /// per-bus cap, the duplicate walk), and callers that care read that zero. Almost none do, and
 /// `Ok(false)` reads exactly like `Ok(())` did for them; [`super::vocal`]'s escalation counter is
 /// the one place the distinction is the mechanism.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn play_kit_ext(
     kits: &mut SoundKits,
     assets: &WorldAssets,

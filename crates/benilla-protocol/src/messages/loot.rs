@@ -10,7 +10,7 @@
 
 use std::io;
 
-use crate::wire::{read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_u32_le, read_u64_le, read_u8};
 
 /// One item row on the normal shape of `SMSG_LOOT_RESPONSE` (vmangos `LootMgr.cpp:837-845` the
 /// `LootItem` write, wrapped by the slot index + trailing slot-type byte the caller appends around
@@ -377,7 +377,9 @@ pub(super) fn read_loot_all_passed(r: &mut &[u8]) -> io::Result<LootAllPassed> {
 /// and filters the list by loot-XP distance and `IsAllowedLooter` (`Group.cpp:914-940`).
 pub(super) fn read_loot_master_list(r: &mut &[u8]) -> io::Result<Vec<u64>> {
     let count = read_u8(r)?;
-    let mut candidates = Vec::with_capacity(count as usize);
+    // The candidates are group members (`Group.cpp:914-940`): vmangos `MAX_RAID_SIZE` 40
+    // (`Group/Group.h:50`).
+    let mut candidates = Vec::with_capacity(capacity_hint(count, 40));
     for _ in 0..count {
         candidates.push(read_u64_le(r)?);
     }
@@ -398,7 +400,9 @@ pub(super) fn read_loot_response(r: &mut &[u8]) -> io::Result<(u64, LootResponse
     }
     let gold = read_u32_le(r)?;
     let count = read_u8(r)?;
-    let mut items = Vec::with_capacity(count as usize);
+    // The loot view indexes both lists by one `u8`: `MAX_NR_LOOT_ITEMS` 16 + `MAX_NR_QUEST_ITEMS`
+    // 32 (vmangos `LootMgr.h:34,36`).
+    let mut items = Vec::with_capacity(capacity_hint(count, 16 + 32));
     for _ in 0..count {
         let slot = read_u8(r)?;
         let item_id = read_u32_le(r)?;

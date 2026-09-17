@@ -131,7 +131,6 @@ fn setup_wdl(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn stream_wdl(
     mut commands: Commands,
     streamer: Option<ResMut<WdlStreamer>>,

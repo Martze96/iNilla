@@ -105,7 +105,6 @@ impl Plugin for CloudsPlugin {
 /// incremental 32-row band scroll (or the frozen capture clock) — and re-upload the colored
 /// RGBA texels when they changed (the reference's per-regen `0x58ac70` upload of the `0x6cfb00`
 /// color buffer, Addendum A §3).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn tick_clouds(
     mut cov: ResMut<CloudCoverage>,
     light: Res<WowLighting>,

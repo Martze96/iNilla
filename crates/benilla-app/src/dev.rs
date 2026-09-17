@@ -34,6 +34,15 @@ pub(crate) fn print_scenario_names() {
     crate::capture::print_scenario_names();
 }
 
+/// `WOW_PROBE=list` — the probe fleet's environment registry (`capture::probe_env`): every
+/// `WOW_PROBE*` variable, whether it arms the un-occludable window, and `WOW_PROBE`'s own named
+/// values — printed before any window or asset setup. Answers nothing in a player build, which
+/// has no probes.
+pub(crate) fn print_probe_vars() {
+    #[cfg(feature = "dev")]
+    crate::capture::probe_env::print();
+}
+
 /// `WOW_HOVER_LOG_REPORT=<csv>` — re-read a recorded run and print its report, no window, no game.
 /// New analysis lands on runs already captured (see `hover_log`).
 pub(crate) fn report_recorded_hover_log(_path: &str) {
@@ -105,34 +114,26 @@ impl Plugin for DevProbesPlugin {
             // Any scripted probe keeps its window un-occludable: a fully covered macOS window drops to
             // ~1 fps drawables, and every probe schedule is wall-clock — a throttled run doesn't measure
             // slowly, it runs the wrong script (see `capture::ProbeFocusPlugin`, decision 0906).
+            // Which probe variables count is the registry's `wall_clock` column
+            // (`capture::probe_env::PROBE_VARS`), not a list kept here: this list was hand-kept
+            // and had drifted to ten of the twenty-five wall-clock variables when 2265 §A5 read
+            // it against the code, so a mail or auction probe ran covered. The four below are the
+            // non-probe instruments that schedule on the wall clock too.
             // (`WOW_LIVE_FPS` is in the list because an occluded SETTLE phase streams the world at ~1 fps
             // and under-warms the scene before sampling even starts — the assertion has to be live from
             // the first tick, not at the uncap.)
-            if [
-                "WOW_PROBE",
-                "WOW_PROBE_CHAT",
-                "WOW_PROBE_HOVER",
-                "WOW_PROBE_KEY",
-                "WOW_PROBE_LUA",
-                // The swim-pitch aim is a wall-clock timeline like every other probe schedule, and
-                // it is the one script that can be a run's *only* actuator (a drifting swimmer
-                // needs no keys) — so it arms the occlusion defence on its own.
-                "WOW_PROBE_PITCH",
-                "WOW_PROBE_CHEST",
-                "WOW_PROBE_CLAM",
-                "WOW_PROBE_VENDOR_SWAP",
-                "WOW_PROBE_MODEL_CAMERA",
-                "WOW_RIG",
-                "WOW_LIVE_FPS",
-                // A screenshot burst and a pick burst are wall-clock schedules too, and on an
-                // occluded window they capture the same stale drawable over and over: a whole
-                // day of lamppost A/Bs on the Air read identical to the decimal because every
-                // frame in every burst was one frame (the halo record).
-                "WOW_LIVE_SHOT",
-                "WOW_PICK",
-            ]
-            .iter()
-            .any(|k| std::env::var(k).is_ok())
+            if crate::capture::probe_env::wall_clock_vars()
+                .chain([
+                    "WOW_RIG",
+                    "WOW_LIVE_FPS",
+                    // A screenshot burst and a pick burst are wall-clock schedules too, and on an
+                    // occluded window they capture the same stale drawable over and over: a whole
+                    // day of lamppost A/Bs on the Air read identical to the decimal because every
+                    // frame in every burst was one frame (the halo record).
+                    "WOW_LIVE_SHOT",
+                    "WOW_PICK",
+                ])
+                .any(|k| std::env::var(k).is_ok())
             {
                 app.add_plugins(crate::capture::ProbeFocusPlugin);
             }

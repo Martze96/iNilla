@@ -40,7 +40,6 @@ pub(super) fn invalidate_player(guid: u64, names: &mut NameCache) {
 /// `SMSG_CREATURE_QUERY_RESPONSE` — the template's name plus the hover line's fields. A `None` name
 /// is the server's "no such entry", cached as such so the ask never repeats; the remaining fields
 /// then carry their miss defaults.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn creature_name(
     entry: u32,
     name: Option<String>,

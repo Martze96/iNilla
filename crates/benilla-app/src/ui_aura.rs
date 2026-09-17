@@ -522,7 +522,6 @@ fn tracking_state_of(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_auras(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,

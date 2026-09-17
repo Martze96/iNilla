@@ -141,7 +141,6 @@ pub(super) struct LastPuff(EntityHashMap<f32>);
 ///
 /// A unit seen for the first time has no [`BreathEnv`] and is classified at once, so a unit that
 /// streams in inside a cold zone breathes on its next idle loop rather than up to 10 s later.
-#[allow(clippy::too_many_arguments)] // one system's full input set
 pub(super) fn classify_breath(
     mut commands: Commands,
     time: Res<Time>,
@@ -184,7 +183,6 @@ pub(super) fn classify_breath(
 /// off the mount — so the **puff goes on the event's own entity** (its mouth), while the unit
 /// state the ladder reads (drunk, the environment) comes from the composite's **root**, exactly
 /// as the footfall visuals split them.
-#[allow(clippy::too_many_arguments)] // one system's full input set
 pub(super) fn fire_breath(
     mut events: MessageReader<AnimSoundEvent>,
     time: Res<Time>,

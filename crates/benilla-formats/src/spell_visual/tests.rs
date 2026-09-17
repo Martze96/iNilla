@@ -27,7 +27,6 @@ fn u32le(v: u32) -> [u8; 4] {
 
 /// One `SpellVisual` row: id, the five stage kits, then the missile block — field 7 (model
 /// effect id) and field 9 (dest-attach ordinal) live, the rest zeroed to fill 16 fields.
-#[allow(clippy::too_many_arguments)]
 fn spell_visual_row(
     id: u32,
     precast: u32,

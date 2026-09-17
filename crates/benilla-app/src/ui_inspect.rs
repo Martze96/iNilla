@@ -155,7 +155,6 @@ fn inspect_slot_view(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_inspect(
     script: Option<NonSendMut<UiScript>>,
     mut target: ResMut<InspectTarget>,

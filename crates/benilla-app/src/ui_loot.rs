@@ -372,7 +372,7 @@ impl LootState {
 
     /// The guid of the loot source whose window is open (`None` = closed). Read by the GameObject
     /// lid-close watcher ([`crate::go_anim`]) to close a chest's lid when its loot window closes
-    /// (decision 0250) — the faithful client-authoritative close, any path (player close or the
+    /// (decision 2271) — the faithful client-authoritative close, any path (player close or the
     /// server's release on the last item).
     pub(crate) fn source(&self) -> Option<u64> {
         self.source
@@ -943,7 +943,6 @@ fn drain_receives(
 /// Push the current loot into the VM and fire open/update/close on a transition (or a content change
 /// — an async name landing, a removed row, the coin clearing). Also routes refusals + receive lines
 /// into the chat window. Diffed against a `Local` memory, exactly like the merchant/gossip feeds.
-#[allow(clippy::too_many_arguments)]
 fn feed_loot(
     script: Option<NonSendMut<UiScript>>,
     mut loot: ResMut<LootState>,
@@ -1164,7 +1163,6 @@ fn close_on_move_start(
 /// `CLootButton`'s arm) and `LootSlot` is the LOOT_BIND confirmation continuation (`flag == 1`,
 /// which sends only for the pending slot). Keeping them apart is what makes a second click on a
 /// bind-on-pickup row re-raise the confirm instead of looting behind it.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn drain_loot(
     script: Option<NonSendMut<UiScript>>,
     mut loot: ResMut<LootState>,

@@ -619,7 +619,7 @@ impl Plugin for TerrainPlugin {
 /// register its doodad/WMO placements. The desired square is gated on the map's WDT `MAIN` grid
 /// (decision 0476): a tile the map doesn't author is never requested — no NotFound error spam on
 /// open-ocean crossings, and the loading screen's ready/total counts only tiles that can exist.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // the bundled asset_stores tuple
+#[allow(clippy::type_complexity)] // the bundled asset_stores tuple
 fn stream_terrain(
     mut commands: Commands,
     mut state: ResMut<TerrainStreamer>,

@@ -49,7 +49,6 @@ fn load_sheathe_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sheathe_sounds(
     mut swaps: MessageReader<SheathSwapMessage>,
     units: Query<(&Transform, &Wielded), With<NetEntity>>,

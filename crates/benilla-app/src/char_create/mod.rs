@@ -379,7 +379,6 @@ fn class_file(class: u8) -> &'static str {
 /// Its own resource rather than a [`CreateSelection`] field on purpose: ticking it there would trip
 /// that resource's change detection every frame and defeat `refresh_dynamic`'s `is_changed` gate,
 /// re-running the whole dial/panel/icon refresh 60× a second.
-#[allow(clippy::too_many_arguments)]
 fn create_input(
     buttons: Query<(Entity, &CreateAction)>,
     clicks: Res<crate::glue::GlueClicks>,

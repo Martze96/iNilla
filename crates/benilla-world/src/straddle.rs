@@ -283,7 +283,6 @@ type BandRoot<'a> = (
 /// Update, after the submersion verdict and before `classify_water_side` — the auto-inserted
 /// sync point between them lands a first-time `ModelWaterBand` before the classifier looks, so
 /// the clip and the twin set flip on the same frame.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn band_instances(
     interleave: WaterInterleave,
     mut clips: ResMut<WaterClips>,

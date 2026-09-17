@@ -4,7 +4,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_u32_le, read_u8};
+use crate::wire::{capacity_hint, read_u32_le, read_u8};
 
 /// `SMSG_BATTLEFIELD_STATUS`, one slot's update (VERIFIED at the bytes, handler `0x4aa850`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +111,7 @@ pub(super) fn read_pvp_log_data(r: &mut impl Read) -> io::Result<PvpLogData> {
     let ended = read_u8(r)? != 0;
     let winner = if ended { Some(read_u8(r)?) } else { None };
     let count = read_u32_le(r)?;
-    let mut rows = Vec::with_capacity(count.min(80) as usize);
+    let mut rows = Vec::with_capacity(capacity_hint(count, 80));
     for _ in 0..count {
         let guid = crate::wire::read_u64_le(r)?;
         let rank = read_u32_le(r)?;
@@ -120,7 +120,7 @@ pub(super) fn read_pvp_log_data(r: &mut impl Read) -> io::Result<PvpLogData> {
         let deaths = read_u32_le(r)?;
         let honor_gained = read_u32_le(r)?;
         let stat_count = read_u32_le(r)?;
-        let mut stats = Vec::with_capacity(stat_count.min(8) as usize);
+        let mut stats = Vec::with_capacity(capacity_hint(stat_count, 8));
         for i in 0..stat_count {
             let v = read_u32_le(r)?;
             if i < 8 {
@@ -173,7 +173,7 @@ pub(super) fn read_battlefield_list(r: &mut impl Read) -> io::Result<Battlefield
     let map_id = read_u32_le(r)?;
     let bracket = read_u8(r)?;
     let count = read_u32_le(r)?;
-    let mut instances = Vec::with_capacity(count.min(64) as usize);
+    let mut instances = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         instances.push(read_u32_le(r)?);
     }
@@ -212,7 +212,7 @@ pub const BATTLEFIELD_POSITIONS_MAX: usize = 40;
 /// triple only when that byte is non-zero.
 pub(super) fn read_battlefield_positions(r: &mut impl Read) -> io::Result<BattlefieldPositions> {
     let count = read_u32_le(r)?;
-    let mut players = Vec::with_capacity((count as usize).min(BATTLEFIELD_POSITIONS_MAX));
+    let mut players = Vec::with_capacity(capacity_hint(count, BATTLEFIELD_POSITIONS_MAX));
     for i in 0..count {
         let guid = crate::wire::read_u64_le(r)?;
         let x = crate::wire::read_f32_le(r)?;

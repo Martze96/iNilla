@@ -88,7 +88,7 @@ struct DialogUi;
 /// Okay (enabled only while the typed text matches) sends the delete; Cancel/Esc close; Enter
 /// confirms when armed. Runs before the list refresh so a successful delete's roster update
 /// repaints the same frame it lands.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn drive_delete_dialog(
     mut commands: Commands,
     mut dialog: ResMut<DeleteDialog>,

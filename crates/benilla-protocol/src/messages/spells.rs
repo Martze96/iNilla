@@ -24,7 +24,8 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    read_cstring, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8, Vector3d,
+    capacity_hint, read_cstring, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
+    Vector3d,
 };
 
 /// `SMSG_CAST_RESULT`'s verdict: `u32 spellId, u8 status` — status `0` (`SPELL_RESULT_STATUS_OKAY`)
@@ -106,7 +107,7 @@ pub struct SpellCastTargets {
     pub mask: u16,
     pub unit_target: Option<u64>,
     /// The GameObject this cast targets (`TARGET_FLAG_GAMEOBJECT`) — an open-lock cast on a chest / locked
-    /// door rides here. Surfaced for the GO lid/door open animation (decision 0250); a unit spell leaves
+    /// door rides here. Surfaced for the GO lid/door open animation (decision 2271); a unit spell leaves
     /// it `None`. Mutually exclusive with `unit_target` in practice (the writer emits one guid).
     pub go_target: Option<u64>,
     pub dest: Option<Vector3d>,
@@ -242,13 +243,15 @@ pub(super) fn read_spell_go(r: &mut impl Read) -> io::Result<SpellGo> {
     let spell_id = read_u32_le(r)?;
     let cast_flags = read_u16_le(r)?;
 
+    // Both counts are `u8` placeholders the server writes back over (`Spell.cpp:4607-4609`);
+    // no tighter bound exists.
     let hit_count = read_u8(r)?;
-    let mut hits = Vec::with_capacity(hit_count as usize);
+    let mut hits = Vec::with_capacity(capacity_hint(hit_count, usize::from(u8::MAX)));
     for _ in 0..hit_count {
         hits.push(read_u64_le(r)?); // raw guid (Spell.cpp:4627,4635) — the hit list is never packed
     }
     let miss_count = read_u8(r)?;
-    let mut misses = Vec::with_capacity(miss_count as usize);
+    let mut misses = Vec::with_capacity(capacity_hint(miss_count, usize::from(u8::MAX)));
     for _ in 0..miss_count {
         let guid = read_u64_le(r)?;
         let reason = read_u8(r)?;

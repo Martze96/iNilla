@@ -249,7 +249,6 @@ struct Preflight {
 }
 
 /// Wait for the self descriptor after each world entry, then print the banner once.
-#[allow(clippy::too_many_arguments)]
 fn report_session(
     mut state: ResMut<Preflight>,
     mut entered: MessageReader<EnteredWorldMessage>,

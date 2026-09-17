@@ -126,7 +126,7 @@ fn burst_path(out: &str, index: u32, count: u32) -> String {
 /// filter instead of the scene. That cost a whole B38 session: eight bursts and three retracted
 /// mechanisms measured on a corpse, because the images still looked like a plausible frame. A loud
 /// no-op is worth far more than a burst that has to be recognised as garbage after the fact.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn fire_live_shot(
     mut shot: ResMut<LiveShot>,
     time: ProbeClock,

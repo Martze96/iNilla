@@ -1,8 +1,8 @@
-//! GameObject open/close animation (decision 0242; chest lid folded in by 0250) — a **client-side**
+//! GameObject open/close animation (decision 0242; chest lid folded in by 2271) — a **client-side**
 //! `GAMEOBJECT_STATE` drives a skeletal M2 sequence, so a **door** swings, a **button** depresses, and a
 //! **chest lid** opens/closes on its §243 state machine.
 //!
-//! **The model (0250, §5-VERIFIED):** the real client keeps *one* stored state per GameObject (the
+//! **The model (2271, §5-VERIFIED):** the real client keeps *one* stored state per GameObject (the
 //! binary's `go+0x27c`) and *one* `SetGoState` that all callers funnel through; a change of that state
 //! plays the §243 transition. benilla mirrors that exactly — [`GoAnim::state`] is the single source of
 //! truth, written by the **three callers** the RE census pinned:
@@ -88,7 +88,7 @@ const GO_STATE_READY: u32 = 1;
 /// object plays this once and *then* goes away; see [`DespawnAnimAnnounced`].
 const ANIM_DESPAWN: u16 = 157;
 
-/// Marker + client-side state for an animated GameObject (decisions 0242/0250). Instanced by
+/// Marker + client-side state for an animated GameObject (decisions 0242/2271). Instanced by
 /// [`crate::entities::attach`] on an animatable GO type whose model authors sequences; driven by
 /// [`drive_go_anim`]. Distinct from creatures' `AnimDriver` so the two drivers never touch one entity.
 #[derive(Component, Default)]
@@ -304,7 +304,7 @@ fn collider_is_solid(wire_state: Option<u32>) -> bool {
 }
 
 /// A cast launched at a GameObject (`SMSG_SPELL_GO` carrying a `TARGET_FLAG_GAMEOBJECT`), bridged from the
-/// net apply layer to this module (decision 0250). [`open_go_lid`] opens the target's lid/door iff the
+/// net apply layer to this module (decision 2271). [`open_go_lid`] opens the target's lid/door iff the
 /// spell carries an open-lock effect and the GO is an animated type — the client's `Spell_C` open path.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct GoLidOpen {
@@ -1784,7 +1784,7 @@ mod tests {
 
     #[test]
     fn chest_animates_but_keeps_its_collider() {
-        // A chest (3) is on the animation machine (0250) but off the collision gate (0249): you see the
+        // A chest (3) is on the animation machine (2271) but off the collision gate (0249): you see the
         // lid move, but you never walk through an open chest.
         assert!(go_animates(3));
         assert!(!collision_follows_state(3));

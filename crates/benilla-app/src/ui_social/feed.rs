@@ -60,7 +60,6 @@ pub(super) struct FedSocial {
 
 /// Build the display snapshot, push it to the VM, fire the list events, and drain the owed
 /// result lines.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_social(
     script: Option<NonSendMut<UiScript>>,
     mut social: ResMut<SocialState>,

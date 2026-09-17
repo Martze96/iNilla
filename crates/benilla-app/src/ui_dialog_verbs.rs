@@ -705,7 +705,7 @@ impl Plugin for UiDialogVerbsPlugin {
                     // packet, and the boot VM exists at the glue screen too.
                     meeting_stone_enter_world
                         .before(feed_meeting_stone)
-                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                        .in_set(crate::char_select::InWorldGated),
                     feed_meeting_stone.before(UiInput),
                     drain_latch_verbs.after(UiInput),
                     drain_queue_verbs.after(UiInput),

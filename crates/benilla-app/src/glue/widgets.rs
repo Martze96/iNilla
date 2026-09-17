@@ -162,7 +162,6 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
 /// Every *other* wrapped glue string in the shipped XML sets `justifyH="LEFT"` explicitly
 /// (`CharacterCreate.xml`'s race/class/faction bodies, `AddonList.xml`'s title/notes/deps), which
 /// is why [`outlined_text`] stays left and this is the exception rather than the default.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn outlined_text_centered<W: Bundle, T: Bundle>(
     parent: &mut ChildSpawnerCommands,
     node: Node,
@@ -257,7 +256,6 @@ pub(crate) fn markup_spans(text: &str, base: Color, wrap: bool) -> Vec<(String, 
 ///
 /// **Private**: [`outlined_text`] is the one door in, so no caller can hand-build spans and skip
 /// the markup decode (B273's shape — see [`markup_spans`]).
-#[allow(clippy::too_many_arguments)]
 fn outlined_spans<W: Bundle, T: Bundle>(
     parent: &mut ChildSpawnerCommands,
     node: Node,
@@ -355,7 +353,6 @@ fn outlined_spans<W: Bundle, T: Bundle>(
 /// visual), and the name label along the bottom (the ref's `HighlightText`, `GlueFontNormalSmall`,
 /// anchored BOTTOM +1 — over the icon's bottom edge). `dyn_icon`/`label_dyn` are the screen's
 /// refresh markers, spawned onto the face / real label text.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
@@ -712,7 +709,6 @@ pub(crate) fn paint_glue_field<'a>(
 /// onto all five row items ([`GlueFieldPart`]) so the screen's refresh can query them as a set and
 /// hand them to [`paint_glue_field`]. Plain-fill fallback without art. Focus and typing are the
 /// owning screen's systems — this is chrome only, so the screens' boxes can never fork.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
     parent: &mut ChildSpawnerCommands,
     art: &GlueArt,
@@ -821,7 +817,6 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
 /// Returns the button's entity, so a screen can reach back into what it just built — the login
 /// screen marks its realmlist button [`GlueDisabled`] when `$WOW_HOST` owns the session (1667).
 /// Ignoring the return is the norm; nothing is `#[must_use]`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn glue_button<A: Component>(
     parent: &mut ChildSpawnerCommands,
     art: &GlueArt,

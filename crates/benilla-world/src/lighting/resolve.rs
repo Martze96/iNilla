@@ -211,7 +211,6 @@ fn hsv_value_scale(c: [f32; 3], f: f32) -> [f32; 3] {
     [c[0] * f, c[1] * f, c[2] * f]
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn update_time_lighting(
     world_time: Res<super::WorldTime>,
     sampler: Option<Res<LightSampler>>,

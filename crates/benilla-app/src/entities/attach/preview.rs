@@ -159,7 +159,6 @@ pub(in crate::entities) struct PreviewCtx<'a, 'w> {
 /// entity-visuals chain (after `update_display_models` has built the body model from the
 /// want-list), so a fresh look's models are ready within a frame or two; until then it leaves the
 /// bake untouched and retries. A bare yaw change never reaches here (the booth handles it).
-#[allow(clippy::too_many_arguments)]
 pub(in crate::entities) fn build_glue_preview(
     preview: Res<GluePreview>,
     mut bake: ResMut<GluePreviewBake>,
@@ -351,7 +350,6 @@ pub(in crate::entities) fn build_glue_preview(
 /// plus the tried-on substitutions. The body display is the player's own, so it is already built
 /// (they are standing in the world); an ITEM model still has to load, which is what the retry latch
 /// is for.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::entities) fn build_dressup_preview(
     preview: Res<DressUpPreview>,
     mut bake: ResMut<DressUpBake>,

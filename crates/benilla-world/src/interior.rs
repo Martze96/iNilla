@@ -470,7 +470,7 @@ pub struct BakeState {
 /// The walk is over ANCHORS, not parts (0734): a settled anchor is one distance compare, whatever
 /// its part count, and parts are written only when their anchor's law changes (or through the
 /// [`InteriorReauthor`] drain — a fresh part, a fade latch, the zoom feather's release).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub fn classify_entity_interior(
     mut commands: Commands,
     time: Res<Time>,
@@ -947,7 +947,6 @@ fn attach_anchor(
 /// stuck-black-unit bug; the fade-latch reauthor is the other half). The slot component lives on
 /// the ANCHOR — its on-remove hook frees the slot on despawn; law transitions remove/insert it
 /// here.
-#[allow(clippy::too_many_arguments)]
 fn resolve_anchor_law(
     commands: &mut Commands,
     probes: &mut PropProbes,

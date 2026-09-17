@@ -32,9 +32,11 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // (`crate::shaders`, `benilla_app::shaders`, `benilla_assets::materials`) and addressed
         // `embedded://<crate>/shaders/…`, so nothing reaches for a file root at all and 1171's
         // engine/game line survives as the crate each shader is embedded from.
-        // Quiet wgpu/naga; our own crates stay at info.
+        // Quiet wgpu/naga; our own crates stay at info. The ring keeps the last lines of what
+        // stderr shows for the crash report (`log_ring`; decision 2266 §B2).
         .set(bevy::log::LogPlugin {
             filter: "wgpu=error,naga=warn".into(),
+            custom_layer: |_| Some(Box::new(crate::log_ring::LogRing)),
             ..default()
         })
         // Asset streaming is this client's load bottleneck: every M2/WMO/BLP read decompresses from

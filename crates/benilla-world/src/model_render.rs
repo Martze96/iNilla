@@ -220,7 +220,6 @@ pub type MaterialCache = benilla_assets::SpatialCache<MatKey, Handle<WowModelMat
 /// test at all. The source blend is what sets [`TWIN_CUTOUT_MARKER`] right (decision 0842: a twin
 /// built as `Blend` cut every texel under 224/255 out of a stealthed Opaque batch, which erased
 /// Gressil's blade body and left only its high-alpha rune pattern).
-#[allow(clippy::too_many_arguments)]
 pub fn model_material(
     cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
@@ -830,7 +829,7 @@ pub struct FarSideOfWater;
 /// walking regime's continuous despawn stream costs ~0.5 full walks/s instead of 12–22.
 const GC_DEADLINE_SECS: f32 = 2.0;
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn classify_water_side(
     interleave: crate::particles::WaterInterleave,
     mut twins: ResMut<FarSideTwins>,

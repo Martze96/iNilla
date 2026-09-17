@@ -229,7 +229,6 @@ fn god_verdict(text: &str) -> Option<bool> {
 
 /// Arm the shield on every world entry, confirm it against the server's own answer, and put it
 /// back up whenever something drops it.
-#[allow(clippy::too_many_arguments)]
 fn drive_shield(
     mut shield: ResMut<ProbeShield>,
     mut entered: MessageReader<EnteredWorldMessage>,

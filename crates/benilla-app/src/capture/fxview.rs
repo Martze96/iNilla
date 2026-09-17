@@ -29,7 +29,6 @@ const FXVIEW_GO_GUID: u64 = (0xF110u64 << 48) | 0xFC0FEE;
 /// through the same [`attach_effect_visuals`] body the game uses, and (for missiles) fly the
 /// root along its facing so trails extend. Inert outside fxview captures (the request resource
 /// only exists then).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_fx_view(
     req: Option<Res<FxViewRequest>>,
     state: Option<ResMut<FxViewState>>,

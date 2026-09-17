@@ -30,7 +30,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_u32_le, read_u64_le, read_u8};
 
 /// `SMSG_FRIEND_STATUS`'s result byte — vmangos's `FriendsResult` (`SocialMgr.h:81-110`), which is
 /// the client's own enum: `FriendList::HandleResult 0x5acab0` switches on it and displays
@@ -130,7 +130,8 @@ impl FriendEntry {
 /// an online one 21.
 pub fn read_friend_list(r: &mut impl Read) -> io::Result<Vec<FriendEntry>> {
     let count = read_u8(r)?;
-    let mut friends = Vec::with_capacity(count as usize);
+    // vmangos `SOCIALMGR_FRIEND_LIMIT` 50 (`SocialMgr.h:114`).
+    let mut friends = Vec::with_capacity(capacity_hint(count, 50));
     for _ in 0..count {
         let mut entry = FriendEntry {
             guid: read_u64_le(r)?,
@@ -254,7 +255,7 @@ pub struct WhoResults {
 pub fn read_who(r: &mut impl Read) -> io::Result<WhoResults> {
     let displayed = read_u32_le(r)?;
     let total = read_u32_le(r)?;
-    let mut entries = Vec::with_capacity(displayed.min(64) as usize);
+    let mut entries = Vec::with_capacity(capacity_hint(displayed, 64));
     for _ in 0..displayed {
         entries.push(WhoEntry {
             name: read_cstring(r)?,

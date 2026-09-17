@@ -87,7 +87,6 @@ impl MessageSounds {
 }
 
 /// Drain [`MessageSounds`]: cue by name, or speech by line (module doc).
-#[allow(clippy::too_many_arguments)]
 fn play_message_sounds(
     mut queue: ResMut<MessageSounds>,
     mut speech: ResMut<VocalSpeech>,

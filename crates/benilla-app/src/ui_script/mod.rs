@@ -488,7 +488,7 @@ impl Plugin for UiScriptPlugin {
                 Update,
                 (
                     extract::tick_script,
-                    input::feed_ui_input.run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    input::feed_ui_input.in_set(crate::char_select::InWorldGated),
                 )
                     .chain()
                     .in_set(UiInput)

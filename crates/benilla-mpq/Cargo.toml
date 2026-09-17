@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Read-only MPQ archive reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Bounds-checked byte readers + the allocation-cap guard (decision 0064). MPQ migrates minimally: the
 # hand-rolled rd_u16/rd_u32 move to ByteExt and the header/block-table/sector allocations get capped;

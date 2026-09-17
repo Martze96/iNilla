@@ -394,7 +394,6 @@ pub(crate) fn spawn_dialog(
 ///
 /// Runs inside each glue screen's own system chain (again: the header says why it cannot be
 /// hoisted out with an ordering pair).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_glue_dialog(
     mut commands: Commands,
     mut dialog: ResMut<GlueDialog>,

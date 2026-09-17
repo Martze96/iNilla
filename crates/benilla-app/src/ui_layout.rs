@@ -339,7 +339,7 @@ impl Plugin for UiLayoutPlugin {
             Update,
             (load_layout, watch_layout, save_layout)
                 .chain()
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         );
     }
 }

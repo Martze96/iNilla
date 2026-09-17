@@ -8,7 +8,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_u32_le, read_u64_le, read_u8};
 
 /// One trainer service (`SMSG_TRAINER_LIST`, vmangos `SendTrainerSpellHelper`,
 /// `NPCHandler.cpp:97-139`) — a spell or tradeskill step the trainer can teach. The 38-byte wire
@@ -96,7 +96,9 @@ pub(super) fn read_trainer_list(
     let trainer = read_u64_le(r)?;
     let trainer_type = read_u32_le(r)?;
     let count = read_u32_le(r)?;
-    let mut services = Vec::with_capacity(count as usize);
+    // No protocol bound: the list is every spell the trainer's template carries (vmangos
+    // `NPCHandler.cpp:170` sums its two lists). 1024 is far past any real trainer.
+    let mut services = Vec::with_capacity(capacity_hint(count, 1024));
     for _ in 0..count {
         // Struct-literal fields evaluate top-to-bottom, so this reads in wire order.
         services.push(TrainerSpell {

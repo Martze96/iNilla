@@ -172,7 +172,7 @@ pub(crate) struct DressKey {
 /// descriptor changed, its key changed, or a global input moved — the [`Items`] epochs (an
 /// object ingest covers the quiver bag walk, a landed template answers every pending ask) and
 /// the two client-data load edges. The idle crowd costs one tick check and one small compare.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(in crate::entities) fn resolve_equipment(
     mut commands: Commands,
     units: Query<(

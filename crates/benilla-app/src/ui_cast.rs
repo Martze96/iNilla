@@ -426,7 +426,6 @@ pub(crate) struct LocalMoveStart(pub(crate) bool);
 /// ~1.9 s in the reference bottle (whose `Config.wtf` caps `maxfps` at 30, and the ref steps
 /// alpha PER TICK), the director's observed "2–3 s"; our transcription normalizes those steps
 /// to the same 30 Hz reference tick so the tail matches at any render rate (`CastingBar.xml`).
-#[allow(clippy::too_many_arguments)] // one resolution's full input set (the reap needs the ECS half)
 fn local_self_cancel(
     script: Option<NonSendMut<UiScript>>,
     mut moved: ResMut<LocalMoveStart>,
@@ -605,7 +604,6 @@ fn cast_bar_label(spells: Option<&crate::ui_action::Spells>, id: u32) -> String 
 /// queued strike makes `IsCasting` true in the reference, so `SpellStopCasting()` returns `1` and
 /// `ToggleGameMenu`'s ladder never reaches `ClearTarget()` (`UIParent.lua` l.1489 vs l.1492).
 /// Reading only the ordinary-cast half here is what dropped the target on the first Esc.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn feed_cast_bar(
     script: Option<NonSendMut<UiScript>>,
     mut feed: ResMut<CastBarFeed>,

@@ -837,7 +837,7 @@ pub(super) fn sync_glue_ffx(
 /// seat the character on the stage spot, and hold the booth camera on the scene's authored camera 0
 /// — every frame, so the per-bake body framing from [`sync_glue_booth`] never wins while a scene
 /// shows. Leaving the screen (`look: None`) tears the scene down and restores the square target.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn sync_glue_scene(
     mut commands: Commands,
     preview: Res<GluePreview>,
@@ -1318,7 +1318,6 @@ fn resize_target(images: &mut Assets<Image>, target: &Handle<Image>, w: u32, h: 
 /// the select screen's hardcoded weather-sun is the in-flight §5's to settle, decision 0465 §5),
 /// the studio buffer otherwise — pose a fresh Stand-**looping** instance with the riders on its
 /// joints, and frame it full-body.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_glue_booth(
     mut commands: Commands,
     preview: Res<GluePreview>,
@@ -1643,7 +1642,6 @@ pub(super) fn sync_glue_booth(
 /// **Not yaw-driven.** Dragging the character spins the character: the reference's facing call
 /// (`0x4730e0`) writes the character component's model transform and nothing else, and both scene
 /// attachments are parentless unkeyed pivots, so the pet keeps the seat's own orientation.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_glue_pet(
     mut commands: Commands,
     pet: Res<GluePetBake>,

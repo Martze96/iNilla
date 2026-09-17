@@ -39,7 +39,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
 
 /// A guild always has at least this many ranks — vmangos `GUILD_RANKS_MIN_COUNT` (`Guild/Guild.h:31`);
 /// the five defaults are GM / Officer / Veteran / Member / Initiate ([`guild_default_rank`]).
@@ -493,12 +493,12 @@ pub(super) fn read_guild_roster(r: &mut impl Read) -> io::Result<GuildRoster> {
     let info = read_cstring(r)?;
 
     let rank_count = read_u32_le(r)?;
-    let mut rank_rights = Vec::with_capacity((rank_count as usize).min(GUILD_RANKS_MAX_COUNT));
+    let mut rank_rights = Vec::with_capacity(capacity_hint(rank_count, GUILD_RANKS_MAX_COUNT));
     for _ in 0..rank_count {
         rank_rights.push(read_u32_le(r)?);
     }
 
-    let mut members = Vec::with_capacity((member_count as usize).min(ROSTER_CAPACITY_HINT_CAP));
+    let mut members = Vec::with_capacity(capacity_hint(member_count, ROSTER_CAPACITY_HINT_CAP));
     for _ in 0..member_count {
         let mut member = GuildRosterMember {
             guid: read_u64_le(r)?,
@@ -566,7 +566,9 @@ pub struct GuildEventNotice {
 pub(super) fn read_guild_event(r: &mut impl Read) -> io::Result<GuildEventNotice> {
     let event = read_u8(r)?;
     let param_count = read_u8(r)?;
-    let mut params = Vec::with_capacity(param_count as usize);
+    // No protocol bound (`Server/Packets/Guild.h:222`, a vector); the events carry one to three
+    // strings, so 16 is generous.
+    let mut params = Vec::with_capacity(capacity_hint(param_count, 16));
     for _ in 0..param_count {
         params.push(read_cstring(r)?);
     }

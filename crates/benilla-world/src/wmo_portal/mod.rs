@@ -366,7 +366,6 @@ const MAX_FLOOR_DROP: f32 = 1760.0;
 
 /// Recompute each resident WMO's per-group visible set from the camera. Cheap: a handful of buildings,
 /// each a small portal flood; a portal-less prop just stays all-visible.
-#[allow(clippy::too_many_arguments)] // a Bevy system: each arg is a distinct resource/query
 fn compute_wmo_pvs(
     wmos: Res<Assets<WmoModel>>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,

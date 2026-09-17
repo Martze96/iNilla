@@ -556,7 +556,6 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
-    #[allow(clippy::too_many_arguments)]
     fn entry(
         skill_id: u32,
         name: &str,

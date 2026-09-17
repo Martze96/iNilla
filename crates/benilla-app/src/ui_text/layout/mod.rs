@@ -201,7 +201,6 @@ pub(crate) struct LinkSpan {
 /// line block vertically (default `Middle`, the client's FontString default; degenerate zero-height
 /// rects keep top). Each line is measured once (a first pass laying glyphs at a zero line-origin),
 /// then shifted by the justification offset.
-#[allow(clippy::too_many_arguments)] // the shared layout context, plus the seat
 pub(crate) fn layout_text_quads(
     e: &mut TextEngine,
     text: &str,
@@ -218,7 +217,6 @@ pub(crate) fn layout_text_quads(
 /// [`layout_text_quads`] that also collects the laid-out [`LinkSpan`]s — the message-frame path
 /// (chat lines carry `|H` item/player links; the app feeds the spans back to the engine's click
 /// hit-test, `benilla_ui::script::UiScript::set_link_spans`).
-#[allow(clippy::too_many_arguments)] // the shared layout context, plus one out-param
 pub(crate) fn layout_text_quads_links(
     e: &mut TextEngine,
     text: &str,
@@ -243,7 +241,6 @@ pub(crate) fn layout_text_quads_links(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // the public pair above is the real surface; this is their body
 fn layout_text_quads_inner(
     e: &mut TextEngine,
     text: &str,

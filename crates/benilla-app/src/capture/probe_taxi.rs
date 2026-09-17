@@ -145,7 +145,7 @@ fn load_expectations(mut probe: ResMut<TaxiProbe>, world_assets: Option<Res<Worl
 }
 
 // One Bevy system's full input set (the crossing-probe shape) + its self query tuple.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn taxi_probe(
     time: ProbeClock,
     mut probe: ResMut<TaxiProbe>,

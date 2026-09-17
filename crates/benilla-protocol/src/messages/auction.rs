@@ -20,7 +20,7 @@
 
 use std::io;
 
-use crate::wire::{read_i32_le, read_u32_le, read_u64_le};
+use crate::wire::{capacity_hint, read_i32_le, read_u32_le, read_u64_le};
 
 /// `SMSG_AUCTION_COMMAND_RESULT`'s `action` field — which verb the verdict answers (VERIFIED
 /// vmangos `AuctionHouseMgr.h:53-58`, `AuctionAction`).
@@ -276,7 +276,6 @@ pub fn auction_remove_item(auctioneer: u64, auction_id: u32) -> Vec<u8> {
 /// `level_min`/`level_max` gate `RequiredLevel`, not item level. The name match is a
 /// case-insensitive substring against the localized name *with the random-property suffix
 /// appended*. `list_from` pages by [`AUCTION_PAGE_SIZE`].
-#[allow(clippy::too_many_arguments)]
 pub fn auction_list_items(
     auctioneer: u64,
     list_from: u32,
@@ -398,7 +397,7 @@ pub(super) fn read_auction_list_result(r: &mut &[u8]) -> io::Result<(Vec<Auction
     let count = read_u32_le(r)?;
     // Bound the allocation by what the buffer could actually hold, not by a `count` we do not
     // trust (see the loop guard below).
-    let mut auctions = Vec::with_capacity((count as usize).min(r.len() / AUCTION_RECORD_BYTES));
+    let mut auctions = Vec::with_capacity(capacity_hint(count, r.len() / AUCTION_RECORD_BYTES));
     for _ in 0..count {
         // `count` is an UPPER BOUND, not a record count. vmangos's *browse fast
         // path* (the no-filter branch of `BuildListAuctionItems`, `AuctionHouseMgr.cpp:716-735`)

@@ -106,7 +106,7 @@ fn control_verdict(mover: u64, allow_move: bool, self_guid: Option<u64>) -> Cont
 /// snap target).
 // One system phase's full input set (the spawner precedent); the transports query type is
 // `control`'s own param shape passed through.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn apply_server_moves(
     time: &Time,
     commands: &mut Commands,

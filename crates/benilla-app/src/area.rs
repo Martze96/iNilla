@@ -145,7 +145,6 @@ fn elect_event(cache: &ZoneCache, next: &ZoneSignal) -> Option<&'static str> {
 /// indoor override), the PvP tuple, write the host globals, then fire the elected zone event
 /// and — independently, like the client's second site — `MINIMAP_ZONE_CHANGED` when the
 /// subzone-else-zone line changed.
-#[allow(clippy::too_many_arguments)]
 fn feed_zone_events(
     script: Option<NonSendMut<UiScript>>,
     world: benilla_world::world_point::WorldPoint,

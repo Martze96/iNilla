@@ -411,7 +411,6 @@ fn time_left_bucket(ms: u32) -> u32 {
 /// row's full enchant/property/suffix tail (an auction row carries all three, so it gets the
 /// complete link rather than the zeroed one a bag slot settles for). `None`s stay `None` while a
 /// query is in flight — the row shows a placeholder and fills in when the answer lands.
-#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn resolve_row(
     entry: &AuctionListEntry,
     self_guid: Option<u64>,
@@ -507,7 +506,6 @@ pub(crate) fn categories(
 }
 
 /// Resolve + sort one list into its display rows.
-#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn rows_for(
     slot: &AuctionListSlot,
     self_guid: Option<u64>,
@@ -561,7 +559,6 @@ type AuctionCatalogs<'w> = (
 
 /// Push the current auction house into the VM and fire the show/close/list-update events on a
 /// transition or content change. Diffed against a `VmMemo`, exactly like the merchant/mail feeds.
-#[allow(clippy::too_many_arguments)] // one parameter per ask-once cache a row reads
 fn feed_auction(
     script: Option<NonSendMut<UiScript>>,
     mut auction: ResMut<AuctionOpen>,
@@ -726,7 +723,6 @@ fn feed_auction(
 }
 
 /// Drain the Lua intents into the auction `CMSG`s.
-#[allow(clippy::too_many_arguments)]
 fn drain_auction(
     script: Option<NonSendMut<UiScript>>,
     mut auction: ResMut<AuctionOpen>,

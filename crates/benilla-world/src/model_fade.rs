@@ -1153,7 +1153,6 @@ fn start_alpha(tag: Option<&MeshTag>) -> f32 {
 /// itself but has fadeable meshes beneath it). Every entity visited — parts, joints, attach roots,
 /// billboard anchors alike — is recorded in `walked`, which the caller uses to recognise the
 /// world-root billboard cards that follow this model.
-#[allow(clippy::too_many_arguments)]
 fn arm_despawn_descendants(
     entity: Entity,
     now: f32,

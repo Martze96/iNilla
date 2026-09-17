@@ -182,7 +182,6 @@ fn resolve(
 
 /// Play one line for `npc` at kit `kit_id` (0 = no such line → nothing), variation `variant`
 /// (`None` = free-pick), latch-gated on the unit's channel (`0x60c28c`) and tagged with the unit.
-#[allow(clippy::too_many_arguments)]
 fn play_line(
     npc: Entity,
     kit_id: u32,
@@ -221,7 +220,6 @@ fn play_line(
 }
 
 /// System 1 — the select greeting: drain [`NpcGreetingRequest`]s and play the cycling welcome.
-#[allow(clippy::too_many_arguments)]
 fn play_select_greetings(
     mut reqs: MessageReader<NpcGreetingRequest>,
     mut seq: Local<GreetSeq>,
@@ -279,7 +277,6 @@ fn play_select_greetings(
 
 /// System 2 — the interaction-window hello/goodbye: diff the active interaction NPC (the union of
 /// the open window sessions) and play hello on open/swap, goodbye on close-to-nothing.
-#[allow(clippy::too_many_arguments)]
 fn play_window_greetings(
     merchant: Res<MerchantOpen>,
     gossip: Res<GossipState>,

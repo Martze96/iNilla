@@ -283,7 +283,6 @@ use invoice::auction_mail;
 /// item-template cache + `ItemDisplayInfo.dbc`, the body from the cache, the stationery basename
 /// from `Stationery.dbc`. `None`s stay `None` while a query is in flight — the row shows a
 /// placeholder and fills in when the answer lands (the merchant/loot pattern).
-#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn resolve_row(
     entry: &MailListEntry,
     bodies: &HashMap<u32, String>,
@@ -482,7 +481,6 @@ fn stationeries(
     out.into_iter().map(|(_, v)| v).collect()
 }
 
-#[allow(clippy::too_many_arguments)] // mirrors `resolve_row`'s cache set
 fn snapshot(
     mail: &MailOpen,
     items: &mut Items,
@@ -531,7 +529,6 @@ struct MailFeedExtras<'w, 's> {
     stationeries: Local<'s, crate::ui_script::VmMemo<Vec<StationeryView>>>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_mail(
     script: Option<NonSendMut<UiScript>>,
     mut mail: ResMut<MailOpen>,

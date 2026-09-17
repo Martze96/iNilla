@@ -33,7 +33,6 @@ pub(super) struct FrameFlags {
 /// Build this frame's two flag words. `swim` is `Some((fwd, side))` exactly while swimming — the
 /// netted swim amounts that actually drove the mover, so a rooted or key-cancelled swimmer cannot
 /// stream a phantom direction.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn this_frame(
     player: &mut Player,
     axes: &input::MoveAxes,

@@ -447,7 +447,7 @@ fn error_name(error: u32) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 fn auction_probe(
     time: ProbeClock,
     mut probe: ResMut<AuctionProbe>,

@@ -102,7 +102,7 @@ fn census(instance: Res<bevy::render::renderer::RenderInstance>, shared: Res<Wgp
 /// multi-draw indirect, so a multidrawable batch set still draws bin by bin) plus one per
 /// unbatchable entity and per non-mesh item; a sorted phase issues one per item whose batch
 /// range survived batching (a merged item's range is emptied into its predecessor's).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn count_draws(
     shared: Res<WgpuCensusShared>,
     opaque: Option<Res<ViewBinnedRenderPhases<Opaque3d>>>,

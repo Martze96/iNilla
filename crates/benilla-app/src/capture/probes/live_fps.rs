@@ -204,7 +204,6 @@ struct SamplePin<'w, 's> {
 
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
 /// harness probe's `Phase::ProbeWarmup`/`Probing` arms.
-#[allow(clippy::too_many_arguments)]
 fn drive_live_fps(
     mut probe: ResMut<LiveFps>,
     time: Res<Time<bevy::time::Real>>,

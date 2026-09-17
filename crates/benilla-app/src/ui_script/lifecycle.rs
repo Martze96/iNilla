@@ -46,7 +46,7 @@ pub(crate) fn setup_script(world: &mut World) {
 /// down at `0x490c97`). Because [`end_ui_session`] routes every login through here, every session's
 /// VM gets the registry and every `inherits="GameFontNormal"` in FrameXML resolves. A design that
 /// dropped the VM and skipped index 0 on the in-game load would fail exactly there — verified in
-/// wow-re's §5 for this change (1291).
+/// wow-re's §5 for this change (2277).
 fn install_boot_vm(world: &mut World) {
     let mut script = match UiScript::new() {
         Ok(s) => s,
@@ -857,7 +857,7 @@ pub(crate) fn arm_leaving_world_on_self_create(
 ///
 /// **The last step is not "destroy the Lua state"** — which is what three of wow-re's own notes
 /// said, until this client's teardown made the question load-bearing and a §5 cross-check settled
-/// it (`system/ui/scratch/lua-state-lifecycle.md`; 1291). `0x490c97` is the frame-script owner's
+/// it (`system/ui/scratch/lua-state-lifecycle.md`; 2277). `0x490c97` is the frame-script owner's
 /// scalar-deleting destructor — the widget tree and the native virtual-font registry — and the Lua
 /// state outlives it. The state is closed and re-opened at `0x703b80`, which reaches `InitLua` by a
 /// **tail-`jmp`** (`0x703b8e`) rather than a call, which is exactly why a call-census missed it.

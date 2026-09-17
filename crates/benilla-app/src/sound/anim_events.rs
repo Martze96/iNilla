@@ -60,7 +60,6 @@ const TRD_HEIGHT: f32 = 1.0;
 /// The attachment the emote voice is born at — `0x623c3a push 0x11`.
 const CSD_ATTACH: u16 = 17;
 
-#[allow(clippy::too_many_arguments)] // the standard sound-route param set + the two resolvers
 pub(super) fn route_anim_events(
     mut events: MessageReader<AnimSoundEvent>,
     // GlobalTransform: `$SND` tags can fire from parented visuals (a mount child's model),

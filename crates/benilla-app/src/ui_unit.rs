@@ -1577,7 +1577,6 @@ pub(crate) fn fire_transitions(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_units(
     script: Option<NonSendMut<UiScript>>,
     // `ChrClasses.dbc` field 16, the only thing `UnitHasRelicSlot` reads. Absent when the client

@@ -498,7 +498,6 @@ fn panel_event(panel: QuestPanel) -> &'static str {
 /// change → the panel's open event; same panel, content changed → `QUEST_ITEM_UPDATE`; closed →
 /// `QUEST_FINISHED`). Diffed against a `Local`, exactly like the gossip/merchant feeds. The NPC
 /// name rides as arg1 (resolved through the NameCache, ask-once — the merchant's pattern).
-#[allow(clippy::too_many_arguments)]
 fn feed_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,

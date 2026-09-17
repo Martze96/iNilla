@@ -33,7 +33,6 @@ const SUBJECT_YAW: f32 = 2.36;
 /// feeds then push it into the VM during the settle window exactly as live wire data would. Item
 /// icons resolve through the offline `ItemDisplayCatalog` (display ids chosen from entries that
 /// catalog is known to carry); names land directly in the caches (no server to ask).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seed_ui_fixture(
     mut ctx: ResMut<CaptureCtx>,
     mut commands: Commands,

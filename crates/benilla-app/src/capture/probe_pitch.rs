@@ -126,7 +126,7 @@ impl Plugin for ProbePitchPlugin {
             drive_probe_pitch
                 .in_set(WorldStage::Input)
                 .before(crate::player::PlayerControlSet)
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         );
     }
 }

@@ -141,7 +141,7 @@ impl Plugin for ProbeCamPlugin {
             drive_probe_cam
                 .in_set(WorldStage::Input)
                 .before(crate::player::PlayerControlSet)
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         );
     }
 }

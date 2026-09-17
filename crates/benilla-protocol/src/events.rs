@@ -854,7 +854,7 @@ pub enum SessionEvent {
         misses: Vec<(u64, u8)>,
         target: Option<u64>,
         /// The GameObject an open-lock cast launched at (`TARGET_FLAG_GAMEOBJECT`) — opens a chest lid /
-        /// locked door (decision 0250). `None` for a unit spell.
+        /// locked door (decision 2271). `None` for a unit spell.
         go_target: Option<u64>,
         /// The ground point a dest-targeted cast launched at (`TARGET_FLAG_DEST_LOCATION`), raw
         /// WoW coords — where a ground AOE's launch-side visual belongs (the B132 follow-up;
@@ -1604,9 +1604,16 @@ pub enum Poll {
     /// census counted it like any other packet. A relayed move landing in an unmodelled opcode was
     /// therefore indistinguishable from one that never arrived. `opcode` rides along so the net
     /// thread can name what actually came off the wire.
+    ///
+    /// `tail` is how many body bytes the decoder left unconsumed
+    /// ([`crate::messages::parse_server_with_tail`]): a length-framed body lets a decoder shorter
+    /// than the server's layout succeed silently, and this is the one number that shows it. An
+    /// instrument, not a verdict — the packet decoded, its events are real, and the tail is
+    /// announced (once per opcode) rather than turned into a [`Poll::Skipped`].
     Events {
         opcode: u16,
         events: Vec<SessionEvent>,
+        tail: usize,
     },
     /// An unparseable packet was skipped — kept the stream aligned, not an error. Carries the
     /// opcode (for the app's dropped-packet tally) and a short description (opcode + error + a hex

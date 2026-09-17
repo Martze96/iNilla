@@ -572,7 +572,6 @@ pub(super) struct ScrollBand;
 ///
 /// Ordered before the select screen's own click handling so a click that lands on the panel is
 /// never also read as a click on the screen behind it.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_addons_panel(
     mut commands: Commands,
     mut panel: ResMut<AddonsPanel>,
@@ -1599,7 +1598,6 @@ fn spawn_panel(
 /// the row's TOPLEFT at (−14, 0), spawned as the row strip's child so the anchor is structural.
 /// `## URL` rides as an extra line (1197: information, not a launch button). A MIXED checkbox
 /// hover shows `ENABLED_FOR_SOME` alone — the reference's GlueTooltip split, on the same box.
-#[allow(clippy::too_many_arguments)]
 fn spawn_tooltip(
     parent: &mut ChildSpawnerCommands,
     art: &GlueArt,

@@ -874,7 +874,7 @@ fn forget_dead_vm_tiles(
 
 /// The per-frame pass: feed the engine the facts it asked for, keep one tile per visible pane,
 /// pack the atlas, place every tile at its cell and its play head, and aim the camera.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn sync_tiles(
     mut commands: Commands,
     script: Option<NonSendMut<UiScript>>,
@@ -1837,7 +1837,6 @@ struct BuiltTile {
 /// Spawn a file's parts, rig and emitters under `root` on the tile layer — the booth bake's
 /// recipe (`portrait::booth::spawn_booth_model`) for a file with no unit. `None` when a material
 /// is not resident yet (the caller retries next frame rather than latch a world-lit twin).
-#[allow(clippy::too_many_arguments)]
 fn build_tile(
     commands: &mut Commands,
     root: Entity,

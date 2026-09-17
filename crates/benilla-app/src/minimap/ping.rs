@@ -134,7 +134,6 @@ pub(super) fn seat_click(ctx: &BlipCtx, ping: &mut MinimapPing, click: Option<(f
 /// Runs before the script tick so the `MINIMAP_PING` event and the position behind
 /// `Minimap:GetPingPosition()` land in the same tick, and so an addon's handler sees a ping that
 /// is already seated (the renderer seated it at the end of the previous frame).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn drive_minimap_ping(
     script: Option<bevy::ecs::system::NonSendMut<UiScript>>,
     mut ping: ResMut<MinimapPing>,

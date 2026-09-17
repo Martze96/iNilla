@@ -17,7 +17,6 @@ use super::{move_trace, state, BodyQuery, ClientCommand, NetCommands, Player, St
 /// Run this frame's stand-state decision and the sheath toggle, and return the **committed**
 /// stand state — the local commit overlaid on the server's echoed byte, which is what the body
 /// pose and the sheath guard both read (decision 0080c).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn update(
     player: &mut Player,
     body: &BodyQuery,

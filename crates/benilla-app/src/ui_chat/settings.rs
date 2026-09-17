@@ -809,11 +809,11 @@ pub(super) fn plugin(app: &mut App) {
         // [`restore_chat_looks`], decision 2119. Only the watcher belongs in `Update`.
         .add_systems(
             Update,
-            watch_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
+            watch_chat_looks.in_set(crate::char_select::InWorldGated),
         )
         .add_systems(
             Update,
-            save_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
+            save_chat_looks.in_set(crate::char_select::InWorldGated),
         );
     // **The session-end flush is not registered here.** It is called from inside
     // `ui_script::end_ui_session` ([`fold_dying_vm_chat_cache`]) so that it covers `/reload` — a

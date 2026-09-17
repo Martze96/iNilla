@@ -184,7 +184,6 @@ pub(super) fn spawn_dressup_booth(
 /// differs from the paper doll is only where the parts come from (a bake resource, not a live
 /// unit's children) and the hand grip — the assembly holds the weapons, so the hands close on them
 /// (wow-re `hand-grip-mechanism.md`).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_dressup_booth(
     mut commands: Commands,
     preview: Res<DressUpPreview>,

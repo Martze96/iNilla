@@ -82,7 +82,6 @@ type DressQuery = (
 );
 
 /// One line per streamed player within [`DEFAULT_RADIUS`], contradictions first.
-#[allow(clippy::too_many_arguments)]
 fn fire_dress_census(
     mut probe: ResMut<DressCensus>,
     time: ProbeClock,

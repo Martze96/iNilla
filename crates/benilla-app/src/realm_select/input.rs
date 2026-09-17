@@ -20,7 +20,6 @@ const DOUBLE_CLICK_SECS: f32 = 0.4;
 
 /// Clicks: a row selects (a second one enters), the column headers sort, Okay enters, Cancel and
 /// the close X leave.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn clicks(
     buttons: Query<(Entity, &RealmAction)>,
     hits: Res<crate::glue::GlueClicks>,

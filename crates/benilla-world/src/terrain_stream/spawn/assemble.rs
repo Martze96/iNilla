@@ -82,7 +82,6 @@ pub struct SpawnedModel {
 /// WMO-display GameObject's doodad props ([`crate::entities`]'s `wmo_props`, the ship's sails), which
 /// pass a doodad-LOCAL `transform` + `card_owner` and parent the returned entities under the moving
 /// gameobject (every downstream system reads propagated `GlobalTransform`s, so the composition holds).
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_model_entities(
     commands: &mut Commands,
     mat_cache: &mut MaterialCache,

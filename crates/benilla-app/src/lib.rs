@@ -59,6 +59,7 @@ mod chr_classes;
 mod cinematic;
 mod combat_text;
 mod cooldowns;
+mod crash;
 mod creature_anim;
 mod cursor;
 mod cvars;
@@ -302,6 +303,16 @@ pub fn run(build: BuildId) -> AppExit {
         dev::print_scenario_names();
         return AppExit::Success;
     }
+    // `WOW_PROBE=list` prints the probe fleet's environment registry (`capture::probe_env`) the
+    // same way — before any window, so a session can ask the binary what the fleet takes.
+    if std::env::var("WOW_PROBE").as_deref() == Ok("list") {
+        dev::print_probe_vars();
+        return AppExit::Success;
+    }
+
+    // From here on a panic leaves `benilla-config/Diagnostics/crash-<unix>.txt` behind (decision
+    // 2266 §B2) — armed before the `App` exists, so a panic while plugins build is a report too.
+    crash::install(build);
 
     let mut app = App::new();
     // The stamp is plain data from here on — the panel footer and preflight banner read it back.

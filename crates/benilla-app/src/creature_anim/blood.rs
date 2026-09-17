@@ -68,7 +68,6 @@ pub(super) fn load_blood_tables(mut commands: Commands, assets: Option<Res<World
 /// `info` and every fired spurt at `debug`, so "I never see blood" localizes to a link in one
 /// fight instead of a code audit (no drop lines at all ⇒ the break is upstream, in the
 /// [`SwingImpact`] feed itself).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn blood_spurts(
     mut swings: MessageReader<SwingImpact>,
     transforms: Query<&Transform>,

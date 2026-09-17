@@ -6,8 +6,8 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
-    Vector3d,
+    capacity_hint, read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le,
+    read_u64_le, read_u8, Vector3d,
 };
 
 use super::{
@@ -233,9 +233,45 @@ fn skip(r: &mut &[u8], n: usize) -> Option<()> {
     (r.len() >= n).then(|| *r = &r[n..])
 }
 
+/// Decode one server packet body into its [`ServerPacket`]. The body is the whole length-framed
+/// packet, so a decoder that reads fewer bytes than the server wrote succeeds all the same; that
+/// gap is what [`parse_server_with_tail`] reports, and this is its `(packet, _)` projection.
 pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
+    parse_server_with_tail(opcode, body).map(|(packet, _)| packet)
+}
+
+/// [`parse_server`], also reporting the **tail**: how many of `body`'s bytes the decoder left
+/// unconsumed. A body is length-framed, so a decoder shorter than the server's layout does not
+/// fail — it silently reads a prefix, and the next field the server added is invisible from
+/// outside. A non-zero tail is the instrument for that drift (decision 2265 §B1): the reader
+/// surfaces it on [`crate::Poll::Events`], the app announces it once per opcode. It is a count,
+/// never a failure — a working decoder with a trailing field it has no use for stays working.
+/// An unknown opcode ([`ServerPacket::Other`]) consumes nothing by definition and reports `0`,
+/// so the tally does not double-count what the dropped-packet tally already names.
+pub fn parse_server_with_tail(opcode: u16, body: &[u8]) -> io::Result<(ServerPacket, usize)> {
     let mut r = body;
-    Ok(match opcode {
+    // `inner_tail` is the one arm that decodes through a second stream (the compressed update
+    // object): the outer cursor ends at the zlib stream's end, and what the INFLATED bytes left
+    // unread is that packet's tail.
+    let mut inner_tail = 0;
+    let packet = parse_server_body(opcode, &mut r, &mut inner_tail)?;
+    let tail = match packet {
+        ServerPacket::Other { .. } => 0,
+        _ => r.len() + inner_tail,
+    };
+    Ok((packet, tail))
+}
+
+/// The opcode → variant dispatch over a slice cursor. `cursor` is advanced past what the arm read
+/// **only on success** (an error's partial read is nobody's business); the arms themselves keep
+/// the plain `&[u8]` local every helper is typed over.
+fn parse_server_body(
+    opcode: u16,
+    cursor: &mut &[u8],
+    inner_tail: &mut usize,
+) -> io::Result<ServerPacket> {
+    let mut r: &[u8] = cursor;
+    let packet = match opcode {
         opcode::SMSG_AUTH_CHALLENGE => ServerPacket::AuthChallenge {
             server_seed: read_u32_le(&mut r)?,
         },
@@ -284,7 +320,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_CHAR_ENUM => {
             let count = read_u8(&mut r)?;
-            let mut characters = Vec::with_capacity(count as usize);
+            // Hint bounded by the realm's character cap: vmangos clamps `CharactersPerRealm` to
+            // 10 (`World.cpp:629`, `setConfigMinMax(…, 10, 1, 10)`).
+            let mut characters = Vec::with_capacity(capacity_hint(count, 10));
             for _ in 0..count {
                 characters.push(Character::read(&mut r)?);
             }
@@ -310,13 +348,19 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         },
         opcode::SMSG_COMPRESSED_UPDATE_OBJECT => {
             let _decompressed_size = read_u32_le(&mut r)?;
-            let mut decoder = flate2::read::ZlibDecoder::new(r);
+            // Through `&mut r`, so the cursor advances over the compressed bytes. Handed `r` by
+            // value the decoder reads a COPY of the slice, and the whole zlib body then reads
+            // as unconsumed — 803 bytes on the decode-length instrument's first live login
+            // (2266 §B1). The tail that means drift here is the inflated stream's, reported
+            // through `inner_tail`.
+            let mut decoder = flate2::read::ZlibDecoder::new(&mut r);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed)?;
+            drop(decoder);
             let mut dr = decompressed.as_slice();
-            ServerPacket::UpdateObject {
-                objects: update_object::read_update_object(&mut dr)?,
-            }
+            let objects = update_object::read_update_object(&mut dr)?;
+            *inner_tail = dr.len();
+            ServerPacket::UpdateObject { objects }
         }
         opcode::SMSG_COMPRESSED_MOVES => ServerPacket::CompressedMoves {
             packets: read_compressed_moves(&mut r)?,
@@ -572,7 +616,7 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             // untargeted emote arrives as the empty string — which is precisely the "untargeted"
             // bit of the sentence-form selector, not a missing value.
             let namelen = read_u32_le(&mut r)? as usize;
-            let mut name = Vec::with_capacity(namelen.min(64));
+            let mut name = Vec::with_capacity(capacity_hint(namelen, 64));
             for _ in 0..namelen {
                 name.push(read_u8(&mut r)?);
             }
@@ -1152,7 +1196,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_INITIALIZE_FACTIONS => {
             let count = read_u32_le(&mut r)?;
-            let mut standings = Vec::with_capacity(count as usize);
+            // The array is exactly `MAX_FACTION_COUNT` 64 entries long (`FACTION_LIST_LEN`).
+            let mut standings =
+                Vec::with_capacity(capacity_hint(count, super::reputation::FACTION_LIST_LEN));
             for _ in 0..count {
                 let flags = read_u8(&mut r)?;
                 let standing = read_u32_le(&mut r)? as i32;
@@ -1162,7 +1208,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_SET_FACTION_STANDING => {
             let count = read_u32_le(&mut r)?;
-            let mut standings = Vec::with_capacity(count as usize);
+            // At most one row per reputation-list slot (`FACTION_LIST_LEN`).
+            let mut standings =
+                Vec::with_capacity(capacity_hint(count, super::reputation::FACTION_LIST_LEN));
             for _ in 0..count {
                 let list_id = read_u32_le(&mut r)?;
                 let standing = read_u32_le(&mut r)? as i32;
@@ -1653,5 +1701,100 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             statuses: read_addon_info(&mut r),
         },
         other => ServerPacket::Other { opcode: other },
-    })
+    };
+    *cursor = r;
+    Ok(packet)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tail is the decoder's unconsumed remainder: a known-good body reports 0, the same body
+    /// with one byte appended reports 1, and neither is an error.
+    #[test]
+    fn a_trailing_byte_is_reported_as_tail_one_and_never_as_a_failure() {
+        // `SMSG_SET_FACTION_VISIBLE`: exactly one `u32 repListId`.
+        let body = 21u32.to_le_bytes().to_vec();
+        let (packet, tail) = parse_server_with_tail(opcode::SMSG_SET_FACTION_VISIBLE, &body)
+            .expect("a well-formed body decodes");
+        assert!(matches!(
+            packet,
+            ServerPacket::SetFactionVisible { list_id: 21 }
+        ));
+        assert_eq!(tail, 0);
+
+        let mut longer = body.clone();
+        longer.push(0xEE);
+        let (packet, tail) = parse_server_with_tail(opcode::SMSG_SET_FACTION_VISIBLE, &longer)
+            .expect("a trailing byte is not a parse failure");
+        assert!(matches!(
+            packet,
+            ServerPacket::SetFactionVisible { list_id: 21 }
+        ));
+        assert_eq!(tail, 1);
+        // …and the projection every existing caller uses is unchanged by it.
+        assert!(parse_server(opcode::SMSG_SET_FACTION_VISIBLE, &longer).is_ok());
+    }
+
+    /// The compressed update object decodes through a second stream. Its zlib bytes are consumed
+    /// through the cursor (a copy of the slice read the whole body as a tail — 803 bytes on the
+    /// instrument's first live login), and the tail it reports is what the INFLATED stream left
+    /// unread — the one leftover that means the inner layout drifted.
+    #[test]
+    fn the_compressed_update_object_reports_the_inflated_streams_tail_not_its_zlib_bytes() {
+        use std::io::Write;
+        fn body(inflated: &[u8]) -> Vec<u8> {
+            let mut out = (inflated.len() as u32).to_le_bytes().to_vec();
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            z.write_all(inflated).unwrap();
+            out.extend(z.finish().unwrap());
+            out
+        }
+        // `u32 count = 0, u8 has_transport = 0`: a well-formed, empty object list.
+        let empty = [0u8, 0, 0, 0, 0];
+        let (packet, tail) =
+            parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body(&empty))
+                .expect("an empty update object decodes");
+        assert!(matches!(packet, ServerPacket::UpdateObject { ref objects } if objects.is_empty()));
+        assert_eq!(tail, 0, "the zlib bytes are consumed, not reported");
+
+        let mut longer = empty.to_vec();
+        longer.push(0xEE);
+        let (_, tail) =
+            parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body(&longer))
+                .expect("a trailing inflated byte is not a failure");
+        assert_eq!(tail, 1, "the inflated stream's leftover is the tail");
+    }
+
+    /// An unknown opcode consumes nothing by definition; reporting its whole body as a tail would
+    /// double-count what the dropped-packet tally already names.
+    #[test]
+    fn an_unknown_opcode_reports_no_tail() {
+        let (packet, tail) =
+            parse_server_with_tail(0xFFFF, &[1, 2, 3]).expect("unknown opcodes never fail");
+        assert!(matches!(packet, ServerPacket::Other { opcode: 0xFFFF }));
+        assert_eq!(tail, 0);
+    }
+
+    /// **The falsifier for decision 2265 §B1**: a wire count of `0xFFFF_FFFF` followed by one
+    /// valid row must come back as a short-read `Err` — never reserve the count, never abort.
+    #[test]
+    fn a_lying_faction_count_is_a_short_read_not_an_allocation() {
+        let mut body = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+        body.push(0x01); // flags
+        body.extend_from_slice(&3000i32.to_le_bytes()); // standing
+        let err = parse_server(opcode::SMSG_INITIALIZE_FACTIONS, &body)
+            .err()
+            .expect("the second row is missing, so the read is short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        let mut body = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+        body.extend_from_slice(&5u32.to_le_bytes());
+        body.extend_from_slice(&(-100i32).to_le_bytes());
+        let err = parse_server(opcode::SMSG_SET_FACTION_STANDING, &body)
+            .err()
+            .expect("the second row is missing, so the read is short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }

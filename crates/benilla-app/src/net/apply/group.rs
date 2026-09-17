@@ -88,7 +88,6 @@ pub(super) fn leader_changed(
 /// read them and both were empty for an out-of-area member before this — the raid grid's class
 /// column (`ui_party::feed::raid_roster`, whose own-row twin of this hole 1549 §7 found live), and
 /// the party frame's 2D portrait stand-in (`portrait::temporary_portrait`, report B315).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn list(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,

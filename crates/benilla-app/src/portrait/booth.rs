@@ -499,7 +499,6 @@ pub(super) enum BoothMotion {
 ///
 /// Returns the [`BoothRig`] handle — seat any remaining consumers on it (the effect hosts, the
 /// glue scene's emitters), then `finish()` it.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_booth_model(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,

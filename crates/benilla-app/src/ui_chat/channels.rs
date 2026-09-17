@@ -523,7 +523,6 @@ fn zone_is_settled(player: Option<&crate::player::Player>) -> bool {
 /// `flags & INITIAL` read fresh. The DBC bit only seeds the mask on a character with no file
 /// (`0x4997fc`). This is what makes `/leave General` stick: the leave clears the bit in the
 /// character's file, and the next login's walk never registers the row ([`plan_walk`]).
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn auto_join_zone_channels(
     commands: Res<NetCommands>,
     mut channels: ResMut<ChannelState>,

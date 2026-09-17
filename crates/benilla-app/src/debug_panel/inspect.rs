@@ -192,7 +192,6 @@ pub(super) struct InspectStores<'w, 's> {
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn inspect_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,

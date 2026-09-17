@@ -56,7 +56,7 @@
 //!   (The questgiver marker raises for a live plate too — a director-pinned DEVIATION: the
 //!   reference really does sit low under a plate (byte-verified, wow-re `questgiver-marker.md`
 //!   Q4a) and the director rejected that overlap; rationale on `quest_markers::pose_markers`,
-//!   0408/0409.)
+//!   2274/2275.)
 //!
 //! (The skull's trivial-gray leg is the shared grey check, [`benilla_ui::script::unit_is_grey`]
 //! — `0x5f0700`, §5-VERIFIED 2026-07-17, the same one the tooltip/quest-range APIs read; it is
@@ -441,7 +441,7 @@ struct PlateWorld<'w, 's> {
 /// name-exclusivity verdict), seat each one, and hand the result to the widget layer as
 /// [`PlateState`] — at constant screen size over the projected anchor + 2/3 yd. Runs after
 /// the script extract), after the targeting chain (it reads the frame's selection verdict).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_vplates(
     mode: Res<VPlateMode>,
     mut plates: ResMut<VPlates>,

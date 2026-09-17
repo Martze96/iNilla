@@ -281,7 +281,7 @@ fn shared_skin_probe() -> bool {
 /// available (those parts then keep their built, untextured material). A composited atlas is uploaded once per look ([`super::super::SkinComposites`] cache); a baked or hair
 /// BLP loads through the async `mpq://` pipeline (which dedups by path). `parts` supplies the hair
 /// batches' blend (hair is alpha-cut, so it can't be forced opaque like the body).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn build_char_skin_materials(
     look: &CharLook,
     // The worn armor display ids (bodyslot 2–9) + the cloak's, and the ItemDisplayInfo catalog to

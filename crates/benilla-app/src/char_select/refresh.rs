@@ -18,7 +18,7 @@ use super::{class_name, Roster};
 /// Refill the row texts + visibility, the selected name, and the realm banner whenever the roster
 /// changes (a fresh enum, a selection move) — or when the screen was just (re)spawned (returning
 /// from the create screen finds an unchanged roster; the fresh, empty tree must still fill).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn refresh_list(
     roster: Res<Roster>,
     areas: Option<Res<AreaTableRes>>,

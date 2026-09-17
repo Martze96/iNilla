@@ -73,7 +73,7 @@ fn wave_g(now: u32, last_reset: &mut u32, rising: &mut bool) -> u8 {
 /// Recompute the flash verdict — the client's per-frame OnUpdate gate, evaluated over the one
 /// unit that can qualify (your current target). Runs before the ring update and the nameplate
 /// drive so both consume this frame's verdict.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn drive_flash(
     mut flash: ResMut<CombatFlash>,
     time: Res<Time>,

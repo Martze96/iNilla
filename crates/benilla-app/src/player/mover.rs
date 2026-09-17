@@ -111,7 +111,6 @@ pub(super) struct Outcome {
 /// Advance the player mover one frame: settle hold, ground classify, the slide, and the
 /// step-down snap. Writes `player.pos`/`vel_y`/`horiz_vel` (the settle *release* is the terrain
 /// streamer's — decision 0737).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn step(
     player: &mut Player,
     time: &Time,

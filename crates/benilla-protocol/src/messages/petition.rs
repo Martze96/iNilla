@@ -42,7 +42,9 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_cstring, read_i32_le, read_u16_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{
+    capacity_hint, read_cstring, read_i32_le, read_u16_le, read_u32_le, read_u64_le, read_u8,
+};
 
 /// The one item that is a guild charter — vmangos `GUILD_CHARTER` (`PetitionsHandler.cpp:37`),
 /// also `Item::IsCharter`'s literal (`Item.h:158`, `GetEntry() == 5863u`). Confirmed against this
@@ -147,7 +149,9 @@ pub struct PetitionShowList {
 pub(super) fn read_petition_show_list(r: &mut impl Read) -> io::Result<PetitionShowList> {
     let npc = read_u64_le(r)?;
     let count = read_u8(r)?;
-    let mut entries = Vec::with_capacity(count as usize);
+    // vmangos sends exactly one charter (`PetitionsHandler.cpp:503`, `entries = { entry }`);
+    // 8 is generous.
+    let mut entries = Vec::with_capacity(capacity_hint(count, 8));
     for _ in 0..count {
         entries.push(PetitionShowListEntry {
             index: read_u32_le(r)?,
@@ -209,7 +213,8 @@ pub(super) fn read_petition_show_signatures(
     let owner = read_u64_le(r)?;
     let petition_id = read_u32_le(r)?;
     let count = read_u8(r)?;
-    let mut signatures = Vec::with_capacity(count as usize);
+    // "Client hard limit at 9 signatures" (vmangos `PetitionsHandler.cpp:269-270`).
+    let mut signatures = Vec::with_capacity(capacity_hint(count, 9));
     for _ in 0..count {
         signatures.push(PetitionSignature {
             signer: read_u64_le(r)?,
@@ -325,7 +330,7 @@ pub(super) fn read_petition_query_response(r: &mut impl Read) -> io::Result<Peti
     let allowed_min_level = read_u32_le(r)?;
     let allowed_max_level = read_u32_le(r)?;
     let choice_count = read_u32_le(r)?;
-    let mut choices = Vec::with_capacity(choice_count.min(64) as usize);
+    let mut choices = Vec::with_capacity(capacity_hint(choice_count, 64));
     for _ in 0..choice_count {
         choices.push(read_cstring(r)?);
     }

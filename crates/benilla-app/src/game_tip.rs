@@ -312,7 +312,6 @@ fn empty_tip(e: &mut EntityCommands, vis: &mut Visibility) {
 ///
 /// Two jobs in one system because they are one mechanism seen at two moments: the reference picks
 /// the row inside `EnterWorld` and lays it out once per raise, then draws that layout every frame.
-#[allow(clippy::too_many_arguments)]
 fn drive_game_tip(
     mut screen: ResMut<crate::loading_screen::LoadingScreen>,
     mut tips: ResMut<GameTips>,

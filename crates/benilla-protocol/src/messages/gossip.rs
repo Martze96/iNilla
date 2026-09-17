@@ -7,7 +7,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
 
 /// One gossip menu entry (`SMSG_GOSSIP_MESSAGE`'s option list, 1.12 shape — no box-money field,
 /// that's TBC+). `index` is the value the client echoes back as `gossipListId` on select; `icon` is
@@ -76,7 +76,8 @@ pub(super) fn read_gossip_message(
     let npc_guid = read_u64_le(r)?;
     let text_id = read_u32_le(r)?;
     let option_count = read_u32_le(r)?;
-    let mut options = Vec::with_capacity(option_count as usize);
+    // vmangos `GOSSIP_MAX_MENU_ITEMS` 32 (`GossipDef.h:32`, "client supports showing max 32").
+    let mut options = Vec::with_capacity(capacity_hint(option_count, 32));
     for _ in 0..option_count {
         options.push(GossipOption {
             index: read_u32_le(r)?,
@@ -86,7 +87,9 @@ pub(super) fn read_gossip_message(
         });
     }
     let quest_count = read_u32_le(r)?;
-    let mut quests = Vec::with_capacity(quest_count as usize);
+    // The quest menu is an unbounded vector server-side (`GossipDef.h:184`); the same 32-item
+    // client display limit bounds the hint.
+    let mut quests = Vec::with_capacity(capacity_hint(quest_count, 32));
     for _ in 0..quest_count {
         quests.push(QuestOption {
             quest_id: read_u32_le(r)?,

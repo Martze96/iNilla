@@ -98,7 +98,7 @@ pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 
 /// Which weather **leg** we run — the reference picks per the `useWeatherShaders` CVar
 /// (default "1", registered `0x67b81d`) AND a rain.bls/patter.bls ARB validation (`0x58b360`);
-/// the verdict lands in `effect+0`. **SHADER — settled in round 3** (0333, retracting 0332's
+/// the verdict lands in `effect+0`. **SHADER — settled in round 3** (2272, retracting 0332's
 /// fixed-func inference): the shader leg's ~10 s onset is real — close-only packet visibility
 /// (`0x6752b0` bakes at flush alone), the packet-1 forecast orphan, and the RNE parity stick
 /// (`0x6754cc`) stack into a stochastic onset (~75% in the 8.5–14 s band, ~25% at ~5 s), and
@@ -453,7 +453,6 @@ fn setup_precip(
 
 /// Per frame: wind, spawn budgets, integrate, land. (The geometry push is [`push_precip`]'s,
 /// in `PostUpdate` after the stream clear.)
-#[allow(clippy::too_many_arguments)]
 fn simulate_precip(
     time: Res<Time>,
     weather: Res<WeatherState>,
@@ -611,7 +610,6 @@ fn simulate_precip(
 /// anchor at the camera — view-z ≈ 0 sorts them after every world transparent, before the
 /// biased glare/nameplate rungs, exactly where the old camera-anchored layer entities landed.
 /// Indoors nothing is pushed — the frozen drops hang, unrendered (`[0xca80c4]`'s draw kill).
-#[allow(clippy::too_many_arguments)] // one push system's full input set
 fn push_precip(
     precip: Option<Res<Precip>>,
     assets: Option<Res<PrecipAssets>>,

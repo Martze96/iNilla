@@ -177,7 +177,6 @@ const SPIRIT_HEALER_RANGE_SQ: f32 = 5.5556 * 5.5556;
 /// Per-frame: derive the death state from the self descriptor, push the countdown/offer snapshot,
 /// and fire the reference's death events on the edges (before `UiInput`, so a frame's `OnEvent`
 /// sees current values — the [`crate::ui_unit`] feed convention).
-#[allow(clippy::too_many_arguments)]
 fn feed_death(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,

@@ -393,7 +393,6 @@ fn repair_all_cost(
 
 /// Build the Lua-facing snapshot from [`MerchantOpen`] + the player/vendor descriptors — `None`
 /// when no vendor is open.
-#[allow(clippy::too_many_arguments)]
 fn snapshot(
     open: &MerchantOpen,
     items: &mut Items,
@@ -433,7 +432,6 @@ fn snapshot(
 /// content change — the async name landing, a post-buy stock update). Also surfaces refusals on the
 /// red error line and pushes the player's purse each frame it changes. Diffed against a `Local`
 /// memory, exactly like the gossip/container feeds.
-#[allow(clippy::too_many_arguments)]
 fn feed_merchant(
     script: Option<NonSendMut<UiScript>>,
     open: Res<MerchantOpen>,

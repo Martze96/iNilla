@@ -91,7 +91,6 @@ fn unit_dot_eligible(store: Option<&ObjectStore>, me: Option<u64>) -> bool {
 /// Walks the candidate set rather than the status map — the classifier's own shape (it is a
 /// per-object callback, not a per-status one), and the only way to reach each object's descriptor,
 /// which [`unit_dot_eligible`] needs.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::minimap) fn emit_quest_dots(
     ctx: &BlipCtx,
     statuses: &HashMap<u64, u32>,
@@ -233,7 +232,6 @@ fn creature_type_of(
 /// byte-verified `0x4eac31`). Same hard 3-D radius cull, cross-interior grey, and hover law
 /// as the quest dots; drawn just before them (the draw walks the cell lists in order, so
 /// cells 0/1 sit under a same-spot quest or party dot).
-#[allow(clippy::too_many_arguments)]
 pub(in crate::minimap) fn emit_tracking_dots(
     ctx: &BlipCtx,
     tracking: SelfTracking,

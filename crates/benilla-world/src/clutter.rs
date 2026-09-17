@@ -399,7 +399,6 @@ pub(crate) fn scatter_tile_clutter(
 /// and spawn them as children of `chunk_entity` (so a tile unload cascades to them). Returns the spawned
 /// entities (tracked on the `ClutterChunk` for distance teardown). Same merge as the old per-tile path,
 /// now per-chunk so only the ~70 yd bubble is ever built/drawn.
-#[allow(clippy::too_many_arguments)]
 fn build_chunk_clutter(
     chunk_entity: Entity,
     models: &[(String, Vec<ShadedPlacement>)],
@@ -547,7 +546,6 @@ fn frustum_corner_reach(fov_y: f32, aspect: f32) -> f32 {
 /// the player instead of every loaded tile and, with the per-frame build cap, spreads the cost so a
 /// tile-load no longer builds 256 chunks at once. Build/teardown happen where the fade ramp is
 /// already alpha 0, so they are invisible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_chunk_clutter(
     mut commands: Commands,
     cam: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,

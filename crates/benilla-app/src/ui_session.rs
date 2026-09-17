@@ -169,7 +169,6 @@ pub(crate) struct InteractNpc(pub(crate) Option<Entity>, pub(crate) Option<u64>)
 /// no cross-system race over who owns the `"npc"` token — the sessions are mutually exclusive, and a
 /// bare `.or` chain is the whole rule. `Option<Res<_>>` keeps it safe in a headless test that mounts
 /// the portrait plugin without every window plugin.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn feed_interact_npc(
     gossip: Option<Res<crate::ui_gossip::GossipState>>,
     quest: Option<Res<crate::ui_quest::QuestGiver>>,

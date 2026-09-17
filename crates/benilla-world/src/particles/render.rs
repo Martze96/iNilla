@@ -560,7 +560,6 @@ pub static EFFECT_DRAW_STATS: [std::sync::atomic::AtomicU32; 2] = [
 /// (0733 §2; decal draws are exempt — 0781), upload them, build the frame's index stream in
 /// sorted-item order while merging sort-adjacent compatible items into single draws, and write
 /// the canonical fog-params rows once.
-#[allow(clippy::too_many_arguments)] // one render system's full input set
 fn prepare_effects(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -761,7 +760,6 @@ fn prepare_effects(
 }
 
 /// Build the view bind group and any missing per-texture groups for this frame's draws.
-#[allow(clippy::too_many_arguments)] // one render system's full input set
 fn prepare_effect_bind_groups(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,

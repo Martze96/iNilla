@@ -144,7 +144,6 @@ fn is_whiff(victim_state: u32) -> bool {
 /// Cache swings, consume impact tags, dispatch `$CPP` defenses, flush on supersede/attack-stop,
 /// silently drop records whose attacker despawned (the client's dtor clears without flushing).
 /// Ordered after [`super::events::fire_anim_events`] so a tag fires the same frame it's crossed.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn route_swing_impacts(
     mut swings: MessageReader<SwingMessage>,
     mut events: MessageReader<AnimSoundEvent>,

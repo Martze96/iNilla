@@ -594,7 +594,6 @@ fn streamed_player<'a>(
     index.0.get(&guid).and_then(|e| stores.get(*e).ok())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn answer_trade_request(
     mut trade: ResMut<TradeSession>,
     commands: Res<NetCommands>,
@@ -827,7 +826,6 @@ fn snapshot(
 /// against `Local` memory, exactly like the mail/merchant feeds. The accept-update fires **after** the
 /// show/update block so an open frame's `TRADE_SHOW` (which hides the highlights) is followed by the
 /// glow, not overwritten by it.
-#[allow(clippy::too_many_arguments)]
 fn feed_trade(
     script: Option<NonSendMut<UiScript>>,
     mut trade: ResMut<TradeSession>,
@@ -979,7 +977,6 @@ fn feed_trade(
 /// the token → player guid → `CMSG_INITIATE_TRADE` (recording the target so `OPEN_WINDOW` can name
 /// it); `AcceptTrade`/`CancelTradeAccept` → the accept/un-accept verbs (with the optimistic local
 /// glow); `CloseTrade` → `CMSG_CANCEL_TRADE` + a local clear.
-#[allow(clippy::too_many_arguments)]
 fn drain_trade(
     script: Option<NonSendMut<UiScript>>,
     mut trade: ResMut<TradeSession>,

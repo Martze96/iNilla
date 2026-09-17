@@ -167,7 +167,7 @@ pub(crate) fn seed_rig_rows(
 /// Post-propagation (inside `BillboardPlace`, chained after the entity lane's
 /// `billboard_joint_palette` and before `face_billboards`): finalize every rig that needs it —
 /// palette rows + replaced-subtree anchor re-seats, with the seat-frame cascade.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // billboard_joint_palette's shape
+#[allow(clippy::type_complexity)] // billboard_joint_palette's shape
 pub fn finalize_rig_worlds(
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     // `Option<&RigSkin>`, not `&RigSkin` (decision 1365): the doodad lane's rigs hold their

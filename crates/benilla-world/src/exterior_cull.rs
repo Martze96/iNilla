@@ -427,7 +427,6 @@ type ElectedBody = (
 /// it is the sole authority for: terrain cells, the WDL far band, and — in the second query below,
 /// a different audience under the same law rather than a second system — the elected net bodies
 /// ([`ElectedBody`], decision 1270), whose roots nothing else writes.
-#[allow(clippy::too_many_arguments)]
 // A Bevy system's params are not an argument list to shorten — each is a distinct world access
 // the scheduler needs by name (the `update_ground_shade` precedent).
 fn apply_exterior_cull(

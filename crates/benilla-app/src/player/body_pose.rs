@@ -15,7 +15,6 @@ use super::{model_pivot_height, wrap_pi, BodyQuery, CameraPivot, Player};
 /// Write this frame onto the driven body and return the camera-pivot **target** height it carries.
 /// `anim_flags` is [`super::gait::drive_body_heading`]'s verdict; `move_flags_now` is the live
 /// wire word, whose forward/back bits gate the swim body pitch.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drive(
     player: &Player,
     body: &mut BodyQuery,

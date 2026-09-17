@@ -100,7 +100,6 @@ impl FailNameTables<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn feed_actions(
     script: Option<NonSendMut<UiScript>>,
     mut actions: ResMut<PlayerActions>,
@@ -600,7 +599,6 @@ pub(super) fn feed_actions(
 /// The spellbook's `GetSpellTexture` (`0x4b3f50`) deliberately runs ONLY arms 1 and 3 — it never
 /// serves `ActiveIconID` (proof by exhaustion in the note). `ui_spellbook` keeps that asymmetry;
 /// do not "fix" it to match the bar.
-#[allow(clippy::too_many_arguments)] // the resolver's full input set, twice-called above
 fn spell_action_icon(
     spell_id: u32,
     d: &benilla_formats::SpellDisplay,

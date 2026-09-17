@@ -25,6 +25,14 @@
 //! its own optimistic flag copy, exactly as it owns the collapse state. The watched index comes back
 //! as a `PLAYER_FIELD_WATCHED_FACTION_INDEX` descriptor update.
 
+/// The length of the reputation-list array `SMSG_INITIALIZE_FACTIONS` is positional in — vmangos
+/// `WorldPackets::Misc::InitializeFactions::MAX_FACTION_COUNT` (`Server/Packets/Misc.h:607`), the
+/// `std::array<FactionInitEntry, 64>` the packet is built over. Every `repListId` on this wire —
+/// the `SMSG_SET_FACTION_STANDING` / `SMSG_SET_FACTION_VISIBLE` slot, and the three send verbs' —
+/// is an index into that array, so one past it is not a faction and a store sized from it is a
+/// store sized from a lie (decision 2265 §B1).
+pub const FACTION_LIST_LEN: usize = 64;
+
 /// The `PLAYER_FIELD_WATCHED_FACTION_INDEX` / `CMSG_SET_WATCHED_FACTION` sentinel for "watch no
 /// faction" — see the module header on why it cannot be `0`.
 pub const WATCHED_FACTION_NONE: i32 = -1;

@@ -12,6 +12,16 @@ authors = ["sam <samuv.eth@gmail.com>"]
 # since day one, enacted at the 0530 debt sweep). Per-crate feature additions stay in the crate.
 # `image` deliberately stays per-crate: its default-features/feature sets differ per consumer,
 # and a workspace default-features choice can't be subtracted from downstream.
+# **Lint policy** (decision 2266 §C4). `too_many_arguments` is a readability lint for plain
+# functions; on a Bevy system the parameter list IS the scheduler's dependency declaration, and
+# a system that reads eight resources has eight parameters by construction. The lint had fired
+# 364 times in this workspace and been allowed 364 times, 281 of them on systems — a lint whose
+# every verdict is overridden is not a gate, it is a tax on adding a system. Allowed once here;
+# the per-site attributes are gone. `type_complexity` stays on: it fires on shapes a type alias
+# or a `SystemParam` bundle genuinely fixes.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+
 [workspace.dependencies]
 anyhow = "1.0.102"
 # bevy's `default` is `["2d", "3d", "ui"]`, and every one of those three pulls `audio`

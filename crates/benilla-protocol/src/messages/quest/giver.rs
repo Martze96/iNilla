@@ -18,7 +18,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_i32_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_i32_le, read_u32_le, read_u64_le, read_u8};
 
 /// `QUEST_EMOTE_COUNT` (vmangos `QuestDef.h:43`) — DETAILS always writes exactly this many emote
 /// pairs; OFFER_REWARD writes a variable count (0..=4), so only DETAILS relies on the constant.
@@ -215,7 +215,9 @@ fn read_item_triple(r: &mut &[u8]) -> io::Result<QuestRewardItem> {
 /// Read a count-prefixed run of item triples (`u32 count` then that many triples).
 fn read_item_block(r: &mut &[u8]) -> io::Result<Vec<QuestRewardItem>> {
     let count = read_u32_le(r)?;
-    let mut items = Vec::with_capacity(count as usize);
+    // The wider of the two lists this reads: `QUEST_REWARD_CHOICES_COUNT` 6 (vmangos
+    // `QuestDef.h:39`; the fixed rewards are `QUEST_REWARDS_COUNT` 4).
+    let mut items = Vec::with_capacity(capacity_hint(count, 6));
     for _ in 0..count {
         items.push(read_item_triple(r)?);
     }
@@ -237,7 +239,9 @@ pub(in crate::messages) fn read_questgiver_quest_list(r: &mut &[u8]) -> io::Resu
     let emote_delay = read_u32_le(r)?;
     let emote = read_u32_le(r)?;
     let count = read_u8(r)?;
-    let mut quests = Vec::with_capacity(count as usize);
+    // No server cap (the quest menu is a vector, `GossipDef.h:184`); `GOSSIP_MAX_MENU_ITEMS` 32
+    // (`GossipDef.h:32`) is the client's display limit.
+    let mut quests = Vec::with_capacity(capacity_hint(count, 32));
     for _ in 0..count {
         quests.push(QuestListEntry {
             quest_id: read_u32_le(r)?,
@@ -375,7 +379,8 @@ pub(in crate::messages) fn read_questgiver_quest_complete(
     let xp = read_u32_le(r)?;
     let money = read_u32_le(r)?;
     let count = read_u32_le(r)?;
-    let mut items = Vec::with_capacity(count as usize);
+    // `QUEST_REWARDS_COUNT` 4 (vmangos `QuestDef.h:40`).
+    let mut items = Vec::with_capacity(capacity_hint(count, 4));
     for _ in 0..count {
         items.push((read_u32_le(r)?, read_u32_le(r)?));
     }

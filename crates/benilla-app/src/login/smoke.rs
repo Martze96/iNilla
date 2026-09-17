@@ -38,7 +38,6 @@ pub(crate) fn smoke_character(spec: &str) -> Option<String> {
 /// `WOW_UNATTENDED=1` still needs a way to name a character without taking it. The pick itself
 /// stays `char_select`'s (`apply_roster_policy` reads the third field the same way it reads
 /// `WOW_CHAR`); this only declines to exit. Pair with `WOW_PROBE_EXIT_AT` to bound the run.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn debug_login_smoke(
     state: Res<State<ClientState>>,
     mut attempt: Attempt,

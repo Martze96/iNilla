@@ -145,7 +145,6 @@ struct FeedMemory {
     self_present: gate::Watch,
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn feed_spellbook(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,

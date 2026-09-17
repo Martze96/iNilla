@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The launcher: build.rs stamps the git build id, main() hands it to benilla-app. A shim, so the stamp's every-commit rebuild dirties this package and not the app crate (decision 0993)"
 
+[lints]
+workspace = true
+
 [features]
 # The dev/player seam, forwarded (decisions 0026 + 1173): this shim is the binary a player would
 # run, so `cargo build -p benilla --no-default-features` is the player build — and the gate.

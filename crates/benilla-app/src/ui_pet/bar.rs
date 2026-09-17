@@ -264,7 +264,6 @@ pub(super) fn active_aura_press(
 /// `pet-action-bar-api.md` §9). Diffing the pushed state is the same edge from the other side:
 /// the slots' content and usability are the bar's, the ten triples are the bank's. `UNIT_PET` is
 /// `feed_pet_unit`'s; `UNIT_FLAGS`/`UNIT_AURA` for `"pet"` are the unit feed's.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn feed_pet_bar(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,

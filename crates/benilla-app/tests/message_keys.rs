@@ -111,10 +111,7 @@ fn every_error_key_in_the_source_resolves_to_real_text() {
         "ERR_PET_SPELL_NOPATH",
     ];
 
-    let data = match benilla_formats::wow_data() {
-        Some(d) => d,
-        None => return,
-    };
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")
@@ -179,10 +176,7 @@ fn every_voiced_key_the_source_raises_has_audio_for_every_playable_race() {
         (0x31, 2, 0), // ERR_MUST_EQUIP_ITEM, Orc male
     ];
 
-    let data = match benilla_formats::wow_data() {
-        Some(d) => d,
-        None => return,
-    };
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let vocal = benilla_formats::load_vocal_ui_sounds(&mut chain).expect("VocalUISounds.dbc");
     let kits = benilla_formats::load_sound_kit_catalog(&mut chain).expect("SoundEntries.dbc");
@@ -249,10 +243,7 @@ fn every_voiced_key_the_source_raises_has_audio_for_every_playable_race() {
 /// than alongside it. Skips without client data.
 #[test]
 fn every_sounding_catalog_row_also_has_text_to_show() {
-    let data = match benilla_formats::wow_data() {
-        Some(d) => d,
-        None => return,
-    };
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")

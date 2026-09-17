@@ -34,6 +34,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
+use benilla_assets::LockRecover;
 use benilla_protocol::{
     host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
     WardenRequired, WorldSession, WorldWriter, WORLD_PORT,
@@ -341,6 +342,11 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     realm_rx,
                     pick_rx,
                 };
+                // Opcodes whose decoder has already been caught leaving bytes behind — one
+                // announcement per opcode for the life of the process, like the dropped-packet
+                // tally's first-occurrence line. Lives here, above the cycle loop, so a reconnect
+                // does not re-announce what the log already says.
+                let mut tails_announced = std::collections::HashSet::new();
                 loop {
                     // **A cycle starts with no measurements.** Every way the last one ended — a
                     // stream failure, a logout, a re-park — lands here, so one clear covers them
@@ -348,8 +354,16 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     // in from the app's drain a frame later. (`writer_loop` clears again when the
                     // fresh writer arrives, and still has to: between the old socket dying and
                     // that handover the keepalive tick can still fire on the stale writer.)
-                    read_clock.lock().expect("ping clock").clear();
-                    match run(&cfg, &events_tx, &writer_tx, &parks, &abandon, &read_clock) {
+                    read_clock.lock_recover().clear();
+                    match run(
+                        &cfg,
+                        &events_tx,
+                        &writer_tx,
+                        &parks,
+                        &abandon,
+                        &read_clock,
+                        &mut tails_announced,
+                    ) {
                         Ok(Cycle::Exit) => return,
                         Ok(Cycle::Repark) => {}
                         Ok(end @ (Cycle::LoggedOut | Cycle::LoginRefused)) => {
@@ -422,6 +436,7 @@ fn run(
     parks: &Parks,
     abandon: &AtomicU64,
     ping_clock: &Mutex<PingClock>,
+    tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<Cycle> {
     let Parks {
         login_rx,
@@ -849,8 +864,25 @@ fn run(
             let polled = reader.poll()?;
             note_inbound(); // one packet off the wire, parsed or not — the census counts liveness
             match polled {
-                Poll::Events { opcode, events } => {
+                Poll::Events {
+                    opcode,
+                    events,
+                    tail,
+                } => {
                     skip_run = 0;
+                    // **The decode-length instrument** (decision 2265 §B1). A body is
+                    // length-framed, so a decoder shorter than the server's layout succeeds
+                    // silently and the field it never read is invisible from outside. This is
+                    // the one line that shows it — once per opcode, at info, and NEVER a skip:
+                    // the packet decoded and its events are real; a trailing field we have no
+                    // use for is drift to look at, not a packet to drop.
+                    if tail > 0 && tails_announced.insert(opcode) {
+                        bevy::log::info!(
+                            "net: opcode {} ({opcode:#06x}) left {tail} trailing byte(s) after \
+                             decode (first occurrence; announced once per opcode)",
+                            benilla_protocol::messages::opcode_name(opcode).unwrap_or("?"),
+                        );
+                    }
                     // The full inbound opcode stream (tag `in`, decision 0624) — the last place a
                     // packet could hide. `skip` covers what failed to parse and `rly` covers what
                     // reached the mover replay; between them sits the packet that parsed into *no*
@@ -876,9 +908,7 @@ fn run(
                         // a whole client frame to every reading, which is a frame's worth of the
                         // client's own slowness reported as the server's distance.
                         if let SessionEvent::Pong { sequence } = ev {
-                            if let Some(rtt) =
-                                ping_clock.lock().expect("ping clock").record_pong(sequence)
-                            {
+                            if let Some(rtt) = ping_clock.lock_recover().record_pong(sequence) {
                                 bevy::log::debug!("net: pong seq={sequence} rtt={rtt}ms");
                             }
                             continue;
@@ -1018,7 +1048,7 @@ fn writer_loop(
                     // A fresh connection restarts the keepalive from scratch, like the real
                     // client: sequence 1 is the new socket's first ping, and a stale in-flight
                     // pong from the old socket can no longer match.
-                    ping_clock.lock().expect("ping clock").clear();
+                    ping_clock.lock_recover().clear();
                     // The connect stamp: the first keepalive of a connection is a full interval
                     // out, not on the next drain (`0x537bcf` — verified; the alternative reading,
                     // that a zeroed stamp fires one immediately, is what the bytes ruled out).
@@ -1042,7 +1072,7 @@ fn writer_loop(
                     // spacing is our attempts on the socket, not the server's answers.
                     ping_tick = crossbeam_channel::after(PING_INTERVAL);
                     let (sequence, last_rtt) = {
-                        let mut c = ping_clock.lock().expect("ping clock");
+                        let mut c = ping_clock.lock_recover();
                         c.sequence += 1;
                         c.sent_at = Some(Instant::now());
                         // `lastRtt`: the most recent single sample, never the mean (VERIFIED —

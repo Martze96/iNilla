@@ -370,7 +370,6 @@ impl UnitClass {
 /// [`crate::target::ring::can_attack_from_player`] is specialised to the local player as the
 /// attacker (1530). We run the direction we have. It differs only for a unit that can attack you
 /// while you cannot attack it, which needs the general two-unit form to answer.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn classify(
     guid: u64,
     self_guid: &SelfGuid,

@@ -17,7 +17,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_u16_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_u16_le, read_u32_le, read_u64_le, read_u8};
 
 /// One active cooldown from `SMSG_INITIAL_SPELLS`' second list (vmangos `SendInitialSpells`):
 /// `u16 spell, u16 castItem, u16 category, u32 spellCdMs, u32 categoryCdMs`. A *permanent*
@@ -38,13 +38,15 @@ pub struct SpellCooldown {
 pub(super) fn read_initial_spells(r: &mut impl Read) -> io::Result<(Vec<u16>, Vec<SpellCooldown>)> {
     let _ = read_u8(r)?;
     let n = read_u16_le(r)?;
-    let mut spells = Vec::with_capacity(n as usize);
+    // No protocol bound on either list (`Player::SendInitialSpells` walks the spell map); a
+    // 1.12 spellbook is a few hundred entries, so 1024 is generous.
+    let mut spells = Vec::with_capacity(capacity_hint(n, 1024));
     for _ in 0..n {
         spells.push(read_u16_le(r)?);
         let _ = read_u16_le(r)?;
     }
     let m = read_u16_le(r)?;
-    let mut cooldowns = Vec::with_capacity(m as usize);
+    let mut cooldowns = Vec::with_capacity(capacity_hint(m, 1024));
     for _ in 0..m {
         cooldowns.push(SpellCooldown {
             spell_id: read_u16_le(r)?,

@@ -26,7 +26,6 @@ impl WorldWriter {
     /// COD. `stationery`/`package` ride the wire but are discarded server-side (player mail is
     /// always stored `MAIL_STATIONERY_DEFAULT`). Answered by `SMSG_SEND_MAIL_RESULT` (a
     /// `SendMailResult` event).
-    #[allow(clippy::too_many_arguments)]
     pub fn send_mail(
         &mut self,
         mailbox: u64,

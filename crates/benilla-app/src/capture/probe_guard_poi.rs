@@ -73,7 +73,6 @@ enum Phase {
 }
 
 // One Bevy system's full input set (the taxi-probe shape).
-#[allow(clippy::too_many_arguments)]
 fn guard_poi_probe(
     time: ProbeClock,
     mut probe: ResMut<GuardPoiProbe>,

@@ -87,7 +87,6 @@ fn mail_send_bodies_golden() {
 /// Append one 8-byte-fixed item block (the tail every `SMSG_MAIL_LIST_RESULT` row always carries,
 /// zeroed when the mail has no attachment): entry, permEnchant, randomPropId, suffixFactor u32 ×4,
 /// stackCount u8, spellCharges/durabilityMax/durabilityCur u32 ×3.
-#[allow(clippy::too_many_arguments)]
 fn push_item_block(
     body: &mut Vec<u8>,
     entry: u32,

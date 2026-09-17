@@ -2254,7 +2254,7 @@ mod tests {
 
     /// The install's own `Bindings.xml`, parsed — `None` (and a skipped test) without a client.
     fn install_bindings() -> Option<Vec<benilla_ui::bindings_xml::AddonBinding>> {
-        let data = benilla_formats::wow_data()?;
+        let data = benilla_formats::wow_data_or_skip!(None);
         let mut chain = benilla_formats::open_chain(&data).expect("open the 1.12 patch chain");
         let xml = String::from_utf8_lossy(
             &chain

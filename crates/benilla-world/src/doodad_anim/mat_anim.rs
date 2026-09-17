@@ -420,7 +420,6 @@ pub fn register_uv(
 /// It over-includes (a part left `Inherited` under a hidden ancestor counts as drawn), which is the
 /// safe direction: an extra write costs a frame's uniform upload, a missed one would freeze a
 /// visible scroll.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn tick_anim_materials(
     time: Res<Time>,
     real: Res<Time<bevy::time::Real>>,
@@ -659,7 +658,6 @@ pub fn register_tint(
 /// works in a deterministic capture** — where [`tick_anim_materials`] is skipped entirely and the
 /// rows stay zero by design. In a live run the `row` column is the tick's real output and the two
 /// halves can be compared directly.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn matanim_probe(
     time: Res<Time>,
     uv_reg: Res<UvAnimMaterials>,

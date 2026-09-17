@@ -212,7 +212,6 @@ pub(super) fn track_area_interior(
 /// flicker, 2026-07-03). The camera is the fallback before login / detached free-fly.
 /// Independent of the PVS compute (which early-outs on portal-less models — a portal-less hut
 /// still has a floor to stand on; the *render* seed stays the camera, as the client's does).
-#[allow(clippy::too_many_arguments)] // a Bevy system: each arg is a distinct resource/query
 pub(super) fn track_current_interior(
     wmos: Res<Assets<WmoModel>>,
     viewer: Res<crate::view::Viewer>,

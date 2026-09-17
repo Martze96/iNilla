@@ -114,7 +114,6 @@ type CensusQuery = (
 
 /// One census line per [`ground_derived`] body within [`GroundCensus::radius`] of ours, worst drop
 /// first, under a summary line naming the count that matters.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn fire_ground_census(
     mut probe: ResMut<GroundCensus>,
     time: ProbeClock,

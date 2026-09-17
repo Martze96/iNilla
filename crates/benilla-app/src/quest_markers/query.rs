@@ -132,7 +132,7 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 /// equipping, unequipping and swapping a bag but not moving a stack inside one. Per unit, the
 /// reference's reaction refresh also keys on charm/persuade/duel-team/`PLAYER_BYTES_3`; we key on
 /// the faction template, and catch a standing change through the reputation sweep instead.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // a Bevy system: one param per resource
+#[allow(clippy::type_complexity)] // a Bevy system: one param per resource
 pub(super) fn query_statuses(
     self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     objects: Query<

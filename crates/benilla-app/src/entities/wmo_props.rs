@@ -186,7 +186,6 @@ pub(super) fn resolve_wmo_gameobject_props(
 /// Spawn each pending prop as its M2 lands, parented under the gameobject entity. The whole ship's
 /// set spawns within a few frames of the models landing — no per-frame budget (transports are a
 /// handful of instances per map, not a city's worth of placements).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn spawn_wmo_gameobject_props(
     mut commands: Commands,
     m2s: Res<Assets<M2Model>>,

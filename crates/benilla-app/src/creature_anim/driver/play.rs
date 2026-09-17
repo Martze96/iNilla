@@ -237,7 +237,6 @@ pub(super) fn roll_loop<'a>(
 /// decision 0123) **and its budget** ([`roll_loop`] — decision 0516), publishing the armed
 /// `(node, R)` into `window` for the watchdog's advance; a one-shot arm clears it (its budget is
 /// the `Count` repeat — no window outlives the arm).
-#[allow(clippy::too_many_arguments)] // the resolve+roll+play primitive's full input set
 pub(super) fn play(
     lock: &mut BaseAnimLock,
     tr: &mut AnimationTransitions,
@@ -382,7 +381,6 @@ pub(super) fn holds_own_clip(
 /// and settles through [`Mode::Entering`]; **Fall has no enter** — the client plays the Fall(40)
 /// loop directly the tick FALLINGFAR latches (`0x602c40`) — so it goes straight to
 /// [`Mode::Looping`] with a looping play.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn enter_special(
     lock: &mut BaseAnimLock,
     sp: Special,
@@ -434,7 +432,6 @@ pub(super) fn enter_special(
 /// started moving drops straight to the gait, letting the cross-fade carry the half-pose into the
 /// walk; an airborne state landing plays its [`jump_land_pick`]; otherwise `sp` plays its graceful
 /// exit one-shot, which [`super::drive_animations`] then waits out. Returns the mode to adopt.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn leave_special(
     lock: &mut BaseAnimLock,
     sp: Special,

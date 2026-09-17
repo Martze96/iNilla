@@ -436,8 +436,13 @@ fn describe(frame: &str, flag: Flag, ours: &str, theirs: &str) -> String {
 /// `parent="UIParent"` back on `BlackoutWorld` and it names that.
 #[test]
 fn the_shipped_frames_carry_the_references_flags() {
+    // Two gates, because the corpus and the manifest are two assets: the extracted reference
+    // dir below, and the chain `load_default_ui` reads — under `WOW_DATA=` (1451) the first is
+    // still there and the second is not.
+    let _data = benilla_formats::wow_data_or_skip!();
     let Some(reference) = reference_frames() else {
-        return; // no install — the same skip every client-data test here takes
+        eprintln!("skipping: no extracted reference FrameXML (WoW/_extracted_framexml)");
+        return;
     };
     let nesting = reference_nesting().expect("the same corpus the frames came from");
     assert!(

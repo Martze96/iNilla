@@ -741,7 +741,7 @@ fn spell_visual_wire_golden() {
 
 /// An open-lock cast on a chest / locked door: `SMSG_SPELL_GO` whose `SpellCastTargets` names a
 /// GameObject (`TARGET_FLAG_GAMEOBJECT`, no unit target). The decoder must surface the GO guid so the
-/// lid/door animation can open it (decision 0250) — the guid the older decode read for alignment and
+/// lid/door animation can open it (decision 2271) — the guid the older decode read for alignment and
 /// dropped.
 #[test]
 fn spell_go_surfaces_the_gameobject_target() {

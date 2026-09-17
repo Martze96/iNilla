@@ -294,7 +294,7 @@ struct RigBuild {
 /// / player body) as submesh children, or a colored cube fallback. The entity's pose is owned by the
 /// net bridge — or, for our own avatar, the player controller — we only add the geometry (and bake
 /// per-display scale onto the root). Our own avatar is the same streamed entity and renders here too.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn attach_entity_visuals(
     mut commands: Commands,
     pending: Query<

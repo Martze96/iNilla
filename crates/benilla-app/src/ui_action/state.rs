@@ -384,7 +384,7 @@ fn resolve_through_macro(
 }
 
 /// Compute + diff-push every occupied slot's dynamic state, and fire the reference event edges.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(super) fn feed_action_state(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,

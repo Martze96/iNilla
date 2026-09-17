@@ -390,7 +390,6 @@ pub(crate) fn stop_attack_local(
 /// `0x6131d9`). `0x5ecb70`'s own validator legs — the target's alive-or-feign + `CanAttack
 /// 0x606980` walk, and the `[0xb4b3e4]` world gate — stay with the callers that already compute
 /// them (`target::scan`'s `new_attackable`, the drain's `attack_actor_refusal`).
-#[allow(clippy::too_many_arguments)] // the tail writes four sinks; the alternative is a bundle
 pub(crate) fn start_attack_local(
     entity: Entity,
     target: u64,
@@ -444,7 +443,6 @@ pub(crate) fn start_attack_local(
 /// `[0xb4b3e4]` — the reference's second condition on the stop arm, a world/session global also
 /// tested at `0x5ecbc0` — is unmodelled; nothing in benilla can be false there while a press is
 /// being drained.
-#[allow(clippy::too_many_arguments)] // the seams' write set, minus the bundle a caller can't hold
 pub(crate) fn toggle_attack_local(
     entity: Entity,
     target: u64,

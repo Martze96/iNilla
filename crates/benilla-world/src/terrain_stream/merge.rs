@@ -281,7 +281,6 @@ impl StaticMerge {
     /// and the shader's `> 7` arm pins it opaque). `false` = this site never merges (WMO group
     /// geometry and props — 1418's verdict / the referrer-set key) — the caller spawns the
     /// batch individually, the fail-open arm.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn divert(
         &mut self,
         site: &MergeSite<'_>,

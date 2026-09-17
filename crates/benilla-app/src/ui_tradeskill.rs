@@ -240,7 +240,6 @@ fn recipe_icon(
 
 /// Build one recipe row: reagents/tools/product resolved through the ask-once template cache
 /// (`None` names re-resolve next frame when the template lands — the item-row precedent).
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn resolve_recipe(
     spell_id: u32,
     rank: u32,
@@ -365,7 +364,6 @@ fn resolve_recipe(
 /// Build the book: the known attr-`0x20` recipes of the open line, difficulty-banded against the
 /// current rank. No sort applied here — the engine owns ALL ordering (group + tier + name, the
 /// VERIFIED two-level law, decision 0446 wow-re `tradeskill` TU-B).
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (the feed precedent)
 fn feed_trade_skill(
     script: Option<NonSendMut<UiScript>>,
     open: Res<TradeSkillOpen>,

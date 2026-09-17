@@ -202,7 +202,6 @@ fn find_bank_slot(store: &ObjectStore, guid: u64) -> Option<u8> {
     (0..24u8).find(|&i| store.0.player_bank_slot(i) == Some(guid))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn bank_probe(
     time: ProbeClock,
     mut probe: ResMut<BankProbe>,

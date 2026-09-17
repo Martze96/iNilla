@@ -12,7 +12,8 @@ use std::io::{self, Read};
 
 use crate::messages::update_object::power_display_scale;
 use crate::wire::{
-    read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
+    capacity_hint, read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le,
+    read_u64_le, read_u8,
 };
 
 /// The raid-assistant bit in [`GroupMemberEntry::flags`] / `SMSG_GROUP_LIST`'s own-flags byte —
@@ -95,7 +96,8 @@ pub(super) fn read_group_list(
     let group_type = read_u8(r)?;
     let own_flags = read_u8(r)?;
     let count = read_u32_le(r)?;
-    let mut members = Vec::with_capacity(count as usize);
+    // A raid is the widest list this carries: vmangos `MAX_RAID_SIZE` 40 (`Group/Group.h:50`).
+    let mut members = Vec::with_capacity(capacity_hint(count, 40));
     for _ in 0..count {
         members.push(GroupMemberEntry {
             name: read_cstring(r)?,
@@ -633,7 +635,7 @@ pub(super) fn read_raid_instance_info(r: &mut &[u8]) -> io::Result<Vec<RaidInsta
     // A cap before the allocation: `count` is attacker-controlled in the general case, and the
     // real client's own list is `MAX_RAID_INFOS`-bounded at the UI. 1024 is far above anything a
     // server can legitimately send and far below a memory problem.
-    let mut out = Vec::with_capacity((count as usize).min(1024));
+    let mut out = Vec::with_capacity(capacity_hint(count, 1024));
     for _ in 0..count {
         out.push(RaidInstanceEntry {
             map: read_u32_le(r)?,

@@ -101,6 +101,7 @@ mod probe_charter;
 mod probe_chest;
 mod probe_clam;
 mod probe_crossing;
+pub(crate) mod probe_env;
 mod probe_gm_ticket;
 mod probe_goquest;
 mod probe_guard_poi;
@@ -912,7 +913,6 @@ impl Plugin for CapturePlugin {
 /// Each frame, force the deterministic capture conditions: pinned time-of-day, no perf HUD, and the
 /// fixed camera pose. Runs in `WorldStage::Present` (after `control` is gated off and after terrain
 /// streaming reads the camera), so the harness is the sole, stable author of the view.
-#[allow(clippy::too_many_arguments)]
 fn pin_scene(
     ctx: Res<CaptureCtx>,
     mut debug: ResMut<DebugState>,
@@ -1001,7 +1001,6 @@ pub(crate) struct ProbeCensus<'w, 's> {
 }
 
 /// Drive the capture lifecycle: wait for streaming, settle, screenshot, exit.
-#[allow(clippy::too_many_arguments)]
 fn drive_capture(
     mut ctx: ResMut<CaptureCtx>,
     mut watch: ResMut<FrameWatch>,

@@ -314,7 +314,6 @@ struct JournalGpu<'w> {
 /// `NonSendMarker` pins this to the main thread, which the `main_ms` column requires:
 /// [`main_thread_cpu_secs`] reports *the calling thread*, so on a worker it would silently log
 /// whichever pool thread ran the flush.
-#[allow(clippy::too_many_arguments)]
 fn journal_fps(
     _pin_to_main_thread: bevy::ecs::system::NonSendMarker,
     mut journal: ResMut<FpsJournal>,

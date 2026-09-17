@@ -341,7 +341,6 @@ fn arm_leg(
 /// gets at most one masked overlay, and [`VisualSheath`] holds that arm's pre-swap placement until
 /// its clip reaches the authored `$SHL`/`$SHR` moment. An arm whose leg has no playable clip
 /// snaps; no arm playing anything at all → no ceremony, and the whole transition snaps.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn start_sheath_ceremony(
     commands: &mut Commands,
     entity: Entity,
@@ -380,7 +379,6 @@ pub(super) fn start_sheath_ceremony(
 /// [`sheath_phase2`] so it can reach for the new weapon. The ceremony ends when every arm has run
 /// out of legs, at which point [`VisualSheath`] is dropped and the resolver falls back to the
 /// committed state.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn advance_sheath_ceremony(
     commands: &mut Commands,
     entity: Entity,

@@ -41,10 +41,11 @@ impl WorldReader {
         if let Err(e) = self.stream.read_exact(&mut body) {
             return Err(anyhow!("world stream closed: {e}"));
         }
-        match messages::parse_server(opcode, &body) {
-            Ok(packet) => Ok(crate::Poll::Events {
+        match messages::parse_server_with_tail(opcode, &body) {
+            Ok((packet, tail)) => Ok(crate::Poll::Events {
                 opcode,
                 events: crate::decode(packet),
+                tail,
             }),
             // Include the raw body (capped) so an unparseable packet can be decoded by hand — a parse
             // bug is otherwise invisible past "failed to fill whole buffer". The opcode rides

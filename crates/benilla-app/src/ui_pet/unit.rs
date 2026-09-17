@@ -59,7 +59,6 @@ pub(super) const UNIT_FLAG_PET_IN_COMBAT: u32 = 0x0000_0800;
 /// The reaction argument is `0`: the pet frame reads no reaction (only `"target"` resolves one —
 /// [`crate::ui_unit::feed_units`]' own note), and the party feed passes the same for the same
 /// reason.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_pet_unit(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,

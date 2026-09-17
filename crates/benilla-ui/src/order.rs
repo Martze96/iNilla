@@ -269,7 +269,6 @@ impl ZKey {
     /// The key for one **region** of a frame. `strata`/`level`/`insertion` are the *owner frame's*
     /// (so the region stays grouped behind its frame); `is_fontstring` places textures before
     /// fontstrings at equal (layer, sub-level).
-    #[allow(clippy::too_many_arguments)]
     pub fn region(
         strata: Strata,
         level: u16,

@@ -1396,7 +1396,6 @@ pub(crate) fn spawn_warm_booth(
 /// Startup: stand up one booth per slot — its image (registered in [`PortraitImages`]), a model-root
 /// entity, and a camera rendering only that slot's layer into the image (transparent, no bloom/MSAA,
 /// rendered before the world camera via a negative order).
-#[allow(clippy::too_many_arguments)]
 fn setup_booths(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -1692,7 +1691,6 @@ impl SnapKey {
     /// Build the key for `unit`'s pane this frame. `dress`/`rev` are the unit's own components
     /// (absent until its equipment first resolves, which is simply another value); `show` and
     /// `aspect` are the booth's.
-    #[allow(clippy::too_many_arguments)]
     fn build(
         unit: Entity,
         parts: &[&PortraitPart],
@@ -1903,7 +1901,6 @@ impl DressedLook<'_, '_> {
 /// [`PortraitPart`] children — into the booth whenever that look changes (new unit, gear swap,
 /// appearance refresh), re-framing the camera from the display's anchors. A live unit whose model
 /// hasn't attached yet shows the ref's 2D `TemporaryPortrait` stand-in instead (RE C5).
-#[allow(clippy::too_many_arguments)]
 fn sync_portraits(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2245,7 +2242,6 @@ fn sync_portraits(
 /// pane showing, a change of dress, an explicit model event, a resize. Mirroring live put a bow
 /// drawn in combat straight onto the character sheet (`#bugs` B324); [`SnapKey`] carries the whole
 /// law and its byte provenance.
-#[allow(clippy::too_many_arguments)]
 fn sync_paperdoll(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2290,7 +2286,6 @@ fn sync_paperdoll(
 
 /// The inspect window's model pane (decision 0631 §4) — the paper doll's exact twin, pointed at
 /// whichever unit [`crate::ui_inspect`] resolved this frame instead of at the self player.
-#[allow(clippy::too_many_arguments)]
 fn sync_inspect_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2334,7 +2329,6 @@ fn sync_inspect_booth(
 
 /// The pet paper doll's model pane (decision 1057) — the inspect pane's exact twin, pointed at the
 /// pet [`crate::ui_pet_doll`] resolved this frame.
-#[allow(clippy::too_many_arguments)]
 fn sync_petdoll_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2463,7 +2457,6 @@ fn sync_stable_standin(
 /// subject entity. So this is [`sync_petdoll_booth`] with one `or` — which is the point of the
 /// stand-in: the summoned pet and the stabled pet reach the same bake through the same code, and so
 /// cannot drift apart in framing, lighting, animation or settle.
-#[allow(clippy::too_many_arguments)]
 fn sync_stable_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2514,7 +2507,6 @@ fn sync_stable_booth(
 /// `unit` is a **subject**, not necessarily a world unit: a [`PortraitStandIn`] mirrors the same
 /// way and carries its own display id, which is how the stable pane draws a pet that has no object
 /// anywhere ([`StableBooth`]).
-#[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
     palettes: &mut benilla_world::rig_palette::RigPalettes,
     slot: &str,
@@ -2837,7 +2829,6 @@ fn pipe_settle(compiling: bool, wake_drained: bool, held_for: f64) -> PipeSettle
 /// The pipeline warm pass is demand too (decision 0938): its menagerie duplicates rigs onto a
 /// booth layer so the booths' `Msaa::Off` pipeline twins compile behind the entry cover — which
 /// only works if the booth cameras render during the warm window.
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource/query
 fn gate_booth_cameras(
     mut commands: Commands,
     mut booths: ResMut<Booths>,

@@ -82,7 +82,6 @@ pub fn down_ray_seeds(model: &WmoModel, eye: [f32; 3], terrain_z: Option<f32>) -
 /// space** (the down-ray's own frame), or `None` where there is no terrain surface to hit — off the
 /// streamed tiles, or a hole cut through the ground into this very interior. It is the client's second
 /// probe, and it wins the column whenever it is *strictly* nearer to the eye than the WMO's hit.
-#[allow(clippy::too_many_arguments)] // the model's stored pieces, passed as parallel slices
 pub(crate) fn down_ray_pick(
     tris: &[Vec<[[f32; 3]; 3]>],
     grids: &[Option<ColumnGrid>],
@@ -354,7 +353,6 @@ pub(crate) fn up_ray_claim(
 
 /// The shared body: `up` flips which side of the probe a face must lie on and which candidate
 /// wins — the nearest one in the cast's own direction, exactly as `footprint_scan` does it.
-#[allow(clippy::too_many_arguments)]
 fn ray_claim(
     tris: &[Vec<[[f32; 3]; 3]>],
     bounds: &[Option<([f32; 3], [f32; 3])>],

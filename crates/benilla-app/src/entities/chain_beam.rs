@@ -240,7 +240,6 @@ fn select_targets(
 /// reapable: the reference only ever publishes a flagged node to the owner slots that the channel
 /// teardown sweeps (`0x6ecdaa` gates the AddRef on the flag), so a one-shot beam always runs its own
 /// clock to the end.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_chain_beams(
     mut commands: Commands,
     time: Res<Time>,
@@ -463,7 +462,6 @@ fn push_strand(
 /// Per frame: age the beam, re-resolve every hop's live endpoints, re-jitter and advect its
 /// polyline, and write the ribbons into the shared effect-quad stream — the reference's
 /// `LightningObject::Update` (`0x6ec460`) and `CLightning::Render` (`0x7afcb0`) in one pass.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_chain_beams(
     time: Res<Time>,
     mut commands: Commands,

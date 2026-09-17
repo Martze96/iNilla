@@ -742,7 +742,6 @@ type AuraParts<'w, 's> = Query<
 /// Note the swap keys on the *instance* alpha only: a batch whose own animated colour alpha dips is
 /// a per-batch quantity the reference combines separately, and forcing those onto a blend pass would
 /// change every existing unit's look.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn apply_aura_alpha(
     time: Res<Time>,
     mut commands: Commands,
@@ -842,7 +841,6 @@ fn author_cards(
 /// property that its attached models render off (the same reason
 /// [`benilla_world::model_fade::apply_despawn_fade`] and the self feather both walk descendants, not
 /// children).
-#[allow(clippy::too_many_arguments)] // the author's full channel set, threaded down the walk
 fn author_descendants(
     entity: Entity,
     alpha: f32,

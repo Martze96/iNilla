@@ -58,7 +58,6 @@ pub(super) struct FedPetition {
 }
 
 /// Build the snapshot, push it, drain the queued lines, and fire the four events on their edges.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn feed_petition(
     script: Option<NonSendMut<UiScript>>,
     registrar: Res<GuildRegistrarState>,
@@ -219,7 +218,6 @@ pub(super) fn feed_petition(
 /// flight, a record is cached, and we are **not** its owner. Closing somebody else's charter tells
 /// them so. `CloseGuildRegistrar`, by contrast, really does send nothing — verified by a closure
 /// walk that found no `CDataStore` build on its whole path.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_petition(
     script: Option<NonSendMut<UiScript>>,
     mut registrar: ResMut<GuildRegistrarState>,

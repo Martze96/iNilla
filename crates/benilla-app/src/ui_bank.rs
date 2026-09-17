@@ -127,7 +127,6 @@ fn bank_slot_error_key(result: u32) -> Option<&'static str> {
 /// window with `UnitName("npc")`, off the interaction token [`crate::ui_session`] already points
 /// at the banker. Firing an argument the reference does not fire is a divergence an addon can
 /// see, and it bought nothing once the reference's file was the one reading the event.
-#[allow(clippy::too_many_arguments)]
 fn feed_bank(
     script: Option<NonSendMut<UiScript>>,
     open: Res<BankOpen>,

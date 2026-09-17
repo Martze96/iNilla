@@ -103,7 +103,14 @@ const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_wa
 /// So they are excluded from the gated number and **counted separately**, because a rule that
 /// hides a number is worse than no rule. `art_scope` is not here: it is registered by
 /// `WorldPlugins` and lives inside the engine, so it never crosses.
-const INSTRUMENT_CONSUMERS: &[&str] = &["debug_panel", "perf", "pipe_warm"];
+///
+/// `crash` (decision 2266 §B2) is the fourth: the panic hook that writes the crash report. It is
+/// `perf::stall`'s sibling — a diagnostic that writes into `Diagnostics/` and nothing gameplay
+/// reads — and the one engine item it names, `log_ring::recent`, is a diagnostic feed kept beside
+/// the engine's `LogPlugin` because that is where the layer has to be installed. An API shaped
+/// by what a crash report wanted to attach is 1163's failure exactly, so it is counted here, not
+/// in the doorway.
+const INSTRUMENT_CONSUMERS: &[&str] = &["crash", "debug_panel", "perf", "pipe_warm"];
 
 /// Is this file one of the app-side instruments?
 fn is_instrument_consumer(rel: &str) -> bool {

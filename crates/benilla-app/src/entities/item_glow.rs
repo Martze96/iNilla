@@ -177,7 +177,6 @@ pub(crate) struct ItemGlowAttached;
 /// waits, so a two-model visual can't spawn half of itself and then re-enter here. A model that
 /// never loads simply never glows (the item is still perfectly drawn); the retry is a handful of
 /// roots per frame.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn attach_item_glows(
     mut commands: Commands,
     pending: Query<(Entity, &ItemGlow), Without<ItemGlowAttached>>,

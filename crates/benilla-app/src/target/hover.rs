@@ -125,7 +125,7 @@ pub(super) struct PickPose<'w, 's> {
 /// body — held weapons, the helm, the shoulders, a mount — is its own pass-1/pass-2 candidate
 /// resolving to the same unit, because the reference registers the whole CM2 attachment tree into
 /// the pick scene under one candidate node (`0x480d90` walking `[model+0x1dc]`/`[+0x1e4]`).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn update_hover(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -614,7 +614,6 @@ fn net_entity_of(
     cur
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn update_hovered_object(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,

@@ -343,7 +343,6 @@ fn tick_countdown(time: Res<Time>, mut duel: ResMut<DuelState>, mut started: Loc
 }
 
 /// Drain the Era API's duel intents into their sends.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn drain_duel(
     script: Option<NonSendMut<UiScript>>,
     duel: Res<DuelState>,

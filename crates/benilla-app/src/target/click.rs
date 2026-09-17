@@ -70,7 +70,6 @@ pub(super) fn world_right_click_payload(
 /// fires on the up edge and the replay below turns it into the interact leg — which is the
 /// reference's own shape, `0x7cb910` → `0x4949f0(mask 4)` → `0x492820`, the same terminal the world
 /// right-click's object leg `0x492ce0` reaches.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_on_plate_click(
     mut plate: ResMut<crate::vplates::PlateClicks>,
     press: Res<PressPick>,
@@ -132,7 +131,6 @@ pub(super) fn select_on_plate_click(
 /// for the whole look session, as the reference suppresses its own hover during freelook. Reading
 /// the live hover here would take the `_ =>` arm below and *clear* the player's target on every
 /// drag. The reference picks once, on the down edge, and this consumes that same latch.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn select_on_click(
     mut clicks: MessageReader<WorldClick>,
     inspect: Res<InspectMode>,
@@ -293,7 +291,7 @@ fn interaction_already_open_on(target: u64, interact: &crate::ui_session::Intera
 /// (`unable` only grays): the server holds the swing until we're in reach, as the real client does.
 /// A right-click on empty ground was just a turn — it never deselects.
 // The `ui_feedback` tuple is the 16-SystemParam ceiling's overflow bundle, commented at its site.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn act_on_right_click(
     mut clicks: MessageReader<WorldRightClick>,
     // **The press pick, not the live hover** (decision 2230) — the same latch the left button has

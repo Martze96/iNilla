@@ -112,7 +112,6 @@ pub(super) fn cinematic_triggered(
 
 /// We are in the world (the IO thread's first in-world event): record our guid, flip the status,
 /// and seed the name cache with our own name.
-#[allow(clippy::too_many_arguments)] // the login's whole hand-off
 pub(super) fn connected(
     guid: u64,
     name: String,
@@ -170,7 +169,6 @@ pub(super) fn logged_out(
 
 /// The session ended (socket closed / handshake failure): tear down the streamed world and clear
 /// every session-scoped cache.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn disconnected(
     reason: String,
     end: benilla_protocol::SessionEnd,
@@ -385,7 +383,6 @@ pub(super) fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
 /// the seam (the `CurrentMap` flip itself flips which legs render), keeping the ride attachment
 /// and the deck collider valid the whole way; the server's post-ack re-create then refreshes its
 /// anchor in place. Boats whose paths never reach the new map despawn like everything else.
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full context, like `disconnected`
 pub(super) fn worldport(
     map_id: u32,
     position: [f32; 3],
@@ -486,7 +483,9 @@ pub(super) fn reputation_delta(
 ) {
     use benilla_formats::faction_flags as flag;
     for (list_id, standing) in standings {
-        let i = list_id as usize;
+        let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_STANDING") else {
+            continue;
+        };
         if reputations.0.len() <= i {
             reputations.0.resize(i + 1, (0, 0));
         }
@@ -508,11 +507,30 @@ pub(super) fn reputation_delta(
 /// silent failure it exists to prevent: the pane keys row membership off this bit, so a faction met
 /// mid-session would keep accruing reputation the player could never see.
 pub(super) fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
-    let i = list_id as usize;
+    let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_VISIBLE") else {
+        return;
+    };
     if reputations.0.len() <= i {
         reputations.0.resize(i + 1, (0, 0));
     }
     reputations.0[i].0 |= benilla_formats::faction_flags::VISIBLE;
+}
+
+/// A wire `repListId` as a store index, or `None` (logged) when it is not one. The list is
+/// positional in a `FACTION_LIST_LEN`-entry array (vmangos `MAX_FACTION_COUNT` 64), so a slot
+/// past it is not a faction — and resizing the store to it was the one wire value that could
+/// abort the process instead of dropping a packet (`0xFFFF_FFFF` → a 34 GB resize; decision
+/// 2265 §B1).
+fn reputation_slot(list_id: u32, opcode: &str) -> Option<usize> {
+    let i = usize::try_from(list_id).ok()?;
+    if i >= benilla_protocol::messages::FACTION_LIST_LEN {
+        warn!(
+            "net: {opcode} names reputation slot {list_id}, past the {}-entry faction list — dropped",
+            benilla_protocol::messages::FACTION_LIST_LEN
+        );
+        return None;
+    }
+    Some(i)
 }
 
 /// The dropped-packet tally (the wire-coverage instrument): count it, and announce each opcode's

@@ -115,7 +115,6 @@ pub(super) fn wound_evict(
 /// sheath reconcile and the event scan. `id` is the wound anim to lay (8–10), already resolved
 /// by the caller — melee by severity/engagement ([`select::wound_anim`]), a spell impact by its
 /// kit's own column ([`WoundEdge`]).
-#[allow(clippy::too_many_arguments)] // the trigger's full live-state + rng input set
 pub(super) fn wound_trigger(
     entity: Entity,
     drv: &mut AnimDriver,

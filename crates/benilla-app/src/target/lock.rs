@@ -148,7 +148,6 @@ pub(crate) const GO_FLAG_LOCKED: u32 = 0x2;
 /// — so iterating a `HashSet` put Blizzard's placeholder name on the cast bar at the hash's whim
 /// (B247). `known` is a [`BTreeSet`] for exactly that reason: ascending spell id is the reference
 /// array's own order after login, the server building `SMSG_INITIAL_SPELLS` out of a `std::map`.
-#[allow(clippy::too_many_arguments)] // the reference fn's own inputs, plus the two out-params
 pub(crate) fn resolve_lock(
     slots: &[LockSlot],
     known: &BTreeSet<u32>,

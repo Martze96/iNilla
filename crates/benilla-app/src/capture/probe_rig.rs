@@ -295,7 +295,6 @@ struct Rig {
 }
 
 /// The whole rig: find-or-create the body at select, enter as it, then apply the state batch.
-#[allow(clippy::too_many_arguments)]
 fn drive_rig(
     mut rig: ResMut<Rig>,
     mut roster: ResMut<Roster>,

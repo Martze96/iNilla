@@ -731,7 +731,7 @@ pub enum ServerPacket {
     },
     /// `SMSG_CANCEL_AUTO_REPEAT` — stop our own ranged auto-repeat visual; self-only, empty body
     /// (vmangos `WorldPackets::Misc::CancelAutoRepeat`). Consumed by the local cancel funnel
-    /// (`net/apply/spells.rs::cancel_auto_repeat`, decision 0406). vmangos DOES send it —
+    /// (`net/apply/spells.rs::cancel_auto_repeat`, decision 2273). vmangos DOES send it —
     /// `SpellCaster::InterruptSpell` → `Player::SendAutoRepeatCancel`, on every player autorepeat
     /// interrupt, target death included (corrected 2026-08-05; the earlier "zero send sites" note
     /// here was wrong).
@@ -964,8 +964,8 @@ pub enum ServerPacket {
         blocks: Vec<super::gossip::NpcTextBlock>,
     },
     /// `SMSG_LIST_INVENTORY` — a vendor's stock, answering `CMSG_LIST_INVENTORY` (vmangos
-    /// `ItemHandler.cpp:741-810`). Empty stock sends `count = 0` plus a trailing error byte the
-    /// parser leaves unconsumed.
+    /// `ItemHandler.cpp:741-810`). Empty stock sends `count = 0` plus one error byte (always 0,
+    /// "Vendor has no inventory") that the parser consumes and drops.
     VendorList {
         vendor: u64,
         items: Vec<VendorItem>,

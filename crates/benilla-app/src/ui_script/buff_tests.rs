@@ -69,7 +69,6 @@ fn harness() -> UiScript {
 
 /// Build an [`AuraState`] as the feed would push it. `expiration_time` 0 = permanent (no wire
 /// duration — the reference's "until cancelled"); the `GetTime()` clock starts at 0 in the harness.
-#[allow(clippy::too_many_arguments)]
 fn aura(
     spell_id: u32,
     name: &str,

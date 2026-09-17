@@ -388,7 +388,6 @@ mod other {
     /// Each frame: while a cursor payload with a resolved icon is held, show ITS 32×32 hardware
     /// cursor (decoded/downsampled on first use, then cached by path); otherwise swap to the
     /// classified mode (base-stem fallback, then Point, then OS) — unchanged from before 0216 §5.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn drive(
         mut commands: Commands,
         cursor: Res<super::DisplayedCursor>,
@@ -543,7 +542,6 @@ mod macos {
     /// §5, decoded/downsampled to 32×32 on first use and cached by path) if one is held and
     /// resolved, else the classified mode (base-stem fallback, then Point); on entering/leaving
     /// mouselook, hide/show it via the app-global hide counter.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn drive(
         cursors: Option<NonSend<NativeCursors>>,
         mut payload_cursors: NonSendMut<PayloadCursors>,

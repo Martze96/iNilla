@@ -43,7 +43,6 @@ const LAND_TIMEOUT: f32 = 5.0;
 /// The land-here ask, and the re-attach that closes it. Runs before [`super::control`], so the
 /// frame that applies the teleport is the frame that takes third-person control again.
 // One system phase's input set, like the controller's own params.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn land_here(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,

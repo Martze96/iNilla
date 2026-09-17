@@ -21,7 +21,6 @@ use super::kit::{
 };
 use super::{AudioListener, SoundConfig, SoundOutput};
 
-#[allow(clippy::too_many_arguments)] // the standard sound-route param set + the hold ledger
 fn route_spell_kit_sounds(
     mut events: MessageReader<SpellKitSound>,
     transforms: Query<&Transform, Without<Camera3d>>,

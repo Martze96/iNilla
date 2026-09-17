@@ -464,9 +464,7 @@ mod tests {
     /// empty string**, which is the assumption `mask_uncached`'s zero-length break rests on.
     #[test]
     fn every_shipped_pattern_compiles_and_none_matches_empty() {
-        let Some(data) = benilla_formats::wow_data() else {
-            return;
-        };
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let profanity = benilla_formats::load_chat_profanity(&mut chain).expect("profanity");
         let spam = benilla_formats::load_spam_messages(&mut chain).expect("spam");
@@ -489,9 +487,7 @@ mod tests {
     /// The shipped data end to end: the oracle's own sentences through the real lists.
     #[test]
     fn the_shipped_lists_reproduce_the_oracle_sentences() {
-        let Some(data) = benilla_formats::wow_data() else {
-            return;
-        };
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let profanity = benilla_formats::load_chat_profanity(&mut chain).expect("profanity");
         let spam = benilla_formats::load_spam_messages(&mut chain).expect("spam");

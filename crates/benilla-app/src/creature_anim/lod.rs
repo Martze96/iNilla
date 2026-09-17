@@ -90,7 +90,7 @@ const FALLBACK_RADIUS: f32 = 6.0;
 /// frame. Exempt: the body we drive (the camera rides its attachment-17 pivot, and it must keep
 /// animating faded-out in first person) and its mount child. `WOW_NO_ANIM_LOD=1` disables
 /// parking — the live-probe A/B lever; `WOW_NO_ROOM_LOD=1` disables only the room leg.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
     cam: Query<&Frustum, With<WorldCamera>>,

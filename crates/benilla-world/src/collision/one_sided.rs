@@ -292,7 +292,6 @@ pub(crate) fn cast_ray(
 /// is what displaced a seated body out of its chair). The `on_hit` callback contract is avian's
 /// ([`MoveAndSlideHitData`] / [`MoveAndSlideHitResponse`]), so the mover's ride/steep-wall handlers
 /// move over unchanged.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_and_slide(
     ms: &MoveAndSlide<'_, '_>,
     shape: &Collider,

@@ -457,7 +457,6 @@ struct MeleeTables<'w> {
     voices: Option<Res<'w, CreatureVoices>>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn combat_sounds(
     mut swings: MessageReader<SwingMessage>,
     mut contacts: MessageReader<SwingImpact>,

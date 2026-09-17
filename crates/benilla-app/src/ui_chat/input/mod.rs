@@ -21,7 +21,6 @@ use crate::creature_anim::{move_flags, MovementState};
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 use crate::target::Selection;
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 /// The target half of the ref's `GetSlashCmdTarget` (ChatFrame.lua:650-658): a bare party
 /// command falls back to the current selection iff it's a PLAYER; anything else is `None` (the
 /// ref's silent no-op). The name is cache-resolved — a streamed player target is always cached.
@@ -67,7 +66,6 @@ pub(super) fn emote_target(selection: &Selection, me: Option<Entity>) -> u64 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The client-local diagnostics' inputs, as one [`SystemParam`] — [`drain_chat_input`] is at the
 /// 16-parameter ceiling, and a named struct beats a nested tuple nobody can read.
 ///
@@ -203,7 +201,6 @@ fn manual_join_or_leave(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_chat_input(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut chat_log: ResMut<super::feed::ChatLog>,

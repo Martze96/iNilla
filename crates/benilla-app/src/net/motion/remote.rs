@@ -492,7 +492,6 @@ pub(in crate::net) fn drain_pending_moves(
 /// ([`drain_pending_moves`]); a dead-reckon that advanced on a different (virtual, clamped) clock
 /// than the fire-times it converges toward would never land on them.
 #[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_arguments)] // a Bevy system signature: one param per resource/query
 pub(in crate::net) fn extrapolate_remote_units(
     time: Res<Time<Real>>,
     mut commands: Commands,

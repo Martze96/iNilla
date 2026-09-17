@@ -153,7 +153,6 @@ enum CursorGesture {
 /// missing link (template in flight, unknown display, group 0, kit 0, absent catalog) is the
 /// client's own silent return, never an error. The previous payload is tracked here (a `Local`),
 /// not in the VM — the engine-free model owns the state, the app owns the sound.
-#[allow(clippy::too_many_arguments)]
 fn play_item_gesture_sounds(
     script: Option<NonSend<UiScript>>,
     mut prev: Local<crate::ui_script::VmMemo<Option<CursorPayload>>>,
@@ -267,7 +266,6 @@ fn play_item_gesture_sounds(
 /// through the byte-verified chain `ItemGroupSounds[ItemDisplayInfo[displayId].group_sounds]
 /// .kit[gesture]` and play it 2D on the SFX bucket. Every missing link (unknown display, group 0,
 /// kit 0) is the client's own silent return, never an error.
-#[allow(clippy::too_many_arguments)]
 fn play_item_gesture(
     display_id: u32,
     gesture: ItemGesture,

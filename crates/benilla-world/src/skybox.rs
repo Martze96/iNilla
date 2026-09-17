@@ -246,7 +246,6 @@ impl Plugin for SkyboxPlugin {
 /// the reported spot it seeds the street group g08 (`0x42805`, a true interior; pin-probed
 /// 2026-09-01, decision 1827) — which is what lets the crossfade weight engage in the square while
 /// the skybox *name* comes from the flood predicate above.
-#[allow(clippy::too_many_arguments)]
 fn resolve_camera_skybox(
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,

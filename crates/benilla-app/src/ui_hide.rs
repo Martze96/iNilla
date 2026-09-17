@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::char_select::ClientState;
+use crate::char_select::{ClientState, InWorldGated};
 use crate::ui_script::UiInput;
 
 /// Is the player UI hidden right now? (`ALT-Z` — [`toggle_ui_hidden`].)
@@ -37,9 +37,7 @@ impl Plugin for UiHidePlugin {
                 Update,
                 // After `UiInput`, like every other gameplay key reader: an EditBox that consumed
                 // this frame's keys has already published its capture flag by then.
-                toggle_ui_hidden
-                    .after(UiInput)
-                    .run_if(in_state(ClientState::InWorld)),
+                toggle_ui_hidden.after(UiInput).in_set(InWorldGated),
             )
             .add_systems(OnExit(ClientState::InWorld), show_ui);
     }

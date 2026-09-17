@@ -139,7 +139,6 @@ fn inherit_trigger(accum: &mut f32, held: &mut Vec3, dt: f32, delta: Vec3, live:
 /// PARTICLE's velocity into the child's inherit add (`(1+S11·var)·v` — for children the
 /// inherit vector IS the particle velocity, copied per call at `0x7b5b5e`). A burst child
 /// latches on its first call of the rising-edge frame. A child never self-emits ambiently.
-#[allow(clippy::too_many_arguments)] // the birth fold's full frame, same as the parent path
 fn drive_child(
     child: &mut ChildEmitter,
     now: &benilla_formats::ParamsNow,
@@ -489,7 +488,7 @@ fn scene_frozen(booth: Option<(bool, bool)>, owner_frozen: bool, draining: bool)
 
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
 /// stream ([`super::buffer::EffectQuads`]).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn simulate_particles(
     time: Res<Time>,
     tuning: Res<ParticleTuning>,

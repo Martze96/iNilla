@@ -147,7 +147,6 @@ pub(super) struct ArcEdges {
 /// heartbeat so next frame can diff against them.
 // Eight, down from twelve: the arc edges are one struct now (`ArcEdges`). The rest are distinct
 // types the compiler can tell apart, so the remaining count is noise rather than a miscount risk.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn stream_self_movement(
     sender: &Sender<ClientCommand>,
     player: &mut Player,

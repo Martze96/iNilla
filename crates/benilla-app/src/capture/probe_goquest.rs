@@ -211,7 +211,6 @@ fn report(label: &str, expect: u32, seen: Option<u32>) -> u32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn goquest_probe(
     time: ProbeClock,
     mut probe: ResMut<GoQuestProbe>,

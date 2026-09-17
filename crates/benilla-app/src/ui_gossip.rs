@@ -309,7 +309,6 @@ fn snapshot(state: &GossipState) -> Option<GossipMenu> {
 /// Push the current menu into the VM and fire the open/close events on a transition (or a content
 /// change — the greeting arriving a frame after the menu). Diffed against a `Local` memory, exactly
 /// like the container feed's per-bag diff.
-#[allow(clippy::too_many_arguments)]
 fn feed_gossip(
     script: Option<NonSendMut<UiScript>>,
     state: Res<GossipState>,

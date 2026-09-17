@@ -159,7 +159,6 @@ type RootState = (
 /// Spawn a print for each per-foot plant on a footprint surface: the state gates (hover /
 /// stealth / ghost / distance), the terrain-flags gate, the unit's ink + params, the event
 /// marker's live bone position, yaw to the facing, project once, cache the triangles.
-#[allow(clippy::too_many_arguments)]
 fn spawn_footprints(
     mut events: MessageReader<AnimSoundEvent>,
     time: Res<Time>,

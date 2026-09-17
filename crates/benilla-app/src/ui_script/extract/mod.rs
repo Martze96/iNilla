@@ -387,7 +387,6 @@ fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
 /// `booths.panes` is the one exception, because [`convert_entry`] writes it through the shared
 /// bridge; re-adding the same tokens is idempotent, so a verify run's panes end up where the full
 /// path would have put them anyway.
-#[allow(clippy::too_many_arguments)]
 fn verify_splice(
     prev: &GateInputs,
     quads: &UiQuads,
@@ -522,7 +521,6 @@ pub(crate) fn seat_text_measurer(script: &mut UiScript, atlas: &UiFontAtlas, sea
 /// p90 of 16 px of lag per frame at 640x360 while a guard walked (the `vpl` trace, 2026-09-10), and
 /// proportionally more at a real window. That is the director's "way more jittered when the
 /// creature is moving".
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 pub(super) fn tick_script(
     script: Option<NonSendMut<UiScript>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -776,7 +774,6 @@ pub(super) fn tick_script(
 /// walked after that camera exists. The re-resolve is what makes the plates' fresh anchors real —
 /// it is the layout ledger's incremental pass, so on a frame where nothing but the plates moved it
 /// solves the plates and nothing else.
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 pub(super) fn paint_script(
     script: Option<NonSendMut<UiScript>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -1381,7 +1378,6 @@ pub(super) fn paint_script(
 /// splice both call this, which is what makes the splice's output equal the full path's by
 /// construction. An arm is splice-eligible only if it writes nothing but `out` — keep
 /// [`splice_simple`] in agreement when an arm's side effects change.
-#[allow(clippy::too_many_arguments)] // the conversion's whole environment, threaded explicitly
 fn convert_entry(
     eq: benilla_ui::script::ExtractedQuad,
     s: f32,

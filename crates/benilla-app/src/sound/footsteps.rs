@@ -102,7 +102,6 @@ fn load_footsteps(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn footstep_sounds(
     mut events: MessageReader<AnimSoundEvent>,
     // GlobalTransform: a mounted unit's steps are the MOUNT model's own tags, fired by the

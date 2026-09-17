@@ -263,7 +263,7 @@ fn transplant_up(
 /// enter/loop/exit the Special states (jump, sit/sleep/kneel) as one-shot-bracketed loops, play the
 /// per-packet melee swings as preemptible one-shots, and cross-fade the gaits (the engaged Ready
 /// idle among them).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn drive_animations(
     mut commands: Commands,
     mut units: Query<(

@@ -462,7 +462,6 @@ fn arrival_handoff(
 /// arrival deadline was fixed at GO). A release already past its deadline arrives on the spot:
 /// the arrival hand-off plays now, no flight entity, no flight loop — the melee-range cast
 /// shows only the hit, the reference's close-range look.
-#[allow(clippy::too_many_arguments)]
 fn launch_go(
     go: &QueuedGo,
     launch: Vec3,
@@ -535,7 +534,6 @@ fn launch_go(
 /// is created at queue time (shared with the attach-point effects — the same `.mdx` is one load
 /// however many things use it); a chain-less spawn resolves the wire ammo display instead
 /// ([`ensure_ammo_model`]).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_missiles(
     mut commands: Commands,
     time: Res<Time>,
@@ -673,7 +671,6 @@ pub(super) fn spawn_missiles(
 /// Spawn a missile's model parts + particle emitters once its M2 finishes building (the shared
 /// cache's `parts` fill in `super::update_display_models`) — children of the missile entity, so
 /// they ride the mover below. An unloadable model just flies invisible and still impacts on time.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn attach_missile_models(
     mut commands: Commands,
     mut missiles: Query<(Entity, &mut Missile)>,
@@ -740,7 +737,6 @@ pub(super) fn attach_missile_models(
 /// the path. On schedule-end it snaps to the point, runs the [`arrival_handoff`] (a landed
 /// target's impact, a missed one's dodge/block), and despawns (children with it; emitters
 /// self-release via the owner contract).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn move_missiles(
     mut commands: Commands,
     time: Res<Time>,

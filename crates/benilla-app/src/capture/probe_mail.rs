@@ -222,7 +222,6 @@ fn last_event(script: &UiScript) -> String {
         .unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn mail_probe(
     time: ProbeClock,
     mut probe: ResMut<MailProbe>,

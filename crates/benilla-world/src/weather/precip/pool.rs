@@ -294,7 +294,6 @@ pub(super) fn spawn_particle(
 
 /// One kind's frame: record (RNE-counted, packet-stamped), activate sealed cohorts,
 /// integrate, land into the ground layer.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_kind(
     pool: &mut Pool,
     kind: WeatherKind,

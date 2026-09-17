@@ -245,7 +245,6 @@ fn catmull_rom(pts: &[[f32; 3]], i: usize, u: f32) -> ([f32; 3], [f32; 3]) {
 /// takes the Catmull-Rom family instead (the taxi/flight look — see [`Spline::sample`]'s INTERIM note).
 /// Returns `None` — "stationary, clear any path" — for a `Stop`, a zero duration, or a path with fewer
 /// than two points (nothing to travel along).
-#[allow(clippy::too_many_arguments)] // one argument per decoded wire field
 pub(in crate::net) fn monster_move_spline(
     path: Vec<[f32; 3]>,
     spline_id: u32,

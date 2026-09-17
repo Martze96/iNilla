@@ -228,7 +228,6 @@ pub(crate) struct EffectHost {
 /// rather than off a slot pinned at spawn. `None` for the lanes that are not `CEffect`s and never
 /// advance — a missile (the separate `CMissile` TU), an item glow, the `fxview` preview — which
 /// keep the pinned single-clip arm they have always had.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn attach_effect_visuals(
     commands: &mut Commands,
     root: Entity,
@@ -916,7 +915,7 @@ fn reap_matching(
 /// so the whole effect — meshes and particle emitters alike — rides the animating bone. The one
 /// exception is the kit's **world-plant slot** ([`benilla_formats::WORLD_EFFECT_TAG`], kit field
 /// 12): its root is a free world entity at the owner's position/facing/scale, [`WorldPlantFx`].
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn attach_spell_fx(
     mut commands: Commands,
     mut units: Query<(
@@ -1124,7 +1123,6 @@ pub(super) fn attach_spell_fx(
 /// the world position; an instance root's own is joint-local). Unlike a streamed creature, an
 /// instance is born under our eyes at t = 0, so first sight fires the head window `[0, cur]` —
 /// the level-up pillar's `$SND(888)` sits at 0.033 s and depends on it.
-#[allow(clippy::too_many_arguments)] // the scan's own params plus the frame's two reads
 pub(super) fn fire_fx_anim_events(
     units: Query<(Entity, &FxAttached)>,
     players: Query<&AnimationPlayer>,

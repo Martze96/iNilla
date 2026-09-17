@@ -42,7 +42,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use crate::char_select::ClientState;
+use crate::char_select::{ClientState, InWorldGated};
 
 use super::camera::{CameraControl, FlyCam, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT};
 use benilla_world::view::WorldCamera;
@@ -231,9 +231,7 @@ pub(super) fn plugin(app: &mut App) {
             // frame renders rather than something the player watches glide into place. Not gated on
             // capture mode: a capture resolves no state path at all (0954's hermetic rule), so this
             // is already inert there.
-            load_camera_pose
-                .before(super::control)
-                .run_if(in_state(ClientState::InWorld)),
+            load_camera_pose.before(super::control).in_set(InWorldGated),
         )
         .add_systems(OnExit(ClientState::InWorld), save_on_session_end);
     // The quit root goes on the exit edge, never `Update` (decision 1528): the close button's

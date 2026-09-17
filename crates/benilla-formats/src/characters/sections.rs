@@ -244,7 +244,6 @@ impl CharSections {
     ///
     /// `emblem` is the wearer's guild tabard (decision 1704), which paints the torso layers' cells
     /// 2/3/4 over the garment's own — see [`equip_blits`] for when it installs and when it does not.
-    #[allow(clippy::too_many_arguments)]
     pub fn composite_body(
         &self,
         chain: &mut Chain,

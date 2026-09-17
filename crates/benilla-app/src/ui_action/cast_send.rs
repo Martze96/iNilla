@@ -265,7 +265,6 @@ impl CastLadder<'_, '_> {
 /// source while one is already in flight, so mashing a key can no longer fire a duplicate
 /// `CMSG_CAST_SPELL` the server bounces back as a spurious cast-bar cancel. Ranged/auto-repeat
 /// shots keep their own lifecycle — they never arm the guard and are never blocked by it.
-#[allow(clippy::too_many_arguments)] // every input the follow-through + the send itself need
 fn send_spell_cast(
     spell_id: u32,
     ctx: &cast_target::CastContext,

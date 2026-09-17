@@ -495,7 +495,6 @@ pub(super) struct SwimFrame {
 /// `basis` is the **level** facing pair `(forward, right)`; `amounts` the netted `(fwd, side)`
 /// swim translation ([`translate_amounts`]); `wobble` this frame's drunk angle, already zeroed by
 /// the caller when it must not apply (sober, stunned, or not translating).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_step(
     player: &mut Player,
     time: &Time,

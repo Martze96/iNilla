@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068"
 
+[lints]
+workspace = true
+
 [dependencies]
 roxmltree = "0.20"
 # The embedded Lua runtime for the script host (decision 0068). `lua51` = Classic Era's Lua

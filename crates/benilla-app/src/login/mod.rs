@@ -447,7 +447,6 @@ fn logon_refusal_text(strings: &GlueStrings, code: Option<u8>) -> &str {
 /// The policy tick + the net-message reactions. Runs in every state (the reconnect path fires
 /// while `InWorld`); the screen's own submit comes through [`login_input`], which calls
 /// [`send_login`] with `announced = true`.
-#[allow(clippy::too_many_arguments)]
 fn drive_policy(
     mut attempt: Attempt,
     realm_list_up: Res<crate::realm_select::Realms>,
@@ -792,7 +791,7 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
 /// The screen's input: typing into the focused box (the ref's 16-letter cap), Tab cycling, Enter
 /// submits, Esc quits (dialog-first — an open dialog's Esc is its Cancel/Okay), clicks focus the
 /// boxes / press the buttons / toggle the checkbox.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn login_input(
     realms: Res<crate::realm_select::Realms>,
     presses: Query<(Entity, &LoginAction, Ref<Interaction>)>,

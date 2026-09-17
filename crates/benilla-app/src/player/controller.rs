@@ -20,7 +20,7 @@ use super::*;
 /// third-person control (WASD walks the avatar; right-drag turns it, left-drag orbits the camera,
 /// wheel zooms) and streams our movement to the server as the confirmed mover. The dev chord + `F`
 /// toggles free-fly (decision 1043).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,

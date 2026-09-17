@@ -98,7 +98,6 @@ fn mark_mesh(icon: u32) -> Mesh {
 /// The marker's world transform for `unit` this frame — the §6 seat over the shared
 /// anchor/scale law. Generic over the joint-globals filter like [`overhead_anchor`] (the placer
 /// passes a disjoint query).
-#[allow(clippy::too_many_arguments)] // the anchor law's full input set, like its callers
 fn mark_place<F: bevy::ecs::query::QueryFilter>(
     unit: Entity,
     tf: &Transform,
@@ -131,7 +130,7 @@ fn mark_place<F: bevy::ecs::query::QueryFilter>(
 /// gate on the plate exclusion, and (re)build the billboard entities. Runs after the name
 /// driver (the seat reads this frame's line counts) — spawn-frame seat here, the per-frame
 /// re-seat is [`place_raid_marks`].
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_raid_marks(
     mut commands: Commands,
     group: Res<GroupState>,

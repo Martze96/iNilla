@@ -128,7 +128,6 @@ fn load_death_thuds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // the standard sound-route param set + the two catalogs
 fn death_thud_sounds(
     mut events: MessageReader<AnimSoundEvent>,
     // GlobalTransform for the same reason every other anim-event consumer takes one: the tag can

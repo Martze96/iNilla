@@ -375,7 +375,6 @@ pub(super) fn empty_display() -> DisplayModel {
 /// Build a display model's spawn parts once its asset has loaded — each submesh's `WowModelMaterial`,
 /// with a creature skin slot filled from the display's variation (`<dir>\<name>.blp`). Returns early
 /// (leaving `parts` `None`) while the asset is still loading.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_parts(
     dm: &mut DisplayModel,
     m2s: &Assets<M2Model>,

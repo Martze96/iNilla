@@ -235,7 +235,6 @@ fn stats_for(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_pet_stats(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,

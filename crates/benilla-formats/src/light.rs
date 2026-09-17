@@ -584,7 +584,6 @@ impl LightCatalog {
     /// (`1` inside `falloffStart`, ramping to `0` at `falloffEnd`). Contrast with [`pick_light`], which
     /// picks just the single most-local sphere — this tells us whether a faithful blend resolves a
     /// **different** (e.g. redder) light at our spot than the single-sample approximation.
-    #[allow(clippy::too_many_arguments)]
     pub fn sample_blended(
         &self,
         map: u32,

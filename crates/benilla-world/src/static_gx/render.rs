@@ -338,7 +338,6 @@ fn vertex_layout() -> VertexBufferLayout {
 
 /// (Re-)specialize the four pipelines for the world view's (samples, format), and assemble
 /// visible cells' GPU state: classes, arrays, layer table, bind groups, runs.
-#[allow(clippy::too_many_arguments)]
 fn prepare_static_gx(
     gx: Res<GxWorld>,
     mut cache: ResMut<GxGpuCache>,

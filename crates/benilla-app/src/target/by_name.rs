@@ -514,7 +514,6 @@ pub(super) fn assist_requests(
 /// The followee's **name** is latched here rather than re-read later: it is what
 /// `AUTOFOLLOW_BEGIN` carries into the status text ([`crate::ui_follow`]), and the resolver has
 /// already produced it for the by-name half.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn follow_requests(
     mut requests: MessageReader<crate::player::FollowRequest>,
     scan_params: ByNameScan,

@@ -109,7 +109,6 @@ pub(super) fn ai_reaction(
 /// the center combat text, which the client fires **synchronously at packet parse**
 /// (`0x6255b0 → 0x629d30 → 0x703f50`, one call stack — §5-verified, wow-re
 /// `combat-text-update-emission-law.md`; decision 0580's fold-back).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn attacker_state(
     mut s: AttackerState,
     index: &GuidIndex,

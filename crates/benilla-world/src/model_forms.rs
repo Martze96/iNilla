@@ -242,7 +242,6 @@ fn build_entry(
 /// urgent requester first — uncapped behind the loading cover (entry/teleport/world-stale), which
 /// exists to absorb exactly that burst. At least one submesh always builds, so progress is
 /// guaranteed. Frees an entry when its model asset leaves the store.
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 pub(crate) fn furnish_model_forms(
     mut forms: ResMut<ModelForms>,
     m2s: Res<Assets<M2Model>>,

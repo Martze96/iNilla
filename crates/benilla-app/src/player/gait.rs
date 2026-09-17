@@ -37,7 +37,6 @@ use super::{Player, STATIONARY_CHASE_RATE};
 // default bound is seven. These are one frame of mover state, each read from a different one of
 // the caller's queries — bundling them into a struct would name nothing the call site does not
 // already say, and the gate is `-D warnings`, so the honest move is to say why, here.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_body_heading(
     player: &mut Player,
     move_flags_now: u32,

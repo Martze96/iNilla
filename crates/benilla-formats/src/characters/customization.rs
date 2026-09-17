@@ -563,7 +563,6 @@ mod tests {
     /// vmangos's `Player::ValidateAppearance`, transcribed verbatim (`Player.cpp:326`): the exact
     /// predicate the server runs on `CMSG_CHAR_CREATE`. `GetCharSectionEntry` is an available-row
     /// lookup (`avail` already excludes the `0x1`-flagged rows), and face is keyed by *skinColor*.
-    #[allow(clippy::too_many_arguments)] // mirrors vmangos's 7-param signature + the two data tables
     fn validate_appearance(
         avail: &HashSet<SectionKey>,
         facial: &HashMap<(u8, u8), HashSet<u8>>,

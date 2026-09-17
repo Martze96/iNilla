@@ -94,7 +94,7 @@ fn conform_rotation(mode: u8, n_local: Vec3) -> Quat {
 /// spawn seats instantly like the reference; and a parked rig (off-frustum, the 0448 anim-LOD
 /// gate) skips its ray and drops its vector, re-seeding warm on wake — the 0448 absolute-snap
 /// philosophy applied to the stance, bounding the cost at one ray per flagged unit ON SCREEN.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn conform_units(
     time: Res<Time>,
     spatial: SpatialQuery,

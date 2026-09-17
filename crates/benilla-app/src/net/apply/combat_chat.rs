@@ -1185,7 +1185,6 @@ fn periodic_leech_amount(power: u32, amount: u32) -> u32 {
 /// 6. **the periodic flag picks the chat-type stub** — `0x627d60` periodic, `0x627d30` direct —
 ///    and only here, *after* the fork.
 /// 7. **`drained == 0` drops the line** (`627ae3 test esi,esi` / `627ae5 je`), after the divide.
-#[allow(clippy::too_many_arguments)] // one reference function's full argument set
 fn power_drain_line(
     log: &mut ChatLog,
     ctx: &ChatCtx,
@@ -1409,8 +1408,7 @@ pub(super) fn faction_standing(
 
 /// The one tail every arm ends in: build the queued line (dropping a class-9 endpoint) and park it
 /// for its names.
-#[allow(clippy::too_many_arguments)] // the tail's args ARE the line: sink, context, and the five
-                                     // facts a queued line is made of. Bundling any of them would only move the list somewhere else.
+// facts a queued line is made of. Bundling any of them would only move the list somewhere else.
 fn queue(
     log: &mut ChatLog,
     ctx: &ChatCtx,
@@ -1436,7 +1434,6 @@ fn queue(
 
 /// [`queue`] for a family whose `Named` slot still has to be looked up — an item entry or a unit
 /// guid rides along and the drain resolves it, holding the line until it lands (§5.7).
-#[allow(clippy::too_many_arguments)] // as [`queue`], plus the one key that defers the line
 fn queue_named(
     log: &mut ChatLog,
     ctx: &ChatCtx,
@@ -1458,7 +1455,6 @@ fn queue_named(
 /// there is a **fall-through** to the generic leech/drain path, not a dropped line. Both failure
 /// shapes below are among the ones the reference reports: its own range gate, and an empty
 /// template.
-#[allow(clippy::too_many_arguments)] // as [`queue_named`], whose body this is
 fn queue_reported(
     log: &mut ChatLog,
     ctx: &ChatCtx,

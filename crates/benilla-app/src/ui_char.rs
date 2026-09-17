@@ -642,7 +642,6 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
 /// equipped-bag icons 20..=23) and the bank bags' own `PLAYER_FIELD_BANK_BAG_SLOT_*` (live ids
 /// 64..=69). Everything past the guid — template, enchants, durability, the pending lock — is
 /// identical for both, which is the whole reason there is one function here and not two.
-#[allow(clippy::too_many_arguments)] // the slot resolve's full read set — the bag feed's twin
 fn slot_view(
     items: &mut Items,
     icons: Option<&ItemDisplays>,
@@ -809,7 +808,6 @@ fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
 /// the four equipped-bag icons (decision 0216 slice 2's bag bar — the bag ITEM occupying `INV_SLOT`
 /// 19..22, not its contents) — all the client's 1-based `GetInventorySlotInfo` ids over the
 /// 0-based inv-slot array.
-#[allow(clippy::too_many_arguments)] // [`slot_view`]'s read set, plus the descriptor it walks
 fn inventory_slots(
     store: &ObjectStore,
     items: &mut Items,
@@ -905,7 +903,6 @@ fn inventory_slots(
 /// `BankButtonIDToInvSlotID(i, 1)` (BankFrame.lua:28-35, 194-198), and the guids stream in the
 /// player descriptor whether or not a banker is open. So they ride the inventory feed, beside the
 /// doll snapshot, rather than the `BankState` the bank window pushes.
-#[allow(clippy::too_many_arguments)] // [`slot_view`]'s read set, one band over
 fn bank_bag_slots(
     store: &ObjectStore,
     items: &mut Items,
@@ -1047,7 +1044,6 @@ pub(crate) fn fire_stat_transitions(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn feed_char(
     // `ChrClasses.dbc` field 16, for the fit rule's relic half — `ui_items::find_equip_slot`
     // (1803). Absent client data reads every class as an ordinary ranged wielder.

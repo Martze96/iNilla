@@ -422,7 +422,6 @@ struct SpellFeedMemory {
 /// display + next-rank reads), and the live aura spells (`SetPlayerBuff`) — so a first hover
 /// never misses, exactly like the reference's all-local reads. The renderers' recorded asks
 /// (the odd id outside those sets) answer through the same build as the fallback.
-#[allow(clippy::too_many_arguments)]
 fn feed_spell_tooltips(
     script: Option<NonSendMut<UiScript>>,
     actions: Option<Res<PlayerActions>>,
@@ -697,7 +696,6 @@ fn locked_line_tint(outcome: Option<crate::target::lock::LockOutcome>) -> Toolti
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn drive_mouseover_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hovered: Res<Hovered>,

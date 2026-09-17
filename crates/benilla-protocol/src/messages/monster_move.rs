@@ -19,8 +19,8 @@ use std::io;
 
 use crate::messages::{MonsterMoveFacing, ServerPacket};
 use crate::wire::{
-    packed_to_vector3d, read_f32_le, read_i32_le, read_packed_guid, read_u32_le, read_u64_le,
-    read_u8, Vector3d,
+    capacity_hint, packed_to_vector3d, read_f32_le, read_i32_le, read_packed_guid, read_u32_le,
+    read_u64_le, read_u8, Vector3d,
 };
 
 /// `MonsterMoveType::Stop` (`SMSG_MONSTER_MOVE`).
@@ -148,10 +148,9 @@ fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<
     let count = read_u32_le(r)?;
     // Cap the *pre-allocation* (not the read) at a sane bound — a corrupt `count` must not reserve GBs;
     // the read itself still errors the instant the (bounded) body underruns.
-    let cap = count.min(0xFFFF) as usize;
     if catmull_rom {
         // Absolute control points, verbatim.
-        let mut points = Vec::with_capacity(cap);
+        let mut points = Vec::with_capacity(capacity_hint(count, 0xFFFF));
         for _ in 0..count {
             points.push(Vector3d::read(r)?);
         }
@@ -162,7 +161,7 @@ fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<
         return Ok(Vec::new());
     }
     let endpoint = Vector3d::read(r)?;
-    let mut points = Vec::with_capacity(cap);
+    let mut points = Vec::with_capacity(capacity_hint(count, 0xFFFF));
     // `count == 2` ⇒ the producer skipped its offset loop entirely (`last_idx > 1`); the destination is
     // the whole payload, and the caller pairs it with the packet's exact `start`.
     let offsets = if count > 2 { count - 1 } else { 0 };

@@ -66,7 +66,6 @@ pub(super) fn frame(elapsed: f32, count: &mut u32) -> Option<u32> {
 
 /// Dump one emitter's live pool against the camera it billboards toward.
 #[cold]
-#[allow(clippy::too_many_arguments)] // the sim loop's full draw context, verbatim
 pub(super) fn dump_emitter(
     fidx: u32,
     def: &ParticleEmitterDef,

@@ -98,7 +98,6 @@ pub(super) fn enter_select(mut preview: ResMut<GluePreview>) {
 /// Spawn the screen tree once its prerequisites exist — and upgrade an artless early spawn the
 /// moment the client art lands (despawn + respawn; the tree is cheap and static). With no client
 /// data at all the artless tree still spawns after a short grace (the graceful-absence posture).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_screen(
     mut commands: Commands,
     existing: Query<(Entity, &CharSelectUi)>,
@@ -148,7 +147,6 @@ pub(super) fn materialize_screen(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_screen(
     commands: &mut Commands,
     assets: &AssetServer,

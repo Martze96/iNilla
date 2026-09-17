@@ -340,7 +340,6 @@ fn open_window(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 fn service_probe(
     time: ProbeClock,
     mut probe: ResMut<ServiceProbe>,

@@ -14,7 +14,9 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_f32_le, read_i32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{
+    capacity_hint, read_f32_le, read_i32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8,
+};
 
 /// One decoded `SMSG_SPELLNONMELEEDAMAGELOG` — non-melee (spell) damage dealt (vmangos
 /// `WorldPackets::Spell::SpellNonMeleeDamageLog::AppendBodyTo`, `Server/Packets/Spell.cpp:124-140` +
@@ -117,7 +119,8 @@ pub(super) fn read_periodic_aura_log(r: &mut impl Read) -> io::Result<PeriodicAu
     let caster = read_packed_guid(r)?;
     let spell_id = read_u32_le(r)?;
     let count = read_u32_le(r)?;
-    let mut ticks = Vec::with_capacity(count as usize);
+    // vmangos writes `count = 1` unconditionally (`Objects/Unit.cpp:4410`); 64 is far past it.
+    let mut ticks = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         let aura_type = read_u32_le(r)?;
         let tick = match aura_type {
@@ -281,7 +284,9 @@ pub(super) fn read_spell_log_miss(r: &mut impl Read) -> io::Result<SpellLogMiss>
     let caster = read_u64_le(r)?;
     let use_extended = read_u8(r)?;
     let count = read_u32_le(r)?;
-    let mut misses = Vec::with_capacity(count as usize);
+    // No server bound: vmangos never sends this opcode at all (its miss list rides
+    // `SMSG_SPELL_GO`), so 64 is a generous sane one.
+    let mut misses = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         let target = read_u64_le(r)?;
         let miss_info = read_u8(r)?;
@@ -375,7 +380,7 @@ pub(super) fn read_spell_dispel_log(r: &mut impl Read) -> io::Result<SpellDispel
     let victim = read_packed_guid(r)?;
     let caster = read_packed_guid(r)?;
     let count = read_u32_le(r)?;
-    let mut spell_ids = Vec::with_capacity(count.min(64) as usize);
+    let mut spell_ids = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         spell_ids.push(read_u32_le(r)?);
     }
@@ -536,11 +541,11 @@ pub(super) fn read_spell_log_execute(r: &mut impl Read) -> io::Result<SpellLogEx
     let caster = read_packed_guid(r)?;
     let spell_id = read_u32_le(r)?;
     let group_count = read_u32_le(r)?;
-    let mut effects = Vec::with_capacity(group_count.min(8) as usize);
+    let mut effects = Vec::with_capacity(capacity_hint(group_count, 8));
     for _ in 0..group_count {
         let effect = read_u32_le(r)?;
         let rows = read_u32_le(r)?;
-        let mut out = Vec::with_capacity(rows.min(64) as usize);
+        let mut out = Vec::with_capacity(capacity_hint(rows, 64));
         for _ in 0..rows {
             out.push(match effect {
                 EFFECT_POWER_DRAIN => ExecuteLog::PowerDrain {

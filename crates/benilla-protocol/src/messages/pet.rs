@@ -22,7 +22,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_u16_le, read_u32_le, read_u64_le, read_u8, Vector3d};
+use crate::wire::{capacity_hint, read_u16_le, read_u32_le, read_u64_le, read_u8, Vector3d};
 
 /// Pet action-bar slots (vmangos `MAX_UNIT_ACTION_BAR_INDEX` = `ACTION_BAR_INDEX_END(10) -
 /// ACTION_BAR_INDEX_START(0)`, `Objects/UnitDefines.h:781-787`); the client's own
@@ -286,7 +286,8 @@ pub(super) fn read_pet_spells(r: &mut &[u8]) -> io::Result<PetSpells> {
     }
 
     let spell_count = read_u8(r)?;
-    let mut spells = Vec::with_capacity(spell_count as usize);
+    // A `u8` count with no tighter server bound (`Player.cpp:17471`, `uint8 addlist`).
+    let mut spells = Vec::with_capacity(capacity_hint(spell_count, usize::from(u8::MAX)));
     for _ in 0..spell_count {
         spells.push(read_u32_le(r)?.into());
     }
@@ -321,16 +322,19 @@ pub(super) fn read_pet_spells(r: &mut &[u8]) -> io::Result<PetSpells> {
 /// discriminator is exact, not a heuristic — and the day vmangos is fixed, this keeps working.
 fn read_cooldown_block(r: &mut &[u8]) -> io::Result<Vec<PetSpellCooldown>> {
     let count = usize::from(read_u8(r)?);
-    if count == 0 {
-        // vmangos leaves its count's high byte behind; the client's form leaves nothing. Either
-        // way there is nothing to read, and trailing slack is not an error.
-        return Ok(Vec::new());
-    }
+    // The discriminator holds at `count == 0` too: vmangos's lone leftover is its `u16` count's
+    // high byte, the client's form leaves nothing. The byte is consumed rather than left behind
+    // so an empty block is not a tail for the decode-length check to announce (decision 2265
+    // §B1); either way nothing else is read and no entry is invented.
     let vmangos = r.len() == 1 + 14 * count;
     if vmangos {
         let _high_byte = read_u8(r)?;
     }
-    let mut cooldowns = Vec::with_capacity(count);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    // `count` came off a `u8` (above); no tighter bound exists on either producer.
+    let mut cooldowns = Vec::with_capacity(capacity_hint(count, usize::from(u8::MAX)));
     for _ in 0..count {
         let spell_id = if vmangos {
             read_u32_le(r)?
@@ -697,11 +701,19 @@ mod tests {
     }
 
     /// A pet with no cooldowns at all: the client's form ends the packet, vmangos's leaves its
-    /// count's high byte behind. Neither is an error and neither invents an entry.
+    /// count's high byte behind. Neither is an error and neither invents an entry — and the
+    /// high byte is consumed, so neither leaves a tail.
     #[test]
     fn an_empty_cooldown_block_reads_either_way() {
-        assert!(read_cooldown_block(&mut &[0u8][..]).unwrap().is_empty());
-        assert!(read_cooldown_block(&mut &[0u8, 0][..]).unwrap().is_empty());
+        let mut client = &[0u8][..];
+        assert!(read_cooldown_block(&mut client).unwrap().is_empty());
+        assert!(client.is_empty());
+        let mut vmangos = &[0u8, 0][..];
+        assert!(read_cooldown_block(&mut vmangos).unwrap().is_empty());
+        assert!(
+            vmangos.is_empty(),
+            "vmangos's count high byte is consumed, not left as a tail"
+        );
     }
 
     /// The teardown: an 8-byte body of zero guid ⇒ a default value whose `pet_guid` is 0. This is

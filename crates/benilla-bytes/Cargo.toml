@@ -5,4 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Bounds-checked byte readers + IFF chunk iteration shared by the format parsers — decision 0064"
 
+[lints]
+workspace = true
+
 [dependencies]

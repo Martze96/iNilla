@@ -6,7 +6,7 @@
 
 use std::io;
 
-use crate::wire::{read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_u32_le, read_u64_le, read_u8};
 
 /// One vendor row (`SMSG_LIST_INVENTORY`, vmangos `ItemHandler.cpp:741-810`). `slot` (the wire's
 /// `muid`) is the row's 1-based position in the vendor's list — **not** what buying uses; buying
@@ -130,14 +130,21 @@ pub fn repair_item(vendor_guid: u64, item_guid: u64) -> Vec<u8> {
 }
 
 /// Read `SMSG_LIST_INVENTORY` (vmangos `ItemHandler.cpp:741-810`): `u64 vendorGuid, u8 count`
-/// (≤ `MAX_VENDOR_ITEMS` 128) then `count` rows of [`VendorItem`]. The empty-vendor case sends
-/// `count = 0` followed by a trailing `u8` error byte (`ItemHandler.cpp:728-733,806-809`); this
-/// parser tolerates it by construction — the row loop simply doesn't run, so the byte is left
-/// harmlessly unconsumed rather than misread as a row.
+/// (≤ `MAX_VENDOR_ITEMS` 128) then `count` rows of [`VendorItem`]. The empty-vendor case is
+/// `count = 0` followed by one trailing `u8` — both producers write a literal `uint8(0)`
+/// ("Vendor has no inventory": `ItemHandler.cpp:728-733` for a creature with no item lists,
+/// `:806-809` for one whose every item is hidden from this player). It carries no other value
+/// on this wire, so it is consumed and dropped — consumed *explicitly*, so an empty list leaves
+/// no tail for the decode-length check to report (decision 2265 §B1).
 pub(super) fn read_list_inventory(r: &mut &[u8]) -> io::Result<(u64, Vec<VendorItem>)> {
     let vendor_guid = read_u64_le(r)?;
     let count = read_u8(r)?;
-    let mut items = Vec::with_capacity(count as usize);
+    if count == 0 {
+        let _no_inventory = read_u8(r)?;
+        return Ok((vendor_guid, Vec::new()));
+    }
+    // vmangos `MAX_VENDOR_ITEMS` 128 (`Objects/CreatureDefines.h:624`).
+    let mut items = Vec::with_capacity(capacity_hint(count, 128));
     for _ in 0..count {
         items.push(VendorItem {
             slot: read_u32_le(r)?,

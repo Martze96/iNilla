@@ -369,7 +369,6 @@ const fn cap_step(entitled: bool, sounding_so_far: usize) -> CapStep {
 
 /// The pump (`0x461990`): fade the orphans, mark unresolvable kits, then service the admitted
 /// entries — start a channel where there is none, and otherwise only *move* the one there is.
-#[allow(clippy::too_many_arguments)] // the standard sound-driver param set
 fn pump_emitters(
     mut pool: ResMut<AmbientEmitterPool>,
     mut emitters: Query<&mut Transform, With<PoolEmitter>>,

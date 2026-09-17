@@ -171,7 +171,6 @@ fn spawn_exile(commands: &mut Commands, f: &GxFader, alpha: f32, admitted: bool)
 /// on that same next frame — the retained item dies in the rendered frame the entity
 /// appears (the overlap protocol; see [`FaderState`]). A re-admit reverses both in ONE
 /// frame: the despawn lands before extract and the cleared bit rides the same publish.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cull_cells(
     mut commands: Commands,
     mut gx: ResMut<StaticGx>,

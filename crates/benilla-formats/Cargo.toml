@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "WoW 1.12.1 asset-format adapters (MPQ/BLP/DBC/ADT/WDT) and the benilla-extract CLI"
 
+[lints]
+workspace = true
+
 [features]
 # The dev/player seam (0026, built by 1173/1174). Default-on, so every normal build keeps the
 # instruments; `--no-default-features` is the player build. Here it gates exactly one thing:

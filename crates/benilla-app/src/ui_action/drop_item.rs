@@ -65,7 +65,6 @@ fn feedable_pet(
 ///
 /// One law, one place: whichever entry it came from, the ask runs the same three gates and the same
 /// commit.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn drop_item_on_unit(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&crate::net::Guid, &crate::net::ObjectStore), With<crate::net::SelfPlayer>>,

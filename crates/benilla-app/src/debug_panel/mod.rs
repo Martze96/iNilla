@@ -37,6 +37,7 @@ use bevy_egui::{
     PrimaryEguiContext,
 };
 
+use benilla_assets::LockRecover;
 use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
 use benilla_world::model_render::{ModelKind, ModelPart};
 use benilla_world::modkeys::{dev_chord, DEV_CHORD};
@@ -380,7 +381,6 @@ fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugState>) 
 /// Draw the panel as a translucent **overlay** on the right — the world renders full-screen
 /// underneath (no viewport inset). `ui_script::PointerOverUi` keeps the cursor's panel
 /// interactions from leaking into gameplay mouse-look.
-#[allow(clippy::too_many_arguments)]
 fn debug_panel_ui(
     mut contexts: EguiContexts,
     stamp: Res<benilla_world::build_id::BuildId>,
@@ -671,7 +671,7 @@ fn debug_panel_ui(
                             // The LAST sample, not the ring average the meter shows: the panel
                             // is the instrument, and "what did the most recent pong measure" is
                             // the question a stuck or spiking meter needs answered.
-                            let last_rtt = ping.0.lock().expect("ping clock").last_rtt_ms;
+                            let last_rtt = ping.0.lock_recover().last_rtt_ms;
                             ui.label(if net_status.connected {
                                 match last_rtt {
                                     Some(ms) => format!("connected · {ms} ms ping"),

@@ -267,7 +267,6 @@ fn readable(
 /// paint a Stone plaque in parchment ink. READY holds until the body and, for a letter, the creator
 /// line are both in. (The window itself only shows on READY — `ItemTextFrame.lua` calls
 /// `ShowUIPanel` there, not on BEGIN.)
-#[allow(clippy::too_many_arguments)]
 fn feed_item_text(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<ItemTextOpen>,

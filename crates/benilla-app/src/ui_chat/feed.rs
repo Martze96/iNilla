@@ -765,7 +765,6 @@ pub(super) struct SpeakerEffects<'w> {
 
 /// Drain [`ChatLog`]: resolve names (ask-once, bounded), build events, [`route`] them. Also ticks
 /// the whisper-chime throttle.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_chat(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut log: ResMut<ChatLog>,

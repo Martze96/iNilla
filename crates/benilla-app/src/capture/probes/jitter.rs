@@ -242,7 +242,6 @@ fn palette_probes(rows: &[Mat4], binds: &[Vec3], radii: &[f32]) -> Vec<Vec3> {
 }
 
 /// One `JIT` line per frame for the subject: the three terms' Δ and Δ², in mm and in pixels.
-#[allow(clippy::too_many_arguments)] // one param per term the reading has to separate
 fn sample_jitter(
     mut meter: ResMut<JitterMeter>,
     time: ProbeClock,

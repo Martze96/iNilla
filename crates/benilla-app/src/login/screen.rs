@@ -81,7 +81,6 @@ pub(super) struct RealmlistReadout;
 /// Spawn the screen tree once its prerequisites exist (the select screen's boot-order pattern:
 /// the INITIAL state's `OnEnter` fires before the MPQ chain / booth slots do) — and upgrade an
 /// artless early spawn the moment the client art lands.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_screen(
     mut commands: Commands,
     existing: Query<(Entity, &LoginUi)>,
@@ -137,7 +136,6 @@ pub(super) fn materialize_screen(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_screen(
     commands: &mut Commands,
     assets: &AssetServer,

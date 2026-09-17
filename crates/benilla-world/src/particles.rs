@@ -35,7 +35,7 @@ mod emitdump;
 mod model;
 mod quads;
 pub mod render;
-pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1291)
+pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1294)
 
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;

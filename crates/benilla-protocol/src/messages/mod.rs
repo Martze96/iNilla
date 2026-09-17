@@ -184,7 +184,7 @@ pub use movement::{
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;
-pub use parse::parse_server;
+pub use parse::{parse_server, parse_server_with_tail};
 pub use pet::{
     pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
     pet_stop_attack, pet_tame_failure_key, pet_unlearn, PetActionEntry, PetMode, PetSpellCooldown,
@@ -217,7 +217,8 @@ pub use quest::{
     QUEST_EMOTE_COUNT, QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
 };
 pub use reputation::{
-    set_faction_at_war, set_faction_inactive, set_watched_faction, WATCHED_FACTION_NONE,
+    set_faction_at_war, set_faction_inactive, set_watched_faction, FACTION_LIST_LEN,
+    WATCHED_FACTION_NONE,
 };
 pub use roster::{
     CharCreateReq, CharEnumItem, Character, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK,

@@ -92,7 +92,6 @@ pub(super) type BoothCamQuery<'w, 's> = Query<
 /// variant encoding can never drift from the real spawn paths; meshes from the production
 /// submesh builders (or their attribute-exact stand-ins) so the vertex layouts can't either.
 /// Returns the entity count.
-#[allow(clippy::too_many_arguments)] // one arg per store/anchor, the file's builder convention
 pub(super) fn spawn_menagerie(
     commands: &mut Commands,
     cam: Entity,

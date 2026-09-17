@@ -453,7 +453,6 @@ fn probe_guild_name(prefix: &str) -> String {
     format!("{prefix} {secs:08}")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn charter_probe(
     time: ProbeClock,
     mut probe: ResMut<CharterProbe>,

@@ -225,7 +225,7 @@ impl Plugin for UiShapeshiftPlugin {
 
 /// Build the bar list from the known-spell set × the catalog, per the module-doc mechanism, and
 /// diff-push it.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn feed_shapeshift_bar(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,

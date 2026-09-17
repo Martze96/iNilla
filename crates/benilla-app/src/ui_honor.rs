@@ -164,7 +164,6 @@ fn events_for(before: Option<&HonorState>, after: &HonorState) -> (bool, bool) {
 }
 
 /// Push the self snapshot and the inspect reply, fire what moved, and drain the pane's request.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn feed_honor(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,

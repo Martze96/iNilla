@@ -376,7 +376,7 @@ fn load_bubble_art(
 /// pieces, tail, wrapped chatType-colored text — bottom-seated on the projected anchor.
 /// Runs after [`VPlateSet`] (the spawn gate reads this frame's plate verdict), inside the
 /// [`UiQuadAppend`] window.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_bubbles(
     mut queue: ResMut<BubbleQueue>,
     mut bubbles: ResMut<Bubbles>,
@@ -609,7 +609,6 @@ struct Pending {
 
 /// Append one bubble's draw list: the Backdrop pieces (bg fill inset by the border-unit +
 /// the 8-piece edge), the tail square, and the wrapped, centered, chatType-colored text.
-#[allow(clippy::too_many_arguments)] // the draw inputs + the jitter trace's decomposition
 fn draw_bubble(
     atlas: &mut UiFontAtlas,
     quads: &mut UiQuads,

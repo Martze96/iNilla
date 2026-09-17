@@ -149,7 +149,6 @@ pub(crate) fn preflight(
     Ok(design.map(|v| v as u32))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_tabard(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TabardOpen>,

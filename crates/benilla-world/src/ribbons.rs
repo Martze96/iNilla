@@ -221,7 +221,6 @@ pub enum RibbonSeq {
 /// sequence that answers it changes while the instance lives. Refusing at spawn was correct only
 /// for the fixed-sequence lanes it was written for (a held item, a missile) and silently wrong for
 /// everything with a state machine — see [`simulate_ribbons`].
-#[allow(clippy::too_many_arguments)] // the spawn's full wiring, `alpha_src` included
 pub fn spawn_ribbon(
     commands: &mut Commands,
     ribbon: &ModelRibbon,
@@ -286,7 +285,6 @@ pub fn spawn_ribbon(
 
 /// Per-frame: place the node from the owner's live transform, commit/expire edges, sag by
 /// gravity, and write the strip into the shared effect-quad stream.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn simulate_ribbons(
     time: Res<Time>,
     mut commands: Commands,

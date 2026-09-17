@@ -21,7 +21,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_u32_le, read_u64_le, read_u8};
 
 /// One row of `MSG_LIST_STABLED_PETS` (vmangos `WorldSession::SendStablePet`,
 /// `NPCHandler.cpp:522-575`) — a pet the stable master can show, whether it is the one currently at
@@ -173,7 +173,8 @@ pub(super) fn read_list_stabled_pets(r: &mut &[u8]) -> io::Result<(u64, u8, Vec<
     let npc = read_u64_le(r)?;
     let num_pets = read_u8(r)?;
     let num_stable_slots = read_u8(r)?;
-    let mut pets = Vec::with_capacity(num_pets as usize);
+    // The current pet plus the stable slots: 1 + vmangos `MAX_PET_STABLES` 2 (`Objects/Pet.h:37`).
+    let mut pets = Vec::with_capacity(capacity_hint(num_pets, 1 + 2));
     for _ in 0..num_pets {
         // Struct-literal fields evaluate top-to-bottom, so this reads in wire order.
         pets.push(StabledPet {

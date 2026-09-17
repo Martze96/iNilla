@@ -76,7 +76,6 @@ fn take_empties(entry: &MailListEntry, action: u32) -> bool {
 /// take/return/delete then re-syncs the inbox with a fresh `CMSG_GET_MAIL_LIST` (the reference
 /// client's inbox-refresh moment); an EQUIP_ERROR routes to the existing inventory-error surface;
 /// any other failure surfaces the red error line.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn send_mail_result(
     mail_id: u32,
     action: u32,

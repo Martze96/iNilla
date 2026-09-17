@@ -103,7 +103,6 @@ pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 /// events on their edges. The per-member unit state is the 0434 §2 **merged view**: a streamed
 /// member's live descriptor wins; the `PARTY_MEMBER_STATS` snapshot covers the rest — and the
 /// roster status byte overlays both (the descriptor never carries connected/AFK/DND).
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_party(
     // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
     // failed to load, in which case no class reads as having a relic slot.

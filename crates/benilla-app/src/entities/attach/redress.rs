@@ -68,7 +68,7 @@ type PartWrites<'a> = (
 /// creature's look never changes this way, and a character-model NPC wears its display's columns —
 /// a *display* change is a different model and stays a teardown
 /// ([`super::super::live_display::refresh_live_display`]).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(in crate::entities) fn redress_player_looks(
     mut commands: Commands,
     mut players: Query<

@@ -561,7 +561,6 @@ struct FeedMemos {
     map_synced: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_world_map(
     script: Option<NonSendMut<UiScript>>,
     data: Option<Res<WorldMapUiData>>,
@@ -816,7 +815,6 @@ fn feed_world_map(
 /// also runs and drills into the clicked zone, which is what you want anyway — you arrive, and the
 /// map is showing where you arrived. Adding a modifier fork to the reference's click law to
 /// suppress that would be a dev affordance rewriting a faithful one.
-#[allow(clippy::too_many_arguments)]
 fn dev_map_jump(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,

@@ -217,7 +217,6 @@ pub(crate) fn idle_action(idle: Duration, gates: IdleGates) -> IdleAction {
 
 /// The handler proper. In-world only: `0x482ea0` is `WorldFrame::Render`, so there is no idle
 /// timer at the glue screens.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn idle_handler(
     time: Res<Time<Real>>,
     last: Res<LastInput>,

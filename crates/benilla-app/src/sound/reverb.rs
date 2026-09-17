@@ -60,7 +60,6 @@ struct AppliedPreset(Option<u32>);
 /// React to area/interior/underwater changes: resolve the preset id and hand the row to the
 /// mixer. The WMO interior's preset overrides the terrain area's (decision 0076 — this is where
 /// ~4 000 CAVE/AUDITORIUM rows live); zero falls through to the area chain.
-#[allow(clippy::too_many_arguments)]
 fn zone_reverb(
     mut applied: ResMut<AppliedPreset>,
     mut out: NonSendMut<SoundOutput>,

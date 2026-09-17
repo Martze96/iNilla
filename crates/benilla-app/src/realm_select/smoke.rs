@@ -56,7 +56,6 @@ pub(super) struct Walk {
 
 /// The walk. Every leg names itself on the way in, so a timeout says which boundary stalled
 /// instead of "the client did not exit".
-#[allow(clippy::too_many_arguments)]
 pub(super) fn debug_realm_smoke(
     mut msgs: MessageReader<crate::net::CharListMessage>,
     realms: ResMut<Realms>,

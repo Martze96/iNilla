@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The world viewer: the engine with no game attached — and the wall that keeps the split honest (decision 1160)"
 
+[lints]
+workspace = true
+
 [dependencies]
 # **Only the engine.** This is the edge the binary exists to hold: if a world concept
 # ever needs the game, this line is what refuses to let it.

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher shim so a commit dirties ~30 lines instead of this crate (decision 0993)"
 
+[lints]
+workspace = true
+
 [features]
 # **The dev/player seam** (decisions 0026 + 1173). Default-ON, so every ordinary `cargo run`,
 # capture, probe and gate builds exactly what it built before. `--no-default-features` compiles

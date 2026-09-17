@@ -89,7 +89,6 @@ struct FeedMemory {
     pushed: PetBookState,
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn feed_pet_book(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
@@ -176,7 +175,6 @@ fn book_changed(fresh: &PetBookState, old: &PetBookState) -> bool {
 }
 
 /// One book slot, fully resolved.
-#[allow(clippy::too_many_arguments)]
 fn slot_view(
     entry: PetActionEntry,
     d: &SpellDisplay,

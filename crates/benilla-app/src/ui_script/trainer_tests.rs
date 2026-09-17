@@ -136,7 +136,6 @@ fn text_center(quads: &[ExtractedQuad], needle: &str) -> (f32, f32) {
 
 /// One service in a named skill line, spelling out every field so the intent is legible at the call
 /// site.
-#[allow(clippy::too_many_arguments)]
 fn service(
     spell_id: u32,
     name: &str,

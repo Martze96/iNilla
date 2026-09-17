@@ -51,7 +51,6 @@ use crate::net::{ActiveMover, Embodied, GuidIndex, RemoteMotion, SelfGuid, SelfP
 ///
 /// Runs before the controller, which reads both to decide what — if anything — it is driving.
 // A Bevy system's parameter list, not an argument list.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn maintain_embodiment(
     mut commands: Commands,
     mut player: ResMut<Player>,

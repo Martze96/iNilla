@@ -79,7 +79,7 @@
 //! few and player-adjacent, so the anim host runs ungated (no draw-gate `DoodadAnimHost`).
 //! [`pose_markers`] swaps every marker between the low and raised bob as the unit's overhead
 //! elements toggle (the floating name [`Nameplates::shows`] OR a live V-plate — our `unit+0xc7c`;
-//! the plate leg is a director-pinned deviation, rationale on [`pose_markers`], 0408/0409):
+//! the plate leg is a director-pinned deviation, rationale on [`pose_markers`], 2274/2275):
 //! cards re-arm the matching loop, hosts switch the playing clip.
 
 mod query;
@@ -200,7 +200,6 @@ fn despawn_marker(commands: &mut Commands, roots: &Query<&QuestMarkerRoot>, root
 /// client's two handlers race last-write-wins on the same attach slot; we compose
 /// deterministically instead — a quest marker, when the status yields one, outranks the green
 /// (a named deviation, invisible in practice: a flight master carrying an active quest marker).
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn sync_markers(
     mut commands: Commands,
     quest: Res<QuestGiver>,
@@ -327,7 +326,6 @@ fn seat_is_stale(marker: &QuestMarkerRoot, seat_alive: bool, want: Option<u16>) 
 /// billboard cards under the identity root with their bob loop armed (the `?`). Retries silently
 /// while either half still loads; latches [`QuestMarkerRoot::no_anchor`] when the body model has
 /// no overhead point (the client's marker never parents — invisible).
-#[allow(clippy::too_many_arguments)]
 fn build_markers(
     mut commands: Commands,
     mut roots: Query<(Entity, &mut QuestMarkerRoot)>,
@@ -513,13 +511,13 @@ fn build_markers(
 /// (WoW z +0.427..+0.517 vs anim 0's −0.089..0), lifting the marker clear of the name text.
 /// Benilla raises for the floating name ([`Nameplates::shows`]) OR a live V-plate
 /// ([`VPlates`](crate::vplates::VPlates)) — the plate leg is a **director-pinned deviation**
-/// (0409): the reference arms anim 0 under a live plate (byte-verified, wow-re
+/// (2275): the reference arms anim 0 under a live plate (byte-verified, wow-re
 /// `questgiver-marker.md` Q4a — ShouldShowName's plate suppression destroys the rendered name
 /// and nulls the `desc+0x8` handle the selector `0x6c7950` tests), leaving its marker low
 /// behind the plate; the director rejected that overlap on sight. The re-arm law is settled
 /// faithful: the reference arms at attach AND re-arms on the frame the name shown-state flips
 /// (an edge inside `0x6c6e90`, never per-frame) — exactly our re-arm-on-flip.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
+#[allow(clippy::type_complexity)] // a Bevy system: each param is one resource, the app's convention
 fn pose_markers(
     plates: Res<Nameplates>,
     vplates: Res<crate::vplates::VPlates>,

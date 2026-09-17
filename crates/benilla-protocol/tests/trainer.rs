@@ -38,7 +38,6 @@ fn trainer_send_bodies_golden() {
 /// Append one 38-byte service record (vmangos SendTrainerSpellHelper, NPCHandler.cpp:97-139) to a
 /// SMSG_TRAINER_LIST body: spell u32, state u8, cost u32, canLearnPrimaryProf u32, isPrimaryProfFirstRank
 /// u32, reqLevel u8, reqSkill u32, reqSkillValue u32, then three prerequisite-spell u32s.
-#[allow(clippy::too_many_arguments)]
 fn push_service(
     body: &mut Vec<u8>,
     spell: u32,

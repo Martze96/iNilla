@@ -183,7 +183,6 @@ pub(crate) mod harness {
             .expect("the relayout system runs");
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn relayout_one(
         In(root): In<Entity>,
         mut pipeline: ResMut<TextPipeline>,

@@ -181,7 +181,6 @@ pub(super) fn superceded_spell(
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cast_result(
     spell_id: u32,
     success: bool,
@@ -335,7 +334,6 @@ pub(super) fn cast_result(
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
 /// — the precast trigger the phase-2 casting animation loop builds on (decision 0099 phase 1).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spell_start(
     caster: u64,
     spell_id: u32,
@@ -446,7 +444,6 @@ const GO_TYPE_CHEST: i32 = 3;
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
 /// visually from the same Speed column (decision 0099 phase 4: the target lists go out as
 /// [`SpellGoTargets`] for the router's instant-impact/missile branch).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_go(
     caster: u64,
     spell_id: u32,
@@ -522,7 +519,7 @@ pub(super) fn spell_go(
     }
     // A cast that names a GameObject (an open-lock cast on a chest / locked door) hands off to the GO
     // animation driver, which gates on the open-lock effect and opens the lid on the cast going off
-    // (decision 0250). Independent of the caster being streamed to us — an observed open still animates.
+    // (decision 2271). Independent of the caster being streamed to us — an observed open still animates.
     if let Some(go_guid) = go_target {
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
@@ -801,7 +798,6 @@ pub(super) fn spell_go(
 
 /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
 /// `Casting` state seam the same as [`spell_go`].
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_failed_other(
     caster: u64,
     spell_id: u32,

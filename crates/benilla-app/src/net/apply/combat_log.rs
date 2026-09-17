@@ -175,7 +175,6 @@ fn power_message_type(power: u32) -> Option<&'static str> {
 /// the zero-damage ABSORB/RESIST word, over the target (`0x5e85e0`). Source-classified: only my
 /// (gold) or my pet's (gold, PetSpellDamage-gated) spells draw. The handler pushes the same
 /// record/source to number and word twin alike, so the override colors both.
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn spell_damage_log(
     s: SpellDamageLog,
     index: &GuidIndex,
@@ -246,7 +245,6 @@ pub(super) fn spell_damage_log(
 
 /// `SMSG_PERIODICAURALOG` → DoT ticks float like direct damage (`0x626dd0`, never crit-category);
 /// heal/energize/leech ticks float **nothing** (heals never float in 5875).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn periodic_aura_log(
     s: PeriodicAuraLog,
     index: &GuidIndex,
@@ -526,7 +524,6 @@ fn miss_action(code: u8) -> Option<&'static str> {
 /// Source-classified like every emitter (the classifier lives inside the word twin too), and
 /// **coloured by the same B/K law as a number** — `0x5e7f63 mov ecx,[ebp-0x8]; 0x5e7f66 push ecx`
 /// pushes the resolved SpellRec, not NULL, so this site's words are spell-GOLD (decision 2229).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn spell_log_miss(
     s: SpellLogMiss,
     index: &GuidIndex,
@@ -619,7 +616,6 @@ pub(super) fn xp_gain(
 ///   path as `SMSG_PLAY_SOUND`.
 ///
 /// No floating text (the XP itself still arrives via the non-kill `SMSG_LOG_XPGAIN`).
-#[allow(clippy::too_many_arguments)] // one arm of the dispatch — its param list IS its input set
 pub(super) fn exploration_xp(
     x: ExplorationXp,
     area_table: Option<&crate::area::AreaTableRes>,

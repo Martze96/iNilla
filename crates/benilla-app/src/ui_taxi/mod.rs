@@ -130,7 +130,6 @@ impl NpcSession for TaxiState {
 /// on `OK` instead — the flight starts and the map has nothing left to show), present a
 /// first-visit discovery, and push the `UnitOnTaxi` ride flag off [`Player::server_riding`].
 /// Diffed against `Local` memory, the trainer/merchant feed shape.
-#[allow(clippy::too_many_arguments)]
 fn feed_taxi(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<TaxiState>,

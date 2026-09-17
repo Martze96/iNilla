@@ -346,7 +346,6 @@ impl WorldCollision<'_, '_> {
     }
 
     /// Move `shape` by `velocity` for `delta_time`, sliding along what it hits.
-    #[allow(clippy::too_many_arguments)] // the mover's full step, minus the two the facade owns
     pub fn slide_body(
         &self,
         shape: &Collider,
@@ -369,7 +368,6 @@ impl WorldCollision<'_, '_> {
 
     /// [`slide_body`](Self::slide_body) against a caller-supplied filter — the ghost's door
     /// exclusion, for the reason spelled out on [`cast_body_with`](Self::cast_body_with).
-    #[allow(clippy::too_many_arguments)] // `slide_body`'s list, plus the filter it defaults
     fn slide_body_with(
         &self,
         shape: &Collider,

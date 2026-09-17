@@ -25,7 +25,6 @@ impl WorldWriter {
     /// nearby players. `flags` must only set bits whose `MovementInfo` tail we serialize — the base
     /// directional/turn/walk bits, `JUMPING` (with its `jump` tail), `SWIMMING` (with its `pitch`
     /// tail), and `ON_TRANSPORT` (with its `transport` local-frame tail — decision 0438 phase 2).
-    #[allow(clippy::too_many_arguments)]
     pub fn send_movement(
         &mut self,
         opcode: u16,
@@ -133,7 +132,6 @@ impl WorldWriter {
     /// echo the mover `guid` + `counter` + the exact `speed` the server sent, carrying our live
     /// `MovementInfo` (same field set as [`Self::send_movement`] — the server relocates us to it).
     /// Mandatory: unacked, the server force-resolves the change after ~4 s and flags its anticheat.
-    #[allow(clippy::too_many_arguments)]
     pub fn force_speed_change_ack(
         &mut self,
         kind: messages::SpeedKind,

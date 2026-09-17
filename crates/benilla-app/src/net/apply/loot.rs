@@ -364,7 +364,6 @@ pub(super) fn item_template(entry: u32, info: Option<ItemInfo>, items: &mut Item
 /// [`PendingItemOps::clear_by_failure`]. This site has no `UiScript` to fire `ITEM_LOCK_CHANGED`
 /// through, so the transitioned slots queue in [`LockTransitions`] for the container feed
 /// (`ui_items::feed::feed_containers`) to drain and fire next time it runs.
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn inventory_failure(
     reason: u8,
     required_level: Option<u32>,

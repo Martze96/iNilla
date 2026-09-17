@@ -71,7 +71,6 @@ type SpawnTables<'w> = (
     Option<ResMut<'w, crate::static_gx::StaticGx>>,
 );
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_loaded_placements(
     mut commands: Commands,
     placements: ResMut<Placements>,

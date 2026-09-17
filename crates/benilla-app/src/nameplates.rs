@@ -384,7 +384,7 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
 /// Update (the schedule the mesh pipelines support). The per-frame *placement* is
 /// [`place_nameplates`] (PostUpdate, off this frame's propagated pose) — a fresh plate spawned
 /// here gets its first seat there, same frame (Update commands flush before PostUpdate).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn drive_nameplates(
     mut commands: Commands,
     units: Query<(

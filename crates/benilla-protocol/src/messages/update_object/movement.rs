@@ -4,7 +4,9 @@ use crate::messages::movement::{
     TransportPose, MOVEMENT_FLAG_JUMPING, MOVEMENT_FLAG_ON_TRANSPORT,
     MOVEMENT_FLAG_SPLINE_ELEVATION, MOVEMENT_FLAG_SPLINE_ENABLED, MOVEMENT_FLAG_SWIMMING,
 };
-use crate::wire::{read_f32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8, Vector3d};
+use crate::wire::{
+    capacity_hint, read_f32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8, Vector3d,
+};
 
 /// Object class (the `TypeId` on a create packet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,7 +229,7 @@ impl MovementBlock {
                 let duration_ms = read_u32_le(r)?;
                 let id = read_u32_le(r)?;
                 let amount_of_nodes = read_u32_le(r)?;
-                let mut nodes = Vec::with_capacity(amount_of_nodes.min(0xFFFF) as usize);
+                let mut nodes = Vec::with_capacity(capacity_hint(amount_of_nodes, 0xFFFF));
                 for _ in 0..amount_of_nodes {
                     let v = Vector3d::read(r)?;
                     nodes.push([v.x, v.y, v.z]);

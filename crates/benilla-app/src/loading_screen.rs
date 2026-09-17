@@ -549,7 +549,7 @@ fn setup_loading_screen(
 
 /// Per-frame: observe the lifecycle edges, run the trigger/clear state machine, resolve backdrop
 /// art, and push the progress fraction into the bar.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
     // The streamer's two published facts, bundled into one param (Bevy's 16-element system-param

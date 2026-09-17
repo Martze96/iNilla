@@ -524,7 +524,6 @@ mod tests {
     use super::*;
 
     /// Build a minimal-but-complete BLP2 header (magic..=mip_sizes[16], `HEADER_SIZE` bytes).
-    #[allow(clippy::too_many_arguments)]
     fn header(
         compression: u8,
         alpha_bits: u8,

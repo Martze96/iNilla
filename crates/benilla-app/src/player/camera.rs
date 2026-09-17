@@ -1033,7 +1033,6 @@ pub(crate) struct CameraPivot {
 /// [`PressGesture::is_click`] alone. There is no "promotion" and nothing cancels the click for
 /// having moved — the pending click used to be destroyed the moment the cursor crossed a 4 px
 /// threshold, which is why a drag could never select (ledger B226).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_look_session(
     buttons: &ButtonInput<MouseButton>,
     mouse_motion: &AccumulatedMouseMotion,
@@ -1240,7 +1239,6 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, m
 /// `feet`/`head` are the caller's, because the head offset is the avatar capsule's and those
 /// constants are a movement concern; `body_pivot` is the target height read off the driven body
 /// this frame, used only when nothing else is being watched.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_on_subject(
     dt: f32,
     turn_delta: f32,
@@ -1397,7 +1395,6 @@ pub(super) fn seat_on_subject(
 /// `head`/`player_pos` are precomputed by [`super::control`] (which owns the avatar capsule
 /// constants); `cam_pivot_height` is the world pivot height it derived from [`CameraPivot`] this
 /// frame.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_camera(
     dt: f32,
     turn_delta: f32,
@@ -1640,7 +1637,7 @@ pub(super) fn seat_camera(
 /// compose (`wow_model.wgsl`: `out_rgb *= faded_alpha`) takes the card to black, which for an ADD blend
 /// is gone. That deliberately avoids `Visibility`, which the card's own hidden-owner mirror authors every
 /// frame in a different system.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
     self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<Embodied>>,

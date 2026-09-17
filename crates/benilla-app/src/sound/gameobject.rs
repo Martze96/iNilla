@@ -93,7 +93,6 @@ fn go_event_slot(ident: &[u8; 4]) -> Option<usize> {
 /// `SMSG_PLAY_OBJECT_SOUND(3355)` ~200 ms earlier — and every lit prop in the world, whose
 /// `CampFireSmallLoop`/`TorchLoop`/`ElvenFountainSmallA` take the pool lane and hum until the
 /// object's state changes under them.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn go_display_sounds(
     mut dispatched: MessageReader<GoStateDispatch>,
     mut events: MessageReader<crate::creature_anim::AnimSoundEvent>,

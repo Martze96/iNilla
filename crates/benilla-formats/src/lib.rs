@@ -845,7 +845,6 @@ mod tests {
 
     /// A minimal, complete BLP2 header (magic..=mip_sizes[16], 148 bytes) — mirrors the private
     /// builder in `benilla_blp`'s own tests (that crate's helper isn't exported).
-    #[allow(clippy::too_many_arguments)]
     fn blp2_header(
         compression: u8,
         alpha_bits: u8,

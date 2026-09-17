@@ -265,7 +265,6 @@ fn load_area_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 
 /// The per-frame scheduler: react to area/phase changes, arm the transition fade-stop, run the
 /// silence timer, start the next track, and keep the stream volumes on the sliders.
-#[allow(clippy::too_many_arguments)]
 fn zone_audio(
     mut zone: NonSendMut<ZoneAudio>,
     mut out: NonSendMut<SoundOutput>,
@@ -644,7 +643,6 @@ fn start_music_stream(
 /// out on the backend (drop the handle — the ramp finishes on kira's thread) while the new bed
 /// starts silent and fades in under the per-frame envelope. This mirrors the client's `0x460b00`
 /// (a 5.0 s crossfade — out `0x7a5a10(5.0f)`, in `0x7a5dc0(0)` → `0x7a57b0(5.0f)`).
-#[allow(clippy::too_many_arguments)]
 fn swap_ambience(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,
@@ -707,7 +705,6 @@ fn swap_ambience(
 /// `net::apply_net_updates`): 2D kits and object-positioned 3D kits go through the kit player;
 /// music takes the zone music slot (interrupting the current track — the zone scheduler resumes
 /// its own rotation after the pushed track ends, via the normal silence interval).
-#[allow(clippy::too_many_arguments)]
 fn server_sounds(
     mut msgs: MessageReader<ServerSoundMessage>,
     mut zone: NonSendMut<ZoneAudio>,

@@ -82,7 +82,6 @@ pub(crate) struct GroundFxDecal {
 /// projection rides the effect stream). The caller resolves the part's texture/blend/fog/tint
 /// identity from its shared material; the caller also inserts the part's `MatAnim` rider (its
 /// `current` is the push-time alpha).
-#[allow(clippy::too_many_arguments)] // the part's full draw identity, one call site
 pub fn spawn_ground_fx_decal(
     commands: &mut Commands,
     texture: Handle<Image>,

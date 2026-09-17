@@ -227,7 +227,7 @@ fn sync_shadows(
 
 /// Re-project each shadow whose inputs moved; clear it when the box degenerates, the fade
 /// reaches zero, or no receiving surface is in the box (the reference's no-ground gate).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn update_shadows(
     time: Res<Time>,
     catalog: Option<Res<AnimData>>,

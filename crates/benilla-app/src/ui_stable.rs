@@ -193,7 +193,6 @@ fn resolve_pet(
 }
 
 /// Build the Lua-facing snapshot from [`StableOpen`] — `None` when no stable is open.
-#[allow(clippy::too_many_arguments)]
 fn snapshot(
     open: &StableOpen,
     names: &mut NameCache,
@@ -228,7 +227,6 @@ fn snapshot(
 
 /// Push the current stable into the VM and fire the show/update/close events on a transition (or a
 /// content change). Diffed against a `Local` memory, exactly like the trainer/merchant feeds.
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn feed_stable(
     script: Option<NonSendMut<UiScript>>,
     // ResMut only to consume the fresh-list latch; the feed never authors stable content.

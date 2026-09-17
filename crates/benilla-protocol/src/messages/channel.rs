@@ -10,7 +10,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_u32_le, read_u64_le, read_u8};
 
 /// `SMSG_CHANNEL_NOTIFY`'s notice byte (`ChatNotify`, VERIFIED vmangos `Chat/Channel.h:35-71`) —
 /// selects which tail follows the channel name (see [`ChannelNoticeTail`]/[`read_channel_notify`]).
@@ -173,7 +173,7 @@ pub(super) fn read_channel_list(r: &mut &[u8]) -> io::Result<(String, u8, Vec<(u
     // The count is wire-controlled — never let it drive allocation (a corrupt 0xFFFFFFFF must fail
     // at the bounds-checked reads below, not abort in the allocator). Legit rosters exceed 256
     // rarely; push simply grows past the hint.
-    let mut members = Vec::with_capacity((count as usize).min(256));
+    let mut members = Vec::with_capacity(capacity_hint(count, 256));
     for _ in 0..count {
         let guid = read_u64_le(r)?;
         let member_flags = read_u8(r)?;

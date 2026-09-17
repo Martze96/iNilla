@@ -63,7 +63,6 @@ pub(super) fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index:
 
 /// An object entered range / was created (`SMSG_UPDATE_OBJECT` create block): spawn or refresh the
 /// entity, warm the ask-once caches, and seed its descriptor store via the per-drain `pending` map.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn object_create(
     guid: u64,
     kind: EntityKind,
@@ -317,7 +316,6 @@ pub(super) fn object_move(
 /// applies now, a future one queues on the unit and fires in `drain_pending_moves` — the dead-reckon
 /// covering the mover's own timeline in between, which is what kills the arrival-jitter snap.
 /// `WOW_REMOTE_SNAP=1` restores raw apply-at-arrival for an A/B.
-#[allow(clippy::too_many_arguments)] // the wire fields + the apply context, one per concern
 pub(super) fn unit_move(
     guid: u64,
     mv: crate::net::motion::RelayMove,
@@ -528,7 +526,6 @@ pub(super) fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &
 /// rider's local pose for `transport::compose_riders` to carry out to the world. When it is `None`
 /// on a unit we had riding, the unit has *left* the deck — vmangos drops it from the transport on
 /// exactly this edge (`MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:156-159`).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn monster_move(
     guid: u64,
     transport: Option<u64>,
@@ -754,7 +751,6 @@ pub(super) fn modes_of(
 /// the reference applies to whatever it finds — so we do too. It is inert on the avatar either way:
 /// the animation selector's `unify` gives the controller's own `MovementState` precedence, and our
 /// mover's modes are the handshake family's ([`crate::player::state::MoveModes`]).
-#[allow(clippy::too_many_arguments)] // the wire fields + the apply context, one per concern
 pub(super) fn spline_move_mode(
     guid: u64,
     mode: SplineMode,
@@ -920,7 +916,6 @@ fn live_speeds(index: &GuidIndex, speeds: &Query<&UnitSpeeds>, guid: u64) -> Opt
 /// answers the mandatory ack with its live pose (the TeleportMessage pattern). An unknown guid
 /// still acks if it's ours-by-guid; a foreign mover (we never control others) is only applied,
 /// never acked — acking a unit we don't control is the server's error path.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn force_speed_change(
     guid: u64,
     kind: SpeedKind,

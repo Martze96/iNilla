@@ -149,7 +149,6 @@ fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<Str
 /// `0x506f70`; its bare name otherwise), the skill requirement's name off `SkillLine.dbc`, the
 /// reputation requirement off `Faction.dbc` names (the red check is the engine's, against the
 /// player's rank map).
-#[allow(clippy::too_many_arguments)] // one app-resolved catalog per argument, by design
 fn template_view(
     t: &ItemInfo,
     spells: Option<&crate::ui_action::Spells>,
@@ -388,7 +387,6 @@ pub(super) fn feed_random_properties(
     *pushed.get(&script) = true;
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn feed_item_stats(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
@@ -493,7 +491,6 @@ pub(super) fn feed_item_stats(
 /// bits) + the full skill-rank map, read off the self player's descriptor, plus the equip
 /// proficiencies (`SMSG_SET_PROFICIENCY`) and the faction → reputation-rank map (DBC base for our
 /// race/class + the `SMSG_INITIALIZE_FACTIONS` standing, ranked) — pushed on change.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn feed_player_req(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -607,7 +604,6 @@ pub(super) fn feed_player_req(
 /// read the action feed's ITEM arm does). `None` = the slot is empty (guid 0/unsent) — an
 /// *unresolved* occupied slot is `Some` with empty fields instead, so the bag shows the item
 /// exists before its query answers.
-#[allow(clippy::too_many_arguments)] // the slot resolve's full read set (stores + both clocks)
 fn resolve_slot(
     guid: u64,
     items: &mut Items,
@@ -840,7 +836,7 @@ pub(crate) fn resolve_item_locks(
         .extend(pending.resolve(|bag, slot1| slot_guid_count(player, bag, slot1, &items)));
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // the param list IS the input set
+#[allow(clippy::type_complexity)] // the param list IS the input set
 pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     // `ChrClasses.dbc` field 16, for the fit rule's relic half — see `find_equip_slot` (1803).

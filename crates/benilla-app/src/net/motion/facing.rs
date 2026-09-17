@@ -227,7 +227,7 @@ fn filter_step(cur: f32, goal: f32, hist: &mut [f32; 4]) -> f32 {
 /// `pub(crate)` rather than `pub(in crate::net)` for one reason: the shuffle latch's *consumer*
 /// lives in `creature_anim`, and the only test that can catch the latch being produced but never
 /// read has to run both systems in one app (`creature_anim::driver::tests`).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn drive_display_facing(
     mut commands: Commands,
     index: Res<GuidIndex>,

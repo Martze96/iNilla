@@ -204,7 +204,6 @@ fn find_in_backpack(
         .map(|_| (guid, u32::from(i) + 1))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn clam_probe(
     time: ProbeClock,
     mut probe: ResMut<ClamProbe>,

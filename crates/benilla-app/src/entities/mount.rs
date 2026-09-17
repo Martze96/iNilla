@@ -156,7 +156,6 @@ pub(super) type MountChildren<'w, 's> = Query<
 /// Drive one unit's mount side to the point where the rider can be seated. Spawns the child when
 /// it is missing, drops and retries a child built for a display the field has since moved off, and
 /// resolves the seat frame once the child's rig is up.
-#[allow(clippy::too_many_arguments)] // the seat law's full input set, like its callers
 pub(super) fn seat_or_spawn_mount(
     commands: &mut Commands,
     children: &MountChildren,

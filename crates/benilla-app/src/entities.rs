@@ -592,7 +592,6 @@ pub(crate) struct DisplayBuildSet;
 /// doc for why a clear is always safe mid-session). These caches are get-or-insert at every use
 /// site, so a cleared entry rebuilds on the next spawn that wants it; without this, every display
 /// id, material key, and composited skin ever seen stayed resident for the life of the process.
-#[allow(clippy::too_many_arguments)]
 fn evict_display_caches(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
     mut composites: ResMut<SkinComposites>,
@@ -1191,7 +1190,6 @@ fn setup_entities(
 /// For every display id active among the net entities: ensure its [`DisplayModel`] exists (resolve the
 /// catalog + request the model handle), and once the handle has loaded, build its spawn parts (the
 /// per-submesh material, with creature skin slots filled from the display's variations).
-#[allow(clippy::too_many_arguments)]
 fn update_display_models(
     // `ObjectStore` rides along for the corpses: which cache holds a corpse's model is a
     // descriptor question (`CORPSE_FLAG_BONES`), not a display-id one — decision 1706.

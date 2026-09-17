@@ -163,7 +163,6 @@ fn clear_log(script: &UiScript) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn vendor_swap_probe(
     time: ProbeClock,
     mut probe: ResMut<VendorSwapProbe>,

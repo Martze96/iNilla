@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 
-use crate::wire::{read_u32_le, read_u8, Vector3d};
+use crate::wire::{capacity_hint, read_u32_le, read_u8, Vector3d};
 
 use super::movement::ObjectType;
 
@@ -656,10 +656,14 @@ fn descriptor_len(object_type: ObjectType) -> u16 {
     }
 }
 
+/// The widest descriptor's mask-word count: `PLAYER_END` 1282 fields (the [`descriptor_len`]
+/// table) is 41 words of 32 bits. A block count past it describes no 1.12 object.
+const MAX_MASK_WORDS: usize = 1282usize.div_ceil(32);
+
 impl ObjectFields {
     pub(super) fn read(r: &mut impl Read) -> io::Result<Self> {
         let amount_of_blocks = read_u8(r)?;
-        let mut present = Vec::with_capacity(amount_of_blocks as usize);
+        let mut present = Vec::with_capacity(capacity_hint(amount_of_blocks, MAX_MASK_WORDS));
         for _ in 0..amount_of_blocks {
             present.push(read_u32_le(r)?);
         }
@@ -893,6 +897,9 @@ impl ObjectFields {
     }
 
     fn insert(&mut self, index: u16, value: u32) {
+        // `index` is a `u16`, so `word` is at most 2047 and the store at most 64 Ki values —
+        // bounded by the type, not by anything the wire says (the wire's block count above is
+        // a `u8`, 255 words at the very most).
         let word = usize::from(index / 32);
         if word >= self.present.len() {
             self.present.resize(word + 1, 0);

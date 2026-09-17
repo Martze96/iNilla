@@ -635,7 +635,6 @@ pub(super) struct CommitOutcome {
 /// don't. Shared with the UI's `TargetUnit` drain (`super::target_unit_requests`) so every
 /// non-mouse selection writer commits identically — a `TargetUnit("player")` mid-combat stops
 /// the swing and does NOT re-point (the tail's self exception).
-#[allow(clippy::too_many_arguments)] // `0x493540`'s own inputs, one press's worth
 pub(super) fn commit(
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
@@ -695,7 +694,6 @@ pub(super) fn commit(
 ///
 /// Re-score the live world, pool by tier, skip the recent history forward (or walk it backward),
 /// commit through the byte-law [`commit`].
-#[allow(clippy::too_many_arguments)] // the shared core's full input set, one press's worth
 fn cycle(
     side: ScanSide,
     reverse: bool,
@@ -1023,7 +1021,6 @@ pub(crate) struct AttackNearestRequest;
 /// error `0xa0` "There is nothing to attack" (we log; the red error banner is its own arc). The
 /// TAB history is not touched — an auto-pick is not a press (Classic's
 /// `TargetPriorityAutoTargetIgnoreWindow` nuance, disclosed unmodeled).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn acquire_and_attack(
     mut requests: MessageReader<AttackNearestRequest>,
     scan: TargetScan,

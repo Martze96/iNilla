@@ -579,7 +579,7 @@ pub(super) fn run(
                         // gait it WRAPPED to its head at completion — the frames + cross-fade
                         // against the restarted reach-to-quiver were the director's "jumps
                         // back to the start the moment it gets fully pulled", in every build
-                        // that replayed a pull (trace-caught, decision 0412). The clamp IS the
+                        // that replayed a pull (trace-caught, decision 2276). The clamp IS the
                         // drawn pose; nothing follows it (0994).
                         // Loot 50 is likewise authored clamp — one 0.5 s kneel-down that must
                         // FREEZE in the rummage pose; as Forever it would wrap back to standing

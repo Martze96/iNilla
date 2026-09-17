@@ -965,7 +965,6 @@ pub(super) fn lowest_near_corner_drop(rotation: Quat, fov: f32, aspect: f32, nea
 
 // Eight parameters: the probe reads a camera, the loaded surfaces, two scoping resources and a
 // clock, then writes the verdict and its two scalars. They are the inputs the rule has.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn detect_submersion(
     mut underwater: ResMut<Underwater>,
     camera: Query<(&Transform, &Projection), With<WorldCamera>>,

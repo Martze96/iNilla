@@ -349,7 +349,6 @@ impl Plugin for EntityShadePlugin {
 // A Bevy system's params are not an argument list to shorten — each is a distinct world access the
 // scheduler needs by name, and the card pass below deliberately takes its own disjoint `MeshTag`
 // query rather than smuggling one through a shared `ParamSet`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn update_ground_shade(
     time: Res<Time>,
     streamer: Option<Res<TerrainStreamer>>,

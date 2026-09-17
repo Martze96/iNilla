@@ -234,7 +234,6 @@ fn report(label: &str, s: &[Sample]) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn book_probe(
     time: ProbeClock,
     mut probe: ResMut<BookProbe>,

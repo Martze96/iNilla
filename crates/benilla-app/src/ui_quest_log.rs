@@ -336,7 +336,6 @@ fn resolve_template_item(
 ///
 /// Still not emitted, and still gaps rather than errors (1156 §4): the `event` line and the
 /// reputation line.
-#[allow(clippy::too_many_arguments)]
 fn build_objectives(
     template: &QuestTemplate,
     log_slot: &QuestLogSlot,
@@ -542,7 +541,6 @@ fn order_groups(rows: &[GroupRow]) -> Vec<(i32, String, Vec<usize>)> {
 /// and push a [`QuestLogState`] snapshot on change (diffed against a `Local`, the crate's standard
 /// feed shape). Also refreshes [`QuestLog::active_quest_ids`]/`entry_slots` for the greeting split
 /// and the abandon drain.
-#[allow(clippy::too_many_arguments)]
 fn feed_quest_log(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,

@@ -51,7 +51,6 @@ type SplashQuery = (Entity, &'static Transform, Option<&'static CollisionHeight>
 type SplashGate = Or<(Changed<Transform>, Changed<CollisionHeight>)>;
 
 /// Play the water splash on a unit's `0.4·h` depth-line crossing, either direction (module docs).
-#[allow(clippy::too_many_arguments)] // the sound-play plumbing, one param per concern
 fn water_splashes(
     units: Query<SplashQuery, (With<NetEntity>, SplashGate)>,
     world: benilla_world::world_point::WorldPoint,

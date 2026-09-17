@@ -412,7 +412,6 @@ type WarmRigVis<'w, 's> = Query<
 /// 0737's rule: never hold a cover unbounded. A timeout fires the tripwire-adjacent warn and
 /// releases; the remaining compiles land live (the pre-0837 world, once, with a named cause).
 const WARM_TIMEOUT_SECS: f32 = 10.0;
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 fn run_warm_pass(
     mut commands: Commands,
     mut warm: ResMut<WarmPass>,

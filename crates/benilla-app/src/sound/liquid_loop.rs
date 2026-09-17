@@ -89,7 +89,6 @@ fn load_water_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 }
 
 /// The per-frame driver (`0x462b50`): scan, arm/retire by priority, slew, fade.
-#[allow(clippy::too_many_arguments)]
 fn drive_liquid_loops(
     mut state: ResMut<LiquidLoopState>,
     water_sounds: Option<Res<WaterSounds>>,
@@ -284,7 +283,6 @@ fn near_clamped(pos: Vec3, player: Vec3) -> Vec3 {
 /// rides the emitter's `Transform`), force-looped (the type-22 kits are all authored loops but
 /// the lava pool omits the 0x200 flag — the same column-authority INTERIM as the creature
 /// body-loop), at an initial pump-lane gain.
-#[allow(clippy::too_many_arguments)]
 fn start_loop(
     kits: &mut SoundKits,
     assets: &WorldAssets,

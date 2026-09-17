@@ -12,7 +12,6 @@ use benilla_protocol::ServerPacket;
 
 /// One serialized enum entry, vmangos field order. Non-roster fields get distinct junk values so a
 /// misaligned parse can't accidentally pass.
-#[allow(clippy::too_many_arguments)]
 fn enum_entry(
     guid: u64,
     name: &str,

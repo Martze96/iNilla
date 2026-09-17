@@ -400,7 +400,6 @@ fn minimap_interior<'a>(
 /// Fills the extracted widget hole: the visible tile quads (clipped to the widget, masked to the
 /// circle) and the player arrow, appended at the widget's own z (stable sort keeps append order
 /// within a key, so the arrow rides above the tiles and below the widget's children).
-#[allow(clippy::too_many_arguments)]
 fn emit_minimap(
     widget: Res<MinimapWidget>,
     assets: Option<Res<MinimapAssets>>,
@@ -935,7 +934,6 @@ fn emit_minimap(
 /// — the client's own signal for "the effective zoom changed" (FrameXML `Minimap_OnEvent`). Without it
 /// the buttons keep the level you left (e.g. `ZoomIn` greyed from an outdoor max-zoom, still greyed
 /// indoors at level 3), which is the director's report (2026-07-09).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     world: benilla_world::world_point::WorldPoint,

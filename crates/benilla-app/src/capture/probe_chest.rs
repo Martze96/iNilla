@@ -211,7 +211,6 @@ fn report(label: &str, expect: u16, seen: &[Option<u16>]) -> u32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn chest_probe(
     time: ProbeClock,
     mut probe: ResMut<ChestProbe>,

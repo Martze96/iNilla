@@ -19,7 +19,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{MacroState, ScriptValue, UiScript};
 
-use crate::char_select::ClientState;
+use crate::char_select::InWorldGated;
 use benilla_assets::{LockRecover, WorldAssets};
 
 pub(crate) mod run;
@@ -79,7 +79,7 @@ impl Plugin for UiMacroPlugin {
                     // roster only names it once a login is live. It self-gates on the identity, so
                     // a re-entry with a different character reloads and a re-entry with the same
                     // one is a no-op.
-                    load_macros.run_if(in_state(ClientState::InWorld)),
+                    load_macros.in_set(InWorldGated),
                     // The save edge is checked every frame, in or out of world: the macro window is
                     // `whileDead = 1` and reachable from the game menu, and a `/logout` must not
                     // strand an unsaved edit.

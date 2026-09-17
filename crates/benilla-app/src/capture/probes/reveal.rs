@@ -72,7 +72,6 @@ impl Plugin for RevealAuditPlugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn drive_reveal_audit(
     mut audit: ResMut<RevealAudit>,
     progress: Res<WorldLoadProgress>,

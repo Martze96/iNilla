@@ -484,7 +484,6 @@ fn render(
 /// Surface the queued announcement lines in the chat window once their names resolve, colored
 /// `LOOT` green (the roll lines ride `CHAT_MSG_LOOT` in the real client, like the receive lines).
 /// Unresolved lines retry up to [`LINE_MAX_TRIES`] frames, then drop.
-#[allow(clippy::too_many_arguments)] // the line resolve's full read set
 fn drain_lines(
     rolls: &mut LootRolls,
     self_guid: Option<u64>,
@@ -575,7 +574,6 @@ fn snapshot(
 
 /// Tick the open rolls, push them into the VM, fire the open/close events, and drain the queued
 /// announcement lines into chat.
-#[allow(clippy::too_many_arguments)]
 fn feed_loot_rolls(
     script: Option<NonSendMut<UiScript>>,
     mut rolls: ResMut<LootRolls>,

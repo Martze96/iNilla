@@ -95,7 +95,6 @@ fn load_emote_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 /// Route the bridged emotes: a text emote plays the performer's race/sex voice; an anim emote
 /// plays its event kit. A performer without race/sex in its store yet (partial snapshot) stays
 /// silent rather than guessing a voice.
-#[allow(clippy::too_many_arguments)]
 fn emote_sounds(
     mut msgs: MessageReader<EmoteMessage>,
     units: Query<(&ObjectStore, &Transform)>,

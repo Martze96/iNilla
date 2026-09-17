@@ -434,7 +434,6 @@ impl M2BatchMaterials<'_> {
 
     /// The one call into the twenty-argument builder: every argument but the four this facade's
     /// entry points choose is read straight off the authored batch.
-    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         sub: &ModelSubmesh,

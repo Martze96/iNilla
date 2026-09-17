@@ -82,7 +82,6 @@ impl WatchCtx<'_> {
 }
 
 /// Queue one single-endpoint line, gated the way its formatter gates.
-#[allow(clippy::too_many_arguments)] // the line's own facts, plus the two contexts the gate reads
 fn queue_one(
     log: &mut ChatLog,
     ctx: &WatchCtx,

@@ -1252,7 +1252,7 @@ impl Player {
     /// vector and the swim amounts but deliberately leaves turning live). What this exists for is
     /// the question a *log line* has to answer after a session boundary — "can the character that
     /// just entered the world be driven?" — which B306 proved nothing was asking: `scripts/smoke.sh`
-    /// has crossed `/logout` → re-enter on every run since 1291 while counting UI rebuilds, errors
+    /// has crossed `/logout` → re-enter on every run since 2277 while counting UI rebuilds, errors
     /// and shutdown writes, none of which a frozen character disturbs.
     ///
     /// It does **not** make the smoke a B306 regression: that run logs in as a GM probe, so vmangos

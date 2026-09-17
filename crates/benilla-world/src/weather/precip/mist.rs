@@ -179,7 +179,6 @@ fn accrue(budget: f32, rate: f32, dt: f32) -> f32 {
 /// (the arg is the RAMPED effect density — the same `effect+0xd0` value the drop kinematics
 /// read, so the knee sits on the density, not the raw wire grade), one node per unit, cap 128;
 /// then every node streams along its motion basis and retires at end-of-life.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_mist(
     mist: &mut Mist,
     weather: &WeatherState,

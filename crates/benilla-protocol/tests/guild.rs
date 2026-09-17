@@ -261,7 +261,6 @@ fn guild_query_response_reports_no_such_guild_as_an_empty_name() {
 /// `last_online` is passed explicitly rather than derived from `presence`, so the *fixture* states
 /// the wire rule independently of the parser under test: an offline member carries the float, an
 /// online one does not.
-#[allow(clippy::too_many_arguments)]
 fn push_member(
     body: &mut Vec<u8>,
     guid: u64,

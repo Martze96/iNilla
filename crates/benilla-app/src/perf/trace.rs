@@ -39,7 +39,6 @@ const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,furnis
                                    attached,adt_freed,meshes_freed,images_freed,adt_added,\
                                    meshes_added,images_added,pipes_new,pipes_pending\n";
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn trace_stream(
     mut trace: ResMut<StreamTrace>,
     mut activity: ResMut<benilla_world::terrain_stream::StreamActivity>,

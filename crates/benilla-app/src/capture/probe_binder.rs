@@ -267,7 +267,6 @@ fn vm_bind_location(script: &UiScript) -> String {
         .unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn binder_probe(
     time: ProbeClock,
     mut probe: ResMut<BinderProbe>,

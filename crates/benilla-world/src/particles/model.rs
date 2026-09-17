@@ -41,7 +41,6 @@ pub(super) struct ModelInstance {
 /// Grow + position each model-particle emitter's instance pool from its freshly-simulated
 /// pool. Runs after [`super::sim::simulate_particles`] in the same set, so instances land on
 /// this frame's positions (the anchored-exactness rule).
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 pub(super) fn update_model_particles(
     mut commands: Commands,
     models: Res<Assets<M2Model>>,

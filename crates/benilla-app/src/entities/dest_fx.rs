@@ -267,7 +267,6 @@ pub(super) fn tick_shard_emitters(
 /// Attach model parts to pending instances whose M2 finished building (the missile pattern —
 /// free world models, ground-anchored so authored flat quads decal to the terrain), start the
 /// one-shot clocks, and run both reapers (one-shot expiry; the loop-repeat override).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn attach_ground_fx_models(
     mut commands: Commands,
     time: Res<Time>,

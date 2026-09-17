@@ -765,7 +765,6 @@ fn play_impact(
 ///   have no packet, decision 0099): field set → the **channel** kit's anim as the hold + its
 ///   sound once at start; field cleared → hold drops. The per-entity edge cache is the dedup the
 ///   client gets from its per-tick armed-id guard — a held channel never restarts its clip.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn route_cast_visuals(
     mut commands: Commands,
     mut events: MessageReader<CastEvent>,
@@ -1323,7 +1322,6 @@ pub(super) fn route_cast_visuals(
 /// exactly that bug: Stealth's kit 312 carries no models, no anim and no attach at all (its whole
 /// visual is one proc-14 CharProc), so an effects-only test dropped it and the character showed
 /// nothing.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn arm_aura_state_fx(
     // The slot diff below is a pure function of the store's aura fields, so it re-runs only when
     // the store was written — `arm_level_up_fx`'s idiom (decision 1357's sibling gate): at the
@@ -1748,7 +1746,6 @@ pub(super) fn arm_morph_latch(
 /// cold-cache shift-in — whose SPELL_GO impact instance was still PENDING at the drain and thus
 /// survived — briefly runs that instance and the replay's twin together (one denser cloud, once
 /// per session per model; the warm-cache GO instance dies in the drain like the reference's).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn replay_morph_kit(
     mut swaps: MessageReader<crate::entities::DisplaySwapped>,
     visuals: Option<Res<SpellVisuals>>,

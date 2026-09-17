@@ -42,7 +42,6 @@ fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) ->
 ///
 /// The greeting is **drawn here**, not at the packet — this is the reference's own moment for it
 /// (`0x4e2010`), and the draw needs both this NPC's gender ([`npc_gender`]) and a fresh roll.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn gossip_menu(
     npc: u64,
     text_id: u32,

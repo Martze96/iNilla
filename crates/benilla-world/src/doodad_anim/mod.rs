@@ -478,7 +478,7 @@ fn reroll_doodad_variation(
 /// both clocks to the shared-clock position — when one is again. Runs before [`AnimationSystems`] so
 /// a resume's seek lands the same frame. Steady state (nothing flipped) is one `Visibility` read per
 /// mesh, no writes.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn gate_doodad_anim(
     time: Res<Time>,
     mut hosts: Query<(

@@ -14,7 +14,6 @@ use benilla_assets::m2_url;
 
 /// The debug bake driver: when `WOW_PORTRAIT_TEST` is set, bake the named model into every slot once
 /// it loads, and own the booths (the live sync yields). See [`bake_test`].
-#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_test_portraits(
     mut commands: Commands,
     booths: Res<Booths>,
@@ -58,7 +57,6 @@ pub(super) fn sync_test_portraits(
 /// → the muted fallback) into every slot and frame each camera. A pipeline eyeball only — no skins, no
 /// cache. Returns `true` once the model has loaded + a light buffer exists and it's baked (the caller
 /// then stops re-baking).
-#[allow(clippy::too_many_arguments)]
 fn bake_test(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,

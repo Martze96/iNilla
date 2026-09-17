@@ -175,7 +175,6 @@ impl Cooldowns {
     /// used to do made the GO insert of any cooldown-carrying spell (Frost Nova) overwrite its
     /// own running GCD node — the whole bar's pie flashed and died ~100 ms after the press,
     /// while cooldown-less spells (Arcane Explosion) kept theirs (decision 0947).
-    #[allow(clippy::too_many_arguments)] // the SPELLHISTORY node's own field list
     fn add(
         &mut self,
         spell_id: u32,

@@ -88,7 +88,6 @@ pub(super) type TwinParts<'w, 's> = Query<
 /// first skinned frame shows the parked pose the static mesh was already showing, and the world
 /// pass takes over the same frame (the wake re-arms the player, whose evaluation re-raises
 /// `pose_dirty`).
-#[allow(clippy::too_many_arguments)] // the gate's full promote handoff
 pub(super) fn promote_lazy_rig(
     commands: &mut Commands,
     palettes: &mut RigPalettes,

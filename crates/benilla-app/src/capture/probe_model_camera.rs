@@ -203,7 +203,6 @@ fn shoot(commands: &mut Commands, name: &str) {
         .observe(save_to_disk(path));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn model_camera_probe(
     mut commands: Commands,
     time: ProbeClock,

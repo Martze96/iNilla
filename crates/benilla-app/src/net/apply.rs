@@ -92,7 +92,7 @@ fn addressed_store<'a>(
 // The tuple params below batch resources to stay under Bevy's 16-SystemParam ceiling; clippy reads
 // the 5-element ResMut tuples as "very complex types", but a named alias per tuple would be less
 // legible than the inline, commented groups.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn apply_net_updates(
     mut commands: Commands,
     events: Res<NetEvents>,

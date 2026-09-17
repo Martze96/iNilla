@@ -215,7 +215,6 @@ fn group_fits(catalog: Option<&MapCatalog>, map_id: u32, group: Option<&GroupSta
 /// Every frame, before the dialog feed fires `UPDATE_BATTLEFIELD_STATUS` and the score feed
 /// fires `UPDATE_BATTLEFIELD_SCORE`: the list (when it changed), the queue slots (always), the
 /// `BATTLEFIELDS_SHOW` event with its anchor, the leash, and the speaking handlers' lines.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn feed_battlefield(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<Battlefield>,

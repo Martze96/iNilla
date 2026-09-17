@@ -156,7 +156,6 @@ fn age(now: f64, at: f64) -> String {
 /// The journal overlay: while inspect is armed, the recent casts as a top-left column, newest
 /// first — click a row to copy its one-line identity block. Shares the inspector card's style
 /// (decision 0025's one overlay look).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn journal_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,

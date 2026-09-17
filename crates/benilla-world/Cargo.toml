@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)"
 
+[lints]
+workspace = true
+
 [features]
 # Forwarded dev/player seam (0026 · 1173/1174 · 1175). Default-on. `benilla-formats` must be taken
 # with `default-features = false` and its `dev` re-exported here: it is default-on there too, so

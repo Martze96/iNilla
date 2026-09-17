@@ -201,10 +201,7 @@ fn resolves(body: &str) -> bool {
 
 #[test]
 fn no_user_facing_sentence_is_written_in_rust_when_the_reference_ships_one() {
-    let data = match benilla_formats::wow_data() {
-        Some(d) => d,
-        None => return,
-    };
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let mut shipped: HashMap<String, Vec<String>> = HashMap::new();
     // The base tables AND the locale patches laid over them (decision 2052): where `Localize()`

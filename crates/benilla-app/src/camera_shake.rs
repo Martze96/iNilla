@@ -284,7 +284,6 @@ fn load_shakes(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 struct Shakes(CameraShakeCatalog);
 
 /// Enqueue a shake for each qualifying footfall and death thud on the frame's event stream.
-#[allow(clippy::too_many_arguments)]
 fn fire_shakes(
     mut events: MessageReader<AnimSoundEvent>,
     time: Res<Time>,

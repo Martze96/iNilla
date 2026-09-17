@@ -37,7 +37,6 @@ const SCREEN_Z: i32 = 1100;
 
 // ── Spawn ────────────────────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn enter_create(
     mut commands: Commands,
     assets: Res<AssetServer>,

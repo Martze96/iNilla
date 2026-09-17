@@ -7,7 +7,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{capacity_hint, read_cstring, read_f32_le, read_u32_le, read_u64_le, read_u8};
 
 /// `MAIL_ITEM (5)` on [`MailListEntry::message_type`] carries no sender bytes at all — the only
 /// branch of the four that reads nothing before the subject cstring (VERIFIED vmangos
@@ -106,7 +106,6 @@ pub fn get_mail_list(mailbox: u64) -> Vec<u8> {
 /// a `u8 0`) — the 1.12.1 tail vmangos read-skips without interpreting. vmangos *discards* the
 /// client's `stationery`/`package` choice: player mail is always stored `MAIL_STATIONERY_DEFAULT`
 /// (41), so both fields exist only to keep the reader aligned.
-#[allow(clippy::too_many_arguments)]
 pub fn send_mail(
     mailbox: u64,
     receiver: &str,
@@ -210,7 +209,8 @@ pub fn item_text_query(text_id: u32, mail_id: u32) -> Vec<u8> {
 /// expireDays, u32 mailTemplateId`.
 pub(super) fn read_mail_list_result(r: &mut &[u8]) -> io::Result<Vec<MailListEntry>> {
     let count = read_u8(r)?;
-    let mut mails = Vec::with_capacity(count as usize);
+    // vmangos stops the list at 254 (`MailHandler.cpp:761`, `mailsCount >= 254`).
+    let mut mails = Vec::with_capacity(capacity_hint(count, 254));
     for _ in 0..count {
         let message_id = read_u32_le(r)?;
         let message_type = read_u8(r)?;

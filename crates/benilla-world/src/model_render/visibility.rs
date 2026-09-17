@@ -26,7 +26,7 @@ use benilla_assets::materials::WowModelMaterial;
 /// Runs every frame (the camera moves, so this can't be snapshot-gated like a pure toggle), but only
 /// **writes** `Visibility` when a submesh's decision actually flips — so the steady-state cost is one
 /// squared-distance compare per submesh and no change-detection churn.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn apply_model_visibility(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,

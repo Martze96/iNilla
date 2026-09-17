@@ -23,7 +23,7 @@ use crate::glue::widgets::{FallbackFace, GlueDisabled, Hilight, HoverLabel, Lock
 
 /// Refill everything that follows the selection — icon rects, dial labels, info texts, faction
 /// tints, class-slot mapping — on selection change or a fresh spawn.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn refresh_dynamic(
     sel: Res<CreateSelection>,
     catalog: Option<Res<CharCreate>>,
@@ -224,7 +224,7 @@ pub(super) fn refresh_dynamic(
 /// latch while a create is in flight. The screen-agnostic passes — up/down art swaps, the glue
 /// buttons' art + caption color, outline mirroring — are [`crate::glue`]'s, registered beside
 /// this in the plugin chain.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn refresh_hover(
     sel: Res<CreateSelection>,
     catalog: Option<Res<CharCreate>>,
