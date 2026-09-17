@@ -22,8 +22,10 @@
 use std::path::{Path, PathBuf};
 
 /// The standing count. **2026-09-16, 164** — measured the day the instrument was built, against
-/// 1177's 141 five weeks earlier.
-const CEILING: usize = 164;
+/// 1177's 141 five weeks earlier. **165 the same day (decision 2279):** `game_plugins.rs` carries
+/// the structural test for the VM's one-shot consumers, which has to name the identifier it
+/// scans for. A test about the wall, not a file that learned the VM exists.
+const CEILING: usize = 165;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 8;

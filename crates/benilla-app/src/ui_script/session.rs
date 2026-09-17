@@ -245,63 +245,7 @@ mod tests {
         ("cursor.rs", "last_ptr"),
     ];
 
-    /// Every `.rs` file under `root`, recursively.
-    fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let mut out = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        out
-    }
-
-    /// The parenthesised parameter list of every `fn` in `text`, by paren matching — so the scan
-    /// sees a signature rather than a whole body, and a `Local` in some unrelated expression
-    /// cannot be mistaken for a system parameter.
-    fn fn_parameter_lists(text: &str) -> Vec<&str> {
-        let bytes = text.as_bytes();
-        let mut out = Vec::new();
-        for (i, _) in text.match_indices("fn ") {
-            // `fn` must start a word: `…_fn (` and `Fn(` are not declarations.
-            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-                continue;
-            }
-            let Some(open) = text[i..].find('(').map(|o| i + o) else {
-                continue;
-            };
-            // A generic parameter list can carry parens, but never before the argument list's `(`
-            // in the shapes this codebase writes; a `<` with an unbalanced `(` would just scan on.
-            let mut depth = 0usize;
-            let mut close = None;
-            for (j, c) in text[open..].char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            close = Some(open + j);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(close) = close {
-                out.push(&text[open + 1..close]);
-            }
-        }
-        out
-    }
+    use crate::test_support::{fn_parameter_lists, rust_files};
 
     /// Every `name: Local<Ty>` in a parameter list, as `(name, Ty)` — angle-bracket matched, so a
     /// nested generic comes back whole.

@@ -275,6 +275,7 @@ pub(super) fn cast_result(
                     arg,
                     // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
                     caster: crate::ui_action::Caster::Player,
+                    redisplay: false,
                 });
             }
         }

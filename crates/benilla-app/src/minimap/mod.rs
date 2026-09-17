@@ -1096,9 +1096,15 @@ impl Plugin for MinimapPlugin {
                     // Before the script tick, and after the containment verdict it reads: the
                     // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
                     // same tick, on a ping the renderer already drew at the end of last frame.
+                    // Gated on the interface being up (decision 2279): a group member's
+                    // `MSG_MINIMAP_PING` can land in the same drain as the login burst, and the
+                    // `fresh` latch it sets is spent by this system's take — on the boot VM, with
+                    // no `MiniMapPing` frame to show it, if this ran in 2214's one-frame window.
+                    // Gated, the latch simply waits for the first frame with an interface.
                     ping::drive_minimap_ping
                         .after(feed_minimap_inside)
-                        .before(crate::ui_script::UiInput),
+                        .before(crate::ui_script::UiInput)
+                        .run_if(crate::ui_script::ingame_ui_up),
                     // Before the script tick, so GameTimeFrame's OnUpdate reads this frame's
                     // minute, not last frame's.
                     feed_game_time.before(crate::ui_script::UiInput),

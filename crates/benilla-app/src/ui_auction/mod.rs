@@ -380,7 +380,16 @@ impl Plugin for UiAuctionPlugin {
                 // out the same frame. After the UnitFeed set so a row's tooltip reads a landed
                 // item-template store.
                 close_npc_session_out_of_range::<AuctionOpen>.before(feed_auction),
-                feed_auction.after(crate::ui_unit::UnitFeed).before(UiInput),
+                // Gated on the interface being up (decision 2279): `AuctionOpen::messages` is
+                // filled by the server's unprompted sold/outbid/expired notices, and one landing
+                // in the same drain as the login burst would be resolved and shown on the boot
+                // VM — lost — if this ran in 2214's one-frame window. The queue is bounded by
+                // what the server sends while no interface is up, and the refresh flags the same
+                // packets set survive as wire re-asks either way.
+                feed_auction
+                    .after(crate::ui_unit::UnitFeed)
+                    .before(UiInput)
+                    .run_if(crate::ui_script::ingame_ui_up),
                 drain_auction.after(UiInput),
             ),
         );

@@ -229,10 +229,9 @@ pub(crate) const LOG_PERIODIC_CVAR: &str = "CombatLogPeriodicSpells";
 /// **The combat-feedback CVars, as one system parameter** — what a packet handler needs to know
 /// about the player's settings before it emits a line or a floating number.
 ///
-/// Bundled for the reason [`crate::cvars::KnobParams`] is: `net::apply::apply_net_updates` lives
-/// against Bevy's 16-parameter ceiling, and three more `Res` would have gone into a nested tuple
-/// as positional fields nobody can read at the use site. They are one concern anyway — the
-/// reference reads all three inside the same combat-log/world-text translation unit.
+/// Bundled because they are one concern — the reference reads all three inside the same
+/// combat-log/world-text translation unit — and read by the net drain as the combat-feedback
+/// member of its catalogs (`net::apply::params::Catalogs`).
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct CombatFeedbackCvars<'w> {
     /// The eight display ranges.

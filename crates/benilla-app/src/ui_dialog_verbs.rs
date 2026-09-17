@@ -700,7 +700,16 @@ impl Plugin for UiDialogVerbsPlugin {
                 Update,
                 (
                     close_npc_session_out_of_range::<PetUnlearnState>.before(feed_dialog_verbs),
-                    feed_dialog_verbs.before(UiInput),
+                    // Gated on the interface being up (decision 2279): `InstanceBoot::events`
+                    // is server-driven — vmangos sends `SMSG_RAID_GROUP_ONLY` from
+                    // `Player::UpdateHomebindTime` on the first map tick after a login inside a
+                    // raid instance with no raid group, i.e. inside the login burst's own
+                    // drain — and `INSTANCE_BOOT_START`, the event that raises the stock
+                    // countdown popup, would be fired at the boot VM in 2214's one-frame window
+                    // and lost. Gated, the queue waits; nothing here clears without a VM.
+                    feed_dialog_verbs
+                        .before(UiInput)
+                        .run_if(crate::ui_script::ingame_ui_up),
                     // In-world only: the claim is about the VM, but the query is a world
                     // packet, and the boot VM exists at the glue screen too.
                     meeting_stone_enter_world

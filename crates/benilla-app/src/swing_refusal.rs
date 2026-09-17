@@ -166,8 +166,8 @@ impl SwingRefusal {
 /// shared `0x148`/`0x149` arm's one and only act.
 ///
 /// The StopAttack lives here rather than in the net drain because [`AttackSeam`] is the whole
-/// write set `0x5ecac0` needs and the drain is already at Bevy's SystemParam ceiling — and
-/// because putting it beside the latch keeps arm 4's "stop, and say nothing" legible as one fact.
+/// write set `0x5ecac0` needs, and because putting it beside the latch keeps arm 4's "stop, and
+/// say nothing" legible as one fact.
 fn apply_swing_refusals(
     mut edges: MessageReader<SwingRefusalEdge>,
     time: Res<Time>,

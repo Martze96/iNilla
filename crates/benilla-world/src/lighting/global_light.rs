@@ -241,11 +241,15 @@ pub(super) fn register(app: &mut App) {
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
-    app.sub_app_mut(RenderApp).add_systems(
-        Render,
-        (upload_light, super::prop_probes::upload_prop_probes)
-            .in_set(RenderSystems::PrepareResources),
-    );
+    // Guarded like every other render-side registration in the tree: a headless build (no GPU,
+    // `backends: None`) has no render app, and the schedule tests build the engine that way.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(
+            Render,
+            (upload_light, super::prop_probes::upload_prop_probes)
+                .in_set(RenderSystems::PrepareResources),
+        );
+    }
 }
 
 /// Create the single persistent storage buffer. `RenderDevice` is a main-world resource (inserted in

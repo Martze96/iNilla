@@ -60,6 +60,17 @@ pub(crate) struct CastFail {
     /// **Whose** refusal this is — which decides which of the reference's two message tables
     /// resolves it. See [`Caster`].
     pub caster: Caster,
+    /// **This entry is a REDISPLAY** — it was queued once already, declined for want of an item
+    /// template, and is being resolved now that the template landed (the `0x78`/`0x5c`/`0x84`
+    /// cache-miss path, decisions 0545 + 0552).
+    ///
+    /// It exists because the reference's two attempts do not raise the same things (decision
+    /// 2285). The first pass bails at `0x6e1eab`/`0x6e1efc` to the epilogue `0x6e224f`, which is
+    /// past the red line AND past the combat-log formatter; the retry is the DBCACHECALLBACK
+    /// `0x6e29b0`, which calls `CGGameUI::DisplayError 0x496720` **directly** and never reaches
+    /// `0x62c360`. So a reagent refusal that had to wait for its item name shows the toast and is
+    /// never written to the log — where one that resolved first try is written to both.
+    pub redisplay: bool,
 }
 
 /// Who failed to cast — the one input that picks between the reference's **two** cast-failure
@@ -94,6 +105,16 @@ impl CastFail {
             reason,
             arg: None,
             caster: Caster::Player,
+            redisplay: false,
+        }
+    }
+
+    /// The same entry, re-queued for the frame its item template lands on — see
+    /// [`Self::redisplay`].
+    pub(crate) const fn requeued(self) -> Self {
+        Self {
+            redisplay: true,
+            ..self
         }
     }
 }
@@ -112,6 +133,7 @@ impl CastErrors {
             reason,
             arg: Some(arg),
             caster: Caster::Player,
+            redisplay: false,
         });
     }
 
@@ -126,6 +148,7 @@ impl CastErrors {
             reason,
             arg: None,
             caster: Caster::Pet,
+            redisplay: false,
         });
     }
 }

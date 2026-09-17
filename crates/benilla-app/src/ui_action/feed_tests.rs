@@ -506,6 +506,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
         reason: 0x5F,
         arg: None,
         caster: Caster::Player,
+        redisplay: false,
     });
     errors.push_pet(GROWL, 0x5F);
 
