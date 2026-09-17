@@ -75,7 +75,7 @@ use bevy::prelude::*;
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The pending summon question — the reference's four-global bank (module doc, pin 1). Written by
 /// the net drain's `SummonRequest` arm through [`apply::request`], read by [`feed_summon`] (which
@@ -301,7 +301,7 @@ impl Plugin for UiSummonPlugin {
                 // Before the feed, so the frame a session ends is already a frame the feed sees no
                 // memory of the last one ([`crate::death`]'s ordering, for the same reason).
                 end_session_summon.before(feed_summon),
-                feed_summon.before(UiInput),
+                feed_summon.in_set(UiFeed),
                 drain_summon.after(UiInput),
             ),
         );

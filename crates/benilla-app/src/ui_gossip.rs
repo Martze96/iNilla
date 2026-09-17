@@ -34,7 +34,7 @@ use benilla_ui::script::{GossipMenu, GossipOptionView, GossipQuestRow, ScriptVal
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_quest::{row_is_active, row_is_one_click};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 /// The open gossip menu, filled by the net bridge ([`crate::net`]) and read by [`feed_gossip`]. The
@@ -201,7 +201,7 @@ impl Plugin for UiGossipPlugin {
                 // push before the input pass so an open/close is on screen the same frame; drain
                 // after it so a click's intent goes out the same frame (mirrors ui_items).
                 close_npc_session_out_of_range::<GossipState>.before(feed_gossip),
-                feed_gossip.before(UiInput),
+                feed_gossip.in_set(UiFeed),
                 drain_gossip.after(UiInput),
             ),
         );

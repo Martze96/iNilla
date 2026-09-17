@@ -65,7 +65,7 @@ use bevy::tasks::IoTaskPool;
 
 use benilla_ui::script::UiScript;
 
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The reference's own file stem (`WoWScrnShot_`), kept: a player who knows what WoW screenshots
 /// are called finds the same names here, and so does every screenshot-organizing tool the
@@ -255,7 +255,7 @@ impl Plugin for ScreenshotPlugin {
         app.init_resource::<ScreenshotState>().add_systems(
             Update,
             (
-                report_captures.before(UiInput),
+                report_captures.in_set(UiFeed),
                 ask_for_captures
                     .after(UiInput)
                     .after(crate::bindings::BindingSet),

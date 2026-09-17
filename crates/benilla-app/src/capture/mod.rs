@@ -996,7 +996,8 @@ fn hold_clock(mut clock: ResMut<Time<Virtual>>) {
 
 /// The three scene-population queries the `FPS_PROBE` line prints — bundled because they are one
 /// concern (how much world is resident, and how much of it survived the cull) and because
-/// `drive_capture` sits against Bevy's 16-parameter ceiling, which `cvars::KnobParams` hit first.
+/// `drive_capture` sits against Bevy's 16-parameter ceiling, which the CVar host's old knob
+/// bundle hit first (retired by 2303).
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ProbeCensus<'w, 's> {
     particles: Query<'w, 's, &'static benilla_world::particles::ParticleEmitter>,

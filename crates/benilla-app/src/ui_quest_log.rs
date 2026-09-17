@@ -56,7 +56,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::query_cache::QueryCache;
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_unit::UnitFeed;
 
 /// The top bit `QuestObjective::creature_or_go` carries for a gameobject objective —
@@ -143,10 +143,10 @@ impl Plugin for UiQuestLogPlugin {
             .add_systems(
                 Update,
                 (
-                    feed_quest_log.in_set(UnitFeed).before(UiInput),
+                    feed_quest_log.in_set(UnitFeed),
                     // Before the script tick, so a QuestTimerFrame OnUpdate this frame reads this
                     // frame's clock (the `minimap::feed_game_time` shape).
-                    feed_server_clock.before(UiInput),
+                    feed_server_clock.in_set(UiFeed),
                     drain_quest_log_abandons.after(UiInput),
                     drain_quest_log_pushes.after(UiInput),
                     drain_quest_log_collapses.after(UiInput),

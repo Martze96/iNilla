@@ -374,7 +374,7 @@ fn apply_realm_policy(
     mut msgs: MessageReader<RealmListMessage>,
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
-    persist: Res<crate::cvars::CvarPersist>,
+    cvars: Res<crate::cvars::Cvars>,
 ) {
     if !realms.env_read {
         realms.env_read = true;
@@ -396,7 +396,11 @@ fn apply_realm_policy(
         if realms.shown {
             continue;
         }
-        let remembered = persist.stored(CVAR_REALM_NAME).map(str::to_string);
+        // The registered default is the empty string — a client that has never connected.
+        let remembered = cvars
+            .get(CVAR_REALM_NAME)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         if realms.current.is_none() {
             realms.current = remembered.clone();
         }

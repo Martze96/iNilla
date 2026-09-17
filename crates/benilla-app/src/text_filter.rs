@@ -595,8 +595,19 @@ fn load_text_filter_lists(
 
 pub(crate) struct TextFilterPlugin;
 
+/// The two filter switches' change callback (decision 2303): flags — the reference's own
+/// callbacks (`0x403570`, `0x4035b0`) mirror `SStrToInt(newValue)` into a global the same way.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut switches: ResMut<TextFilterSwitches>) {
+    match ev.key().as_str() {
+        "profanityfilter" => switches.profanity = ev.flag(),
+        "spamfilter" => switches.spam = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for TextFilterPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<TextFilterSwitches>()
             .init_resource::<TextFilter>()
             .add_systems(

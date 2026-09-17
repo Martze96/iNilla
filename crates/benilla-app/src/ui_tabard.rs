@@ -35,7 +35,7 @@ use benilla_ui::script::{TabardHost, TabardIntent, UiScript, TABARD_COUNTS, TABA
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::portrait::PaperDollBooth;
 use crate::ui_guild::GuildState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The open designer: the vendor it was opened on (`[0xbdcee8]`), and the save-in-flight latch
@@ -298,7 +298,7 @@ impl Plugin for TabardUiPlugin {
                 (
                     reset_on_world_enter.before(feed_tabard),
                     close_npc_session_out_of_range::<TabardOpen>.before(feed_tabard),
-                    feed_tabard.before(UiInput),
+                    feed_tabard.in_set(UiFeed),
                     drain_tabard.after(UiInput),
                 ),
             );

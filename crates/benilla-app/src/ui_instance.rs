@@ -113,7 +113,7 @@ use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The window `CanShowResetInstances()` offers the row in, in seconds — `cmp eax, 0x15f90` at
 /// `0x495ce6` against `time(0) - <when we left>`, unsigned, so the boundary is inclusive.
@@ -590,7 +590,7 @@ impl Plugin for UiInstancePlugin {
                 // a map change and its answer should not be a frame apart.
                 clear_witness_on_logout.before(track_instance_state),
                 track_instance_state.before(feed_instance),
-                feed_instance.before(UiInput),
+                feed_instance.in_set(UiFeed),
                 drain_instance.after(UiInput),
             ),
         );

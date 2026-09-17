@@ -40,13 +40,17 @@ use crate::net::{
 use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_script::{gate, UiInput};
 
-/// The feed pass — runs **after [`benilla_world::schedule::WorldStage::Net`]** (the feeds snapshot state
-/// the net apply writes; unordered, `apply_net_updates` could land BETWEEN two feeds, and a
-/// synchronous event fired by the later one then re-read the earlier one's pre-mutation push —
-/// the spellbook's cooldown pie stayed cold until a manual reopen, reproduced live 2026-07-31)
-/// and before [`UiInput`], so the snapshot + events it produces are in place when the VM ticks
-/// and dispatches this frame. A named set so the demo override ([`crate::ui_script`]) can order
-/// itself after it. Configured in [`UiUnitPlugin`] — the set's home.
+/// The unit-feed pass — the GATED sub-phase of [`crate::ui_script::UiFeed`], which carries the
+/// order: after [`benilla_world::schedule::WorldStage::Net`] and before [`UiInput`], so the
+/// snapshot + events it produces are in place when the VM ticks and dispatches this frame. That
+/// order was found here first (the feeds snapshot state the net apply writes; unordered,
+/// `apply_net_updates` could land BETWEEN two feeds, and a synchronous event fired by the later
+/// one then re-read the earlier one's pre-mutation push — the spellbook's cooldown pie stayed
+/// cold until a manual reopen, reproduced live 2026-07-31), and decision 2304 made it every
+/// feed's. What stays this set's own is the gate: every member either fires a login one-shot or
+/// latches a per-VM memo, so none may run before the in-game interface exists (1348). A named
+/// set so the demo override ([`crate::ui_script`]) can order itself after it. Configured in
+/// [`UiUnitPlugin`] — the set's home.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UnitFeed;
 
@@ -253,7 +257,8 @@ impl Plugin for UiUnitPlugin {
         app.configure_sets(
             Update,
             UnitFeed
-                .after(benilla_world::schedule::WorldStage::Net) // the set's own doc: the why
+                // A sub-phase of the feed phase, which carries the order (the set's own doc)…
+                .in_set(crate::ui_script::UiFeed)
                 // …and never before the in-game UI exists (1348). The whole SET, not just
                 // `feed_units`: every feed in it either fires a login one-shot or latches a
                 // per-VM memo, and both are lost forever against the boot VM. The window and
@@ -296,17 +301,20 @@ impl Plugin for UiUnitPlugin {
                 fire_combat_text,
             )
                 .chain()
-                .in_set(UnitFeed)
-                .before(UiInput),
+                .in_set(UnitFeed),
         )
         .add_systems(Update, drain_pvp_toggles.after(UiInput))
         .add_systems(Update, drain_worn_display_toggles.after(UiInput))
         .add_systems(Update, drain_action_bar_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
         .add_systems(Update, feed_known_languages.in_set(UnitFeed))
-        // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
-        // `load_default_languages` only builds a Bevy resource and stays a one-shot.
-        .add_systems(Update, load_exhaustion_rows)
+        // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290), in
+        // the feed phase; `load_default_languages` only builds a Bevy resource and stays a
+        // one-shot.
+        .add_systems(
+            Update,
+            load_exhaustion_rows.in_set(crate::ui_script::UiFeed),
+        )
         .add_systems(PostStartup, (load_default_languages, load_languages));
     }
 }

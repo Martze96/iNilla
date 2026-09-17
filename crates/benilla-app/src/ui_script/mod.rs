@@ -281,13 +281,31 @@ pub(crate) struct UiPassState {
 #[derive(Resource, Default)]
 pub(crate) struct PointerOverUiPanel(pub(crate) bool);
 
+/// The player-UI FEED phase — every push into the VM that this frame's tick must see: the
+/// snapshot feeds, the one-shot drains that `fire_event`, the per-VM seeds. Chained
+/// `UiFeed` → [`UiInput`] → [`UiPaint`] and ordered after [`WorldStage::Net`] (decision 2304), so
+/// a feed reads what this frame's packets did, and a handler its event fires reads what every
+/// other feed pushed — the reference's own frame, where packet dispatch precedes every
+/// `FrameScript_SignalEvent` and both precede `OnUpdate`. The failure the order closes was found
+/// in the unit feed first ([`crate::ui_unit::UnitFeed`]'s doc): unordered, `apply_net_updates`
+/// could land between two feeds, and a synchronous handler fired by the later one re-read the
+/// earlier one's pre-mutation push. **No run condition on the set** — whether a feed may run
+/// before the in-game interface exists is a judgement per feed (2232), and the ones that may not
+/// ride `UnitFeed`, a gated sub-phase of this one. Every system holding the VM in `Update`
+/// declares its side of the tick — this set, or `.after(UiInput)` — and
+/// `game_plugins::schedule_tests` holds it on the built schedule.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiFeed;
+
 /// The player-UI PAINT pass — the quad walk ([`extract::paint_script`]), ordered after the world's
 /// camera update so that world-anchored widgets are drawn from this frame's camera (decision 2168).
+/// The last of the three UI phases (see [`UiFeed`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiPaint;
 
-/// The player-UI input pass — hit-testing + handler firing. Ordered before [`WorldStage::Input`] so
-/// the [`PlayerUiHover`] it produces is folded into `PointerOverUi` before `player::control` reads it.
+/// The player-UI input pass — the tick, hit-testing + handler firing. Ordered before
+/// [`WorldStage::Input`] so the [`PlayerUiHover`] it produces is folded into `PointerOverUi` before
+/// `player::control` reads it; the middle of the three UI phases (see [`UiFeed`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
 
@@ -403,8 +421,31 @@ pub(crate) fn seam_scale(window_h: f32, ui_scale: f32) -> f32 {
 /// tick → resolve → extract pipeline into [`UiQuads`], plus the input pass ([`feed_ui_input`]).
 pub(crate) struct UiScriptPlugin;
 
+/// `uiScale`'s change callback (decision 2303): the dial's own `[0.5, 1.5]` clamp.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiScaleCvar>) {
+    if ev.is("uiScale") {
+        scale.0 = ev.num().clamp(0.5, 1.5);
+    }
+}
+
+/// `/console reloadUI` — the reference's own console command, and the same deferred rebuild
+/// `ReloadUI()` and `/reload` queue (decision 1291): through the session seam, run by
+/// [`run_pending_reload`] at the top of the next frame.
+fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
+    match world.get_non_send_resource_mut::<UiScript>() {
+        Some(mut script) => {
+            script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
+            Vec::new()
+        }
+        None => vec!["reloadUI: no interface to reload".to_string()],
+    }
+}
+
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
+        use crate::console::ConsoleCommandApp;
+        app.add_observer(on_cvar);
+        app.console_command("reloadUI", "Reload the interface.", console_reload_ui);
         // **The quit root of the shutdown tail, on the exit edge** (decision 1528). It was
         // `.add_systems(Update, shutdown_on_exit)` below, which cannot see the `AppExit` a player
         // produces — the close button's is written in `PostUpdate` — so quitting from in-world
@@ -474,14 +515,26 @@ impl Plugin for UiScriptPlugin {
                 PreUpdate,
                 (run_pending_reload, lifecycle::run_pending_entry_load).chain(),
             )
-            // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
+            // **The three UI phases, in order** (decision 2304): every push after the net
+            // drain, then the tick, then the paint. `UiFeed`'s own doc has the why; `UiInput`
+            // sits before the world's input stage so the hover it produces reaches the pointer
+            // arbiter in time (its doc).
+            .configure_sets(
+                Update,
+                (
+                    UiFeed.after(WorldStage::Net),
+                    UiInput.before(WorldStage::Input),
+                    UiPaint,
+                )
+                    .chain(),
+            )
+            // `GetFramerate()`'s host half (decision 1195), in the feed phase so an `OnUpdate`
             // handler reads this frame's number rather than the previous one's.
-            .add_systems(Update, feed_framerate.before(UiInput))
+            .add_systems(Update, feed_framerate.in_set(UiFeed))
             // `tick_script` resolves layout; `feed_ui_input` hit-tests against those rects, so they
-            // chain (also required because both take the single `NonSend` VM). The pair runs before
-            // `WorldStage::Input` so the hover result reaches the pointer arbiter in time. The input
-            // pass is in-world only (decision 0193): the character-select glue screen owns the
-            // pointer + keyboard there (its exit edge resets the latches this pass normally drives).
+            // chain (also required because both take the single `NonSend` VM). The input pass is
+            // in-world only (decision 0193): the character-select glue screen owns the pointer +
+            // keyboard there (its exit edge resets the latches this pass normally drives).
             .init_resource::<UiPassState>()
             .init_resource::<PointerOverUiPanel>()
             .add_systems(
@@ -495,8 +548,7 @@ impl Plugin for UiScriptPlugin {
                     // The binding dispatch (0997) runs in this same set, after the feed: it
                     // reads the capture gate the feed just wrote, so a key a focused box
                     // consumed this frame never also fires a binding.
-                    .before(crate::bindings::BindingSet)
-                    .before(WorldStage::Input),
+                    .before(crate::bindings::BindingSet),
             )
             // **The paint half, after the camera** (decision 2168): the quad walk runs once the
             // world's own update has happened, so a widget anchored to the world — the nameplates,
@@ -527,8 +579,8 @@ impl Plugin for UiScriptPlugin {
         app.add_systems(
             Update,
             demo_unit_feed
+                .in_set(UiFeed)
                 .after(UnitFeed)
-                .before(UiInput)
                 .run_if(capture_ui_active),
         );
     }

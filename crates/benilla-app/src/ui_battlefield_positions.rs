@@ -35,7 +35,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_world_map::{project_on_displayed, WorldMapUiData};
 
 /// The reference's request throttle: `RequestBattlefieldPositions` sends at most once per 5000 ms.
@@ -231,7 +231,7 @@ impl Plugin for BattlefieldPositionsPlugin {
             Update,
             (
                 reset_on_world_enter.before(feed_battlefield_positions),
-                feed_battlefield_positions.before(UiInput),
+                feed_battlefield_positions.in_set(UiFeed),
                 drain_battlefield_positions.after(UiInput),
             ),
         );

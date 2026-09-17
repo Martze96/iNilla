@@ -104,6 +104,30 @@ pub(crate) struct CameraOptions {
     pub(crate) water_collision: bool,
 }
 
+/// The camera options' change callback (2149, 2303). The numeric rows take the value
+/// straight: the reference's own validator on them is `0x50b330`'s range REFUSAL, which is the
+/// camera-speed rows' business ([`super::camera::on_cvar`]), not these.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut opts: ResMut<CameraOptions>) {
+    let v = ev.num();
+    match ev.key().as_str() {
+        "camerapivot" => opts.pivot = v != 0.0,
+        "camerawatercollision" => opts.water_collision = v != 0.0,
+        "camerapivotdxmax" => opts.pivot_dx_max = v,
+        "camerapivotdymin" => opts.pivot_dy_min = v,
+        "cameratargetsmoothspeed" => opts.target_smooth_speed = v,
+        "cameraterraintilt" => opts.terrain_tilt = v != 0.0,
+        "cameragroundsmoothspeed" => opts.ground_smooth_speed = v,
+        "cameraterraintilttimemin" => opts.tilt_time_min = v,
+        "cameraterraintilttimemax" => opts.tilt_time_max = v,
+        "camerabobbing" => opts.bobbing = v != 0.0,
+        "camerabobbinglramplitude" => opts.bob_lr_amplitude = v,
+        "camerabobbingudamplitude" => opts.bob_ud_amplitude = v,
+        "camerabobbingfrequency" => opts.bob_frequency = v,
+        "camerabobbingsmoothspeed" => opts.bob_smooth_speed = v,
+        _ => {}
+    }
+}
+
 impl Default for CameraOptions {
     fn default() -> Self {
         Self {

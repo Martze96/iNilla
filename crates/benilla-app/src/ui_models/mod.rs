@@ -653,7 +653,7 @@ impl Plugin for UiModelsPlugin {
             // published (the UI pass's `paint_script`) — see [`forget_dead_vm_tiles`].
             .add_systems(
                 Update,
-                forget_dead_vm_tiles.before(crate::ui_script::UiInput),
+                forget_dead_vm_tiles.in_set(crate::ui_script::UiFeed),
             )
             // After the extract published this frame's requests, and before the pose/palette
             // passes read the roots' transforms (they run in PostUpdate).

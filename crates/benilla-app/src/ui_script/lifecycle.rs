@@ -238,7 +238,7 @@ pub(crate) fn arm_entry_ui_load(world: &mut World) {
 /// phase can write CVars — the character screen's AddOns panel is the live case, a *Load out of
 /// date AddOns* click — and `sync_cvars` (1291) registers them onto whichever VM is in the world,
 /// so this is the last moment that table exists. Folded into the persist state, the
-/// `set_cvar_saved_base` + `register_cvars` pair in the load below starts the new VM at the
+/// `set_cvar_saved_base` + `seed_cvars` pair in the load below starts the new VM at the
 /// player's value. That is exactly the route `/reload` has always taken through
 /// [`end_ui_session`]; 2226 makes the first login take it too.
 ///
@@ -483,15 +483,19 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // gets a turn — so this edge would load a client with no CVar table at all. Nothing had ever
     // noticed, because until now no interface file read a CVar at load.
     //
-    // The two lines are `sync_cvars`'s own first two, in its own order, and the order is
-    // load-bearing: the saved config goes in FIRST so registration starts each key at the player's
-    // value rather than the factory one (1291) — reversed, a reload would quietly reset every
-    // knobless CVar to its default. `sync_cvars` still does its full knob-derived pass on the next
-    // `Update`; both calls are idempotent, and a re-register never clobbers a live value.
-    if let Some(persist) = world.get_resource::<crate::cvars::CvarPersist>() {
-        script.set_cvar_saved_base(persist.saved_base());
+    // The two lines are `sync_cvars`'s own seed, in its own order, and the order is
+    // load-bearing: the file's unclaimed entries go in FIRST so an addon's `RegisterCVar` starts
+    // its key at the player's value rather than the declared one (1291); then the registry's
+    // whole table at its live values (2303) — the store that outlived the last VM. `sync_cvars`
+    // still runs its own per-VM seed on the next `Update`; both are idempotent. A world with no
+    // registry (a bare test app) gets the registered defaults.
+    match world.get_resource::<crate::cvars::Cvars>() {
+        Some(cvars) => {
+            script.set_cvar_saved_base(cvars.orphans());
+            script.seed_cvars(cvars.vm_seed());
+        }
+        None => script.register_cvars(crate::cvars::registered_pairs()),
     }
-    script.register_cvars(crate::cvars::registered_pairs());
     // The realm name goes in BEFORE the UI loads, because `GetRealmName()` is read at addon file
     // scope — `MyAddonDB[GetRealmName()] = …` is the corpus idiom, and 24 addons stop on it
     // (decision 1195). The roster carries the auth realm-list entry this session connected to.
@@ -531,14 +535,9 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // character select reached here inside the save debounce; the fold carries that click now, by
     // the route the reload path always used. Absent both (a bare test world) is the registrar
     // default: check ON.
-    let version_check = script
-        .cvar("checkAddonVersion")
-        .map(|v| v != "0")
-        .unwrap_or_else(|| {
-            world
-                .get_resource::<crate::cvars::CvarPersist>()
-                .is_none_or(crate::cvars::CvarPersist::addon_version_check)
-        });
+    let version_check = world
+        .get_resource::<crate::cvars::Cvars>()
+        .is_none_or(crate::cvars::Cvars::addon_version_check);
     // **…and the rest of the same class** (decision 2241). Each of these was a per-VM claim in
     // `Update`, which answers *which* VM and not *when inside its life* — and every one of them
     // backs a Lua getter the load burst below reads:

@@ -51,7 +51,7 @@ use benilla_ui::script::{ScriptValue, UiScript};
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The pending respec question. Written by the net drain's `TalentWipeConfirm` arm, read by
@@ -206,7 +206,7 @@ impl Plugin for UiTalentWipePlugin {
                 // Range-close before the feed so walking away takes the dialog down the same
                 // frame (the binder question's ordering, for the same reason).
                 close_npc_session_out_of_range::<TalentWipeState>.before(feed_talent_wipe),
-                feed_talent_wipe.before(UiInput),
+                feed_talent_wipe.in_set(UiFeed),
                 drain_talent_wipe.after(UiInput),
             ),
         );

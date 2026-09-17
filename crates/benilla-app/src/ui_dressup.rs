@@ -2,7 +2,7 @@
 //! window's `DressUpModel` widget verbs ([`DressUpIntent`], queued engine-side) and the booth's
 //! look ([`DressUpPreview`]).
 //!
-//! Three jobs, each frame, before the VM ticks ([`UiInput`]):
+//! Three jobs, each frame, in the feed phase before the VM ticks ([`UiFeed`]):
 //!
 //! - **Apply the intents, in order.** `Dress` drops every substitution (the ref's
 //!   `SetUnit("player")` on open and `Dress()` on Reset); `Undress` strips every worn piece but
@@ -37,7 +37,7 @@ use crate::entities::equip_slot;
 use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::portrait::{DressUpLook, DressUpPreview};
-use crate::ui_script::UiInput;
+use crate::ui_script::UiFeed;
 
 /// The equipment slots a dressing-room look reads off the player — every rendered slot
 /// (`EQUIPMENT_SLOT_*`), which is exactly the set [`equip_slot`] can map an item into.
@@ -229,7 +229,7 @@ pub(crate) struct DressUpUiPlugin;
 impl Plugin for DressUpUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DressUpRoom>()
-            .add_systems(Update, feed_dressup.in_set(UiInput));
+            .add_systems(Update, feed_dressup.in_set(UiFeed));
     }
 }
 

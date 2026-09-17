@@ -38,7 +38,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 use crate::ui_spellbook::SkillLines;
 
@@ -143,7 +143,7 @@ impl Plugin for UiTrainerPlugin {
                     // push before the input pass so an open/close is on screen the same frame; drain
                     // after it (mirrors ui_merchant/ui_gossip).
                     close_npc_session_out_of_range::<TrainerOpen>.before(feed_trainer),
-                    feed_trainer.before(UiInput),
+                    feed_trainer.in_set(UiFeed),
                     drain_trainer.after(UiInput),
                 ),
             );

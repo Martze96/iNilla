@@ -253,16 +253,159 @@ pub(crate) fn present_mode(vsync: bool) -> PresentMode {
 
 pub(crate) struct VideoPlugin;
 
+/// **The Video Options block's change callbacks** (decision 2303) — the rows the reference
+/// registers from its one video-options registration block (`0x688470`, wow-re
+/// `cvar/scratch/graphics-cost-cvar-census.md` §2), landing on the resources they drive. Each
+/// arm writes only its own resource, so a `ViewDistance` change is `farclip` moving and nothing
+/// else; the clamps are each row's own, stated beside it.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut cfg: ResMut<VideoConfig>,
+    mut view: ResMut<benilla_world::view::ViewDistance>,
+    mut msaa: ResMut<benilla_world::view::MsaaSetting>,
+    msaa_formats: Res<benilla_world::view::MsaaFormats>,
+    mut tex_filter: ResMut<benilla_assets::TexFilterSetting>,
+    mut clutter: ResMut<benilla_world::clutter::ClutterConfig>,
+    mut weather: ResMut<benilla_world::weather::WeatherState>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
+) {
+    use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
+    let v = ev.num();
+    match ev.key().as_str() {
+        // The one string row here (1627), composed in the reference's own `WxH` spelling. A
+        // value that is not a size is consumed with a warn and the window keeps its truth.
+        "gxresolution" => match parse_resolution(&ev.new) {
+            Some(size) => cfg.windowed = size,
+            None => warn!("cvar gxResolution: unparseable value '{}' ignored", ev.new),
+        },
+        // Vertical Sync — a flag like every other checkbox. `apply_present_mode` pushes it to
+        // the window when this resource moves; nothing else reads it.
+        "gxvsync" => cfg.vsync = ev.flag(),
+        // Display mode (1627) — the reference's own polarity: `1` is WINDOWED (the row is
+        // "Windowed Mode"). `apply_window_mode` pushes it to the window when this moves.
+        "gxwindow" => cfg.display = display_from_flag(v),
+        "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90`
+        // echoes "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is the
+        // table's standing posture for every range — the consumer clamps at its own edge.
+        "nearclip" => view.set_nearclip(v),
+        // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`,
+        // then the DEVICE's ceiling (1643): a count this GPU does not offer is not a setting
+        // that degrades, it is a wgpu validation error that kills the render thread on frame
+        // one. Clamping at the write covers every writer there is: the file, a Lua `SetCVar`,
+        // the dropdown, and the Defaults button. Latched: the camera reads this once, at spawn.
+        "gxmultisample" => {
+            let asked = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end());
+            let granted = msaa_formats.clamp(asked);
+            if granted != asked {
+                // At `warn`, the same posture as the seed clamp: the player asked for something
+                // and did not get it, and this is the only place that fact exists.
+                warn!("cvar gxMultisample: this GPU does not offer {asked}x multisampling — using {granted}x");
+            }
+            msaa.samples = granted;
+        }
+        // The filter policy's two halves (1642). Both write a value nothing reads until the
+        // next launch — the process policy is published once at the end of `CvarLoad` — which
+        // is benilla's limitation, not a latch: the reference registers both with `flags = 1`
+        // and applies them live. `anisotropic` takes the reference's own parse-then-clamp
+        // `[1, 16]` (`0x689110`); `trilinear` is a flag like every other.
+        "trilinear" => tex_filter.trilinear = ev.flag(),
+        "anisotropic" => {
+            tex_filter.aniso = (v as u32).clamp(
+                *benilla_assets::ANISO_RANGE.start(),
+                *benilla_assets::ANISO_RANGE.end(),
+            )
+        }
+        // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
+        // slider's own range (an off-grid hand-edit rides between stops, like every slider).
+        // The SAME knob has a second registered spelling (2151), MIRRORED below — the knob is
+        // already written, so the sibling row follows without a callback — so `GetCVar` never
+        // answers two detail levels for one ground cover.
+        "worlddetail" => {
+            clutter.density = v.clamp(0.0, 2.0) + 1.0;
+            cvars.mirror(
+                benilla_ui::script::CVAR_FRILL_DENSITY,
+                &clutter.frill_density().to_string(),
+            );
+        }
+        // …and in the reference's own cells-per-chunk, with the reference's own `[1, 256]`
+        // clamp rather than the stop's — `ClutterConfig::set_frill_density` carries both, and
+        // `terrain_stream::rescatter_clutter` re-scatters the loaded tiles off the resulting
+        // density change exactly as it does for the row above (0992's setter law, which is the
+        // callback's own chunk rebuild).
+        "frilldensity" => {
+            clutter.set_frill_density(v);
+            cvars.mirror(
+                benilla_ui::script::CVAR_WORLD_DETAIL,
+                &(clutter.density - 1.0).to_string(),
+            );
+        }
+        // Weather Intensity, the panel's 0..3 step 1 (2181). The reference's callback is
+        // `0x67b870`, a jump table (`0x67b8e8`) mapping 0/1/2/3 onto the quality cells
+        // {0.1, 0.33, 0.66, 1.0} in `[0x8680ec]` (wow-re `graphics-cost-cvar-census.md` §4).
+        // What that table does with an off-grid int is NOT carved, so the clamp here is the
+        // table's own standing posture rather than a fidelity claim — and it costs nothing
+        // either way, because `WeatherState::density_gain` already `.min(3)`s its own index.
+        "weatherdensity" => weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
+        _ => {}
+    }
+}
+
+/// `/console detailDoodadAlpha [0..255]` — the reference's own console command (`0x6739a0`;
+/// registrar `0x63f9e0`, a command table and not `CVar::Register`, so it never persists — 1804
+/// does not apply to it). It is the **ground-clutter cutout reference**, the dial that decides
+/// where grass first appears: the detail-doodad draw alpha-tests `texel.a x distance_ramp`
+/// against it, so at the default 128 nothing survives past ~61 yd of the 70 yd horizon, and
+/// lowering it walks that onset out toward the horizon. The reference rejects an out-of-range
+/// value rather than saturating (`0x6739b9: cmp eax,0xff; jbe`), so out-of-range and
+/// unparseable are the same here: a readout with the usage. Bare = the readout (the reference
+/// reads an uninitialised stack slot there; a readout is the useful reading of "no argument").
+fn detail_doodad_alpha(world: &mut World, args: &str) -> Vec<String> {
+    let Some(mut clutter) = world.get_resource_mut::<benilla_world::clutter::ClutterConfig>()
+    else {
+        return vec!["detailDoodadAlpha: this run has no ground clutter".to_string()];
+    };
+    match args
+        .split_whitespace()
+        .next()
+        .and_then(|v| v.parse::<u8>().ok())
+    {
+        Some(v) => {
+            clutter.alpha_ref = f32::from(v) / 255.0;
+            vec![format!("detailDoodadAlpha set to {v}")]
+        }
+        None => vec![format!(
+            "detailDoodadAlpha is {} (usage: /console detailDoodadAlpha 0-255)",
+            (clutter.alpha_ref * 255.0).round() as u32
+        )],
+    }
+}
+
 impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
+        use crate::console::ConsoleCommandApp;
+        app.add_observer(on_cvar);
+        app.console_command(
+            "detailDoodadAlpha",
+            "The ground-clutter cutout reference, 0-255 (128 = the default).",
+            detail_doodad_alpha,
+        );
         app.init_resource::<VideoConfig>()
             .init_resource::<GxRestarts>()
             .add_systems(Startup, (log_display_session, check_window_pinned).chain())
             .add_systems(
                 Update,
                 (
-                    (drain_restart_gx, (apply_present_mode, apply_window_mode)).chain(),
-                    publish_display_modes,
+                    // After the tick, and after the CVar sync: the stock video window's Okay is
+                    // `SetCVar` per changed row and then `RestartGx()`, in one handler, so the
+                    // staged rows have to be in the registry before the commit reads it
+                    // (decision 2304).
+                    (drain_restart_gx, (apply_present_mode, apply_window_mode))
+                        .chain()
+                        .after(crate::ui_script::UiInput)
+                        .after(crate::cvars::sync_cvars),
+                    // A push the tick may read (`GetScreenResolutions`): the feed phase.
+                    publish_display_modes.in_set(crate::ui_script::UiFeed),
                 ),
             );
     }
@@ -277,27 +420,40 @@ impl Plugin for VideoPlugin {
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct GxRestarts(u32);
 
-/// Move the interface's `RestartGx()` calls into [`GxRestarts`].
+/// Move the interface's `RestartGx()` calls into [`GxRestarts`] — and **commit the latch**.
 ///
-/// benilla applies its video settings live (this module's doc says so for `gxVSync` and the
-/// display mode), so what a restart means HERE is "re-assert them against the window now" rather
-/// than "tear the device down and rebuild it". The two systems below do the asserting; this one
-/// only carries the request across the VM boundary.
+/// The `gx*` rows are latched, as the reference registers them (flags `3`, decision 2303): a
+/// `SetCVar("gxVSync", 0)` or a `/console gxWindow 1` is staged, `GetCVar` keeps answering the
+/// applied value, and nothing moves until `RestartGx()` — which in the reference re-creates the
+/// device and calls `CVar::Update 0x63e060` on each row from inside it. Here the commit is
+/// [`crate::cvars::Cvars::commit_latched`], its observers run at the sync point before the two
+/// appliers below, and what a restart means beyond that is "re-assert the settings against the
+/// window now" rather than "tear the device down": wgpu reconfigures the surface on the next
+/// present. The two systems below do the asserting; this one carries the request across the VM
+/// boundary and fires the commit.
 fn drain_restart_gx(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut restarts: ResMut<GxRestarts>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
+    mut commands: Commands,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let asks = script.take_restart_gx_asks();
     if asks == 0 {
-        // Never touch the resource on a quiet frame: a `ResMut` deref-mut is a change signal, and
+        // Never touch the resources on a quiet frame: a `ResMut` deref-mut is a change signal, and
         // both consumers below are gated on the value moving.
         return;
     }
     restarts.0 = restarts.0.wrapping_add(asks);
-    info!("video: RestartGx — re-asserting the display mode and present mode");
+    let committed = cvars.commit_latched();
+    if cvars.has_events() {
+        for event in cvars.take_events() {
+            commands.trigger(event);
+        }
+    }
+    info!("video: RestartGx — {committed} staged setting(s) committed; re-asserting the display mode and present mode");
 }
 
 /// **The reference's own three filters on the resolution list** (wow-re
@@ -557,26 +713,25 @@ fn display_session() -> String {
 
 /// Push the setting to the window **when the setting moves**, and only then.
 ///
-/// The value compare is the `rescatter_clutter` pattern (0992), and it is load-bearing for two
-/// separate reasons. `Res::is_changed()` over-fires: the cvar sync builds its `Knobs` bundle by
-/// deref-mutting *every* knob resource, so any CVar write anywhere flags this one. And re-asserting
-/// the setting every frame would fight the capture probes, which write `present_mode` on the window
-/// directly mid-run (`capture::mod`, `probes::live_fps`) to uncap a measurement — their override
-/// has to stick.
+/// `Res::is_changed()` is the honest signal since 2303: [`on_cvar`] writes this resource only
+/// when one of its own rows moved (before the registry, the CVar host's knob bundle deref-mutted
+/// every knob on every write, and this carried a value compare to work around it). The gate is
+/// load-bearing: re-asserting the setting every frame would fight the capture probes, which
+/// write `present_mode` on the window directly mid-run (`capture::mod`, `probes::live_fps`) to
+/// uncap a measurement — their override has to stick.
 ///
-/// First sight deliberately does **not** just arm: `load_config` applies the saved value at
-/// `Startup`, after the window already exists at its boot mode, so the first run is the one that
-/// reconciles them.
+/// First sight deliberately does **not** just arm: an inserted resource reads as changed on its
+/// first frame, and `load_config` applies the saved value at `Startup`, after the window already
+/// exists at its boot mode — so the first run is the one that reconciles them.
 fn apply_present_mode(
     cfg: Res<VideoConfig>,
     restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut last: Local<Option<bool>>,
     mut last_restart: Local<u32>,
 ) {
     // A `RestartGx()` re-asserts even when nothing moved — that is what the caller asked for.
     let forced = std::mem::replace(&mut *last_restart, restarts.0) != restarts.0;
-    if last.replace(cfg.vsync) == Some(cfg.vsync) && !forced {
+    if !cfg.is_changed() && !forced {
         return;
     }
     let want = present_mode(cfg.vsync);
@@ -606,14 +761,13 @@ fn apply_window_mode(
     cfg: Res<VideoConfig>,
     restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut last: Local<Option<DisplayMode>>,
     mut last_restart: Local<u32>,
 ) {
     // A `RestartGx()` re-asserts even when nothing moved, and that includes re-applying
     // `gxResolution` to a window already in windowed mode — the one video setting whose value can
     // have moved without the MODE moving, and therefore the one this verb is most useful for.
     let forced = std::mem::replace(&mut *last_restart, restarts.0) != restarts.0;
-    if last.replace(cfg.display) == Some(cfg.display) && !forced {
+    if !cfg.is_changed() && !forced {
         return;
     }
     let Ok(mut window) = windows.single_mut() else {

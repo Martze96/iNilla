@@ -94,7 +94,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, SelfGuid};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// Give up re-checking a pending announcement's names after this many frames — the same budget and
 /// reasoning as [`crate::ui_loot`]'s receive lines (a negative-cached entry never resolves).
@@ -299,7 +299,7 @@ impl Plugin for UiLootRollPlugin {
                 // Same ordering rule as the loot window (ui_loot): push before the input pass so a
                 // freshly opened roll is on screen the same frame, drain after it so a Need/Greed/
                 // Pass click goes out the same frame.
-                feed_loot_rolls.before(UiInput),
+                feed_loot_rolls.in_set(UiFeed),
                 drain_loot_rolls.after(UiInput),
             ),
         );

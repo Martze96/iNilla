@@ -585,10 +585,21 @@ fn melee_impact_text(
 /// inside the append window the mesh rebuild waits on).
 pub(crate) struct CombatTextPlugin;
 
+/// The damage-text rows' change callback (decision 2303): three flags.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gates: ResMut<DamageTextGates>) {
+    match ev.key().as_str() {
+        "combatdamage" => gates.combat_damage = ev.flag(),
+        "petmeleedamage" => gates.pet_melee = ev.flag(),
+        "petspelldamage" => gates.pet_spell = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for CombatTextPlugin {
     fn build(&self, app: &mut App) {
         // The Update append window (see [`UiQuadAppend`]): after the camera controller, and
         // projecting through the camera's FRESH Transform (not the stale propagated global).
+        app.add_observer(on_cvar);
         app.init_resource::<WorldTexts>()
             .init_resource::<DamageTextFont>()
             .init_resource::<DamageTextGates>()

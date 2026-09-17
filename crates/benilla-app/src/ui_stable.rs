@@ -41,7 +41,7 @@ use benilla_ui::script::{StableIntent, StablePetSlot, StableState, UiScript, NUM
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_pet_stats::{PetFamilyTables, PetStatTables};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 pub(crate) struct UiStablePlugin;
@@ -57,7 +57,7 @@ impl Plugin for UiStablePlugin {
                     // frame; push before the input pass so an open/close is on screen the same frame;
                     // drain after it (the trainer/merchant/gossip ordering).
                     close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
-                    feed_stable.before(UiInput),
+                    feed_stable.in_set(UiFeed),
                     drain_stable.after(UiInput),
                     // AFTER the VM ticks, unlike every other booth feed: this one reads the
                     // *selection*, which a click on a slot writes during `UiInput` — and

@@ -69,7 +69,7 @@ use benilla_assets::coords::bevy_to_wow;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
-use crate::ui_script::{UiInput, VmMemo};
+use crate::ui_script::{UiFeed, UiInput, VmMemo};
 
 /// Spell 7355 "Stuck" — what `Stuck()` casts, and the Help window's "Auto-Unstuck".
 ///
@@ -449,7 +449,7 @@ impl Plugin for UiGmTicketPlugin {
             .add_systems(
                 Update,
                 (
-                    feed_gm_ticket.before(UiInput),
+                    feed_gm_ticket.in_set(UiFeed),
                     drain_gm_ticket.after(UiInput),
                 ),
             );

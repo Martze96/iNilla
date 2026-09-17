@@ -24,7 +24,8 @@
 //! refusal. The window opening clears the gate, so the first search is always allowed. (INTERIM,
 //! decision 1511 — pinned to the in-flight §5's TU-2.)
 //!
-//! The net bridge ([`crate::net::apply::auction`]) fills [`AuctionOpen`] from the wire. Each frame
+//! The packet handlers ([`net`], in the net handler table — decision 2305) fill [`AuctionOpen`]
+//! from the wire. Each frame
 //! [`feed_auction`] resolves each [`AuctionListEntry`] to a Lua-facing row (name/quality/icon via
 //! the ask-once item-template cache + `ItemDisplayInfo.dbc`, seller via the ask-once name cache,
 //! the time-left bucket from the wire's milliseconds), applies the sort, pushes the snapshot, and
@@ -49,12 +50,14 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 mod sort;
 
 use sort::SortStack;
+
+mod net;
 
 /// The browse query rate limit, in seconds. **VERIFIED** (wow-re §5 TU-2): the reference arms the
 /// gate with `tick + 0x1388` *after* the packet goes out, re-checks it inside the query itself,
@@ -371,6 +374,7 @@ pub(crate) struct UiAuctionPlugin;
 
 impl Plugin for UiAuctionPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<AuctionOpen>().add_systems(
             Update,
             (
@@ -388,7 +392,7 @@ impl Plugin for UiAuctionPlugin {
                 // packets set survive as wire re-asks either way.
                 feed_auction
                     .after(crate::ui_unit::UnitFeed)
-                    .before(UiInput)
+                    .in_set(UiFeed)
                     .run_if(crate::ui_script::ingame_ui_up),
                 drain_auction.after(UiInput),
             ),

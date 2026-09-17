@@ -222,9 +222,6 @@ pub(crate) struct WindowStores<'w> {
     /// another player's honor numbers, so the reply parks here and `crate::ui_honor` pushes it
     /// into the pane and fires `INSPECT_HONOR_UPDATE`.
     pub inspect_honor: ResMut<'w, crate::ui_honor::InspectHonor>,
-    /// The auctioneer session (decision 1511) — the hello reply opens it, the three list results
-    /// fill it, and `crate::ui_auction` feeds it to the window.
-    pub auction_open: ResMut<'w, crate::ui_auction::AuctionOpen>,
     /// The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the world
     /// point here and the minimap renderer derives everything else from it.
     pub ping: ResMut<'w, crate::minimap::MinimapPing>,

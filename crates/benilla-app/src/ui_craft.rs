@@ -59,10 +59,7 @@ impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CraftOpen>().add_systems(
             Update,
-            (
-                feed_craft.in_set(UnitFeed).before(UiInput),
-                drain_craft.after(UiInput),
-            ),
+            (feed_craft.in_set(UnitFeed), drain_craft.after(UiInput)),
         );
     }
 }

@@ -315,8 +315,18 @@ fn use_gamma_ui_shaders(
 
 pub(crate) struct UiGammaPlugin;
 
+/// Brightness's change callback (2182, 2303). The clamp is OURS and the reference has none —
+/// the reason it costs one is on [`GAMMA_RANGE`], and nothing a player can reach from the panel
+/// meets it.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gamma: ResMut<DisplayGamma>) {
+    if ev.is(benilla_ui::script::CVAR_GAMMA) {
+        gamma.0 = ev.num().clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
+    }
+}
+
 impl Plugin for UiGammaPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<DisplayGamma>()
             .add_plugins(ExtractComponentPlugin::<UiGammaLane>::default())
             .add_systems(Update, stamp_lane_gamma);

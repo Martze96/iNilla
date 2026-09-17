@@ -36,6 +36,26 @@ pub(crate) struct CvarSlot {
     pub name: String,
     pub value: String,
     pub default: String,
+    /// The reference's flag bit1 (`rec+0x1c & 0x2`, decision 2303): a write lands in
+    /// [`Self::pending`] instead of [`Self::value`], so `GetCVar` keeps answering the applied
+    /// value until the host commits the latch (`CVar::Update 0x63e060` — for the `gx*` rows,
+    /// inside `RestartGx`). Seeded by the host ([`super::UiScript::seed_cvars`]); a row the VM
+    /// registers on its own is never latched, exactly like the console `set` command's create
+    /// path in the reference.
+    pub latched: bool,
+    /// The staged value of a latched row — what the host will commit at the boundary, and what
+    /// it is told about through the change queue the moment it is written.
+    pub pending: Option<String>,
+}
+
+/// One row of the host's registry, as the VM's mirror is seeded from it (decision 2303): the
+/// registered spelling, the **applied** value, the registered default, and the latch flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeededCvar {
+    pub name: String,
+    pub value: String,
+    pub default: String,
+    pub latched: bool,
 }
 
 /// One device-supported multisample format, as the Video options dropdown shows it.
@@ -173,6 +193,8 @@ impl super::UiScript {
                             name: name.to_string(),
                             value,
                             default: default.to_string(),
+                            latched: false,
+                            pending: None,
                         },
                     );
                 }
@@ -180,14 +202,44 @@ impl super::UiScript {
         }
     }
 
-    /// Host-side write (loaded config, env override): sets the value WITHOUT queueing a change
-    /// event — the host is the caller, an echo would re-dirty the file it just read. Unknown
-    /// names warn once, same posture as the Lua side.
+    /// Seed the mirror from the host's registry (decision 2303): every row's spelling, applied
+    /// value, default and latch flag, creating or overwriting the slot. This is what a fresh VM
+    /// gets at claim time and at the world-entry edge — the host's table is the store that
+    /// outlives the VM, so the mirror starts wherever it stands, and a re-seed of a live table
+    /// is the host re-asserting its truth (a staged value is dropped with it: the host holds
+    /// the pending copy and pushes it back through the outbox if it still stands).
+    ///
+    /// `&self` for [`Self::register_cvars`]'s reason — the interface loader seeds from a
+    /// `&UiScript` before the stock files read their first CVar (decision 2115).
+    pub fn seed_cvars(&self, rows: impl IntoIterator<Item = SeededCvar>) {
+        let mut model = self.model_mut();
+        for row in rows {
+            let key = row.name.to_ascii_lowercase();
+            model.cvars.insert(
+                key,
+                CvarSlot {
+                    name: row.name,
+                    value: row.value,
+                    default: row.default,
+                    latched: row.latched,
+                    pending: None,
+                },
+            );
+        }
+    }
+
+    /// Host-side write (a loaded value, a committed latch, the host registry's outbox): sets
+    /// the value WITHOUT queueing a change event — the host is the caller, an echo would
+    /// re-dirty the file it just read — and clears a staged value, because a host write IS the
+    /// commit. Unknown names warn once, same posture as the Lua side.
     pub fn set_cvar_host(&mut self, name: &str, value: &str) {
         let mut model = self.model_mut();
         let key = name.to_ascii_lowercase();
         match model.cvars.get_mut(&key) {
-            Some(slot) => slot.value = value.to_string(),
+            Some(slot) => {
+                slot.value = value.to_string();
+                slot.pending = None;
+            }
             None => warn_unknown(&mut model, name),
         }
     }
@@ -215,6 +267,14 @@ impl super::UiScript {
     /// spelling regardless of the caller's casing.
     pub fn take_cvar_changes(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.model_mut().cvar_changes)
+    }
+
+    /// Drain the `(name, default)` rows an addon's `RegisterCVar` created since the last call
+    /// (decision 2303) — the host's cue to give each one a row in its own registry, which is the
+    /// store that survives this VM. In the reference an addon's registration lands in the same
+    /// engine-side table as the client's own; this is how ours does.
+    pub fn take_cvar_registrations(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.model_mut().cvar_registrations)
     }
 
     /// A native surface's write — [`set_from_engine`]'s public face: sets the value AND queues
@@ -297,15 +357,38 @@ impl super::UiScript {
 /// code, not UI content, so a miss means this build's host doesn't back the var (a bare test VM) —
 /// and the registered set is welded to the code truths by `crate::cvars`'s own test.
 pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
-    let Some(slot) = model.cvars.get_mut(&name.to_ascii_lowercase()) else {
-        return;
-    };
-    if slot.value == value {
-        return;
+    store(model, &name.to_ascii_lowercase(), value);
+}
+
+/// **The one store every write goes through** — Lua's `SetCVar`, `ConsoleExec`, and the engine
+/// writes above. Returns the registered spelling when the write moved something (and queued it
+/// for the host), `None` for an unknown key or a write that changed nothing.
+///
+/// A **latched** slot (decision 2303) takes the write as its staged value and leaves `value`
+/// alone, which is the reference's `Set 0x63df50`: `latchedValue` gets the string, `InternalSet`
+/// does not run, and `GetCVar` keeps answering what is applied. Writing a latched slot back to
+/// its applied value clears the stage instead of staging a no-op. Either way the host hears it
+/// through the change queue — it holds the pending copy and commits it at the boundary.
+fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
+    let slot = model.cvars.get_mut(key)?;
+    if slot.latched {
+        let staged = (value != slot.value).then_some(value.clone());
+        if slot.pending == staged && staged.is_some() {
+            return None;
+        }
+        if staged.is_none() && slot.pending.is_none() {
+            return None;
+        }
+        slot.pending = staged;
+    } else {
+        if slot.value == value {
+            return None;
+        }
+        slot.value = value.clone();
     }
-    slot.value = value.clone();
     let registered = slot.name.clone();
-    model.cvar_changes.push((registered, value));
+    model.cvar_changes.push((registered.clone(), value));
+    Some(registered)
 }
 
 /// Push the warn-once for an unknown CVar name into the model's warning stream.
@@ -319,26 +402,19 @@ pub(super) fn write_cvar(
     token: Option<String>,
 ) -> bool {
     let key = name.to_ascii_lowercase();
-    match model.cvars.get_mut(&key) {
-        Some(slot) => {
-            if slot.value != value {
-                slot.value = value.clone();
-                let reg_name = slot.name.clone();
-                model.cvar_changes.push((reg_name, value.clone()));
-                if let Some(token) = token {
-                    model.pending_events.push((
-                        "CVAR_UPDATE".to_string(),
-                        vec![ScriptValue::Str(token), ScriptValue::Str(value)],
-                    ));
-                }
-            }
-            true
-        }
-        None => {
-            warn_unknown(model, name);
-            false
+    if !model.cvars.contains_key(&key) {
+        warn_unknown(model, name);
+        return false;
+    }
+    if store(model, &key, value.clone()).is_some() {
+        if let Some(token) = token {
+            model.pending_events.push((
+                "CVAR_UPDATE".to_string(),
+                vec![ScriptValue::Str(token), ScriptValue::Str(value)],
+            ));
         }
     }
+    true
 }
 
 fn warn_unknown(model: &mut Model, name: &str) {
@@ -395,11 +471,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // saved value survives the VM being replaced — the declared value stays the DEFAULT,
             // so the saver still knows what "moved off default" means for this key.
             let saved = model.cvars_saved_base.get(&key).cloned();
-            model.cvars.entry(key).or_insert(CvarSlot {
-                name,
-                value: saved.unwrap_or_else(|| value.clone()),
-                default: value,
-            });
+            if model.cvars.contains_key(&key) {
+                return Ok(());
+            }
+            // The host learns the row through its own queue (decision 2303): an addon-declared
+            // CVar gets a row in the host's registry, which is the store that survives this VM.
+            model.cvar_registrations.push((name.clone(), value.clone()));
+            model.cvars.insert(
+                key,
+                CvarSlot {
+                    name,
+                    value: saved.unwrap_or_else(|| value.clone()),
+                    default: value,
+                    latched: false,
+                    pending: None,
+                },
+            );
             Ok(())
         })?,
     )?;
@@ -1133,7 +1220,7 @@ fn install_nameplate_verbs(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::MultisampleFormat;
+    use super::{MultisampleFormat, SeededCvar};
     use crate::script::UiScript;
 
     fn script_with_volume() -> UiScript {
@@ -1168,6 +1255,113 @@ mod tests {
         // A write to the same value queues nothing (quiet frames stay quiet).
         s.run(r#"SetCVar("MusicVolume", "0.7")"#).unwrap();
         assert!(s.take_cvar_changes().is_empty());
+    }
+
+    /// **A latched row stages the write and keeps answering the applied value** (decision 2303)
+    /// — the reference's `Set 0x63df50` on flag bit1: `latchedValue` takes the string, `InternalSet`
+    /// never runs, so `GetCVar` (which reads `rec+0x20`) answers the old value until
+    /// `CVar::Update 0x63e060` commits it. The host still hears every staged write through the
+    /// change queue (it holds the pending copy), and its commit arrives as a host write, which
+    /// clears the stage. Writing the applied value back over a stage clears the stage too.
+    #[test]
+    fn a_latched_row_stages_the_write_until_the_host_commits_it() {
+        let mut s = UiScript::new().unwrap();
+        s.seed_cvars([
+            SeededCvar {
+                name: "gxVSync".into(),
+                value: "1".into(),
+                default: "1".into(),
+                latched: true,
+            },
+            SeededCvar {
+                name: "MusicVolume".into(),
+                value: "0.4".into(),
+                default: "0.4".into(),
+                latched: false,
+            },
+        ]);
+        s.run(r#"SetCVar("gxVSync", 0)"#).unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("gxVSync")"#).unwrap(),
+            "1",
+            "the applied value stands until the boundary"
+        );
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![("gxVSync".to_string(), "0".to_string())],
+            "the host hears the staged write"
+        );
+        // Staging the same value again is quiet; staging the applied value back clears the stage
+        // and is reported, so the host can drop its pending copy too.
+        s.run(r#"SetCVar("gxVSync", "0")"#).unwrap();
+        assert!(s.take_cvar_changes().is_empty());
+        s.run(r#"SetCVar("gxVSync", "1")"#).unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![("gxVSync".to_string(), "1".to_string())]
+        );
+        assert!(
+            s.take_cvar_changes().is_empty(),
+            "nothing staged, nothing to say"
+        );
+        // The commit is a host write: the value moves, the stage clears, no echo.
+        s.run(r#"SetCVar("gxVSync", 0)"#).unwrap();
+        s.take_cvar_changes();
+        s.set_cvar_host("gxVSync", "0");
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("gxVSync")"#).unwrap(),
+            "0"
+        );
+        assert!(s.take_cvar_changes().is_empty());
+        // An unlatched sibling is untouched by any of this.
+        s.run(r#"SetCVar("MusicVolume", 0.7)"#).unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("MusicVolume")"#)
+                .unwrap(),
+            "0.7"
+        );
+    }
+
+    /// **An addon's `RegisterCVar` reaches the host** (decision 2303): the row it creates is
+    /// reported once, with the declared default, so the host's registry — the store that
+    /// outlives this VM — can carry it. A re-declaration of a live name is the no-op it always
+    /// was, and reports nothing.
+    #[test]
+    fn an_addon_registration_is_reported_to_the_host_once() {
+        let mut s = UiScript::new().unwrap();
+        s.run(r#"RegisterCVar("myAddonKnob", "7")"#).unwrap();
+        s.run(r#"RegisterCVar("myAddonKnob", "9")"#).unwrap();
+        assert_eq!(
+            s.take_cvar_registrations(),
+            vec![("myAddonKnob".to_string(), "7".to_string())]
+        );
+        assert!(s.take_cvar_registrations().is_empty(), "drained");
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("myAddonKnob")"#)
+                .unwrap(),
+            "7"
+        );
+    }
+
+    /// **A bare CVar name through `ConsoleExec` is the host's to answer** (decision 2303): the
+    /// reference's per-CVar console command prints `CVar "%s" is "%s"` on an empty argument
+    /// (`0x63dde0`), and that printing lives host-side with the rest of the command registry.
+    /// A name WITH a value is still written synchronously, so the next Lua line reads it back.
+    #[test]
+    fn console_exec_writes_a_valued_cvar_and_hands_a_bare_name_to_the_host() {
+        let mut s = script_with_volume();
+        s.run(r#"ConsoleExec("MusicVolume 0.2")"#).unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("MusicVolume")"#)
+                .unwrap(),
+            "0.2"
+        );
+        assert!(
+            s.take_console_lines().is_empty(),
+            "a valued write is consumed here"
+        );
+        s.run(r#"ConsoleExec("MusicVolume")"#).unwrap();
+        assert_eq!(s.take_console_lines(), vec!["MusicVolume".to_string()]);
     }
 
     /// **`SetCVar`'s third argument is the `CVAR_UPDATE` token** (decision 1140) — the whole

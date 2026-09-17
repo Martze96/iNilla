@@ -47,7 +47,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
 use crate::portrait::InspectBooth;
-use crate::ui_script::UiInput;
+use crate::ui_script::UiFeed;
 
 /// Which unit the inspect window is bound to — the ref's `InspectFrame.unit`, mirrored app-side so
 /// the feed knows whether to resolve anything. The **token** is the identity (not the guid): the
@@ -81,7 +81,7 @@ impl Plugin for InspectUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InspectTarget>()
             .init_resource::<InspectFeedState>()
-            .add_systems(Update, feed_inspect.in_set(UiInput));
+            .add_systems(Update, feed_inspect.in_set(UiFeed));
     }
 }
 

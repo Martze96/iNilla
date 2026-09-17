@@ -283,14 +283,14 @@ pub(crate) fn reconcile_afk_mirror(
 /// reference tables that happen to overlap, not one shared idea.
 pub(crate) fn movement_clears_afk(
     binds: Res<crate::bindings::BindingsState>,
-    cvars: Res<crate::cvars::CvarPersist>,
+    cvars: Res<crate::cvars::Cvars>,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     commands: Res<crate::net::NetCommands>,
     mut chat: ResMut<ChatLog>,
     mut mirror: ResMut<AfkMirror>,
 ) {
     use crate::bindings::cmd;
-    if !mirror.is_afk() || cvars.stored("autoClearAFK").is_some_and(|v| v == "0") {
+    if !mirror.is_afk() || cvars.flag("autoClearAFK") == Some(false) {
         return;
     }
     // The inline-array idiom `player::follow`'s `move_start` uses — its six, plus JUMP.

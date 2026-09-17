@@ -16,7 +16,6 @@ use benilla_ui::script::{ScriptValue, UiScript};
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, PlaySeq};
 use crate::net::{ClientCommand, GuidIndex, NetCommands, SelfGuid};
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 /// One edge of our own cast's lifecycle, queued by the net bridge for the cast bar.
@@ -785,10 +784,7 @@ impl Plugin for UiCastPlugin {
             .init_resource::<LocalMoveStart>()
             .add_systems(
                 Update,
-                (local_self_cancel, feed_cast_bar)
-                    .chain()
-                    .in_set(UnitFeed)
-                    .before(UiInput),
+                (local_self_cancel, feed_cast_bar).chain().in_set(UnitFeed),
             );
     }
 }

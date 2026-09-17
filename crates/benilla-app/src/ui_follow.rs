@@ -53,7 +53,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{FollowRequest as ScriptFollowRequest, ScriptValue, UiScript};
 
 use crate::player::{FollowRequest, FollowState};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// What the VM has last been told, so the two events fire exactly on transitions and never once a
 /// frame. Mirrors [`FollowState::guid`]; `None` means the VM believes no follow is running.
@@ -126,7 +126,7 @@ impl Plugin for UiFollowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FollowFeed>().add_systems(
             Update,
-            (feed_follow.before(UiInput), drain_follow.after(UiInput)),
+            (feed_follow.in_set(UiFeed), drain_follow.after(UiInput)),
         );
     }
 }

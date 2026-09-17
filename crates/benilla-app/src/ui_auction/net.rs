@@ -1,23 +1,120 @@
-//! The auction house's wire→session bridge (decision 1511 P1) — every `SMSG_AUCTION_*` lands here
-//! and becomes state on [`AuctionOpen`], which [`crate::ui_auction::feed_auction`] turns into the
-//! window's events on the next frame. Nothing here touches the VM: the feed owns the script.
+//! The auction house's packet handlers (decision 1511 P1; in the net handler table since 2305 —
+//! the first family out of the drain's dispatch match) — every `SMSG_AUCTION_*` lands here and
+//! becomes state on [`AuctionOpen`], which [`super::feed_auction`] turns into the window's events
+//! on the next frame. Nothing here touches the VM: the feed owns the script.
 
 use benilla_protocol::messages::{
     auction_action, auction_error, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification,
 };
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use benilla_ui::script::{BIDDER, LIST, OWNER};
+use bevy::prelude::*;
 
-use crate::ui_auction::{AuctionMessage, AuctionOpen};
+use super::{AuctionMessage, AuctionOpen};
+use crate::net::NetHandlerApp;
+
+/// Register the house's handlers — called from [`super::UiAuctionPlugin`]. One per `SMSG_AUCTION_*`
+/// kind, plus the session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::AuctionHello, on_hello)
+        .net_handler(K::AuctionCommandResult, on_command_result)
+        .net_handler(K::AuctionListResult, on_list_result)
+        .net_handler(K::AuctionOwnerListResult, on_owner_list_result)
+        .net_handler(K::AuctionBidderListResult, on_bidder_list_result)
+        .net_handler(K::AuctionBidderNotification, on_bidder_notification)
+        .net_handler(K::AuctionOwnerNotification, on_owner_notification)
+        .net_handler(K::AuctionRemovedNotification, on_removed_notification)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_hello(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionHello {
+        auctioneer,
+        house_id,
+    } = ev
+    {
+        auction_hello(auctioneer, house_id, &mut auction);
+    }
+}
+
+fn on_command_result(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionCommandResult {
+        auction_id,
+        action,
+        error,
+        tail,
+    } = ev
+    {
+        auction_command_result(auction_id, action, error, &tail, &mut auction);
+    }
+}
+
+fn on_list_result(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionListResult {
+        auctions,
+        total_count,
+    } = ev
+    {
+        auction_list_result(auctions, total_count, &mut auction);
+    }
+}
+
+fn on_owner_list_result(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionOwnerListResult {
+        auctions,
+        total_count,
+    } = ev
+    {
+        auction_owner_list_result(auctions, total_count, &mut auction);
+    }
+}
+
+fn on_bidder_list_result(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionBidderListResult {
+        auctions,
+        total_count,
+    } = ev
+    {
+        auction_bidder_list_result(auctions, total_count, &mut auction);
+    }
+}
+
+fn on_bidder_notification(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionBidderNotification(n) = ev {
+        auction_bidder_notification(&n, &mut auction);
+    }
+}
+
+fn on_owner_notification(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionOwnerNotification(n) = ev {
+        auction_owner_notification(&n, &mut auction);
+    }
+}
+
+fn on_removed_notification(In(ev): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    if let SessionEvent::AuctionRemovedNotification { item_entry, .. } = ev {
+        auction_removed_notification(item_entry, &mut auction);
+    }
+}
+
+/// An open auction house dies with the socket (decision 1511): every auction command
+/// re-validates the auctioneer server-side, so a session that survived a reconnect would be a
+/// window whose every button silently failed. A listener on the session end, which the drain's
+/// dispatch match still owns ([`crate::net::handlers::BROADCAST`]).
+fn on_session_end(In(_): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
+    auction.clear_session();
+}
 
 /// `MSG_AUCTION_HELLO`'s reply — **this**, not our send, is what opens the window (wow-re: the
 /// window's opener runs inside the hello handler). The house id keys the deposit rate.
-pub(super) fn auction_hello(auctioneer: u64, house_id: u32, auction: &mut AuctionOpen) {
+fn auction_hello(auctioneer: u64, house_id: u32, auction: &mut AuctionOpen) {
     auction.open(auctioneer, house_id);
 }
 
 /// One of the three list results. They share a frame and a record; only the tab differs.
-pub(super) fn auction_list(
+fn auction_list(
     which: usize,
     auctions: Vec<AuctionListEntry>,
     total_count: u32,
@@ -34,7 +131,7 @@ pub(super) fn auction_list(
     auction.set_list(which, auctions, total_count);
 }
 
-pub(super) fn auction_list_result(
+fn auction_list_result(
     auctions: Vec<AuctionListEntry>,
     total_count: u32,
     auction: &mut AuctionOpen,
@@ -42,7 +139,7 @@ pub(super) fn auction_list_result(
     auction_list(LIST, auctions, total_count, auction);
 }
 
-pub(super) fn auction_owner_list_result(
+fn auction_owner_list_result(
     auctions: Vec<AuctionListEntry>,
     total_count: u32,
     auction: &mut AuctionOpen,
@@ -54,7 +151,7 @@ pub(super) fn auction_owner_list_result(
 /// currently hold the bid on, so **one auction can appear twice in a page** — deduped here by
 /// auction id, keeping the first occurrence, because a duplicated row would be two rows the player
 /// can click that address the same auction.
-pub(super) fn auction_bidder_list_result(
+fn auction_bidder_list_result(
     auctions: Vec<AuctionListEntry>,
     total_count: u32,
     auction: &mut AuctionOpen,
@@ -73,7 +170,7 @@ pub(super) fn auction_bidder_list_result(
 /// server writes `auc ? auc->Id : 0`), so it is not a correlation handle on an error; and several
 /// refusals send **no packet at all** (a bid the player cannot afford, a cancel whose cut they
 /// cannot pay), which is why nothing in this arc blocks its UI waiting for an ack.
-pub(super) fn auction_command_result(
+fn auction_command_result(
     auction_id: u32,
     action: u32,
     error: u32,
@@ -154,10 +251,7 @@ fn command_error_key(error: u32) -> Option<&'static str> {
 ///
 /// **`bid_or_zero == 0` means WON**, not "no bid" — the server overloads the field, and reading it
 /// the obvious way turns every win into an outbid notice.
-pub(super) fn auction_bidder_notification(
-    notice: &AuctionBidderNotification,
-    auction: &mut AuctionOpen,
-) {
+fn auction_bidder_notification(notice: &AuctionBidderNotification, auction: &mut AuctionOpen) {
     let won = notice.bid_or_zero == 0;
     auction.messages.push(AuctionMessage::chat_item(
         if won {
@@ -172,10 +266,7 @@ pub(super) fn auction_bidder_notification(
 
 /// `SMSG_AUCTION_OWNER_NOTIFICATION` — one of ours sold, or took a bid. An all-zero bidder guid is
 /// the "sold" signal (the server zeroes it on a sale).
-pub(super) fn auction_owner_notification(
-    notice: &AuctionOwnerNotification,
-    auction: &mut AuctionOpen,
-) {
+fn auction_owner_notification(notice: &AuctionOwnerNotification, auction: &mut AuctionOpen) {
     // **Two stages, and the first one decides whether anything is said at all** (wow-re §11.4).
     // A NON-zero bidder guid is "somebody bid on your auction": the row updates and the client says
     // nothing — `[0x4cd25f, 0x4cd3bd)` holds no display call. Only a zeroed guid reaches the message
@@ -197,7 +288,7 @@ pub(super) fn auction_owner_notification(
 ///
 /// One id, unconditionally (wow-re §11.4: `0x4cd480` has exactly one `call 0x496720` and no branch
 /// selecting an id).
-pub(super) fn auction_removed_notification(item_entry: u32, auction: &mut AuctionOpen) {
+fn auction_removed_notification(item_entry: u32, auction: &mut AuctionOpen) {
     auction.messages.push(AuctionMessage::chat_item(
         "ERR_AUCTION_REMOVED_S",
         item_entry,
@@ -209,6 +300,42 @@ pub(super) fn auction_removed_notification(item_entry: u32, auction: &mut Auctio
 mod tests {
     use super::*;
     use benilla_ui::messages::MsgKind;
+
+    /// The registration, end to end: a hello and a session end through the real table.
+    #[test]
+    fn the_table_routes_the_hello_and_the_session_end_to_the_house() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<AuctionOpen>();
+        register(&mut app);
+        let through_the_match = |_: &mut World, unclaimed: Vec<SessionEvent>| {
+            let kinds: Vec<SessionEventKind> =
+                unclaimed.iter().map(SessionEventKind::from).collect();
+            assert_eq!(
+                kinds,
+                vec![SessionEventKind::Disconnected],
+                "the broadcast reaches the match too"
+            );
+        };
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::AuctionHello {
+                auctioneer: 0x10,
+                house_id: 1,
+            }],
+            |_, unclaimed| assert!(unclaimed.is_empty()),
+        );
+        assert_eq!(app.world().resource::<AuctionOpen>().auctioneer, Some(0x10));
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+            through_the_match,
+        );
+        assert_eq!(app.world().resource::<AuctionOpen>().auctioneer, None);
+    }
 
     fn keys(auction: &AuctionOpen) -> Vec<(&'static str, MsgKind, Option<u32>)> {
         auction

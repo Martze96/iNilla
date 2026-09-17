@@ -38,7 +38,7 @@ use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands};
 use crate::player::Player;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The leash radius, squared: the CRT initialiser's `fld [0x806574]; fmul` of the `.rdata` f32
 /// `5.55555534362793` (§7.1).
@@ -365,11 +365,13 @@ impl Plugin for BattlefieldPlugin {
         app.init_resource::<Battlefield>().add_systems(
             Update,
             (
-                reset_on_world_enter.before(feed_battlefield),
+                reset_on_world_enter
+                    .in_set(crate::ui_script::UiFeed)
+                    .before(feed_battlefield),
                 feed_battlefield
                     .before(crate::ui_battlefield_score::feed_battlefield_score)
                     .before(crate::ui_dialog_verbs::feed_dialog_verbs)
-                    .before(UiInput),
+                    .in_set(UiFeed),
                 drain_battlefield.after(UiInput),
             ),
         );

@@ -146,17 +146,6 @@ pub(crate) const VIEW_DEFAULTS: [[&str; 3]; VIEW_COUNT] = [
 /// the client opens on `THIRD_PERSON_A`.
 pub(crate) const ACTIVE_VIEW_DEFAULT: &str = "1";
 
-/// True if `name` is one of this module's sixteen CVars (case-insensitively, like every CVar
-/// lookup). [`crate::cvars::apply_to_knobs`] asks so a `SaveView` marks the config dirty and the
-/// view is actually persisted; there is nothing to apply, because [`CameraViews`] is the writer.
-pub(crate) fn is_view_cvar(name: &str) -> bool {
-    name.eq_ignore_ascii_case(CVAR_ACTIVE_VIEW)
-        || VIEW_CVARS
-            .iter()
-            .flatten()
-            .any(|n| n.eq_ignore_ascii_case(name))
-}
-
 /// One view's pose, in **benilla's** units: yards, and radians with [`FlyCam::pitch`]'s
 /// positive-is-UP sign. `yaw` is an offset from the subject's facing (see the module header), so a
 /// view whose yaw is `0.0` is "directly behind" whichever way the character is pointing.
@@ -270,17 +259,17 @@ impl CameraViews {
 
 /// Startup: seed the five views (and the live index) from `config.toml`.
 ///
-/// Reads [`crate::cvars::CvarPersist::stored`] rather than the VM's table for the reason 1622's
-/// remembered-character row does: the VM's CVar table is a per-VM `Update` seed and does not exist
-/// yet, while the persisted values are a resource from `CvarLoad` onward and stay current across a
-/// VM replacement (1291). An absent key is the shipped default, which is every first run.
-fn load_saved_views(persist: Res<crate::cvars::CvarPersist>, mut views: ResMut<CameraViews>) {
+/// Reads the registry ([`crate::cvars::Cvars::get`]) rather than the VM's table for the reason
+/// 1622's remembered-character row does: the VM's mirror is a per-VM `Update` seed and does not
+/// exist yet, while the registry is a resource from `CvarLoad` onward and outlives every VM
+/// (2303). An absent key answers the shipped default, which is every first run.
+fn load_saved_views(cvars: Res<crate::cvars::Cvars>, mut views: ResMut<CameraViews>) {
     for (view, slot) in views.views.iter_mut().enumerate() {
         // Each field is independently optional, like the pose file's two keys: an absent or
         // hand-mangled value costs that one number, not the whole view.
         let field = |i: usize| {
-            persist
-                .stored(VIEW_CVARS[view][i])
+            cvars
+                .get(VIEW_CVARS[view][i])
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .filter(|v| v.is_finite())
         };
@@ -294,8 +283,8 @@ fn load_saved_views(persist: Res<crate::cvars::CvarPersist>, mut views: ResMut<C
         };
         *slot = ViewPose::from_reference(raw(0), raw(1), raw(2));
     }
-    if let Some(v) = persist
-        .stored(CVAR_ACTIVE_VIEW)
+    if let Some(v) = cvars
+        .get(CVAR_ACTIVE_VIEW)
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|v| *v < VIEW_COUNT)
     {
@@ -316,7 +305,11 @@ struct ViewTargets<'w, 's> {
 ///
 /// Ordered before [`super::control`] so a view taken this frame is the pose this frame's camera
 /// seat is computed from, exactly like the pose file's restore.
-fn drain_view_requests(script: Option<NonSendMut<UiScript>>, mut targets: ViewTargets) {
+fn drain_view_requests(
+    script: Option<NonSendMut<UiScript>>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
+    mut targets: ViewTargets,
+) {
     let Some(mut script) = script else {
         return;
     };
@@ -399,10 +392,10 @@ fn drain_view_requests(script: Option<NonSendMut<UiScript>>, mut targets: ViewTa
         }
     }
 
-    // Mirror into the CVar table so the change dirties `config.toml` and the view survives a
-    // restart — `set_cvar_engine` is the minimap-zoom pattern (the engine's own value moved, so
-    // the table follows AND queues the change). The resource stays authoritative either way, so a
-    // run with no VM at all (a bare test app) still has working views.
+    // Mirror into the registry so the change dirties `config.toml` and the view survives a
+    // restart — a host write (2303: the engine's own value moved, so the table follows and the
+    // VM's mirror learns it). The resource stays authoritative either way, so a run with no VM
+    // at all (a bare test app) still has working views.
     for view in write_slots {
         // A reset writes the reference's default STRING verbatim, not a re-rendered `%f` of it:
         // `crate::cvars`'s file is a diff against the registered default, and only the exact text
@@ -415,11 +408,11 @@ fn drain_view_requests(script: Option<NonSendMut<UiScript>>, mut targets: ViewTa
             } else {
                 rendered[field].as_str()
             };
-            script.set_cvar_engine(VIEW_CVARS[view][field], value);
+            cvars.set(VIEW_CVARS[view][field], value);
         }
     }
     if write_active {
-        script.set_cvar_engine(CVAR_ACTIVE_VIEW, &targets.views.current.to_string());
+        cvars.set(CVAR_ACTIVE_VIEW, &targets.views.current.to_string());
     }
 }
 
@@ -451,6 +444,9 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             drain_view_requests
+                // After the tick that queued them (`SetView`/`SaveView` are Lua's), before the
+                // control pass that seats the pose.
+                .after(crate::ui_script::UiInput)
                 .before(super::control)
                 // Capture parks the camera itself (`capture::probe_cam`), and `control` is gated
                 // off there for the same reason; a queued view must not steal a parked pose.
@@ -630,8 +626,8 @@ mod tests {
     }
 
     /// **The weld** ([`crate::cvars`]'s own convention): every one of the sixteen names is
-    /// registered, with the reference's default string, and nothing here has drifted from the
-    /// table `is_view_cvar` answers from.
+    /// registered, with the reference's default string. No observer watches them — this module
+    /// is their writer, and the registry persists a host write on its own (2303).
     #[test]
     fn the_view_cvars_are_registered_with_the_references_defaults() {
         let registered = |name: &str| {
@@ -648,25 +644,8 @@ mod tests {
                     Some(VIEW_DEFAULTS[view][field]),
                     "{name} is not registered with its shipped default"
                 );
-                assert!(
-                    is_view_cvar(name),
-                    "{name} is not recognised as a view cvar"
-                );
-                assert!(
-                    is_view_cvar(&name.to_ascii_uppercase()),
-                    "{name} is case-sensitive"
-                );
             }
         }
         assert_eq!(registered(CVAR_ACTIVE_VIEW), Some(ACTIVE_VIEW_DEFAULT));
-        assert!(is_view_cvar(CVAR_ACTIVE_VIEW));
-        assert!(
-            !is_view_cvar("cameraDistanceMaxFactor"),
-            "the zoom ceiling is not a view"
-        );
-        assert!(
-            !is_view_cvar("cameraDistanceE"),
-            "there are only five views"
-        );
     }
 }

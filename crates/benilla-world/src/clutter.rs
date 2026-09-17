@@ -58,9 +58,9 @@ impl Plugin for ClutterPlugin {
 /// global is read at draw time and needs no rebuild; ours costs a re-mesh of the ~30 chunks in the
 /// bubble, which the per-frame cap spreads over a few frames.
 ///
-/// Watches the **value**, not `is_changed()`, for the reason `terrain_stream::rescatter_clutter`
-/// spells out: the cvar sync deref-muts every knob resource whenever any cvar moves, so the flag
-/// over-fires. First sight only arms.
+/// Watches the **value**, not `is_changed()`, because the predicate is "the cutout moved" and
+/// not "the resource moved": `ClutterConfig` also carries the density, whose own writer would
+/// otherwise cost a re-mesh of the bubble on every detail-slider notch. First sight only arms.
 fn remesh_on_cutout_change(
     mut commands: Commands,
     cfg: Res<ClutterConfig>,

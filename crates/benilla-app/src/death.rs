@@ -16,7 +16,7 @@ use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// Where our corpse is — the `MSG_CORPSE_QUERY` answer (decision 0308 §5). Raw WoW coords.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -718,7 +718,7 @@ impl Plugin for DeathPlugin {
             .add_systems(
                 Update,
                 (
-                    feed_death.before(UiInput),
+                    feed_death.in_set(UiFeed),
                     drain_death.after(UiInput),
                     drive_death_look,
                     // Before the feed, so the frame a session ends is already a frame the feed

@@ -524,8 +524,34 @@ fn world_audio_live(
 
 pub(crate) struct SoundPlugin;
 
+/// The sound rows' change callback (decision 2303): the volumes clamp to `[0, 1]`, the enables
+/// are the client's int-parse + `!= 0` — `SoundReverb`'s own parse is literally that
+/// (`0x4574d0`: `setne al`). Writes only the arm it matched, so a `SoundConfig` change is a
+/// sound setting moving and nothing else.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<SoundConfig>) {
+    let v = ev.num();
+    match ev.key().as_str() {
+        "mastervolume" => sound.master = v.clamp(0.0, 1.0),
+        "soundvolume" => sound.sfx = v.clamp(0.0, 1.0),
+        "musicvolume" => sound.music = v.clamp(0.0, 1.0),
+        "ambiencevolume" => sound.ambience = v.clamp(0.0, 1.0),
+        "mastersoundeffects" => sound.enabled = v != 0.0,
+        "enablemusic" => sound.music_enabled = v != 0.0,
+        "enableambience" => sound.ambience_enabled = v != 0.0,
+        "enableerrorspeech" => sound.error_speech = v != 0.0,
+        "sound_enablesoundwhengameisinbg" => sound.background_sound = v != 0.0,
+        "soundreverb" => sound.reverb = v != 0.0,
+        "soundoutputlimiter" => sound.limiter = v != 0.0,
+        "soundlisteneratcharacter" => sound.listener_at_character = v != 0.0,
+        "emotesounds" => sound.emote_sounds = v != 0.0,
+        "soundzonemusicnodelay" => sound.zone_music_no_delay = v != 0.0,
+        _ => {}
+    }
+}
+
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         // Who gets sound: a run a human launched, and only that. The default posture is audible
         // (decision 1026 — `SoundConfig::muted` starts false), so the silence has to be opt-in by
         // the *automated* callers, both of which are unattended by construction:

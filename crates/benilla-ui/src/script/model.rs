@@ -789,6 +789,9 @@ pub(crate) struct Model {
     /// `(registered name, new value)` per Lua `SetCVar` since the app's last
     /// [`super::UiScript::take_cvar_changes`] drain — the knob-sync + config-dirty cue.
     pub(crate) cvar_changes: Vec<(String, String)>,
+    /// `(name, default)` per addon `RegisterCVar` that created a slot, since the host's last
+    /// [`super::UiScript::take_cvar_registrations`] drain (decision 2303).
+    pub(crate) cvar_registrations: Vec<(String, String)>,
     /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
     pub(crate) cvars_warned: HashSet<String>,
 
@@ -2020,6 +2023,7 @@ impl Model {
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
+            cvar_registrations: Vec::new(),
             cvars_warned: HashSet::new(),
             multisample_formats: Vec::new(),
             screen_resolutions: Vec::new(),

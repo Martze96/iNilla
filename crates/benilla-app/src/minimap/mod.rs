@@ -238,6 +238,23 @@ pub(crate) struct MinimapZoom {
     pub(crate) inside: u8,
 }
 
+/// The two zoom indices' change callback (1131, 2303): each index lands on its own field,
+/// clamped exactly like the client's `set_zoom` (`0x6daa10`: clamp at 5) — the widget clamps
+/// again on the way in, so a hand-edited level lands in range whichever path it takes.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut zoom: ResMut<MinimapZoom>) {
+    match ev.key().as_str() {
+        "minimapzoom" => zoom.outdoor = zoom_index(ev.num()),
+        "minimapinsidezoom" => zoom.inside = zoom_index(ev.num()),
+        _ => {}
+    }
+}
+
+/// A stored minimap zoom level → a valid index: truncate to int and clamp into
+/// `[0, MINIMAP_ZOOM_LEVELS)`, the client's own `set_zoom` clamp.
+fn zoom_index(v: f32) -> u8 {
+    v.clamp(0.0, f32::from(benilla_ui::widget::MINIMAP_ZOOM_LEVELS - 1)) as u8
+}
+
 impl Default for MinimapZoom {
     fn default() -> Self {
         Self {
@@ -1058,6 +1075,7 @@ pub(crate) struct MinimapPlugin;
 
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<MinimapWidget>()
             .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
@@ -1086,13 +1104,16 @@ impl Plugin for MinimapPlugin {
                     composite::drive_composite.after(UiQuadAppend),
                     // Before the script tick, so a zoom button pressed this frame routes to the
                     // indoor/outdoor index that matches where the player actually is.
-                    feed_minimap_inside.before(crate::ui_script::UiInput),
+                    feed_minimap_inside.in_set(crate::ui_script::UiFeed),
                     // Before the script tick, so an addon's OnUpdate steers off this frame's
                     // heading rather than last frame's.
-                    feed_minimap_player_facing.before(crate::ui_script::UiInput),
-                    // Before the emit that reads `MinimapAssets::mask`, so a mask set this frame
-                    // is the one this frame draws with.
-                    feed_minimap_mask.before(UiQuadAppend),
+                    feed_minimap_player_facing.in_set(crate::ui_script::UiFeed),
+                    // After the tick that can call `Minimap:SetMaskTexture`, before the emit that
+                    // reads `MinimapAssets::mask`: a mask set this frame is the one this frame
+                    // draws with.
+                    feed_minimap_mask
+                        .after(crate::ui_script::UiInput)
+                        .before(UiQuadAppend),
                     // Before the script tick, and after the containment verdict it reads: the
                     // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
                     // same tick, on a ping the renderer already drew at the end of last frame.
@@ -1103,16 +1124,16 @@ impl Plugin for MinimapPlugin {
                     // Gated, the latch simply waits for the first frame with an interface.
                     ping::drive_minimap_ping
                         .after(feed_minimap_inside)
-                        .before(crate::ui_script::UiInput)
+                        .in_set(crate::ui_script::UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
                     // Before the script tick, so GameTimeFrame's OnUpdate reads this frame's
                     // minute, not last frame's.
-                    feed_game_time.before(crate::ui_script::UiInput),
+                    feed_game_time.in_set(crate::ui_script::UiFeed),
                     // After the world-mouseover drive (UnitFeed): a same-frame world-hover→blip
                     // transition must end with the blip tooltip shown, not the fade.
                     blips::drive_blip_tooltip
                         .after(crate::ui_unit::UnitFeed)
-                        .before(crate::ui_script::UiInput),
+                        .in_set(crate::ui_script::UiFeed),
                 ),
             );
     }

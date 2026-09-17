@@ -21,13 +21,13 @@ use benilla_ui::script::UiScript;
 use benilla_assets::LockRecover;
 
 use crate::net::PingShared;
-use crate::ui_script::UiInput;
+use crate::ui_script::UiFeed;
 
 pub(crate) struct UiNetPlugin;
 
 impl Plugin for UiNetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, feed_net_stats.before(UiInput));
+        app.add_systems(Update, feed_net_stats.in_set(UiFeed));
     }
 }
 

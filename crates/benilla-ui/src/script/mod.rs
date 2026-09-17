@@ -201,7 +201,7 @@ pub use cursor::{
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{
-    MultisampleFormat, ScreenResolution, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
+    MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
     CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS, CVAR_WORLD_DETAIL, VIDEO_DEFAULT_CVARS,
     WORLD_DETAIL_STOPS,
 };

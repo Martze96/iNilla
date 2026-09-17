@@ -49,7 +49,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// `SPELL_EFFECT_DUEL` — the `Effect[0]` value that identifies the duel spell in the player's own
 /// spellbook (7266 "Duel" on 1.12 data, granted to every race/class at creation). The reference
@@ -468,7 +468,7 @@ impl Plugin for UiDuelPlugin {
                 // the VM — so the tick has to run first or every "Duel starting: N" lands a
                 // frame late.
                 tick_countdown.before(feed_duel),
-                feed_duel.before(UiInput),
+                feed_duel.in_set(UiFeed),
                 drain_duel.after(UiInput),
             ),
         );

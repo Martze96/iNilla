@@ -221,9 +221,10 @@ impl Plugin for BindingsPlugin {
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
-                        .before(benilla_world::schedule::WorldStage::Input)
                         .in_set(InWorldGated),
-                    drain_binding_requests,
+                    // After the tick: the requests are Lua's own (`SaveBindings`, `RunBinding`),
+                    // queued by handlers the tick dispatched, and a save must not wait a frame.
+                    drain_binding_requests.after(crate::ui_script::UiInput),
                 ),
             );
     }

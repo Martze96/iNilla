@@ -25,7 +25,6 @@ use crate::target::{
     go_is_nearest, ring_reaction, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_script::UiInput;
 use crate::ui_unit::{enrich_unit, snapshot, UnitFeed};
 
 pub struct UiTooltipPlugin;
@@ -35,8 +34,8 @@ impl Plugin for UiTooltipPlugin {
         app.add_systems(
             Update,
             (
-                drive_mouseover_tooltip.in_set(UnitFeed).before(UiInput),
-                feed_spell_tooltips.in_set(UnitFeed).before(UiInput),
+                drive_mouseover_tooltip.in_set(UnitFeed),
+                feed_spell_tooltips.in_set(UnitFeed),
             ),
         );
     }

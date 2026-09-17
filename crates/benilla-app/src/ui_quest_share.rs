@@ -48,7 +48,7 @@ use bevy::prelude::*;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// How many frames a queued line waits for its `%s` before it is dropped — [`crate::ui_loot`]'s
 /// `RECEIVE_MAX_TRIES`, and the same reasoning: a name query is one round trip, so any real answer
@@ -144,7 +144,7 @@ impl Plugin for QuestSharePlugin {
         app.init_resource::<QuestShare>().add_systems(
             Update,
             (
-                feed_quest_share.before(UiInput),
+                feed_quest_share.in_set(UiFeed),
                 drain_quest_share.after(UiInput),
             ),
         );

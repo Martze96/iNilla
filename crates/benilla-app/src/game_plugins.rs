@@ -231,6 +231,9 @@ impl PluginGroup for GamePlugins {
             // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
             // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
             .add(crate::cvars::CvarPlugin)
+            // The console command registry (decision 2303): the reference's `ConsoleCommand` table,
+            // its four CVar commands and `help`; subsystems register their own from their plugins.
+            .add(crate::console::ConsolePlugin)
             // The key-binding engine (decision 0997): the chord→command dispatch every rebindable input
             // runs through, its persistence, and the Key Bindings window's capture seam.
             .add(crate::bindings::BindingsPlugin)
@@ -519,6 +522,10 @@ pub(crate) mod schedule_tests {
         pub dependencies: Vec<(SystemKey, SystemKey)>,
         /// The systems that must run on the main thread (the VM's, the audio layer's).
         pub non_send: Vec<SystemKey>,
+        /// The systems whose declared access includes the Lua VM — read off each system's
+        /// own access set, not off the conflicts it happens to have (a holder whose every VM
+        /// pair is declared would not show there).
+        pub holds_vm: HashSet<SystemKey>,
     }
 
     impl Census {
@@ -544,6 +551,13 @@ pub(crate) mod schedule_tests {
                 ambiguity_detection: LogLevel::Warn,
                 ..default()
             });
+            // The systems' access is filled by `initialize`, which the build below would run
+            // anyway (bevy drains one list of uninitialized systems, once). Done first, so pass
+            // 1 can read it while the graph still holds the systems.
+            schedule.graph_mut().systems.initialize(world);
+            let vm = world
+                .components()
+                .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
             // Pass 1, before the build: the graph still holds the systems.
             let graph = schedule.graph();
             let set_conditions: HashMap<_, Vec<String>> = graph
@@ -560,7 +574,14 @@ pub(crate) mod schedule_tests {
                 })
                 .collect();
             let mut systems = HashMap::new();
+            let mut holds_vm = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
+                if let (Some(vm), Some(with_access)) = (vm, graph.systems.get(key)) {
+                    let access = with_access.access.combined_access();
+                    if access.has_resource_read(vm) || access.has_resource_write(vm) {
+                        holds_vm.insert(key);
+                    }
+                }
                 let mut sets = Vec::new();
                 let mut conditions: Vec<String> = conds
                     .iter()
@@ -665,6 +686,7 @@ pub(crate) mod schedule_tests {
                 classes,
                 dependencies,
                 non_send,
+                holds_vm,
             }
         })
     }
@@ -688,9 +710,11 @@ pub(crate) mod schedule_tests {
     ///
     /// - **A non-`Send` owner** — the Lua VM, the audio layer's handles. Their systems run on
     ///   the main thread one at a time under any executor, so no order among them is a race.
-    ///   *Which feed fires its Lua events first* is a real question — 2265 §A3(a)'s, answered
-    ///   once for the `UiFeed` set, not per pair. Derived, not listed: every registration that
-    ///   is not `Send + Sync`.
+    ///   *Which feed fires its Lua events first* is a real question, answered by the `UiFeed`
+    ///   phase (decision 2304): every push after the drain and before the tick, and among the
+    ///   pushes an order declared where it matters (the chat cascade, the cooldown events),
+    ///   registration order otherwise. Derived, not listed: every registration that is not
+    ///   `Send + Sync`.
     /// - **A pure cache** — a read is a write because a miss records itself: the ask-once
     ///   caches mark the key pending and send one query (`NameCache`, the GameObject
     ///   templates, the page texts), the load-once caches build the entry (`WorldAssets`,
@@ -704,6 +728,13 @@ pub(crate) mod schedule_tests {
     ///   writers commute, and a drain's order against a writer is one frame of latency, never
     ///   a loss. (2283's ten pairs were all this shape: a new verb drain against its siblings
     ///   over the chat and error sinks.)
+    /// - **An exclusive edge** — a pair bevy reports with NO component list: one side is a
+    ///   build-inserted `ApplyDeferred` sync point or an exclusive system, which conflicts on
+    ///   `World` itself. Its order against a system it shares nothing with is immaterial by
+    ///   construction (the build already placed the barrier after the commands it flushes and
+    ///   before their dependents), and there is nothing to declare it against. Until 2304 an
+    ///   empty list read as "VM only" vacuously, so that class rose and fell with the barrier
+    ///   count; now it is named.
     /// - **A random stream** — `SoundKits`, which every sound system holds to play a kit: a
     ///   decode cache, a per-kit last-variation memory and one xorshift stream. Any
     ///   interleaving of draws is a valid draw, and that is the reference's own contract for
@@ -798,6 +829,9 @@ pub(crate) mod schedule_tests {
 
         /// Which class explains this pair — `None` if it is actionable.
         pub fn class_of(&self, what: &[ComponentId]) -> Option<&'static str> {
+            if what.is_empty() {
+                return Some("exclusive");
+            }
             if !what.iter().all(|id| self.explains(*id)) {
                 return None;
             }
@@ -919,7 +953,7 @@ pub(crate) mod schedule_tests {
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_289;
+    const UPDATE_ACTIONABLE_CEILING: usize = 2_975;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1122,7 +1156,7 @@ pub(crate) mod schedule_tests {
             .non_send
             .iter()
             .copied()
-            .filter(|k| holds(*k, &|id| Some(id) == c.classes.vm))
+            .filter(|k| c.holds_vm.contains(k))
             .collect();
         let audio: Vec<SystemKey> = c
             .non_send
@@ -1178,6 +1212,137 @@ pub(crate) mod schedule_tests {
         eprintln!("  VM + audio Send-owned: {w2} waves");
         let (w3, _) = waves(&c, |_| false, &[]);
         eprintln!("  declared edges only:   {w3} waves (every conflict ordered, everything Send)");
+    }
+
+    /// Why a system that holds the VM in `Update` and is ordered before the tick may stay OUT
+    /// of [`crate::ui_script::UiFeed`] — keyed by a suffix of the system's full name, with the
+    /// reason. Read beside [`every_vm_holder_in_update_declares_its_side_of_the_tick`].
+    /// Empty at 2304: every holder ordered before the tick joined the phase (`ui_session::
+    /// feed_interact_npc`, seated inside `WorldStage::Net` for decision 2022's reason, looked
+    /// like the one exception and is not — it writes a resource the unit feed reads, and
+    /// never holds the VM).
+    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
+
+    /// **Every system that holds the VM in `Update` declares its side of the tick** (decision
+    /// 2304). The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick
+    /// must see rides `UiFeed`, which the plugin chains after the net drain and before the
+    /// tick; a drain of what the tick produced is `.after(UiInput)`. Read off the built graph,
+    /// so a membership through a parent set and an order through a chain both count. Three
+    /// things fail here: a holder with no declared path to or from the tick; one ordered
+    /// before the tick without riding the feed phase — so it may run before this frame's
+    /// packets land, the class 2265 §A3 counted as "ordered only against `UiInput`" — unless
+    /// it is argued in [`OUTSIDE_THE_FEED_PHASE`]; and a feed-phase member the graph does not
+    /// actually place after the drain and before the tick, the set's contract checked rather
+    /// than trusted. A row arguing a system the graph places elsewhere fails too.
+    #[test]
+    fn every_vm_holder_in_update_declares_its_side_of_the_tick() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let tick = one("::extract::tick_script");
+        let drain = one("::net::apply::apply_net_updates");
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        let mut pred: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+            pred.entry(*b).or_default().push(*a);
+        }
+        let reach = |start: SystemKey, edges: &HashMap<SystemKey, Vec<SystemKey>>| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![start];
+            while let Some(n) = stack.pop() {
+                for m in edges.get(&n).into_iter().flatten() {
+                    if seen.insert(*m) {
+                        stack.push(*m);
+                    }
+                }
+            }
+            seen
+        };
+        let before_tick = reach(tick, &pred);
+        let after_tick = reach(tick, &succ);
+        let after_drain = reach(drain, &succ);
+        let mut holders: Vec<SystemKey> = c.holds_vm.iter().copied().collect();
+        holders.sort_by(|a, b| c.name(*a).cmp(c.name(*b)));
+        let (mut feed, mut post, mut argued) = (0, 0, 0);
+        let mut offenders = Vec::new();
+        let mut stale = Vec::new();
+        for k in &holders {
+            if *k == tick {
+                continue;
+            }
+            let s = &c.systems[k];
+            let in_feed = s.sets.iter().any(|set| set == "UiFeed");
+            let row = OUTSIDE_THE_FEED_PHASE
+                .iter()
+                .find(|(suffix, _)| s.name.ends_with(suffix));
+            if in_feed {
+                feed += 1;
+                if !(after_drain.contains(k) && before_tick.contains(k)) {
+                    offenders.push(format!(
+                        "{}: in `UiFeed`, but the graph does not place it after the net drain and before the tick",
+                        s.name
+                    ));
+                }
+            } else if after_tick.contains(k) {
+                post += 1;
+            } else if before_tick.contains(k) {
+                if row.is_some() {
+                    argued += 1;
+                    continue;
+                }
+                offenders.push(format!(
+                    "{}: ordered before the tick but not in `UiFeed` — it may run before this frame's packets land; `.in_set(UiFeed)`",
+                    s.name
+                ));
+            } else {
+                offenders.push(format!(
+                    "{}: no declared side of the tick — `.in_set(UiFeed)` for a push the tick must see this frame, `.after(UiInput)` for a drain of what the tick produced",
+                    s.name
+                ));
+            }
+            if row.is_some() {
+                stale.push(format!(
+                    "{}: argued in OUTSIDE_THE_FEED_PHASE but the graph places it {} — drop the row",
+                    s.name,
+                    if in_feed {
+                        "in the feed phase"
+                    } else {
+                        "after the tick"
+                    }
+                ));
+            }
+        }
+        for (suffix, _) in OUTSIDE_THE_FEED_PHASE {
+            if !holders.iter().any(|k| c.name(*k).ends_with(suffix)) {
+                stale.push(format!(
+                    "`…{suffix}` is not a VM holder in Update — drop its row"
+                ));
+            }
+        }
+        eprintln!(
+            "VM holders in Update: {} — the tick, {feed} in the feed phase, {post} after the tick, {argued} argued outside the phase",
+            holders.len()
+        );
+        assert!(
+            offenders.is_empty(),
+            "these systems hold the VM in `Update` without declaring their side of the tick \
+             (decision 2304):\n  {}",
+            offenders.join("\n  ")
+        );
+        assert!(stale.is_empty(), "stale rows:\n  {}", stale.join("\n  "));
     }
 
     /// The consumer markers 2220's census used: a system that holds the VM and does one of

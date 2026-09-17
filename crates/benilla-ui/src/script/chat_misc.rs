@@ -138,9 +138,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ConsoleExec("name value") — the console line `/console` hands over. A registered CVar is
-    // written the way `SetCVar` writes it (same store, same change queue, no CVAR_UPDATE token);
-    // anything else is a console command the app owns.
+    // ConsoleExec("name value") — the console line `/console` hands over. A registered CVar
+    // WITH a value is written the way `SetCVar` writes it (same store, same change queue, no
+    // CVAR_UPDATE token), synchronously, so a script reading it back on the next line sees the
+    // write. Everything else — a command name, or a bare CVar name, which the reference's
+    // per-CVar console command answers with `CVar "%s" is "%s"` (`0x63dde0`) — is a line for
+    // the host's command registry (decision 2303).
     g.set(
         "ConsoleExec",
         lua.create_function(|lua, line: Option<String>| {
@@ -152,10 +155,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .map_or((line.as_str(), ""), |(n, v)| (n, v.trim()));
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let is_cvar = model.cvars.contains_key(&name.to_ascii_lowercase());
-            if is_cvar {
-                if !value.is_empty() {
-                    super::cvars::write_cvar(&mut model, name, value.to_string(), None);
-                }
+            if is_cvar && !value.is_empty() {
+                super::cvars::write_cvar(&mut model, name, value.to_string(), None);
             } else {
                 model.console_lines.push(line.clone());
             }
@@ -251,7 +252,12 @@ mod tests {
             "0.8",
             "the CVar store is the same one SetCVar writes, matched case-insensitively"
         );
-        assert_eq!(s.take_console_lines(), vec!["reloadui".to_string()]);
+        // A bare CVar name is the host's to answer (2303: the reference prints its value from
+        // the per-CVar console command), so it rides the command lane like `reloadui`.
+        assert_eq!(
+            s.take_console_lines(),
+            vec!["reloadui".to_string(), "uiScale".to_string()]
+        );
         assert_eq!(
             s.take_cvar_changes(),
             vec![("uiScale".to_string(), "0.8".to_string())],

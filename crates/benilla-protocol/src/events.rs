@@ -146,7 +146,14 @@ impl LoginRefusal {
 
 /// One decoded event from the world stream. Carries only primitives + the coarse [`EntityKind`]
 /// classification — no wire types leak to the app, and no running state lives here.
-#[derive(Debug, Clone)]
+///
+/// [`SessionEventKind`] is its fieldless twin (one variant per variant, derived): the key the
+/// app's packet-handler table dispatches on, as the reference's table is keyed by opcode.
+#[derive(Debug, Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(SessionEventKind),
+    derive(Hash, PartialOrd, Ord, strum::EnumIter, strum::IntoStaticStr)
+)]
 pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
@@ -1607,6 +1614,13 @@ pub enum SessionEvent {
         scope: Option<(u32, u32)>,
         states: Vec<(u32, u32)>,
     },
+}
+
+impl SessionEventKind {
+    /// Every kind, in declaration order — for a census that asks "who handles each?".
+    pub fn all() -> impl Iterator<Item = Self> {
+        <Self as strum::IntoEnumIterator>::iter()
+    }
 }
 
 /// The result of polling the reader for the next packet's events.

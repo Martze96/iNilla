@@ -1174,16 +1174,15 @@ impl Plugin for UiItemsPlugin {
                     // pie waits for the NEXT store change).
                     feed_containers
                         .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents)
-                        .before(UiInput),
+                        .before(crate::ui_action::CooldownEvents),
                     // The shared item-tooltip store: answer stat asks before the input pass so a
                     // re-hover the very next frame already sees them.
-                    feed_item_stats.in_set(UnitFeed).before(UiInput),
-                    feed_item_sets.in_set(UnitFeed).before(UiInput),
+                    feed_item_stats.in_set(UnitFeed),
+                    feed_item_sets.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM (1547) — before the input pass, so
                     // the first hover of the session already resolves a drop's suffix lines.
-                    feed_random_properties.in_set(UnitFeed).before(UiInput),
-                    feed_player_req.in_set(UnitFeed).before(UiInput),
+                    feed_random_properties.in_set(UnitFeed),
+                    feed_player_req.in_set(UnitFeed),
                     // After the input pass, so a click's UseContainerItem goes out the same frame.
                     drain_container_uses.after(UiInput),
                     // The left-click pick/place/split drain — a queued move → CMSG_SWAP_INV_ITEM /

@@ -337,8 +337,16 @@ impl Plugin for UiLayoutPlugin {
         // which is the reference's own single write site and the only one a `/reload` reaches.
         app.init_resource::<LayoutFile>().add_systems(
             Update,
-            (load_layout, watch_layout, save_layout)
-                .chain()
+            (
+                // The restore is a push the tick should see the frame it lands: the feed phase.
+                load_layout.in_set(crate::ui_script::UiFeed),
+                // The watcher and the save read what the drag pump — Lua's, in the tick — did:
+                // after it. Load precedes watch through the phases, as the old chain had it,
+                // so the watcher never reads the restore's own move.
+                (watch_layout, save_layout)
+                    .chain()
+                    .after(crate::ui_script::UiInput),
+            )
                 .in_set(crate::char_select::InWorldGated),
         );
     }

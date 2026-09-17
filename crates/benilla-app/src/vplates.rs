@@ -372,7 +372,7 @@ fn feed_plate_globals(
 fn toggle_vplates(
     binds: Res<crate::bindings::BindingsState>,
     mut mode: ResMut<VPlateMode>,
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
 ) {
     use crate::bindings::cmd;
     let (was_enemies, was_friends) = (mode.enemies, mode.friends);
@@ -396,14 +396,12 @@ fn toggle_vplates(
         mode.friends = !both;
         info!("nameplates: all {}", if !both { "ON" } else { "OFF" });
     }
-    if let Some(mut script) = script {
-        let flag = |b: bool| if b { "1" } else { "0" };
-        if mode.enemies != was_enemies {
-            script.set_cvar_engine(CVAR_ENEMIES, flag(mode.enemies));
-        }
-        if mode.friends != was_friends {
-            script.set_cvar_engine(CVAR_FRIENDS, flag(mode.friends));
-        }
+    let flag = |b: bool| if b { "1" } else { "0" };
+    if mode.enemies != was_enemies {
+        cvars.set(CVAR_ENEMIES, flag(mode.enemies));
+    }
+    if mode.friends != was_friends {
+        cvars.set(CVAR_FRIENDS, flag(mode.friends));
     }
 }
 
@@ -884,8 +882,20 @@ pub(crate) struct VPlateSet;
 /// V-key nameplates: the toggles + the per-frame gate/draw.
 pub(crate) struct VPlatesPlugin;
 
+/// The two V-plate toggles' change callback (decision 2303) — the bitmask's two bits, flags
+/// like every other checkbox. Lowercased here like every arm; the consts carry the registered
+/// spelling.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut mode: ResMut<VPlateMode>) {
+    if ev.is(CVAR_ENEMIES) {
+        mode.enemies = ev.flag();
+    } else if ev.is(CVAR_FRIENDS) {
+        mode.friends = ev.flag();
+    }
+}
+
 impl Plugin for VPlatesPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<VPlateMode>()
             .init_resource::<VPlates>()
             .init_resource::<PlateHover>()
@@ -918,7 +928,7 @@ impl Plugin for VPlatesPlugin {
             // system would rewire all of that. A V press can therefore reach the globals a frame late,
             // which costs nothing: their only readers are `UpdateNameplates` at the two world-entry
             // events and an addon that calls it, never a per-frame path.
-            .add_systems(Update, feed_plate_globals.before(crate::ui_script::UiInput));
+            .add_systems(Update, feed_plate_globals.in_set(crate::ui_script::UiFeed));
     }
 }
 
@@ -1005,34 +1015,40 @@ mod tests {
     #[test]
     fn the_v_key_mirrors_into_the_cvar_table() {
         use crate::bindings::{cmd, BindingsState};
+        use crate::cvars::Cvars;
         let mut app = App::new();
-        let script = benilla_ui::script::UiScript::new().unwrap();
-        script.register_cvars([(CVAR_ENEMIES, "0"), (CVAR_FRIENDS, "0")]);
         app.add_systems(Update, toggle_vplates)
             .init_resource::<VPlateMode>()
-            .insert_non_send_resource(script)
+            .init_resource::<Cvars>()
             .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
         app.update();
         assert!(app.world().resource::<VPlateMode>().enemies, "V turns on");
-        let mut script = app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let moved = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Cvars>()
+                .take_events()
+                .into_iter()
+                .map(|e| (e.name, e.new))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            script.take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_ENEMIES.to_string(), "1".to_string())],
-            "the change queues, so the host dirties the config file"
+            "the write is an accepted move, so the config dirties and the mirror learns it"
         );
-        assert_eq!(script.cvar(CVAR_FRIENDS).as_deref(), Some("0"), "untouched");
+        assert_eq!(
+            app.world().resource::<Cvars>().get(CVAR_FRIENDS),
+            Some("0"),
+            "untouched"
+        );
 
-        // And back: the same key mirrors the OFF as an engine write too.
+        // And back: the same key mirrors the OFF as a host write too.
         app.world_mut()
             .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
         app.update();
         assert!(!app.world().resource::<VPlateMode>().enemies, "V turns off");
         assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_ENEMIES.to_string(), "0".to_string())]
         );
 
@@ -1042,20 +1058,14 @@ mod tests {
         app.update();
         assert!(app.world().resource::<VPlateMode>().friends);
         assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_FRIENDS.to_string(), "1".to_string())]
         );
 
         // A frame with nothing fired writes nothing at all.
         app.world_mut().insert_resource(BindingsState::default());
         app.update();
-        assert!(app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .take_cvar_changes()
-            .is_empty());
+        assert!(moved(&mut app).is_empty());
     }
 
     /// **The FrameXML mirror is owed to every VM** (decision 2132) — the mode's two bits reach

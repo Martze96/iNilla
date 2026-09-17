@@ -812,8 +812,18 @@ pub(crate) struct BubbleSet;
 
 pub(crate) struct ChatBubblePlugin;
 
+/// The two bubble switches' change callback (1139, 2303): flags, like every other pair.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<BubbleConfig>) {
+    match ev.key().as_str() {
+        "chatbubbles" => bubbles.all = ev.flag(),
+        "chatbubblesparty" => bubbles.party = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for ChatBubblePlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<BubbleQueue>()
             .init_resource::<BubbleConfig>()
             .init_resource::<Bubbles>()

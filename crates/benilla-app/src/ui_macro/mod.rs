@@ -71,19 +71,24 @@ impl Plugin for UiMacroPlugin {
                     // old answer to the ordering half alone — after `AssetSet::Open` this ran
                     // before the VM existed and silently pushed no icon list at all — and a
                     // session-keyed claim answers both halves at once.
-                    load_icon_catalog,
+                    load_icon_catalog.in_set(crate::ui_script::UiFeed),
                     // Before the action feeds read it (they run in `UnitFeed`), so a macro edited
                     // this frame reports its new spell's cooldown the same frame.
-                    rebind_macro_spells.before(crate::ui_unit::UnitFeed),
+                    rebind_macro_spells
+                        .in_set(crate::ui_script::UiFeed)
+                        .before(crate::ui_unit::UnitFeed),
                     // Load runs in-world only: the per-character file needs the character, and the
                     // roster only names it once a login is live. It self-gates on the identity, so
                     // a re-entry with a different character reloads and a re-entry with the same
                     // one is a no-op.
-                    load_macros.in_set(InWorldGated),
+                    load_macros
+                        .in_set(crate::ui_script::UiFeed)
+                        .in_set(InWorldGated),
                     // The save edge is checked every frame, in or out of world: the macro window is
                     // `whileDead = 1` and reachable from the game menu, and a `/logout` must not
-                    // strand an unsaved edit.
-                    save_dirty_macros.after(load_macros),
+                    // strand an unsaved edit. After the tick that dirtied it — which also puts it
+                    // after the load, in the feed phase.
+                    save_dirty_macros.after(crate::ui_script::UiInput),
                 ),
             );
     }

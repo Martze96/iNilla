@@ -27,11 +27,13 @@ use crossbeam_channel::{Receiver, Sender};
 use benilla_world::schedule::WorldStage;
 
 mod apply;
+pub(crate) mod handlers;
 pub(crate) mod io;
 mod motion;
 
 pub(crate) use apply::apply_net_updates;
 use apply::tag_self_player;
+pub(crate) use handlers::NetHandlerApp;
 
 // The per-frame motion model lives in [`motion`]: `RemoteMotion`/`Spline` are re-exported for the
 // crate (the animation selector reads them); the integration systems + pose helpers stay `pub(super)`

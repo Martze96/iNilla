@@ -42,7 +42,7 @@
 use benilla_protocol::messages::{friend_result, friend_status, FriendEntry, FriendStatusUpdate};
 use bevy::prelude::*;
 
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 mod feed;
 mod query;
@@ -322,7 +322,7 @@ impl Plugin for UiSocialPlugin {
         app.init_resource::<SocialState>().add_systems(
             Update,
             (
-                feed::feed_social.before(UiInput),
+                feed::feed_social.in_set(UiFeed),
                 feed::drain_social.after(UiInput),
             ),
         );

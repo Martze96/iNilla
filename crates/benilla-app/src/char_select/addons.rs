@@ -516,13 +516,13 @@ fn status_label<'a>(strings: &'a GlueStrings, token: &'a str) -> &'a str {
 }
 
 /// Flip the *Load out of date AddOns* box: the `checkAddonVersion` CVar **inverted** (1292 §2,
-/// byte-verified — ticked = `"0"`). Written through [`UiScript::set_cvar_engine`] so it rides the
-/// change queue like a Lua `SetCVar` and the host's sync persists it (the minimap-zoom pattern) —
-/// nothing else to do: the statuses repaint from [`drive_addons_panel`]'s per-frame mirror, no
-/// rescan, because the gate re-reads the flag per query (1292 §2.2).
-fn toggle_force_load(script: &mut UiScript) {
-    let checking = script.cvar("checkAddonVersion").is_none_or(|v| v != "0");
-    script.set_cvar_engine("checkAddonVersion", if checking { "0" } else { "1" });
+/// byte-verified — ticked = `"0"`). A host write into the registry (2303), which is what
+/// persists it and what the VM's mirror learns — nothing else to do: the statuses repaint from
+/// [`drive_addons_panel`]'s per-frame mirror, no rescan, because the gate re-reads the flag per
+/// query (1292 §2.2).
+fn toggle_force_load(cvars: &mut crate::cvars::Cvars) {
+    let checking = cvars.addon_version_check();
+    cvars.set("checkAddonVersion", if checking { "0" } else { "1" });
 }
 
 /// The panel's clickable parts.
@@ -578,7 +578,8 @@ pub(super) fn drive_addons_panel(
     art: Res<GlueArt>,
     assets: Res<AssetServer>,
     strings: Option<Res<GlueStrings>>,
-    mut script: Option<NonSendMut<UiScript>>,
+    script: Option<NonSendMut<UiScript>>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
@@ -641,9 +642,7 @@ pub(super) fn drive_addons_panel(
             AddonsAction::ForceLoad => {
                 // No VM (a bare test world / a capture): nothing to write to and nothing the
                 // walk would read differently — the box is inert, honestly.
-                if let Some(script) = script.as_deref_mut() {
-                    toggle_force_load(script);
-                }
+                toggle_force_load(&mut cvars);
             }
         }
     }
@@ -2007,28 +2006,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// The force-load box IS the `checkAddonVersion` CVar inverted, and a toggle goes through
-    /// the engine write ([`UiScript::set_cvar_engine`]) so it rides the change queue — that is
-    /// the whole persistence story (the host's sync drains the queue and dirties the config);
-    /// the panel itself only repaints from its per-frame mirror, rescanning nothing (1292 §2.2).
+    /// The force-load box IS the `checkAddonVersion` CVar inverted, and a toggle is a host
+    /// write into the registry (2303) — that is the whole persistence story (the write dirties
+    /// the config and reaches the VM's mirror through the outbox); the panel itself only
+    /// repaints from its per-frame mirror, rescanning nothing (1292 §2.2).
     #[test]
-    fn the_force_load_box_flips_the_cvar_through_the_engine_queue() {
-        let mut script = UiScript::new().unwrap();
-        script.register_cvars([("checkAddonVersion", "1")]);
+    fn the_force_load_box_flips_the_cvar_in_the_registry() {
+        let mut cvars = crate::cvars::Cvars::default();
+        assert!(
+            cvars.addon_version_check(),
+            "the registrar default: check ON"
+        );
 
-        toggle_force_load(&mut script);
+        toggle_force_load(&mut cvars);
         assert_eq!(
-            script.take_cvar_changes(),
-            vec![("checkAddonVersion".to_string(), "0".to_string())],
+            cvars.get("checkAddonVersion"),
+            Some("0"),
             "tick: check ON (\"1\") flips to \"0\" — box ticked = version gate open"
         );
-        assert_eq!(script.cvar("checkAddonVersion").as_deref(), Some("0"));
-
-        toggle_force_load(&mut script);
+        assert!(!cvars.addon_version_check());
         assert_eq!(
-            script.take_cvar_changes(),
-            vec![("checkAddonVersion".to_string(), "1".to_string())],
-            "untick: back to the registrar default, and the queue carries it again"
+            cvars.take_events().len(),
+            1,
+            "a host write is an accepted move — the config dirties and the mirror learns it"
+        );
+
+        toggle_force_load(&mut cvars);
+        assert_eq!(
+            cvars.get("checkAddonVersion"),
+            Some("1"),
+            "untick: back to the registrar default"
         );
     }
 

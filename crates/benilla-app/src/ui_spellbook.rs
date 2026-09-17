@@ -103,8 +103,7 @@ impl Plugin for UiSpellbookPlugin {
                     // book buttons re-read them (that set's own doc).
                     feed_spellbook
                         .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents)
-                        .before(UiInput),
+                        .before(crate::ui_action::CooldownEvents),
                     drain_spell_casts.after(UiInput),
                 ),
             );

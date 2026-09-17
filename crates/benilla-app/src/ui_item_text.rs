@@ -38,7 +38,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::QueryCache;
 use crate::ui_mail::MailOpen;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// One page of a book as the wire gave it (`SMSG_PAGE_TEXT_QUERY_RESPONSE`).
 pub(crate) struct PageText {
@@ -190,7 +190,7 @@ impl Plugin for UiItemTextPlugin {
                 (
                     // Feed before the input pass so an open paints the same frame; drain after it so
                     // a Close click clears the same frame (the ui_mail ordering).
-                    feed_item_text.before(UiInput),
+                    feed_item_text.in_set(UiFeed),
                     drain_item_text.after(UiInput),
                 ),
             );

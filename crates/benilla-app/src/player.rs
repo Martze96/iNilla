@@ -326,6 +326,8 @@ impl Plugin for PlayerPlugin {
             Update,
             world_focus::release_post_snap_hold.after(benilla_world::schedule::WorldStage::Stream),
         );
+        app.add_observer(camera::on_cvar);
+        app.add_observer(camera_dynamics::on_cvar);
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();

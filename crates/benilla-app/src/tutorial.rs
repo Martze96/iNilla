@@ -35,7 +35,7 @@ use benilla_ui::script::{ScriptValue, UiScript};
 use crate::char_select::ClientState;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::player::Player;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The popup cue `0x4b5390` plays on both legs (`0x846b68`), gated on `MasterSoundEffects` at
 /// the mixer like every SFX kit.
@@ -599,7 +599,7 @@ impl Plugin for TutorialPlugin {
                     // The gate costs nothing: the cascade still arms and still triggers, `fired`
                     // simply waits, and the first frame with an interface delivers the set.
                     feed_tutorials
-                        .before(UiInput)
+                        .in_set(UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
                     drain_tutorials.after(UiInput),
                 ),

@@ -155,13 +155,11 @@ impl Plugin for UiPetPlugin {
                 // edges against last frame's answer and the Pet tab never came up.
                 feed_pet_bar
                     .in_set(UnitFeed)
-                    .after(crate::ui_pet_stats::PetSnapshot)
-                    .before(UiInput),
+                    .after(crate::ui_pet_stats::PetSnapshot),
                 feed_pet_unit
                     .in_set(UnitFeed)
-                    .after(crate::ui_pet_stats::PetSnapshot)
-                    .before(UiInput),
-                feed_pet_menu.in_set(UnitFeed).before(UiInput),
+                    .after(crate::ui_pet_stats::PetSnapshot),
+                feed_pet_menu.in_set(UnitFeed),
                 drain_pet_actions.after(UiInput),
                 drain_pet_menu.after(UiInput),
             ),

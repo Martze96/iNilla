@@ -26,7 +26,7 @@ use benilla_ui::script::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStat
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_dialog_verbs::BattlefieldQueue;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::world_state_ui::WorldStateUiRes;
 
 /// `RequestBattlefieldScoreData`'s throttle — `0x4aa170`: `now + 0x1388`.
@@ -182,7 +182,7 @@ impl Plugin for BattlefieldScorePlugin {
                 // status-3 message, as in the client.
                 feed_battlefield_score
                     .before(crate::ui_dialog_verbs::feed_dialog_verbs)
-                    .before(UiInput),
+                    .in_set(UiFeed),
                 drain_battlefield_score.after(UiInput),
             ),
         );

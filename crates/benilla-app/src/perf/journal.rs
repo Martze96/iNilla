@@ -64,6 +64,15 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
                               gpu_other\n";
 
+/// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
+/// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
+/// and closes the second it is turned off.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut journal: ResMut<FpsJournalSetting>) {
+    if ev.is("fpsJournal") {
+        journal.0 = ev.flag();
+    }
+}
+
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         // bevy's per-pass render diagnostics — the source of the GPU columns, and (under the
@@ -72,6 +81,7 @@ impl Plugin for FpsJournalPlugin {
         // journal is exactly the build that has to carry it (2008).
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<FpsJournalSetting>()
+            .add_observer(on_cvar)
             .insert_resource(FpsJournal {
                 env_path: std::env::var("WOW_FPS_JOURNAL")
                     .ok()

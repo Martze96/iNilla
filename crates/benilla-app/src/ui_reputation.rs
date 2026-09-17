@@ -39,7 +39,7 @@ use benilla_ui::script::{FactionEntry, ReputationSend, ReputationState, UiScript
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::Factions;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The cumulative standing edges of the eight ranks: `RANK_BOUNDS[r]` is rank `r`'s absolute floor
 /// and `RANK_BOUNDS[r + 1]` its ceiling. The widths between them are vmangos's `PointsInRank`
@@ -57,7 +57,7 @@ impl Plugin for UiReputationPlugin {
         app.add_systems(
             Update,
             (
-                feed_reputation.before(UiInput),
+                feed_reputation.in_set(UiFeed),
                 drain_reputation_sends.after(UiInput),
             ),
         );

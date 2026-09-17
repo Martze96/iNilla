@@ -34,7 +34,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_items::KEYRING_CONTAINER;
 use crate::ui_party::{GroupState, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The coin-pile row icons (direct `Interface\Icons` paths — `SetTexture` takes them as-is, no DBC),
 /// **six of them, one per decade of copper**, all VERIFIED to extract from `interface.MPQ`.
@@ -470,7 +470,7 @@ impl LootState {
 /// `show_loot_spam` is 1.12's own `showLootSpam` — the *Detailed Loot Information* checkbox, whose
 /// subject is **group loot rolls**, not loot messages generally (decision 1589, the Chat page).
 /// It rides here rather than on [`crate::ui_loot_roll`] because it is one loot knob among the
-/// loot knobs and `cvars::KnobParams` fetches this resource already. VERIFIED at the bytes (wow-re
+/// loot knobs and [`on_cvar`] writes both. VERIFIED at the bytes (wow-re
 /// `system/object-layer/scratch/lootroll-chat-and-lifecycle.md` §4): the CVar is `0xb4e2bc`,
 /// registered at `0x48fd1c` with default `"1"` and flags 5, and a byte census over the whole
 /// binary finds exactly four references — one writer and three readers, all three inside the
@@ -618,8 +618,19 @@ pub(crate) struct LootMoveStart(pub(crate) bool);
 
 pub(crate) struct UiLootPlugin;
 
+/// The loot rows' change callback (decision 2303): two flags.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut loot: ResMut<LootConfig>) {
+    match ev.key().as_str() {
+        "autolootdefault" => loot.auto_loot = ev.flag(),
+        // The loot-roll detail switch (1589) — a flag over the roll-line composer's two shapes.
+        "showlootspam" => loot.show_loot_spam = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<LootState>()
             .init_resource::<LootConfig>()
             .init_resource::<LootLatch>()
@@ -630,7 +641,7 @@ impl Plugin for UiLootPlugin {
                 (
                     // Push before the input pass so an open/close is on screen the same frame; drain
                     // after it so a click's intent goes out the same frame (mirrors ui_merchant).
-                    feed_loot.before(UiInput),
+                    feed_loot.in_set(UiFeed),
                     drain_loot.after(UiInput),
                     // Predicate B, per frame, after the net drain that arms the latch. The anim
                     // driver then orders itself after THIS (`crate::creature_anim`), closing the

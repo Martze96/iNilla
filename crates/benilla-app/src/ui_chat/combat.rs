@@ -172,6 +172,17 @@ impl CombatLogRanges {
         self.death
     }
 
+    /// Whether `name` is one of the eight — asked before [`Self::set`] so an observer holding
+    /// the resource mutably does not flag a change it did not make.
+    pub(crate) fn is_range_cvar(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case(DEATH_LOG_RANGE_CVAR)
+            || (0..self.class.len()).any(|i| {
+                UnitClass::from_index(i)
+                    .range_cvar()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(name))
+            })
+    }
+
     /// Apply one `SetCVar` to the table — `true` if the name was one of the eight.
     ///
     /// The class names are walked through [`UnitClass::range_cvar`] so this module keeps exactly
@@ -192,6 +203,20 @@ impl CombatLogRanges {
             }
         }
         false
+    }
+}
+
+/// The combat log rows' change callback (decision 2303): the eight display ranges (yards, the
+/// CVar's float field) and the periodic-effects switch.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut ranges: ResMut<CombatLogRanges>,
+    mut periodic: ResMut<LogPeriodicSpells>,
+) {
+    if ev.is(LOG_PERIODIC_CVAR) {
+        periodic.0 = ev.flag();
+    } else if ranges.is_range_cvar(&ev.name) {
+        ranges.set(&ev.name, ev.num());
     }
 }
 

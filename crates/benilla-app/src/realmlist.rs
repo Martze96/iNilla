@@ -29,8 +29,21 @@ use bevy::prelude::*;
 /// before `cvars::load_config` applies the saved value at `Startup` — `lib.rs` orders it there.
 pub(crate) struct RealmlistPlugin;
 
+/// `realmList`'s change callback (1667, 2303): a string row — a value that is not an address
+/// is consumed with a warn, and the resource keeps its truth.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<Realmlist>) {
+    if !ev.is(CVAR_REALMLIST) {
+        return;
+    }
+    match normalize(&ev.new) {
+        Some(address) => realmlist.set(&address),
+        None => warn!("cvar realmList: unusable realmlist '{}' ignored", ev.new),
+    }
+}
+
 impl Plugin for RealmlistPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<Realmlist>();
     }
 }

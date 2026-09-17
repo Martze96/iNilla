@@ -152,7 +152,9 @@ impl ZoomLimit {
         self.max = CAM_DIST_BASE_MAX * f;
     }
 
-    /// The live factor — what the CVar table and the config file carry.
+    /// The live factor — the inverse of [`Self::set_factor`], kept for the weld test (the
+    /// registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn factor(&self) -> f32 {
         self.max / CAM_DIST_BASE_MAX
     }
@@ -172,6 +174,54 @@ const LOOK_SENSITIVITY: f32 = 0.003;
 /// 0.5 … 1.5, step 0.05). A multiplier over [`LOOK_SENSITIVITY`], so the registered default 1.0
 /// reproduces the shipped feel exactly.
 pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// The camera rows' change callback (decision 2303) — the look, zoom and follow knobs.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut look: ResMut<LookConfig>,
+    mut zoom: ResMut<ZoomLimit>,
+    mut follow: ResMut<FollowConfig>,
+) {
+    let v = ev.num();
+    match ev.key().as_str() {
+        "mouseinvertpitch" => look.invert_pitch = v != 0.0,
+        // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
+        "mousespeed" => {
+            look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
+        }
+        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
+        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
+        // value stands. That is a different posture from every clamping row, and it is the
+        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
+        "camerayawmovespeed" | "camerapitchmovespeed" => {
+            if !CAMERA_SPEED_RANGE.contains(&v) {
+                warn!(
+                    "cvar {}: value out of range ({} - {}) — ignored",
+                    ev.name,
+                    CAMERA_SPEED_RANGE.start(),
+                    CAMERA_SPEED_RANGE.end()
+                );
+                return;
+            }
+            if ev.is("cameraYawMoveSpeed") {
+                look.yaw_speed = v;
+            } else {
+                look.pitch_speed = v;
+            }
+        }
+        "cameradistancemaxfactor" => zoom.set_factor(v),
+        // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
+        // default rather than as a dead camera (`FollowStyle::from_cvar`).
+        "camerasmoothstyle" => follow.style = FollowStyle::from_cvar(v),
+        // Its sibling selector — the one the reference swaps in for the externally-driven states.
+        "camerasmoothtrackingstyle" => follow.tracking_style = FollowStyle::from_cvar(v),
+        // The auto-follow rate, clamped to 1.12's own AUTO_FOLLOW_SPEED slider range.
+        "camerayawsmoothspeed" => {
+            follow.yaw_speed = v.clamp(*FOLLOW_SPEED_RANGE.start(), *FOLLOW_SPEED_RANGE.end());
+        }
+        _ => {}
+    }
+}
 
 /// **The mouse-look rate law, and the one place benilla's units are not the reference's.**
 ///
@@ -330,7 +380,9 @@ impl FollowStyle {
         }
     }
 
-    /// The CVar string this style is — the value the table and `config.toml` carry.
+    /// The CVar string this style is — the inverse of [`Self::from_cvar`], kept for the
+    /// round-trip test (the registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn cvar(self) -> &'static str {
         match self {
             Self::Never => "0",

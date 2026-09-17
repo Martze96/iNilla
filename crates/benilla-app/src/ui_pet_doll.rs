@@ -1,7 +1,7 @@
 //! The app-side **pet paper-doll feed** (decision 1057) — `PetPaperDollFrame`'s data, the
 //! [`crate::ui_char`] pattern pointed at the pet.
 //!
-//! Two jobs, each frame, before the VM ticks ([`UiInput`]):
+//! Two jobs, each frame, in the feed phase before the VM ticks ([`crate::ui_script::UiFeed`]):
 //!
 //! - **The pet's [`UnitCombatStats`]**, built through [`crate::ui_char::unit_combat_stats`] — the
 //!   descriptor-only core, which is all a creature has. It is the *same* snapshot type and the
@@ -35,7 +35,6 @@ use benilla_ui::script::{UiScript, UnitCombatStats};
 use crate::portrait::PetDollBooth;
 use crate::ui_char::{fire_stat_transitions, unit_combat_stats};
 use crate::ui_pet::{PetBar, PetUnit};
-use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 pub(crate) struct UiPetDollPlugin;
@@ -44,7 +43,7 @@ impl Plugin for UiPetDollPlugin {
     fn build(&self, app: &mut App) {
         // Rides the unit feed beside the pet bar's and the stat block's, and before the VM ticks —
         // the whole page repaints out of the one pass that pushes the pet's health.
-        app.add_systems(Update, feed_pet_doll.in_set(UnitFeed).before(UiInput));
+        app.add_systems(Update, feed_pet_doll.in_set(UnitFeed));
     }
 }
 

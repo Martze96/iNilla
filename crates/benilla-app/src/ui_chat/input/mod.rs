@@ -15,7 +15,7 @@ use bevy::prelude::*;
 mod parse;
 #[cfg(test)]
 pub(super) use parse::lua_quoted_string;
-pub(super) use parse::{console_command, parse_line, ParsedChat};
+pub(super) use parse::{parse_line, ParsedChat};
 
 use crate::creature_anim::{move_flags, MovementState};
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
@@ -116,7 +116,10 @@ pub(super) struct ChatProbes<'w, 's> {
 ///   [`crate::target`]'s shared resolver so they commit through the same SetSelection path a click
 ///   does. Chat never writes [`Selection`] itself.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct ChatOut<'w> {
+pub(super) struct ChatOut<'w, 's> {
+    /// The console registry's lane: a `/console` line runs against the world at the next sync
+    /// point ([`crate::console::execute`]).
+    console: Commands<'w, 's>,
     stand: MessageWriter<'w, crate::player::StandStateRequest>,
     sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     target: MessageWriter<'w, crate::target::TargetByNameRequest>,
@@ -134,10 +137,6 @@ pub(super) struct ChatOut<'w> {
     /// since a resource reachable twice from one system is a `B0002` panic on the first live frame
     /// (1903). Nothing else in this system touches `UiErrorKeys`.
     ui_errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
-    /// `/console detailDoodadAlpha` — the ground-clutter cutout reference. Rides this bundle for
-    /// the same arity reason as `ui_errors` above, and like it, nothing else in this system
-    /// touches `ClutterConfig` (a resource reachable twice from one system is a `B0002` panic).
-    clutter: ResMut<'w, benilla_world::clutter::ClutterConfig>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -168,12 +167,11 @@ fn engine_verbs(
         out.push((String::new(), ParsedChat::Uninvite { name: Some(name) }));
     }
     for line in script.take_console_lines() {
-        // `ConsoleExec` already wrote the CVar lines to the store; what reaches here is a
-        // console COMMAND — a name the engine's own command table owns rather than
-        // `CVar::Register`'s, which is why `detailDoodadAlpha` lives here and not in the CVar
-        // store (wow-re: registrar `0x63f9e0`, so it never persists — 2012).
-        let parsed = console_command(&line);
-        out.push((line, parsed));
+        // `ConsoleExec` already wrote the valued CVar lines to the store; what reaches here is
+        // a console COMMAND — a name the engine's own command table owns rather than
+        // `CVar::Register`'s (`detailDoodadAlpha`: registrar `0x63f9e0`, so it never persists —
+        // 2012) — or a bare CVar name for the registry to print (2303).
+        out.push((line.clone(), ParsedChat::Console { line }));
     }
     for cmd in script.take_channel_commands() {
         out.push((String::new(), ParsedChat::Channel(cmd)));
@@ -946,46 +944,26 @@ pub(super) fn drain_chat_input(
             ParsedChat::Quit => {
                 script.queue_session_request(benilla_ui::script::SessionRequest::Quit)
             }
-            // `/reload` and `/console reloadUI` — the same deferred rebuild `ReloadUI()` queues
-            // (decision 1291), through the same session seam as the exit verbs above.
+            // `/reload` — the same deferred rebuild `ReloadUI()` queues (decision 1291), through
+            // the same session seam as the exit verbs above.
             ParsedChat::ReloadUi => {
                 script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi)
             }
-            // `/console detailDoodadAlpha [0..255]` — the reference's own console command
-            // (`0x6739a0`), and the dial that decides where ground clutter first appears: the
-            // detail-doodad draw alpha-tests `texel.a x distance_ramp` against it, so 128 (the
-            // default) hides everything past ~61 yd of the 70 yd fade horizon and a lower value
-            // walks that onset out toward the horizon. Non-persistent, exactly as the reference's
-            // command table is.
-            ParsedChat::DetailDoodadAlpha { value } => {
-                let text = match value {
-                    Some(v) => {
-                        chat_out.clutter.alpha_ref = f32::from(v) / 255.0;
-                        format!("detailDoodadAlpha set to {v}")
+            // A `/console` line for the command registry (decision 2303). Deferred to the world
+            // because a command's body is `fn(&mut World, &str)` — the reference's handlers run
+            // against the whole client too — and its lines land in the chat frame as system
+            // text, the seam `/console` output has always used.
+            ParsedChat::Console { line } => {
+                chat_out.console.queue(move |world: &mut World| {
+                    let lines = crate::console::execute(world, &line);
+                    let mut log = world.resource_mut::<super::feed::ChatLog>();
+                    for text in lines {
+                        log.push_event(super::event::ChatEvent::text_only(
+                            super::event::ChatEventKind::System,
+                            text,
+                        ));
                     }
-                    None => format!(
-                        "detailDoodadAlpha is {} (usage: /console detailDoodadAlpha 0-255)",
-                        (chat_out.clutter.alpha_ref * 255.0).round() as u32
-                    ),
-                };
-                chat_log.push_event(super::event::ChatEvent::text_only(
-                    super::event::ChatEventKind::System,
-                    text,
-                ));
-            }
-            ParsedChat::ConsoleUnknown { cmd } => {
-                const IMPLEMENTED: &str = "reloadUI, detailDoodadAlpha, and `<cvar> <value>`";
-                let text = if cmd.is_empty() {
-                    format!("console: no command given (this client implements: {IMPLEMENTED})")
-                } else {
-                    format!(
-                        "console: '{cmd}' is not implemented (this client implements: {IMPLEMENTED})"
-                    )
-                };
-                chat_log.push_event(super::event::ChatEvent::text_only(
-                    super::event::ChatEventKind::System,
-                    text,
-                ));
+                });
             }
             // The reference's own handler body, run in the VM (the 0668 posture) — `/trade`,
             // `/inspect`, the loot-method trio, and `/script`'s raw chunk.
@@ -1571,8 +1549,8 @@ fn is_dnd(self_q: &Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>
 /// `autoClearAFK` — registered default `"1"` (`0x5e24d4 push 0x82e748`). Its reader tests
 /// `[cvar+0x28]` for non-zero (`0x5eb84b`), and with the CVar OFF the clear is a **total** no-op:
 /// no echo, no mirror write, no packet.
-fn auto_clear_afk(cvars: &crate::cvars::CvarPersist) -> bool {
-    cvars.stored("autoClearAFK").is_none_or(|v| v != "0")
+fn auto_clear_afk(cvars: &crate::cvars::Cvars) -> bool {
+    cvars.flag("autoClearAFK").unwrap_or(true)
 }
 
 /// Turn an addon's `SendChatMessage` calls into sends (decision 1199).
@@ -1591,7 +1569,7 @@ pub(super) fn drain_addon_chat_sends(
     // The optimistic AFK mirror (`[0xb6e5cc]`) the `/afk` toggle reads and writes — 2088.
     mut mirror: ResMut<super::away::AfkMirror>,
     // `autoClearAFK`, whose registered default is `"1"` — the gate on the implicit clear.
-    cvars: Res<crate::cvars::CvarPersist>,
+    cvars: Res<crate::cvars::Cvars>,
     // Our own descriptor, for the DND arm's LIVE `PLAYER_FLAGS & 0x4` read (DND has no mirror).
     self_q: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {

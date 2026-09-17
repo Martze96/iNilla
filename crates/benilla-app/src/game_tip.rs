@@ -268,12 +268,24 @@ pub(crate) fn tip_bundle() -> impl Bundle {
 
 pub(crate) struct GameTipPlugin;
 
+/// The tip rows' change callback (decision 2303): the switch, and the cursor — which is not a
+/// preference: a hand-edited or downgraded value lands here verbatim and [`raise`] clamps it,
+/// which is the reference's own tolerance (`0x46b682`).
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut setting: ResMut<GameTipSetting>) {
+    match ev.key().as_str() {
+        "showgametips" => setting.show = ev.flag(),
+        "gametip" => setting.next = ev.num() as i64,
+        _ => {}
+    }
+}
+
 impl Plugin for GameTipPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<GameTips>()
-            // The CVar mirror, init'd HERE and not by the CVar host: `KnobParams` takes it as a
-            // plain `ResMut`, so a build that registers the row without the resource panics the
-            // first `load_config` — which is what a live run caught and no unit test could, the
+            // The CVar knob, init'd HERE and not by the CVar host: [`on_cvar`] takes it as a
+            // plain `ResMut`, so a build that registers the row without the resource panics on
+            // the first write — which is what a live run caught and no unit test could, the
             // test harness having its own `init_resource` chain.
             .init_resource::<GameTipSetting>()
             .add_systems(
@@ -330,9 +342,9 @@ fn drive_game_tip(
     windows: Query<&Window>,
     assets: Res<AssetServer>,
     mut commands: Commands,
-    // The cursor persists through the VM's table, not the knob — see `cvars::write_host_cvar`.
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut persist: ResMut<crate::cvars::CvarPersist>,
+    // The cursor persists through the registry, not the knob alone: a host write there is what
+    // the file is composed from and what the VM's mirror learns (decision 2303).
+    mut cvars: ResMut<crate::cvars::Cvars>,
 ) {
     let Some(edge) = screen.take_tip_edge() else {
         return;
@@ -356,9 +368,7 @@ fn drive_game_tip(
         // is `EnterWorld`'s own bookkeeping and belongs to the PICK, not to the draw: it stands
         // even on a frame the paint below cannot complete.
         setting.next = i64::from(next);
-        if let Some(mut script) = script {
-            crate::cvars::write_host_cvar(&mut script, &mut persist, "gameTip", &next.to_string());
-        }
+        cvars.set("gameTip", &next.to_string());
     }
 
     // The text is laid out once per raise, not per frame, exactly as the reference does.
@@ -573,7 +583,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
         crate::text_reshape::harness::add_text_plugins(&mut app);
         app.add_systems(PostUpdate, bevy::text::detect_text_needs_rerender::<Text>);
-        app.init_resource::<crate::cvars::CvarPersist>();
+        app.init_resource::<crate::cvars::Cvars>();
         app.init_resource::<GameTipSetting>();
         app.insert_resource(GameTips {
             catalog: GameTipsCatalog::from_tips(vec![

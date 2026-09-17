@@ -15,7 +15,7 @@ pub mod world;
 pub use auth::AuthReject;
 pub use events::{
     decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, SessionEnd,
-    SessionEvent,
+    SessionEvent, SessionEventKind,
 };
 pub use messages::field;
 pub use messages::{

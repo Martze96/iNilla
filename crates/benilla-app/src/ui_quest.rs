@@ -30,7 +30,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, Spells, UiError};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 /// The open questgiver view — exactly the wire packet that opened the current panel. The feed turns
@@ -264,7 +264,7 @@ impl Plugin for UiQuestPlugin {
                 // drain after it so a click's intent goes out the same frame (mirrors
                 // ui_gossip/merchant).
                 close_npc_session_out_of_range::<QuestGiver>.before(feed_quest),
-                feed_quest.before(UiInput),
+                feed_quest.in_set(UiFeed),
                 drain_quest.after(UiInput),
             ),
         );

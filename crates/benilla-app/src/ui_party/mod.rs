@@ -32,7 +32,7 @@ use benilla_protocol::messages::{
 };
 use bevy::prelude::*;
 
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 mod feed;
 pub(crate) use feed::{
@@ -47,7 +47,7 @@ impl Plugin for UiPartyPlugin {
         app.init_resource::<GroupState>().add_systems(
             Update,
             (
-                feed::feed_party.before(UiInput),
+                feed::feed_party.in_set(UiFeed),
                 feed::drain_party.after(UiInput),
             ),
         );

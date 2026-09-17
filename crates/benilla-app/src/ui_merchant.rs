@@ -30,7 +30,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_items::{item_link, slot_guid, wire_pos};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
 
@@ -145,9 +145,7 @@ impl Plugin for UiMerchantPlugin {
                     // unordered, the first paint races feed_item_stats/feed_player_req and the
                     // usable reds drop until the next content repaint.
                     close_npc_session_out_of_range::<MerchantOpen>.before(feed_merchant),
-                    feed_merchant
-                        .after(crate::ui_unit::UnitFeed)
-                        .before(UiInput),
+                    feed_merchant.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     drain_merchant.after(UiInput),
                 ),
             );

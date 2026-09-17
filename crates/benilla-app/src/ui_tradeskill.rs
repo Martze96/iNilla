@@ -96,7 +96,7 @@ impl Plugin for UiTradeSkillPlugin {
                     // the same frame; the feed pushes before the input pass (the trainer's order);
                     // the drain + repeat machine run after it so a Create click casts this frame.
                     open_trade_skill.before(feed_trade_skill),
-                    feed_trade_skill.in_set(UnitFeed).before(UiInput),
+                    feed_trade_skill.in_set(UnitFeed),
                     drain_trade_skill.after(UiInput),
                 ),
             );

@@ -46,7 +46,7 @@ use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::QueryCache;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 mod feed;
 mod lines;
@@ -780,15 +780,24 @@ pub(crate) struct GuildFeed;
 /// The guild windows' session: the wire mirror, the VM feed, and the outbound intents.
 pub(crate) struct UiGuildPlugin;
 
+/// Guild Member Alert's change callback (1589, 2303) — conjunct 2 of the sign-on/sign-off
+/// line's condition; a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut notify: ResMut<GuildMemberNotify>) {
+    if ev.is("guildMemberNotify") {
+        notify.0 = ev.flag();
+    }
+}
+
 impl Plugin for UiGuildPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         crate::query_cache::register::<GuildState>(app);
         app.init_resource::<GuildState>()
             .init_resource::<GuildMemberNotify>()
             .add_systems(
                 Update,
                 (
-                    feed::feed_guild.before(UiInput).in_set(GuildFeed),
+                    feed::feed_guild.in_set(UiFeed).in_set(GuildFeed),
                     feed::drain_guild.after(UiInput),
                 )
                     // **Never against the boot VM** (1348/1978, and B376's half of it): the feed

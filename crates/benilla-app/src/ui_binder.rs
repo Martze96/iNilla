@@ -45,7 +45,7 @@ use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The innkeeper's pending bind question. Written by the net drain's `BinderConfirm` arm, read by
@@ -266,7 +266,7 @@ impl Plugin for UiBinderPlugin {
                 // Range-close before the feed so walking away takes the dialog down the same
                 // frame (the gossip window's ordering, for the same reason).
                 close_npc_session_out_of_range::<BinderState>.before(feed_binder),
-                feed_binder.before(UiInput),
+                feed_binder.in_set(UiFeed),
                 drain_binder.after(UiInput),
             ),
         );

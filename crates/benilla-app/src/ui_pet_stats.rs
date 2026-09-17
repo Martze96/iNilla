@@ -34,7 +34,6 @@ use benilla_ui::script::{PetStats, ScriptValue, UiScript};
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore};
 use crate::ui_pet::{PetBar, PetUnit};
-use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 /// `UNIT_FIELD_BYTES_0` byte 1 == 3 — **Hunter**, the class the four stat bindings gate on
@@ -93,13 +92,7 @@ impl Plugin for UiPetStatsPlugin {
     fn build(&self, app: &mut App) {
         // Rides the unit feed beside the pet bar's own, and before the VM ticks — the pet frame
         // repaints out of the same pass that pushes its health.
-        app.add_systems(
-            Update,
-            feed_pet_stats
-                .in_set(UnitFeed)
-                .in_set(PetSnapshot)
-                .before(UiInput),
-        );
+        app.add_systems(Update, feed_pet_stats.in_set(UnitFeed).in_set(PetSnapshot));
     }
 }
 

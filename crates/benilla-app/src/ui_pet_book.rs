@@ -72,8 +72,7 @@ impl Plugin for UiPetBookPlugin {
                 // tab flipped this frame already reads a populated book.
                 feed_pet_book
                     .in_set(UnitFeed)
-                    .before(crate::ui_action::CooldownEvents)
-                    .before(UiInput),
+                    .before(crate::ui_action::CooldownEvents),
                 // After the input pass, and — like `ui_pet`'s own drain — writing back into
                 // `PetBar`, whose next feed carries the mirrored autocast bit.
                 drain_pet_book.after(UiInput),

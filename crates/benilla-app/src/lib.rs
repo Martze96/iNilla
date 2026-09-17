@@ -58,6 +58,7 @@ mod chat_bubble;
 mod chr_classes;
 mod cinematic;
 mod combat_text;
+mod console;
 mod cooldowns;
 mod crash;
 mod creature_anim;

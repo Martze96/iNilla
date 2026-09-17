@@ -55,7 +55,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::query_cache::QueryCache;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 mod pending;
@@ -217,7 +217,7 @@ impl Plugin for UiMailPlugin {
                     // out the same frame (the ui_merchant ordering exactly). After the UnitFeed set
                     // so the SetInboxItem tooltip reads a landed item-template store.
                     close_npc_session_out_of_range::<MailOpen>.before(feed_mail),
-                    feed_mail.after(crate::ui_unit::UnitFeed).before(UiInput),
+                    feed_mail.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     drain_mail.after(UiInput),
                     // The world-enter one-shot (decision 0548 §7: "once at UI/login load") — its
                     // own system, ordering-independent of the feed/drain pair above.

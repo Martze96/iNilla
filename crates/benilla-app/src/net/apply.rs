@@ -14,7 +14,6 @@ use super::{
 };
 
 mod anim;
-mod auction;
 mod chat;
 mod combat;
 mod combat_chat;
@@ -86,11 +85,28 @@ fn addressed_store<'a>(
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
 
-/// Drain the inbound event channel and mutate real ECS entities: spawn on create, move existing,
-/// despawn on remove, attach/clear movement splines, and surface teleport/worldport/clock changes.
-pub(crate) fn apply_net_updates(
+/// The drain: take this frame's events off the channel and run them, **in packet order**, through
+/// the two halves of the dispatch (decision 2305) — first the kinds the `match` below still owns,
+/// through [`apply_unpeeled`], then the kinds a subsystem has claimed in the handler table
+/// ([`super::handlers`]), each handler a one-shot system over this exclusive world. One frame,
+/// packet order, before anything else in [`benilla_world::schedule::WorldStage::Net`] runs: the
+/// property 0006 built and 2265 said every split must keep.
+pub(crate) fn apply_net_updates(world: &mut World) {
+    let events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
+    super::handlers::dispatch(world, events, |world, unclaimed| {
+        if let Err(e) = world.run_system_cached_with(apply_unpeeled, unclaimed) {
+            panic!("the drain's dispatch match did not run: {e}");
+        }
+    });
+}
+
+/// The dispatch `match` — every kind no subsystem has claimed yet (2305's migration runs one
+/// window family at a time out of here into its own module's handlers). Mutates real ECS
+/// entities: spawn on create, move existing, despawn on remove, attach/clear movement splines,
+/// and surface teleport/worldport/clock changes; parks the rest into window state.
+fn apply_unpeeled(
+    In(events): In<Vec<SessionEvent>>,
     mut commands: Commands,
-    events: Res<NetEvents>,
     net_commands: Res<NetCommands>,
     mut index: ResMut<GuidIndex>,
     mut self_guid: ResMut<SelfGuid>,
@@ -233,7 +249,6 @@ pub(crate) fn apply_net_updates(
         mut tabard,
         mut poi_marker,
         mut inspect_honor,
-        mut auction_open,
         mut ping,
         mut gm_ticket,
         mut registrar,
@@ -295,7 +310,7 @@ pub(crate) fn apply_net_updates(
             }
         };
     }
-    for ev in events.0.try_iter() {
+    for ev in events {
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
             SessionEvent::LoginQueued { position, realm } => {
@@ -375,7 +390,6 @@ pub(crate) fn apply_net_updates(
                     &mut mail_open,
                     &mut mail_pending,
                     &mut trade_session,
-                    &mut auction_open,
                     &mut bank_open,
                     &mut duel,
                     &mut social,
@@ -1889,41 +1903,6 @@ pub(crate) fn apply_net_updates(
             SessionEvent::NextMailTime { seconds } => {
                 mail::next_mail_time(seconds, &mut mail_pending)
             }
-            // The auction house arc (decision 1511 P1): the hello reply OPENS the window — our
-            // send does not — and the three list results fill the three tabs.
-            SessionEvent::AuctionHello {
-                auctioneer,
-                house_id,
-            } => auction::auction_hello(auctioneer, house_id, &mut auction_open),
-            SessionEvent::AuctionCommandResult {
-                auction_id,
-                action,
-                error,
-                tail,
-            } => {
-                auction::auction_command_result(auction_id, action, error, &tail, &mut auction_open)
-            }
-            SessionEvent::AuctionListResult {
-                auctions,
-                total_count,
-            } => auction::auction_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionOwnerListResult {
-                auctions,
-                total_count,
-            } => auction::auction_owner_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionBidderListResult {
-                auctions,
-                total_count,
-            } => auction::auction_bidder_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionBidderNotification(n) => {
-                auction::auction_bidder_notification(&n, &mut auction_open)
-            }
-            SessionEvent::AuctionOwnerNotification(n) => {
-                auction::auction_owner_notification(&n, &mut auction_open)
-            }
-            SessionEvent::AuctionRemovedNotification { item_entry, .. } => {
-                auction::auction_removed_notification(item_entry, &mut auction_open)
-            }
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the
             // `TradeSession` the trade feed (`crate::ui_trade`) reads.
@@ -1939,6 +1918,15 @@ pub(crate) fn apply_net_updates(
             SessionEvent::WorldStates { scope, states } => {
                 world::world_states(scope, states, &mut world_states)
             }
+            // A kind with no arm here is one a subsystem has claimed in the handler table
+            // (decision 2305) — routed there by the drain, so it never reaches this match — or a
+            // new kind nobody handles, which `every_session_event_kind_has_one_owner` names at
+            // test time and this names at run time: the reference discards an unregistered
+            // opcode in silence; this client says so.
+            other => error!(
+                "net: {:?} reached the dispatch match with no arm — neither peeled nor handled",
+                benilla_protocol::SessionEventKind::from(&other)
+            ),
         }
     }
     // Flush the staged descriptor seeds/deltas onto the entities born this drain (now spawned by the

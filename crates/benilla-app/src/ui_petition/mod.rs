@@ -96,7 +96,7 @@ use bevy::prelude::*;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::QueryCache;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::NpcSession;
 
 mod feed;
@@ -424,7 +424,7 @@ impl Plugin for UiPetitionPlugin {
                     // frame — every other NPC window's ordering.
                     crate::ui_session::close_npc_session_out_of_range::<GuildRegistrarState>
                         .before(feed::feed_petition),
-                    feed::feed_petition.before(UiInput),
+                    feed::feed_petition.in_set(UiFeed),
                     feed::drain_petition.after(UiInput),
                 ),
             );

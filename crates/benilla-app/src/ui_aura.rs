@@ -158,13 +158,7 @@ impl Plugin for UiAuraPlugin {
             .init_resource::<AuraFeedMemory>()
             // Feed before the VM dispatch (like the unit feed), so a frame's OnEvent sees the fresh
             // list; drain the cancels after, once the VM has queued them.
-            .add_systems(
-                Update,
-                feed_auras
-                    .in_set(UnitFeed)
-                    .in_set(AuraEvents)
-                    .before(UiInput),
-            )
+            .add_systems(Update, feed_auras.in_set(UnitFeed).in_set(AuraEvents))
             .add_systems(Update, drain_aura_cancels.after(UiInput))
             // The ONLY teardown of the aura state, and it hangs off the session edge — never off
             // the avatar entity's existence, which a worldport interrupts mid-session (0900).

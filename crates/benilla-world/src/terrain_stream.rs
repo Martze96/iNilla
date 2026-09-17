@@ -1409,9 +1409,9 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
 /// tail-calls the chunk-rebuild walk (`0x6725a0` → `0x6b1d20`, wow-re terrain.md), so a change
 /// re-scatters the LOADED tiles too, not just future streams. The fresh `ClutterChunk`s spawn
 /// unbuilt and the lazy builder re-meshes the ~70 yd bubble over the next frames. Watches the
-/// VALUE, not `is_changed()`: the cvar sync's `Knobs` construction deref-muts every knob
-/// resource whenever any cvar moves, so the flag over-fires (cvars.rs notes the same trap).
-/// First sight only arms.
+/// VALUE, not `is_changed()`, because the predicate is "the density moved" and not "the resource
+/// moved": `ClutterConfig` also carries the detail-doodad cutout, whose console command would
+/// otherwise re-scatter every loaded tile. First sight only arms.
 fn rescatter_clutter(
     mut commands: Commands,
     mut streamer: ResMut<TerrainStreamer>,

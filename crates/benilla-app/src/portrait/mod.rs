@@ -1204,11 +1204,19 @@ pub(crate) struct BoothFraming<'w> {
 /// Owns the portrait bake pipeline: the [`PortraitImages`] bridge + the per-slot off-screen booths.
 pub(crate) struct PortraitPlugin;
 
+/// The body panes' half-rate switch's change callback (1444, 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRate>) {
+    if ev.is("boothHalfRate") {
+        rate.half = ev.flag();
+    }
+}
+
 impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PortraitImages>()
             .init_resource::<PortraitBakes>()
             .init_resource::<PaneRate>()
+            .add_observer(on_cvar)
             .init_resource::<PaperDollBooth>()
             .init_resource::<InspectBooth>()
             .init_resource::<PetDollBooth>()

@@ -95,6 +95,11 @@ impl Plugin for LoginPlugin {
                     )
                         .chain()
                         .before(crate::glue::GlueVisuals)
+                        // After the UI tick: one member holds the VM (`answer_dialog` writes
+                        // into it), and every VM holder in `Update` declares its side of the
+                        // tick (decision 2304). A glue screen has no push the tick must see,
+                        // so the whole chain takes the drain side.
+                        .after(crate::ui_script::UiInput)
                         .run_if(in_state(ClientState::Login)),
                     (smoke::debug_login_smoke, screen::debug_login_shot),
                 )
@@ -156,7 +161,8 @@ impl LoginIntent {
 /// the channel to the parked IO thread, the abandon generation a Cancel bumps, and — since
 /// decision 1667 — the realmlist it dials.
 ///
-/// A bundle rather than four parameters, for `cvars::KnobParams`' reason: adding the realmlist put
+/// A bundle rather than four parameters, for the reason the CVar host's old knob bundle had
+/// (retired by 2303): adding the realmlist put
 /// [`login_input`] at **seventeen** parameters, one past Bevy's ceiling, and the three systems
 /// that submit were already re-typing the same four names. Now a submit is one call on one param,
 /// and the next thing an attempt needs is one field here instead of a fourth signature to widen.

@@ -1,66 +1,61 @@
-//! benilla's **CVar host** — registration, knob sync, and the client's first persistence
-//! (decision 0954). The engine holds the table and the Lua API ([`benilla_ui::script`]'s
-//! `GetCVar`/`SetCVar`); this module is everything host-side:
+//! benilla's **CVar registry** — the client's configuration store, host side (decisions 0954,
+//! 2303). The reference keeps every player setting in one engine-side table
+//! (`ConsoleVar.cpp`, a `TSHashTable<CVar>` of 0xc4-byte records: name, value, default, the
+//! latch slot, and a change callback the owning subsystem hands `CVar::Register 0x63db90`).
+//! This module is that table: [`Cvars`] holds the live value of every registered row, it is
+//! what survives a VM replacement, and it is what `config.toml` is composed from. The script VM
+//! carries a **mirror** of it for Lua's synchronous `GetCVar`/`SetCVar`
+//! ([`benilla_ui::script::UiScript::seed_cvars`]); the mirror's writes ride a queue back here.
 //!
 //! - **The registered set** ([`REGISTERED`]): only vars something actually reads — a host knob,
-//!   or (since 1140) a live Lua consumer, which is the same rule seen from the UI side and the
-//!   only refinement the honest-tree law has needed.
-//!
-//!   **A row's default is the REFERENCE's default** (decision 1804), and every row says where it
-//!   stands against it — that is [`Registered::reference`], a mandatory third column with no
-//!   "unknown" variant, so a new row cannot be added without answering the question. Two tests
-//!   hold it: one checks each row's claim in both directions (a `Same` that drifted, *and* a
-//!   `Deviates` that quietly came back into agreement), the other pins the deviation set as a
-//!   readable list. Beside that, and unchanged, each default is still **welded to the code
-//!   constant it mirrors** — `SoundConfig`, `NameConfig`, `ZoomLimit` and the rest — so the CVar
-//!   table and the knob it feeds cannot drift apart either.
+//!   or (since 1140) a live Lua consumer. **A row's default is the REFERENCE's default**
+//!   (decision 1804), and every row says where it stands against it — [`Registered::reference`],
+//!   a mandatory column with no "unknown" variant. Two tests hold it: one checks each row's claim
+//!   in both directions, the other pins the deviation set as a readable list. A row the reference
+//!   **latches** (flag bit1 at its register site) says so with [`Registered::latched`]; a
+//!   structural test insists every row has a reader somewhere in the source.
 //!
 //!   **The reference column has one source**: wow-re's
 //!   `system/cvar/scratch/registered-defaults-census.md` and the regenerable manifest beside it,
 //!   `re/cvar/cvar-register-sites.tsv` — all 214 of the reference's `CVar::Register` sites with
-//!   name, help, flags, default string, callback, category and record global. 1804 dispatched the
-//!   §5 round that built it; a new row looks its answer up there rather than re-deriving it, and a
-//!   row that disagrees with it is a contradiction to resolve before it lands (`method.md`).
-//! - **Boot**: read `benilla-config/config.toml` ([`crate::local_state`]) and apply it to the knob
-//!   resources; when the UI VM exists, register the table and push the resolved session values
-//!   so `GetCVar` answers what the client is actually doing.
-//! - **Sync**: drain Lua `SetCVar` changes into the knob resources each frame and mark the
-//!   config dirty.
+//!   name, help, flags, default string, callback, category and record global. A new row looks
+//!   its answer up there rather than re-deriving it.
+//!
+//! - **The change callback is a Bevy observer** ([`CvarChanged`]). An accepted move of a row's
+//!   applied value is triggered as one event, and the subsystem that owns the knob observes it
+//!   beside the knob (`sound::on_cvar`, `video::on_cvar`, …), writing only its own resource — so
+//!   `Res::is_changed()` on a knob is honest again, which the 32-resource bundle this replaced
+//!   could not offer (it deref-mutted every knob on every write; three consumers carried the
+//!   written workaround). The registry never applies anything itself: it has no knob, and no arm.
+//!
+//! - **The latch** ([`Row::pending`]): a write to a latched row is staged, `GetCVar` keeps
+//!   answering the applied value, and nothing fires until [`Cvars::commit_latched`] — which is
+//!   the reference's `CVar::Update 0x63e060`, called for the `gx*` rows from inside `RestartGx`
+//!   (the video window's Okay). A staged value that is never committed is dropped at exit, as
+//!   the reference's is (`SaveConfig` writes `rec+0x20`, the applied value).
+//!
+//! - **Boot**: read `benilla-config/config.toml` ([`crate::local_state`]) into the registry and
+//!   fire the observers synchronously, before anything ordered after [`CvarLoad`] runs; when the
+//!   UI VM exists, seed its mirror from the registry so `GetCVar` answers what the client is doing.
+//! - **Sync**: per frame, drain the VM's registrations and writes into the registry, push the
+//!   registry's own writes into the mirror, and trigger the accepted moves.
 //! - **Save**: dirty + one quiet second → rewrite `config.toml` atomically (and flush on
 //!   `AppExit`). The file holds **only values that moved off their default** — a diff, not a
-//!   dump — plus any entries this build doesn't know (a newer build's keys survive a downgrade;
-//!   same posture for a hand-added key: preserved verbatim, warned once).
+//!   dump — plus any entries this build doesn't know (a newer build's keys, an addon's before it
+//!   registers them: preserved verbatim, warned once).
 //!
 //! **Env overrides win for the session and never touch the file**: `WOW_UI_SCALE`/`WOW_FARCLIP`
-//! beat the loaded config (they exist to make taste iteration a relaunch — pinning one into the
-//! config would make the A/B sticky), the session runs and saves around them, and the file keeps
-//! whatever it already said for those keys.
+//! and their siblings beat the loaded config (they exist to make taste iteration a relaunch —
+//! pinning one into the config would make the A/B sticky), the session runs and saves around
+//! them, and the file keeps whatever it already said for those keys ([`Cvars::own_for_session`]).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use bevy::prelude::*;
 
-use crate::chat_bubble::BubbleConfig;
-use crate::minimap::MinimapZoom;
-use crate::nameplates::NameConfig;
-use crate::player::camera::{
-    FollowConfig, FollowStyle, LookConfig, ZoomLimit, CAMERA_SPEED_RANGE, FOLLOW_SPEED_RANGE,
-    MOUSE_SPEED_RANGE,
-};
-use crate::portrait::PaneRate;
-use crate::sound::SoundConfig;
-use crate::target::ClickConfig;
-use crate::ui_chat::combat::UnitClass as CombatClass;
-use crate::ui_loot::LootConfig;
-use crate::ui_script::UiScaleCvar;
-use crate::video::VideoConfig;
-use crate::vplates::VPlateMode;
-use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
-use benilla_ui::script::UiScript;
-use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
-use benilla_world::clutter::ClutterConfig;
-use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
+use crate::ui_script::VmMemo;
+use benilla_ui::script::{SeededCvar, UiScript};
 
 /// One host-backed CVar: its registered name, benilla's shipped default, and — the column that
 /// exists so a divergence is a *decision* rather than an accident — **what the reference ships**
@@ -88,6 +83,21 @@ pub(crate) struct Registered {
     /// choice above it, never a value this client acts on.
     #[allow(dead_code)]
     pub(crate) reference: Reference,
+    /// The reference registers it with flag bit1 (`rec+0x1c & 0x2`, decision 2303): a write is
+    /// staged in [`Row::pending`] and applied only at the latch boundary
+    /// ([`Cvars::commit_latched`]). Read off `re/cvar/cvar-register-sites.tsv`'s `flags` column
+    /// (2 or 3); a test pins the set.
+    pub(crate) latched: bool,
+}
+
+impl Registered {
+    /// Mark the row latched — see [`Registered::latched`].
+    pub(crate) const fn latched(self) -> Self {
+        Self {
+            latched: true,
+            ..self
+        }
+    }
 }
 
 /// benilla's default, weighed against the reference's own.
@@ -143,6 +153,7 @@ const fn same(name: &'static str, default: &'static str) -> Registered {
         name,
         default,
         reference: Reference::Same(default),
+        latched: false,
     }
 }
 
@@ -158,6 +169,7 @@ const fn overridden(
         name,
         default,
         reference: Reference::Overridden { registered, why },
+        latched: false,
     }
 }
 
@@ -173,6 +185,7 @@ const fn deviates(
         name,
         default,
         reference: Reference::Deviates { value, why },
+        latched: false,
     }
 }
 
@@ -182,6 +195,7 @@ const fn ours(name: &'static str, default: &'static str, why: &'static str) -> R
         name,
         default,
         reference: Reference::Ours(why),
+        latched: false,
     }
 }
 
@@ -214,7 +228,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The address of the logon server — the reference's own CVar, byte-verified in `WoW.exe`
     // (the registration's string neighbours are `realmlist.wtf`, "Address of realm list server"
     // and `us.logon.worldofwarcraft.com:3724`; wow-re `mpq/scratch/startup-order-A.md` row 62).
-    // A **string** row, so it is matched ahead of the numeric parse in `apply_to_knobs`.
+    // A **string** row: the registry takes any string for it, and `realmlist::on_cvar` judges it.
     // The default diverges knowingly — see `realmlist::DEFAULT_REALMLIST`.
     deviates(
         crate::realmlist::CVAR_REALMLIST,
@@ -289,7 +303,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // larger of its two, because the stall the crackle was measured from was a whole IO cycle
     // long and the depth exists to hide the next one. Applies at the next launch, like the
     // reference's.
-    same("SoundBufferSize", "100"),
+    same("SoundBufferSize", "100").latched(),
     // The output limiter (1551) — benilla's own, not a 1.12 CVar. The reference needs no such DSP
     // (its mix is FMOD 3's and its headroom lives in the SFX-bus auto-duck); benilla sums into f32
     // behind a hard clamp, and every WoW SFX is mastered to full scale, so two overlapping kits
@@ -651,7 +665,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // hold honestly rather than by picking a number that merely looks right.
     //
     // The validator is `0x50c000` → `0x50b330`, range [0.1, 360], and it **rejects rather than
-    // clamps** — `apply_to_knobs` does the same below, which is why these two do not use the
+    // clamps** — `player::camera::on_cvar` does the same, which is why these two do not use the
     // clamping shape every other numeric row uses.
     same("cameraYawMoveSpeed", "180"),
     same("cameraPitchMoveSpeed", "90"),
@@ -663,8 +677,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // **The spelling is FrameXML's, not the binary's**, and that is deliberate: `WoW.exe` holds
     // `mouseSpeed` (capital S, register site `0x402c7b`) while `UIOptionsFrame.lua`'s slider
     // writes `cvar = "mousespeed"`. The reference reconciles them by looking CVars up
-    // case-insensitively (`SStrCmpI`, wow-re `cvar/cvar.md`), and so do we (`apply_to_knobs`
-    // lowercases first), so both spellings answer. We take the one the interface uses, because
+    // case-insensitively (`SStrCmpI`, wow-re `cvar/cvar.md`), and so do we (the registry and
+    // every observer lowercase first), so both spellings answer. We take the one the interface uses, because
     // that is the one an addon will type.
     //
     // **The VALUE agrees and the MECHANISM does not** (wow-re
@@ -845,7 +859,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // byte-verified (wow-re `addon-version-gate.md` §1.1: the key appears in Config.wtf exactly
     // while force-load is on and vanishes when it is turned off, `SaveConfig 0x63d980`'s
     // skip-default rule). No host knob: its consumers are the load walk (via the persisted value,
-    // [`CvarPersist::addon_version_check`]) and the gate's live per-query read in the VM.
+    // [`Cvars::addon_version_check`]) and the gate's live per-query read in the VM.
     same("checkAddonVersion", "1"),
     // **Which graphics API this run is actually on** (2151) — 1.12's own `gxApi`, byte-read at
     // `0x63a833`: name `0x842a64`, default string `0x864f7c` `"direct3d"`, help "graphics api",
@@ -879,7 +893,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "direct3d",
         "2151: descriptive, not a selector — benilla renders through wgpu, which has no D3D9 \
          backend and no chooser; the value is the live adapter's own and is never persisted",
-    ),
+    )
+    .latched(),
     // Vertical Sync — 1.12's own `gxVSync`, the Video Options checkbox at index 5
     // (`OptionsFrame.lua`'s `OptionsFrameCheckButtons["VERTICAL_SYNC"]`, in the install's
     // FrameXML). The knob is [`crate::video::VideoConfig::vsync`], which the window's
@@ -892,7 +907,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Two knowing departures from the reference row, both stated on [`crate::video`]: its
     // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
     // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
-    same("gxVSync", "1"),
+    same("gxVSync", "1").latched(),
     // **Display mode** (decisions 1627, 1650) — 1.12's own `gxWindow`, worn since 1650 as modern
     // Classic's two-entry *Display Mode* dropdown rather than 1.12's *Windowed Mode* checkbox: the
     // two states 1627 settled on ARE that client's two (its own `Graphics.lua` builds the list from
@@ -915,14 +930,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // caught its own instrument publishing a single arm mid-round). benilla is enUS-only, so `"0"`
     // is the answer here; the note exists so the next reader does not take a locale-conditional
     // default for an unconditional one.
-    same("gxWindow", "0"),
+    same("gxWindow", "0").latched(),
     // The **windowed** size, `gxResolution` — 1.12's own CVar name, narrowed to half its job.
     // There it is the display mode *and* the backbuffer; here it is only what "windowed" means,
     // because fullscreen is the monitor's own size and we expose no mode list to pick from (the
     // deviation decision 1092 already records for `GxAspect`, unchanged by 1627).
     //
-    // A **string** CVar, like it is in the reference — the one row [`apply_to_knobs`] has to match
-    // ahead of its numeric parse. Default is the 1600×900 that was the client's only size before
+    // A **string** CVar, like it is in the reference — the registry takes any string for it and
+    // `video::on_cvar` parses it. Default is the 1600×900 that was the client's only size before
     // 1627, so a windowed run is bit-for-bit where it was.
     deviates(
         "gxResolution",
@@ -930,7 +945,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "640x480",
         "1627: narrowed to the WINDOWED size only — fullscreen is the monitor's own and we expose \
          no mode list, and 640x480 is not a window anyone would ship a client at",
-    ),
+    )
+    .latched(),
     // The body panes' half-rate render (decision 1444) — **benilla's own CVar**, no 1.12
     // counterpart: the reference draws its doll inside the main pass (no second view exists to
     // rate-limit), while our RTT booths (1069) re-run the render graph per pane per frame. "1" =
@@ -950,15 +966,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The select screen's memory of who you last entered the world as (decision 1622) — 1.12's
     // own `lastCharacterIndex`, help string "Last character selected". **No host knob**: the live
     // value is the character screen's own state ([`crate::char_select::Roster::pending_index`]),
-    // which this row only mirrors — the `statusBarText` posture, and why the arm in
-    // [`apply_to_knobs`] is empty.
+    // which this row only mirrors — the `statusBarText` posture, and why no observer watches it.
     //
     // Registered **"0"**, byte-read rather than chosen: `CVar::Register` at `0x402d93` pushes
     // default string `0x82e570` = "0", category 4, and caches the CVar* at `[0x882674]`. The value
     // is a **0-based** row (the engine's selection cell `[0x83856c]` under `"%d"`), so "0" is the
     // FIRST character and not a "no memory" sentinel — which is exactly why a stock `Config.wtf`
     // has no such line until you have played somebody other than your first character
-    // (`SaveConfig 0x63d980` skips values equal to their default; `compose_file` does the same).
+    // (`SaveConfig 0x63d980` skips values equal to their default; [`Cvars::compose`] does the same).
     // Multisample antialiasing — 1.12's own `gxMultisample`, registered at `0x63a950` with help
     // "multisample antialiasing" and flags `3` = registered | **latched**. The knob is
     // [`benilla_world::view::MsaaSetting`], read once at the world camera's spawn; its doc carries
@@ -976,7 +991,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Latched means a change is PENDING until the next launch — the reference's own callback
     // echoes "set pending gxRestart" — so this row persists and `GetCVar` answers it, while the
     // camera keeps what it was born with. `$WOW_MSAA` overrides it session-only, below.
-    same("gxMultisample", "1"),
+    same("gxMultisample", "1").latched(),
     // The multisample triple's other two thirds. The reference's Video dropdown formats all three
     // into one row (`MULTISAMPLING_FORMAT_STRING` = "%d-bit color %d-bit depth %dx multisample")
     // and `GetCurrentMultisampleFormat 0x48c580` looks up all three by name to find which row is
@@ -996,13 +1011,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "16",
         "1643: these describe, they do not steer — the pair is our swapchain's own, and every \
          format `MsaaFormats` publishes carries it",
-    ),
+    )
+    .latched(),
     deviates(
         "gxDepthBits",
         "32",
         "16",
         "1643: as `gxColorBits` — the depth half of the same descriptive pair",
-    ),
+    )
+    .latched(),
     // **The texture filter policy** — 1.12's own `trilinear` and `anisotropic`, over
     // `benilla_assets::TexFilterSetting`. The defaults are the reference's registered strings, and
     // benilla had neither CVar: it hardcoded trilinear + aniso 8 at every sampler it built, which
@@ -1126,12 +1143,97 @@ struct LocalConfig {
     cvars: BTreeMap<String, String>,
 }
 
-/// The persistence state: what the file said, which keys the environment overrides this
-/// session, and the dirty/debounce pair.
-#[derive(Resource, Default)]
-pub(crate) struct CvarPersist {
-    /// The file's `[cvars]` entries, verbatim spelling — the merge base every save starts from
-    /// (unknown keys ride through untouched, session-owned keys keep their stored value).
+// ─── The registry ────────────────────────────────────────────────────────────────────────────
+
+/// **One accepted move of a CVar's applied value** — the reference's change callback, as the
+/// Bevy event it is (decision 2303). Triggered by the registry's flushers for every write that
+/// changed a row's applied value (a Lua `SetCVar`, a `/console` line, a host write, a committed
+/// latch, and the loaded file at boot); observed by the subsystem that owns the knob, beside the
+/// knob, writing only its own resource.
+///
+/// Not fired for a write that changed nothing, for a staged (latched) value, or for a session
+/// override taking a row (the knob already read the env).
+#[derive(Event, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CvarChanged {
+    /// The registered spelling (`MasterVolume`).
+    pub(crate) name: String,
+    pub(crate) old: String,
+    pub(crate) new: String,
+}
+
+impl CvarChanged {
+    /// Case-insensitive, like every lookup the client makes.
+    pub(crate) fn is(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+    }
+
+    /// The lowercased name — what an observer's `match` arms are spelled in.
+    pub(crate) fn key(&self) -> String {
+        self.name.to_ascii_lowercase()
+    }
+
+    /// The new value as a number. **The registry refuses an unparseable write to a numeric
+    /// row** ([`Cvars::set`]), so on a row whose default is a number this is never a fallback;
+    /// on a string row it is `0`, and an observer for a string row reads [`Self::new`] instead.
+    pub(crate) fn num(&self) -> f32 {
+        self.new.trim().parse().unwrap_or(0.0)
+    }
+
+    /// The new value as the client's flag: int-parse, then `!= 0`.
+    pub(crate) fn flag(&self) -> bool {
+        self.num() != 0.0
+    }
+}
+
+/// One row of the live registry — the reference's `CVar` record, the parts benilla keeps.
+#[derive(Clone, Debug)]
+pub(crate) struct Row {
+    /// The registered spelling.
+    pub(crate) name: String,
+    pub(crate) default: String,
+    /// The **applied** value: what `GetCVar` answers and what the file is composed from.
+    pub(crate) value: String,
+    /// A latched row's staged value (`rec+0x38`), applied by [`Cvars::commit_latched`].
+    pub(crate) pending: Option<String>,
+    /// [`Registered::latched`] — the reference's flag bit1.
+    pub(crate) latched: bool,
+    /// Declared by an addon's `RegisterCVar` rather than by [`REGISTERED`] (decision 1195): it
+    /// persists like any other row, and it is re-seeded into every later VM so the addon's own
+    /// re-declaration finds it and no-ops.
+    pub(crate) addon: bool,
+}
+
+impl Row {
+    /// A row whose default parses as a number holds numbers — the registry refuses a write
+    /// that does not parse ([`Cvars::set`]), so a numeric observer can trust [`CvarChanged::num`].
+    fn numeric(&self) -> bool {
+        self.default.trim().parse::<f32>().is_ok()
+    }
+}
+
+/// What a write did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetOutcome {
+    /// No such row (warned).
+    Unknown,
+    /// A numeric row, and the value does not parse — refused, the applied value stands (warned).
+    Refused,
+    /// Already the applied value (or already the staged one).
+    Unchanged,
+    /// A latched row: staged, not applied; nothing fires until the commit.
+    Staged,
+    /// Applied: a [`CvarChanged`] is queued for the next flush and the config is dirty.
+    Changed,
+}
+
+/// **The registry** — the engine-side CVar table. See the module doc.
+#[derive(Resource)]
+pub(crate) struct Cvars {
+    rows: Vec<Row>,
+    /// Lowercased name → row.
+    index: HashMap<String, usize>,
+    /// The file's `[cvars]` entries, verbatim spelling — the merge base every save starts from:
+    /// unknown keys ride through untouched, session-owned keys keep their stored value.
     file: BTreeMap<String, String>,
     /// Lowercased names this SESSION owns rather than the player — never saved, and the file's
     /// own entry for them is left exactly as it was found.
@@ -1140,67 +1242,387 @@ pub(crate) struct CvarPersist {
     /// that stuck in `config.toml` would make an A/B or an instrument run sticky across
     /// relaunches. `gxApi` (2151) is the member that is not — it is owned by the session because
     /// it is a fact about the *machine* (the render adapter's backend), which is nobody's setting
-    /// to persist. The field was `env_overridden` until it gained that one.
+    /// to persist.
     session_owned: HashSet<String>,
-    /// The engine table has been registered + seeded — **once per VM**, not once per process
-    /// (decision 1290). A login builds a fresh VM, so the seed has to happen again: an
-    /// unregistered table answers every `GetCVar` with nil, and [`save_config`] composes
-    /// `config.toml` out of that same table.
-    registered: crate::ui_script::VmMemo<bool>,
+    /// Accepted moves not yet triggered — flushed by [`sync_cvars`] every frame, synchronously by
+    /// the boot load and the session-edge fold, and by any caller that wants its observers to
+    /// have run before its own dependents ([`Cvars::take_events`]).
+    events: Vec<CvarChanged>,
+    /// Host-side writes the VM's mirror has not seen yet — pushed by [`sync_cvars`] as host
+    /// writes (no echo). Cleared by a seed, which carries the whole table anyway.
+    outbox: Vec<(String, String)>,
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
     last_change: Option<Instant>,
 }
 
-impl CvarPersist {
-    /// The saved-base pairs a VM's table is seeded from — the file's entries minus the ones the
-    /// session owns ([`CvarPersist::session_owned`]), which are never persisted.
-    ///
-    /// Extracted so `ui_script::lifecycle`'s world-entry edge can run the same seed before the
-    /// interface loads (decision 2115): the reference's own `UIOptionsFrame.xml` reads two CVars
-    /// in its dropdowns' `OnLoad`, and a `/reloadui` builds a fresh VM and loads the whole
-    /// interface before [`sync_cvars`]'s `Update` claim gets a turn. The ORDER at both call sites
-    /// is this first, `register_cvars` second (1291) — reversed, a reload resets every knobless
-    /// CVar to its factory value.
-    pub(crate) fn saved_base(&self) -> impl Iterator<Item = (String, String)> + '_ {
-        self.file
-            .iter()
-            .filter(|(k, _)| !self.session_owned.contains(&k.to_ascii_lowercase()))
-            .map(|(k, v)| (k.clone(), v.clone()))
-    }
-
-    /// One CVar as `config.toml` holds it — matched case-insensitively, so a hand-edited
-    /// spelling still answers.
-    ///
-    /// Read from the persist state rather than from the VM's table for the callers that want a
-    /// value **before, or outside, a registered table**: the addon load walk runs while the VM's
-    /// CVar table does not exist yet (registration is a per-VM `Update` seed, 1291), and the
-    /// select screen wants its remembered row the moment a roster lands, from a system that has
-    /// no business holding the VM (1622). The 1291 fold keeps this current across VM
-    /// replacements, so it is the value the reference's live read would see.
-    pub(crate) fn stored(&self, name: &str) -> Option<&str> {
-        self.file
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// A persist state that already holds one stored value — a launch whose `config.toml` said
-    /// so, without a file. `#[cfg(test)]` and `pub(crate)` because [`Self::file`] is private:
-    /// `char_select`'s restore test drives the real [`apply_roster_policy`] over a real remembered
-    /// row rather than a copy of its logic (the `Roster::with_pending_pick` posture).
-    #[cfg(test)]
-    pub(crate) fn with_stored(name: &str, value: &str) -> Self {
-        Self {
-            file: BTreeMap::from([(name.to_string(), value.to_string())]),
-            ..Self::default()
+impl Default for Cvars {
+    fn default() -> Self {
+        let mut cvars = Self {
+            rows: Vec::with_capacity(REGISTERED.len()),
+            index: HashMap::with_capacity(REGISTERED.len()),
+            file: BTreeMap::new(),
+            session_owned: HashSet::new(),
+            events: Vec::new(),
+            outbox: Vec::new(),
+            dirty: false,
+            last_change: None,
+        };
+        for r in REGISTERED {
+            cvars.insert_row(Row {
+                name: r.name.to_string(),
+                default: r.default.to_string(),
+                value: r.default.to_string(),
+                pending: None,
+                latched: r.latched,
+                addon: false,
+            });
         }
+        cvars
+    }
+}
+
+impl Cvars {
+    fn insert_row(&mut self, row: Row) {
+        let key = row.name.to_ascii_lowercase();
+        debug_assert!(
+            !self.index.contains_key(&key),
+            "{}: registered twice",
+            row.name
+        );
+        self.index.insert(key, self.rows.len());
+        self.rows.push(row);
+    }
+
+    fn slot(&self, name: &str) -> Option<usize> {
+        self.index.get(&name.to_ascii_lowercase()).copied()
+    }
+
+    /// The row, matched case-insensitively.
+    pub(crate) fn row(&self, name: &str) -> Option<&Row> {
+        self.slot(name).map(|i| &self.rows[i])
+    }
+
+    /// Every row, in registration order.
+    pub(crate) fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter()
+    }
+
+    /// The applied value.
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+        self.row(name).map(|r| r.value.as_str())
+    }
+
+    /// The applied value as a number, `None` for an unknown row or a non-numeric value.
+    pub(crate) fn num(&self, name: &str) -> Option<f32> {
+        self.get(name).and_then(|v| v.trim().parse().ok())
+    }
+
+    /// The applied value as the client's flag (int-parse, `!= 0`), `None` for an unknown row.
+    pub(crate) fn flag(&self, name: &str) -> Option<bool> {
+        self.num(name).map(|v| v != 0.0)
+    }
+
+    /// The registered default.
+    pub(crate) fn default_of(&self, name: &str) -> Option<&str> {
+        self.row(name).map(|r| r.default.as_str())
+    }
+
+    /// Whether this session owns the row rather than the player.
+    pub(crate) fn is_session_owned(&self, name: &str) -> bool {
+        self.session_owned.contains(&name.to_ascii_lowercase())
     }
 
     /// The persisted `checkAddonVersion` (decision 1292) — what the addon load walk gates on.
-    /// Absent = the registrar default: check ON.
+    /// The registrar default is check ON.
     pub(crate) fn addon_version_check(&self) -> bool {
-        self.stored("checkAddonVersion").is_none_or(|v| v != "0")
+        self.flag("checkAddonVersion").unwrap_or(true)
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.last_change = Some(Instant::now());
+    }
+
+    /// The write, from either side of the VM boundary. `from_vm` is a write the mirror has
+    /// already made (a Lua `SetCVar`, `ConsoleExec`, an engine verb), so it is not echoed back;
+    /// a refusal IS pushed back, because the mirror stored what this refused.
+    fn write(&mut self, name: &str, value: &str, from_vm: bool) -> SetOutcome {
+        let Some(i) = self.slot(name) else {
+            warn!("cvar {name}: not registered — write ignored");
+            return SetOutcome::Unknown;
+        };
+        let row = &mut self.rows[i];
+        if row.numeric() && value.trim().parse::<f32>().is_err() {
+            warn!(
+                "cvar {}: unparseable value '{value}' refused (still {:?})",
+                row.name, row.value
+            );
+            if from_vm {
+                self.outbox.push((row.name.clone(), row.value.clone()));
+            }
+            return SetOutcome::Refused;
+        }
+        if row.latched {
+            // The reference's `Set 0x63df50` on flag bit1: `latchedValue` takes the string and
+            // `InternalSet` does not run — no dirty, no callback. Staging the applied value
+            // back clears the stage.
+            // The stage lives HERE, not in the mirror: the VM only ever learns applied values
+            // (a host write into the mirror IS a commit there), so a host-side stage is not
+            // echoed — `GetCVar` keeps answering the applied value either way, and the commit
+            // below is what reaches the VM.
+            let staged = (value != row.value).then(|| value.to_string());
+            if row.pending == staged {
+                return SetOutcome::Unchanged;
+            }
+            row.pending = staged;
+            return if row.pending.is_some() {
+                SetOutcome::Staged
+            } else {
+                SetOutcome::Unchanged // the stage cleared: the boundary has nothing to do
+            };
+        }
+        if row.value == value {
+            return SetOutcome::Unchanged;
+        }
+        let old = std::mem::replace(&mut row.value, value.to_string());
+        let name = row.name.clone();
+        self.events.push(CvarChanged {
+            name: name.clone(),
+            old,
+            new: value.to_string(),
+        });
+        if !from_vm {
+            self.outbox.push((name, value.to_string()));
+        }
+        self.touch();
+        SetOutcome::Changed
+    }
+
+    /// **A host-side write** — the counterpart of a Lua `SetCVar`, for the engine's own values:
+    /// the minimap zoom, the camera views, the remembered character, the loading screen's tip
+    /// cursor. Mirrored into the VM, persisted, and observed like any other write.
+    pub(crate) fn set(&mut self, name: &str, value: &str) -> SetOutcome {
+        self.write(name, value, false)
+    }
+
+    /// A write the VM's mirror already made — drained from its change queue.
+    pub(crate) fn set_from_vm(&mut self, name: &str, value: &str) -> SetOutcome {
+        self.write(name, value, true)
+    }
+
+    /// **The table follows a value the engine already applied** — a mirror, not a write: the
+    /// applied value moves, the config dirties, the VM's mirror learns it, and **no observer
+    /// fires**, because the knob is already there. For a second registered spelling of one knob
+    /// (`WorldDetail`/`frillDensity`, 2151) — an observer that answered its sibling's move with a
+    /// full write would queue an event that lands one flush later, by which time the row may
+    /// have moved again, and the stale event would win. Returns whether the row moved.
+    pub(crate) fn mirror(&mut self, name: &str, value: &str) -> bool {
+        let Some(i) = self.slot(name) else {
+            warn!("cvar {name}: not registered — mirror ignored");
+            return false;
+        };
+        let row = &mut self.rows[i];
+        if row.value == value {
+            return false;
+        }
+        row.value = value.to_string();
+        row.pending = None;
+        self.outbox.push((row.name.clone(), value.to_string()));
+        self.touch();
+        true
+    }
+
+    /// **The latch boundary** — the reference's `CVar::Update 0x63e060`: every staged value
+    /// becomes the applied one, fires, persists, and reaches the mirror. Returns how many moved.
+    /// Called for the `gx*` rows from `RestartGx` ([`crate::video`]); a row nothing ever commits
+    /// (`SoundBufferSize`, `gxApi`) holds its stage until exit, and loses it there, as the
+    /// reference does.
+    pub(crate) fn commit_latched(&mut self) -> usize {
+        let mut moved = 0;
+        for row in &mut self.rows {
+            let Some(staged) = row.pending.take() else {
+                continue;
+            };
+            if staged == row.value {
+                continue;
+            }
+            let old = std::mem::replace(&mut row.value, staged.clone());
+            self.events.push(CvarChanged {
+                name: row.name.clone(),
+                old,
+                new: staged.clone(),
+            });
+            self.outbox.push((row.name.clone(), staged));
+            moved += 1;
+        }
+        if moved > 0 {
+            self.touch();
+        }
+        moved
+    }
+
+    /// **This session owns the row**: an env lever or the machine's own fact took it, so it is
+    /// never saved and the file's entry for it is left alone. `value` is what the row answers
+    /// this session — `None` marks the row without moving it (the resource is absent, so the
+    /// registered default is the truth). No observer fires: the knob already read the env.
+    pub(crate) fn own_for_session(&mut self, name: &str, value: Option<&str>) {
+        let key = name.to_ascii_lowercase();
+        self.session_owned.insert(key.clone());
+        let Some(value) = value else {
+            return;
+        };
+        let Some(&i) = self.index.get(&key) else {
+            warn!("cvar {name}: not registered — session value ignored");
+            return;
+        };
+        let row = &mut self.rows[i];
+        if row.value != value {
+            row.value = value.to_string();
+            row.pending = None;
+            self.outbox.push((row.name.clone(), value.to_string()));
+        }
+    }
+
+    /// An addon's `RegisterCVar` (decision 1195), reported by the VM: a row of its own, starting
+    /// at the file's value for that name when it carries one (the 1291 bridge, now on the store
+    /// that survives the VM), else at the declared default. A name already registered — the
+    /// client's own, or the same addon's earlier declaration — is the no-op it always was.
+    pub(crate) fn learn_addon_row(&mut self, name: &str, default: &str) {
+        if self.slot(name).is_some() {
+            return;
+        }
+        let saved = self
+            .file
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone());
+        self.insert_row(Row {
+            name: name.to_string(),
+            default: default.to_string(),
+            value: saved.unwrap_or_else(|| default.to_string()),
+            pending: None,
+            latched: false,
+            addon: true,
+        });
+    }
+
+    /// Fold the file in: every known, player-owned key becomes its row's applied value (an
+    /// accepted move, so the observers hear it — the reference's `Register` on a record
+    /// `Config.wtf` already created calls the callback with the file's value); an unknown key is
+    /// preserved for the save and warned once; a session-owned key is skipped and the file keeps
+    /// it. Loading is not a change: nothing is dirtied.
+    fn load_file(&mut self, file: BTreeMap<String, String>) {
+        for (name, value) in &file {
+            let key = name.to_ascii_lowercase();
+            let Some(&i) = self.index.get(&key) else {
+                warn!("config: unknown cvar '{name}' — preserved, not applied");
+                continue;
+            };
+            if self.session_owned.contains(&key) {
+                info!("config: {name} is owned by this session, not the file (file value kept)");
+                continue;
+            }
+            let row = &mut self.rows[i];
+            if row.numeric() && value.trim().parse::<f32>().is_err() {
+                warn!("config: {name}: unparseable value '{value}' ignored");
+                continue;
+            }
+            if row.value == *value {
+                continue;
+            }
+            let old = std::mem::replace(&mut row.value, value.clone());
+            self.events.push(CvarChanged {
+                name: row.name.clone(),
+                old,
+                new: value.clone(),
+            });
+        }
+        self.file = file;
+    }
+
+    /// The file's entries no row claims — a newer build's keys, or an addon's before it
+    /// registers them this session. Handed to the VM as its saved base, so an addon's
+    /// `RegisterCVar` starts at the player's value (decision 1291).
+    pub(crate) fn orphans(&self) -> Vec<(String, String)> {
+        self.file
+            .iter()
+            .filter(|(k, _)| !self.index.contains_key(&k.to_ascii_lowercase()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The whole table as a VM's mirror is seeded from it.
+    pub(crate) fn vm_seed(&self) -> Vec<SeededCvar> {
+        self.rows
+            .iter()
+            .map(|r| SeededCvar {
+                name: r.name.clone(),
+                value: r.value.clone(),
+                default: r.default.clone(),
+                latched: r.latched,
+            })
+            .collect()
+    }
+
+    /// Whether a flush has something to trigger — read before taking, so a quiet frame never
+    /// deref-muts the registry.
+    pub(crate) fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// The accepted moves since the last flush — the caller triggers each one.
+    pub(crate) fn take_events(&mut self) -> Vec<CvarChanged> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn has_outbox(&self) -> bool {
+        !self.outbox.is_empty()
+    }
+
+    fn take_outbox(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Compose the file to save: the previous file as the merge base, every row that moved off
+    /// its default written (the **applied** value — a staged one is not the player's setting
+    /// yet), every one back at its default removed — session-owned keys and unknown keys
+    /// untouched.
+    fn compose(&self) -> BTreeMap<String, String> {
+        let mut out = self.file.clone();
+        for row in &self.rows {
+            let key = row.name.to_ascii_lowercase();
+            if self.session_owned.contains(&key) {
+                continue;
+            }
+            // Match any existing entry case-insensitively so a hand-edited spelling doesn't fork.
+            let existing = out
+                .keys()
+                .find(|k| k.eq_ignore_ascii_case(&row.name))
+                .cloned();
+            if row.value == row.default {
+                if let Some(k) = existing {
+                    out.remove(&k);
+                }
+            } else {
+                out.insert(
+                    existing.unwrap_or_else(|| row.name.clone()),
+                    row.value.clone(),
+                );
+            }
+        }
+        out
+    }
+
+    /// A registry that already holds one stored value — a launch whose `config.toml` said so,
+    /// without a file. For the tests that drive a real consumer over a real remembered row
+    /// (`char_select`'s restore test) rather than a copy of its logic.
+    #[cfg(test)]
+    pub(crate) fn with_value(name: &str, value: &str) -> Self {
+        let mut cvars = Self::default();
+        cvars.load_file(BTreeMap::from([(name.to_string(), value.to_string())]));
+        cvars.events.clear();
+        cvars
     }
 }
 
@@ -1208,7 +1630,8 @@ impl CvarPersist {
 /// short enough that a crash loses one gesture, not a session ("write-on-change, debounced").
 const SAVE_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The startup fold of `config.toml` into the knob resources ([`load_config`]).
+/// The startup fold of `config.toml` into the registry and, through the observers, the knobs
+/// ([`load_config`]).
 ///
 /// A set rather than a bare system because one knob is **read once and never again**: the world
 /// camera takes its `Msaa` at spawn (decision 1629, the reference's latched `gxMultisample`), so
@@ -1228,14 +1651,18 @@ pub(crate) struct CvarPlugin;
 
 impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CvarPersist>()
+        app.init_resource::<Cvars>()
             .add_systems(
                 Startup,
                 (load_config, publish_filter_policy)
                     .chain()
                     .in_set(CvarLoad),
             )
-            .add_systems(Update, sync_cvars);
+            // After the tick (decision 2304): a `SetCVar` the interface made this frame reaches
+            // the registry — and its observers — before the frame's drains read it. The video
+            // window's Okay is the case: `SetCVar` per changed row, then `RestartGx()`, in one
+            // handler; `video::drain_restart_gx` orders after this so the commit finds the stage.
+            .add_systems(Update, sync_cvars.after(crate::ui_script::UiInput));
         // **The flush is on the exit edge, not beside its feed** (decision 1528). It used to be
         // `(sync_cvars, save_config).chain()` in `Update`, which made the "or the app exiting"
         // half of its own gate dead on the exit a player actually causes: the close button's
@@ -1246,557 +1673,124 @@ impl Plugin for CvarPlugin {
     }
 }
 
-/// The knob resources as a **SystemParam** — the one census, fetched once, shared by all three
-/// entry points ([`load_config`], [`sync_cvars`], [`fold_dying_vm_cvars`]).
+/// **What the environment took for this session, and what it set it to** — read off the knobs
+/// the env levers already seeded (`RenderScale::default()` reads `$WOW_RENDER_SCALE`, and so
+/// on), so the registry answers `GetCVar` with the value the client is actually running at.
 ///
-/// It exists because the census had grown past Bevy's **16-param ceiling**: with fifteen knobs,
-/// `sync_cvars` (script + persist + knobs) and the fold's `SystemState` both stopped compiling the
-/// moment the plate toggles landed. Re-typing the list at every call site was already the shape
-/// that made a new knob a four-place edit; bundling it makes a new knob one field here, one field
-/// on [`Knobs`], and one arm in [`apply_to_knobs`], and the ceiling stops being reachable.
-#[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct KnobParams<'w> {
-    sound: ResMut<'w, SoundConfig>,
-    scale: ResMut<'w, UiScaleCvar>,
-    view: ResMut<'w, ViewDistance>,
-    msaa: ResMut<'w, MsaaSetting>,
-    msaa_formats: Res<'w, benilla_world::view::MsaaFormats>,
-    look: ResMut<'w, LookConfig>,
-    click: ResMut<'w, ClickConfig>,
-    loot: ResMut<'w, LootConfig>,
-    names: ResMut<'w, NameConfig>,
-    plates: ResMut<'w, VPlateMode>,
-    clutter: ResMut<'w, ClutterConfig>,
-    weather: ResMut<'w, benilla_world::weather::WeatherState>,
-    display_gamma: ResMut<'w, crate::ui_gamma::DisplayGamma>,
-    minimap: ResMut<'w, MinimapZoom>,
-    bubbles: ResMut<'w, BubbleConfig>,
-    zoom: ResMut<'w, ZoomLimit>,
-    follow: ResMut<'w, FollowConfig>,
-    camera_opts: ResMut<'w, crate::player::camera_dynamics::CameraOptions>,
-    video: ResMut<'w, VideoConfig>,
-    render_scale: ResMut<'w, RenderScale>,
-    tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
-    pane_rate: ResMut<'w, PaneRate>,
-    guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
-    text_filter: ResMut<'w, crate::text_filter::TextFilterSwitches>,
-    game_tip: ResMut<'w, crate::game_tip::GameTipSetting>,
-    block_trades: ResMut<'w, crate::ui_trade::BlockTrades>,
-    auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
-    realmlist: ResMut<'w, crate::realmlist::Realmlist>,
-    fps_journal: ResMut<'w, crate::perf::FpsJournalSetting>,
-    assist_attack: ResMut<'w, crate::target::AssistAttack>,
-    combat_ranges: ResMut<'w, crate::ui_chat::combat::CombatLogRanges>,
-    damage_text: ResMut<'w, crate::combat_text::DamageTextGates>,
-    log_periodic: ResMut<'w, crate::ui_chat::combat::LogPeriodicSpells>,
-}
-
-impl KnobParams<'_> {
-    /// Borrow the set as [`Knobs`] for a write.
-    ///
-    /// **Deref-muts every resource, so call it only when a change is actually being applied**
-    /// (0992's change-detection trap: the clutter re-scatter watches `is_changed::<ClutterConfig>`,
-    /// and a set built on every frame — or before the change queue is known to be non-empty —
-    /// re-scattered the world on every MasterVolume drag tick). Reading a field off `self`
-    /// directly, as the session seed does, goes through `Deref` and flags nothing.
-    fn knobs(&mut self) -> Knobs<'_> {
-        Knobs {
-            sound: &mut self.sound,
-            scale: &mut self.scale,
-            view: &mut self.view,
-            msaa: &mut self.msaa,
-            msaa_formats: &self.msaa_formats,
-            look: &mut self.look,
-            click: &mut self.click,
-            loot: &mut self.loot,
-            names: &mut self.names,
-            plates: &mut self.plates,
-            clutter: &mut self.clutter,
-            weather: &mut self.weather,
-            display_gamma: &mut self.display_gamma,
-            minimap: &mut self.minimap,
-            bubbles: &mut self.bubbles,
-            zoom: &mut self.zoom,
-            follow: &mut self.follow,
-            camera_opts: &mut self.camera_opts,
-            video: &mut self.video,
-            render_scale: &mut self.render_scale,
-            tex_filter: &mut self.tex_filter,
-            pane_rate: &mut self.pane_rate,
-            guild_notify: &mut self.guild_notify,
-            text_filter: &mut self.text_filter,
-            game_tip: &mut self.game_tip,
-            block_trades: &mut self.block_trades,
-            auto_self_cast: &mut self.auto_self_cast,
-            realmlist: &mut self.realmlist,
-            fps_journal: &mut self.fps_journal,
-            assist_attack: &mut self.assist_attack,
-            combat_ranges: &mut self.combat_ranges,
-            damage_text: &mut self.damage_text,
-            log_periodic: &mut self.log_periodic,
-        }
+/// This is the (iv) residue 2265 named: each lever here is one the env still reaches through a
+/// resource's `Default` rather than through a `category: debug` row of this table, and each
+/// line goes the day its lever does. A lever whose resource is absent (a stripped test app)
+/// still marks its row session-owned — the file must not apply over an env the caller set.
+fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
+    let set = |k: &str| std::env::var_os(k).is_some();
+    let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+    let mut out: Vec<(&'static str, Option<String>)> = Vec::new();
+    if set("WOW_UI_SCALE") {
+        let v = world.get_resource::<crate::ui_script::UiScaleCvar>();
+        out.push(("uiScale", v.map(|s| s.0.to_string())));
     }
-}
-
-/// The knob resources one CVar write can land on, bundled so [`apply_to_knobs`] and its two
-/// callers grow together (a new knob is one field + one arm).
-struct Knobs<'a> {
-    sound: &'a mut SoundConfig,
-    scale: &'a mut UiScaleCvar,
-    view: &'a mut ViewDistance,
-    msaa: &'a mut MsaaSetting,
-    /// What the device actually offers — the ceiling `gxMultisample` is clamped to (1643).
-    msaa_formats: &'a benilla_world::view::MsaaFormats,
-    look: &'a mut LookConfig,
-    click: &'a mut ClickConfig,
-    loot: &'a mut LootConfig,
-    names: &'a mut NameConfig,
-    plates: &'a mut VPlateMode,
-    clutter: &'a mut ClutterConfig,
-    /// The weather driver's own state — `weatherDensity` writes ONE byte of it
-    /// ([`benilla_world::weather::WeatherState::weather_density`]), the particle-density
-    /// step; every other field on it is the wire's, not a setting's (2181).
-    weather: &'a mut benilla_world::weather::WeatherState,
-    /// The display-brightness ramp the UI lane's decode applies (2182).
-    display_gamma: &'a mut crate::ui_gamma::DisplayGamma,
-    minimap: &'a mut MinimapZoom,
-    bubbles: &'a mut BubbleConfig,
-    zoom: &'a mut ZoomLimit,
-    follow: &'a mut FollowConfig,
-    camera_opts: &'a mut crate::player::camera_dynamics::CameraOptions,
-    video: &'a mut VideoConfig,
-    render_scale: &'a mut RenderScale,
-    tex_filter: &'a mut benilla_assets::TexFilterSetting,
-    pane_rate: &'a mut PaneRate,
-    guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
-    text_filter: &'a mut crate::text_filter::TextFilterSwitches,
-    game_tip: &'a mut crate::game_tip::GameTipSetting,
-    block_trades: &'a mut crate::ui_trade::BlockTrades,
-    auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
-    realmlist: &'a mut crate::realmlist::Realmlist,
-    fps_journal: &'a mut crate::perf::FpsJournalSetting,
-    assist_attack: &'a mut crate::target::AssistAttack,
-    combat_ranges: &'a mut crate::ui_chat::combat::CombatLogRanges,
-    damage_text: &'a mut crate::combat_text::DamageTextGates,
-    log_periodic: &'a mut crate::ui_chat::combat::LogPeriodicSpells,
-}
-
-/// **The string-valued rows**, matched ahead of the numeric parse every other row goes through —
-/// which would reject them as bad values. `gxResolution` was the first (decision 1627) and its
-/// comment named this as the shape a second one would join rather than a second special case
-/// somewhere else; `realmList` (1667) is the second, `realmName` the third. Every arm shares the
-/// numeric miss's posture below: known key, bad value — consumed, with a warn, and the resource
-/// keeps its truth.
-///
-/// **Split out of [`apply_to_knobs`] so the table can be held to it.** The claim
-/// "a string row without an arm here is a CVar the client will never honour" was written beside
-/// [`the_string_valued_cvars_are_the_realm_and_the_windowed_size`] and then not enforced:
-/// `realmName` shipped with no arm, so every launch after the first connect warned
-/// `cvar realmName: unparseable value 'VMaNGOS' ignored` on the way past the numeric parse. As a
-/// separate `bool` this is something a test can call for every non-numeric row in the table, which
-/// is what [`every_string_valued_row_is_claimed_before_the_numeric_parse`] now does.
-fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) -> bool {
-    if !is_string_valued(key) {
-        return false;
-    }
-    match key {
-        "gxresolution" => match crate::video::parse_resolution(value) {
-            Some(size) => knobs.video.windowed = size,
-            None => warn!("cvar {name}: unparseable value '{value}' ignored"),
-        },
-        "realmlist" => match crate::realmlist::normalize(value) {
-            Some(address) => knobs.realmlist.set(&address),
-            None => warn!("cvar {name}: unusable realmlist '{value}' ignored"),
-        },
-        // No host knob, and none wanted: the live realm name is written from the session
-        // (`ui_script::addons::load_third_party`), and the persisted one reaches `GetCVar` through
-        // `set_cvar_saved_base` without passing here at all. Claimed anyway — the `statusBarText`
-        // posture — so the value is CONSUMED rather than falling to a numeric parse that can only
-        // reject it, and so a toggle still dirties the config.
-        "realmname" => {}
-        // Descriptive, not a knob (2151): the live value is the render adapter's backend, pushed
-        // into the table by [`sync_cvars`]. Claimed for the same reason `realmname` is — so a
-        // write is CONSUMED rather than falling to a numeric parse that can only reject it — and
-        // it goes no further: the reference latches this CVar for the next `GxDevCreate`, and we
-        // have no device to re-create it on. `load_config` marks it session-owned, so the write
-        // also never reaches `config.toml`.
-        "gxapi" => {}
-        _ => {}
-    }
-    true
-}
-
-/// Which keys [`apply_string_valued`] claims — lowercased, and split out from the arms so a test
-/// can hold the TABLE to it without building a `Knobs`. The claim it makes possible: every
-/// registered row whose default does not parse as a number is named here
-/// ([`every_string_valued_row_is_claimed_before_the_numeric_parse`]).
-fn is_string_valued(key: &str) -> bool {
-    matches!(key, "gxapi" | "gxresolution" | "realmlist" | "realmname")
-}
-
-/// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
-/// build knows (the caller decides whether that warns or rides through).
-fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
-    let key = name.to_ascii_lowercase();
-    if apply_string_valued(&key, name, value, knobs) {
-        return true;
-    }
-    let Ok(v) = value.parse::<f32>() else {
-        warn!("cvar {name}: unparseable value '{value}' ignored");
-        return true; // known key, bad value — consumed, resource keeps its truth
-    };
-    match key.as_str() {
-        "mastervolume" => knobs.sound.master = v.clamp(0.0, 1.0),
-        "soundvolume" => knobs.sound.sfx = v.clamp(0.0, 1.0),
-        "musicvolume" => knobs.sound.music = v.clamp(0.0, 1.0),
-        "ambiencevolume" => knobs.sound.ambience = v.clamp(0.0, 1.0),
-        // The enables are 0/1 flags; the client's own parse is int + `!= 0`.
-        "mastersoundeffects" => knobs.sound.enabled = v != 0.0,
-        "enablemusic" => knobs.sound.music_enabled = v != 0.0,
-        "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
-        "enableerrorspeech" => knobs.sound.error_speech = v != 0.0,
-        "sound_enablesoundwhengameisinbg" => knobs.sound.background_sound = v != 0.0,
-        // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
-        "soundreverb" => knobs.sound.reverb = v != 0.0,
-        "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
-        "soundlisteneratcharacter" => knobs.sound.listener_at_character = v != 0.0,
-        "emotesounds" => knobs.sound.emote_sounds = v != 0.0,
-        "soundzonemusicnodelay" => knobs.sound.zone_music_no_delay = v != 0.0,
-        "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
-        "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
-        // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90` echoes
-        // "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is this table's
-        // standing posture for every range — the consumer clamps at its own edge.
-        "nearclip" => knobs.view.set_nearclip(v),
-        "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
-        "autoselfcast" => knobs.auto_self_cast.0 = v != 0.0,
-        "assistattack" => knobs.assist_attack.0 = v != 0.0,
-        // The sixteen camera-view CVars have no knob to apply to: `CameraViews` is their writer,
-        // not their reader (it seeds itself from the persisted file at startup, and `SaveView`
-        // writes back). They are claimed here so the table's own "not a knob this build knows"
-        // warning stays meaningful — an unclaimed name would look like a typo every session.
-        _ if crate::player::camera_view::is_view_cvar(name) => {}
-        "mouseinvertpitch" => knobs.look.invert_pitch = v != 0.0,
-        "cameradistancemaxfactor" => knobs.zoom.set_factor(v),
-        // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
-        // default rather than as a dead camera (`FollowStyle::from_cvar`).
-        "camerasmoothstyle" => knobs.follow.style = FollowStyle::from_cvar(v),
-        // Its sibling selector — the one the reference swaps in for the externally-driven states.
-        "camerasmoothtrackingstyle" => knobs.follow.tracking_style = FollowStyle::from_cvar(v),
-        // The auto-follow rate, clamped to 1.12's own AUTO_FOLLOW_SPEED slider range.
-        "camerayawsmoothspeed" => {
-            knobs.follow.yaw_speed =
-                v.clamp(*FOLLOW_SPEED_RANGE.start(), *FOLLOW_SPEED_RANGE.end());
-        }
-        // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
-        "mousespeed" => {
-            knobs.look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
-        }
-        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
-        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
-        // value stands. That is a different posture from every clamping row above, and it is the
-        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
-        "camerayawmovespeed" | "camerapitchmovespeed" => {
-            if !CAMERA_SPEED_RANGE.contains(&v) {
-                warn!(
-                    "cvar {name}: value out of range ({} - {}) — ignored",
-                    CAMERA_SPEED_RANGE.start(),
-                    CAMERA_SPEED_RANGE.end()
-                );
-                return true;
-            }
-            if key == "camerayawmovespeed" {
-                knobs.look.yaw_speed = v;
-            } else {
-                knobs.look.pitch_speed = v;
-            }
-        }
-        "combatdamage" => knobs.damage_text.combat_damage = v != 0.0,
-        "petmeleedamage" => knobs.damage_text.pet_melee = v != 0.0,
-        "petspelldamage" => knobs.damage_text.pet_spell = v != 0.0,
-        "combatlogperiodicspells" => knobs.log_periodic.0 = v != 0.0,
-        // The combat log's eight display ranges (yards, the CVar's float field). One arm for all
-        // of them: `CombatLogRanges::set` walks the class table through `UnitClass::range_cvar`,
-        // so the seven names live in exactly one place and this arm cannot drift from them.
-        _ if knobs.combat_ranges.set(name, v) => {}
-        "autolootdefault" => knobs.loot.auto_loot = v != 0.0,
-        "unitnameplayer" => knobs.names.player = v != 0.0,
-        "unitnamenpc" => knobs.names.npc = v != 0.0,
-        "unitnameown" => knobs.names.own = v != 0.0,
-        "unitnameplayerguild" => knobs.names.player_guild = v != 0.0,
-        // The camera options (2149). The three numeric ones take the value straight: the
-        // reference's own validator on them is `0x50b330`'s range REFUSAL, which lives in
-        // `benilla_ui`'s `SetCVar` path, not here.
-        "camerapivot" => knobs.camera_opts.pivot = v != 0.0,
-        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
-        "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
-        "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
-        "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
-        "cameraterraintilt" => knobs.camera_opts.terrain_tilt = v != 0.0,
-        "cameragroundsmoothspeed" => knobs.camera_opts.ground_smooth_speed = v,
-        "cameraterraintilttimemin" => knobs.camera_opts.tilt_time_min = v,
-        "cameraterraintilttimemax" => knobs.camera_opts.tilt_time_max = v,
-        "camerabobbing" => knobs.camera_opts.bobbing = v != 0.0,
-        "camerabobbinglramplitude" => knobs.camera_opts.bob_lr_amplitude = v,
-        "camerabobbingudamplitude" => knobs.camera_opts.bob_ud_amplitude = v,
-        "camerabobbingfrequency" => knobs.camera_opts.bob_frequency = v,
-        "camerabobbingsmoothspeed" => knobs.camera_opts.bob_smooth_speed = v,
-        // The two V-plate toggles — the bitmask's two bits, flags like every other checkbox.
-        // Lowercased here like every arm; `VPlateMode`'s consts carry the registered spelling.
-        "nameplateshowenemies" => knobs.plates.enemies = v != 0.0,
-        "nameplateshowfriends" => knobs.plates.friends = v != 0.0,
-        // Two CVars with no HOST knob, because their consumers are Lua (1140, B230). Known — so
-        // the caller dirties the config and the value persists — with nothing to apply this side.
-        "statusbartext" | "ubertooltips" => {}
-        // The two bubble switches (1139) — flags, like every other pair here.
-        "showgametips" => knobs.game_tip.show = v != 0.0,
-        // The cursor, not a preference — a hand-edited or downgraded value lands here verbatim and
-        // `game_tip::raise` clamps it, which is the reference's own tolerance (`0x46b682`).
-        "gametip" => knobs.game_tip.next = v as i64,
-        "profanityfilter" => knobs.text_filter.profanity = v != 0.0,
-        "spamfilter" => knobs.text_filter.spam = v != 0.0,
-        "chatbubbles" => knobs.bubbles.all = v != 0.0,
-        "chatbubblesparty" => knobs.bubbles.party = v != 0.0,
-        // The loot-roll detail switch (1589) — a flag over the roll-line composer's two shapes.
-        "showlootspam" => knobs.loot.show_loot_spam = v != 0.0,
-        // Guild Member Alert (1589) — conjunct 2 of the sign-on/sign-off line's condition.
-        "guildmembernotify" => knobs.guild_notify.0 = v != 0.0,
-        "blocktrades" => knobs.block_trades.0 = v != 0.0,
-        // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
-        // slider's own range (an off-grid hand-edit rides between stops, like every slider).
-        "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
-        // The SAME knob in the reference's own cells-per-chunk (2151), with the reference's own
-        // `[1, 256]` clamp rather than the stop's — `ClutterConfig::set_frill_density` carries
-        // both, and `terrain_stream::rescatter_clutter` re-scatters the loaded tiles off the
-        // resulting density change exactly as it does for the row above (0992's setter law, which
-        // is the callback's own chunk rebuild).
-        "frilldensity" => knobs.clutter.set_frill_density(v),
-        // Weather Intensity, the panel's 0..3 step 1 (2181). The reference's callback is
-        // `0x67b870`, a jump table (`0x67b8e8`) mapping 0/1/2/3 onto the quality cells
-        // {0.1, 0.33, 0.66, 1.0} in `[0x8680ec]` (wow-re
-        // `cvar/scratch/graphics-cost-cvar-census.md` §4). What that table does with an
-        // off-grid int is NOT carved, so the clamp here is this table's own standing
-        // posture rather than a fidelity claim — and it costs nothing either way, because
-        // `WeatherState::density_gain` already `.min(3)`s its own index.
-        "weatherdensity" => knobs.weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
-        // Brightness (2182). The clamp is OURS and the reference has none — the reason it
-        // costs one is on [`crate::ui_gamma::GAMMA_RANGE`], and nothing a player can reach
-        // from the panel meets it.
-        "gamma" => {
-            knobs.display_gamma.0 = v.clamp(
-                *crate::ui_gamma::GAMMA_RANGE.start(),
-                *crate::ui_gamma::GAMMA_RANGE.end(),
-            )
-        }
-        // The two zoom indices (1131) clamp exactly like the client's `set_zoom` (`0x6daa10`:
-        // clamp at 5) — the widget clamps again on the way in, so a hand-edited level lands
-        // in range whichever path it takes.
-        "minimapzoom" => knobs.minimap.outdoor = zoom_index(v),
-        "minimapinsidezoom" => knobs.minimap.inside = zoom_index(v),
-        // The addon version gate (1292): no host knob — the load walk reads the persisted value
-        // and the gate reads the live table — but a KNOWN key, so a toggle dirties the config
-        // and persists (the statusBarText posture).
-        "checkaddonversion" => {}
-        // The remembered character row (1622) — same posture again: the live value is the select
-        // screen's own, which writes this key rather than reading it back. Known, so entering the
-        // world dirties the config and the memory survives to the next launch.
-        "lastcharacterindex" => {}
-        // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
-        // watches the value and pushes it to the window; nothing else reads it.
-        "gxvsync" => knobs.video.vsync = v != 0.0,
-        // Display mode (1627) — a flag like every other checkbox here, and the reference's own
-        // polarity: `1` is WINDOWED (the row is "Windowed Mode"). `video::apply_window_mode`
-        // watches the value and pushes it to the window; nothing else reads it.
-        "gxwindow" => knobs.video.display = crate::video::display_from_flag(v),
-        // The body panes' half-rate render (1444) — a flag like every other checkbox here.
-        "boothhalfrate" => knobs.pane_rate.half = v != 0.0,
-        // Render scale (1639). Clamped at the knob's edge like every other numeric row; the
-        // backdrop re-sizes on the next frame and the world camera's target factor follows it
-        // in the same pass, which is what keeps the pick rays where they were.
-        "renderscale" => {
-            knobs.render_scale.0 = v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
-        }
-        // The FPS journal switch (2008): a flag, the client's int-parse + `!= 0`. The journal
-        // system reads the knob every frame, so the file opens on the next second and closes
-        // the second it is turned off.
-        "fpsjournal" => knobs.fps_journal.0 = v != 0.0,
-        // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
-        // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
-        // and nothing reads this resource after the world camera's spawn.
-        "gxmultisample" => {
-            // TWO ceilings, and the second one was missing until 1643. The reference's own
-            // `atoi`-then-clamp `[1, 16]` comes first; then the DEVICE's, because a count this
-            // GPU does not offer is not a setting that degrades — it is a wgpu validation error
-            // that kills the render thread on frame one ("Sample count 8 is not supported by
-            // format Rgba16Float on this device", 2026-08-26).
-            //
-            // `MsaaSupportPlugin::finish` already clamped, but it runs once, before the first
-            // update — so it saw `MsaaSetting::default()` and never the value `load_config` was
-            // about to fold in from `config.toml`. A config written on a machine that offers 8x
-            // and opened on one that stops at 4 therefore reached the camera untouched. Clamping
-            // at the WRITE covers every writer there is: the file, a Lua `SetCVar`, the dropdown,
-            // and the Defaults button.
-            let asked = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end());
-            let granted = knobs.msaa_formats.clamp(asked);
-            if granted != asked {
-                // At `warn`, the same posture as the seed clamp: the player asked for something
-                // and did not get it, and this is the only place that fact exists.
-                warn!(
-                    "cvar {name}: this GPU does not offer {asked}x multisampling — using {granted}x"
-                );
-            }
-            knobs.msaa.samples = granted;
-        }
-        // The filter policy's two halves. Both write the PENDING value — latched, like
-        // `gxMultisample`: the process policy is published once at the end of `load_config` and
-        // nothing reads this resource afterwards. `anisotropic` takes the reference's own
-        // parse-then-clamp `[1, 16]` (`0x689110`); `trilinear` is a flag like every other.
-        "trilinear" => knobs.tex_filter.trilinear = v != 0.0,
-        "anisotropic" => {
-            knobs.tex_filter.aniso = (v as u32).clamp(
-                *benilla_assets::ANISO_RANGE.start(),
-                *benilla_assets::ANISO_RANGE.end(),
-            )
-        }
-        _ => return false,
-    }
-    true
-}
-
-/// Freeze the texture filter policy for the process, and say what it resolved to.
-///
-/// **A separate system, chained after [`load_config`], deliberately.** `load_config` returns early
-/// on an absent or malformed file, and the policy has to be published on every one of those paths:
-/// the sampler lanes are an async `AssetLoader` and a set of ordinary systems, none of which can
-/// read a resource the others own, so a run that never published would be reading
-/// [`benilla_assets::tex_filter`]'s fallback while a player's `config.toml` said otherwise.
-///
-/// The log line is not decoration — it is the same reasoning as `video::log_display_session`
-/// (1627). Every filtering report this client will get comes from a machine nobody here can run,
-/// and "which mode was that run actually in" must be readable off the log a player pastes rather
-/// than reasoned about.
-fn publish_filter_policy(filter: Res<benilla_assets::TexFilterSetting>) {
-    benilla_assets::publish_tex_filter(*filter);
-    let mode = filter.mode();
-    let name = match mode {
-        3 => "bilinear + nearest-mip select, aniso off",
-        4 => "trilinear, aniso off",
-        _ => "trilinear + aniso",
-    };
-    info!(
-        "texture filter: mode {mode} ({name}) — trilinear={} anisotropic={}",
-        u8::from(filter.trilinear),
-        filter.aniso
-    );
-}
-
-/// A stored minimap zoom level → a valid index: truncate to int and clamp into
-/// `[0, MINIMAP_ZOOM_LEVELS)`, the client's own `set_zoom` clamp.
-fn zoom_index(v: f32) -> u8 {
-    v.clamp(0.0, f32::from(MINIMAP_ZOOM_LEVELS - 1)) as u8
-}
-
-/// The two registered spellings of `ClutterConfig::density`, lowercased (2151) — `WorldDetail`'s
-/// panel stop and `frillDensity`'s cells-per-chunk.
-///
-/// Named as a **pair**, because that is the thing about them that is easy to get wrong: anything
-/// which takes the knob for the session has to take *both* keys. `$WOW_CLUTTER_DENSITY` marked
-/// only `worlddetail` for exactly as long as it was the only spelling, and the moment the second
-/// row landed that would have let an A/B lever ride into `config.toml` through the other name and
-/// pin itself on every later launch.
-const CLUTTER_DENSITY_CVARS: [&str; 2] = ["worlddetail", "frilldensity"];
-
-/// Startup: read `benilla-config/config.toml` (absent file = all defaults, not an error) and apply it
-/// to the knob resources — except the keys this session owns rather than the player
-/// ([`CvarPersist::session_owned`]): an env lever's resource has already read the variable in its
-/// `Default`, and `gxApi` is the machine's own. The VM does not exist yet; [`sync_cvars`] seeds
-/// the table when it does.
-fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
-    let mut knobs = params.knobs();
-    if std::env::var_os("WOW_UI_SCALE").is_some() {
-        persist.session_owned.insert("uiscale".into());
-    }
-    if std::env::var_os("WOW_FARCLIP").is_some() {
-        persist.session_owned.insert("farclip".into());
+    if set("WOW_FARCLIP") {
+        let v = world.get_resource::<benilla_world::view::ViewDistance>();
+        out.push(("farclip", v.map(|s| s.farclip.to_string())));
     }
     // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law, over
-    // BOTH of that knob's spellings ([`CLUTTER_DENSITY_CVARS`]).
-    if std::env::var_os("WOW_CLUTTER_DENSITY").is_some() {
-        for key in CLUTTER_DENSITY_CVARS {
-            persist.session_owned.insert(key.into());
-        }
+    // BOTH of that knob's spellings ([`CLUTTER_DENSITY_CVARS`]). An off-grid multiplier seeds
+    // off-grid honestly: the dropdown shows the raw number and checks nothing (the 0959
+    // out-of-range posture, dropdown-flavored).
+    if set("WOW_CLUTTER_DENSITY") {
+        let v = world.get_resource::<benilla_world::clutter::ClutterConfig>();
+        out.push(("WorldDetail", v.map(|c| (c.density - 1.0).to_string())));
+        out.push(("frillDensity", v.map(|c| c.frill_density().to_string())));
     }
     // `$WOW_NOVSYNC=1` is the measurement uncap: session-only, exactly like the taste-iteration
     // overrides above. Pinning it into the config would make an instrument run sticky.
     if crate::video::novsync_env() {
-        persist.session_owned.insert("gxvsync".into());
+        let v = world.get_resource::<crate::video::VideoConfig>();
+        out.push(("gxVSync", v.map(|c| flag(c.vsync))));
     }
     // The filter policy's A/B levers, under the same law: pricing mode 3 against mode 5 on one
     // machine in one session is exactly what these are for, and a value that stuck in
     // `config.toml` would silently denominate every later reading.
-    if std::env::var_os("WOW_TRILINEAR").is_some() {
-        persist.session_owned.insert("trilinear".into());
+    let tex = world.get_resource::<benilla_assets::TexFilterSetting>();
+    if set("WOW_TRILINEAR") {
+        out.push(("trilinear", tex.map(|t| flag(t.trilinear))));
     }
-    if std::env::var_os("WOW_ANISO").is_some() {
-        persist.session_owned.insert("anisotropic".into());
+    if set("WOW_ANISO") {
+        out.push(("anisotropic", tex.map(|t| t.aniso.to_string())));
     }
     // `$WOW_WIN`, a capture scenario, or any instrumented run owns the window's geometry for the
     // session (decision 1627), so the two CVars that would otherwise move it mid-run are
-    // session-only under exactly the same law as the four above.
+    // session-only under exactly the same law as the levers above.
     if crate::video::windowed_env() {
-        persist.session_owned.insert("gxwindow".into());
-        persist.session_owned.insert("gxresolution".into());
+        let v = world.get_resource::<crate::video::VideoConfig>();
+        out.push((
+            "gxWindow",
+            v.map(|c| flag(c.display == crate::video::DisplayMode::Windowed)),
+        ));
+        out.push((
+            "gxResolution",
+            v.map(|c| format!("{}x{}", c.windowed.x, c.windowed.y)),
+        ));
     }
-    // `$WOW_MSAA` is the multisampling A/B lever (1629), session-only under the same law as every
-    // override above: a value pinned into the file would make a measurement sticky across
-    // relaunches.
-    if std::env::var_os("WOW_MSAA").is_some() {
-        persist.session_owned.insert("gxmultisample".into());
+    // `$WOW_MSAA` is the multisampling A/B lever (1629); `$WOW_RENDER_SCALE` the render-scale one
+    // (1639), doubly session-only because it is also the supersampling instrument this machine
+    // prices pixels with, and an instrument run that pinned 4× into the file would come back at
+    // 4× the next time the client opened.
+    if set("WOW_MSAA") {
+        let v = world.get_resource::<benilla_world::view::MsaaSetting>();
+        out.push(("gxMultisample", v.map(|m| m.samples.to_string())));
     }
-    // `$WOW_RENDER_SCALE` is the render-scale A/B lever (1639), and doubly session-only: it is
-    // also the supersampling instrument this machine prices pixels with, and an instrument run
-    // that pinned 4× into the file would come back at 4× the next time the client opened.
-    if std::env::var_os("WOW_RENDER_SCALE").is_some() {
-        persist.session_owned.insert("renderscale".into());
+    if set("WOW_RENDER_SCALE") {
+        let v = world.get_resource::<crate::world_backdrop::RenderScale>();
+        out.push(("renderScale", v.map(|r| r.0.to_string())));
     }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
     // whatever a test dialed. `Realmlist::default()` has already taken it; this keeps it off disk.
-    if std::env::var_os("WOW_HOST").is_some() {
-        persist.session_owned.insert("realmlist".into());
+    if set("WOW_HOST") {
+        let v = world.get_resource::<crate::realmlist::Realmlist>();
+        out.push((
+            crate::realmlist::CVAR_REALMLIST,
+            v.map(|r| r.address().to_string()),
+        ));
     }
-    // The one member with no env var behind it (2151): `gxApi` reports the render adapter's
-    // backend, which is a fact about the machine rather than a setting the player chose. It is
-    // pushed live by `sync_cvars` on every launch, so persisting it could only ever write a name
-    // that the next launch overwrites — or, worse, a stale one that outlives the GPU it described.
-    persist.session_owned.insert("gxapi".into());
-    let cvars = match stored_config() {
-        StoredConfig::Absent => return, // no file, hermetic capture, or no install
-        StoredConfig::Bad(msg) => {
-            // A malformed file is preserved, not clobbered: nothing loads, but nothing saves
-            // over it either until a change actually happens — and the warn names the file.
-            warn!("{msg}");
-            return;
+    out
+}
+
+/// Startup: mark what the session owns, read `benilla-config/config.toml` (absent file = all
+/// defaults, not an error) into the registry, and **fire the observers here and now** — this is
+/// exclusive so that everything ordered after [`CvarLoad`] finds its knob already written, the
+/// way the reference's subsystems find their callback already run by the time they read a
+/// record. The VM does not exist yet; [`sync_cvars`] seeds its mirror when it does.
+fn load_config(world: &mut World) {
+    let session = session_values(world);
+    let stored = stored_config();
+    let events = {
+        let mut cvars = world.resource_mut::<Cvars>();
+        for (name, value) in session {
+            cvars.own_for_session(name, value.as_deref());
         }
-        StoredConfig::Table(t) => t,
+        // The one member with no env var behind it (2151): `gxApi` reports the render adapter's
+        // backend, which is a fact about the machine rather than a setting the player chose. It
+        // is pushed live by [`sync_cvars`] once the adapter exists, so persisting it could only
+        // ever write a name that the next launch overwrites — or, worse, a stale one that
+        // outlives the GPU it described.
+        cvars.own_for_session("gxApi", None);
+        match stored {
+            StoredConfig::Absent => {} // no file, hermetic capture, or no install
+            StoredConfig::Bad(msg) => {
+                // A malformed file is preserved, not clobbered: nothing loads, but nothing
+                // saves over it either until a change actually happens — and the warn names
+                // the file.
+                warn!("{msg}");
+            }
+            StoredConfig::Table(table) => cvars.load_file(table),
+        }
+        cvars.take_events()
     };
-    let known: HashSet<String> = REGISTERED
-        .iter()
-        .map(|r| r.name.to_ascii_lowercase())
-        .collect();
-    for (name, value) in &cvars {
-        let key = name.to_ascii_lowercase();
-        if !known.contains(&key) {
-            warn!("config: unknown cvar '{name}' — preserved, not applied");
-            continue;
-        }
-        if persist.session_owned.contains(&key) {
-            info!("config: {name} is owned by this session, not the file (file value kept)");
-            continue;
-        }
-        apply_to_knobs(name, value, &mut knobs);
+    for event in events {
+        world.trigger(event);
     }
-    persist.file = cvars;
 }
 
 /// What the one read of `config.toml` found.
@@ -1845,8 +1839,8 @@ fn stored_config() -> StoredConfig {
 /// One CVar as `config.toml` holds it, matched case-insensitively — **before the `App` exists**
 /// (decision 1627).
 ///
-/// Every other consumer wants [`CvarPersist::stored`], which answers from the same values once
-/// they are a resource and stays current across a VM replacement (1291). This one exists for the
+/// Every other consumer wants [`Cvars::get`], which answers from the registry once it is a
+/// resource and stays current across a VM replacement (1291). This one exists for the
 /// single caller that cannot wait for a resource: the primary window has to be *built* with its
 /// display mode already resolved.
 pub(crate) fn boot_cvar(name: &str) -> Option<String> {
@@ -1859,79 +1853,83 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
-/// Per frame: seed the VM's table once it exists (registered set + the RESOLVED session values,
-/// so `GetCVar` reflects env overrides and the loaded config alike), then drain Lua `SetCVar`
-/// changes into the knob resources and mark the config dirty.
-fn sync_cvars(
+/// Per frame: seed the VM's mirror once it exists (the registered set at its live values, so
+/// `GetCVar` reflects env overrides and the loaded config alike), drain the VM's registrations
+/// and writes into the registry, push the registry's own writes into the mirror, and trigger
+/// every accepted move for its observers.
+pub(crate) fn sync_cvars(
     script: Option<NonSendMut<UiScript>>,
-    mut persist: ResMut<CvarPersist>,
-    mut params: KnobParams,
+    mut cvars: ResMut<Cvars>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+    msaa_formats: Option<Res<benilla_world::view::MsaaFormats>>,
+    mut seeded: Local<VmMemo<bool>>,
+    mut commands: Commands,
 ) {
+    // **The machine's, not the player's** (2151): the live render backend, so `GetCVar` and
+    // pfUI's system tooltip answer what this run is actually on. Absent in a headless app with
+    // no renderer, where the registered `""` stands and says so.
+    if let Some(adapter) = adapter.as_deref() {
+        let backend = adapter.backend.to_str();
+        if cvars.get("gxApi") != Some(backend) {
+            cvars.own_for_session("gxApi", Some(backend));
+        }
+    }
     let Some(mut script) = script else {
+        // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
+        if cvars.has_outbox() {
+            cvars.take_outbox();
+        }
+        if cvars.has_events() {
+            for event in cvars.take_events() {
+                commands.trigger(event);
+            }
+        }
         return;
     };
-    if persist.registered.claim(&script) {
-        // Read-only borrows for the seed: field access through `ResMut`'s `Deref` flags nothing,
-        // which is the half of 0992's change-detection trap this system has to keep.
-        let KnobParams {
-            camera_opts,
-            sound,
-            scale,
-            view,
-            look,
-            click,
-            loot,
-            names,
-            plates,
-            clutter,
-            weather,
-            display_gamma,
-            minimap,
-            bubbles,
-            zoom,
-            follow,
-            video,
-            render_scale,
-            pane_rate,
-            guild_notify,
-            block_trades,
-            auto_self_cast,
-            text_filter,
-            game_tip,
-            msaa,
-            msaa_formats,
-            tex_filter,
-            realmlist,
-            fps_journal,
-            assist_attack,
-            combat_ranges,
-            damage_text,
-            log_periodic,
-        } = &params;
-        // The config file's values go in FIRST (decision 1291): registration — ours below, or an
-        // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
-        // knobless CVar (`statusBarText`) and an addon-declared one across a VM replacement; the
-        // knob-derived session rows below still win for every key a host knob backs, and an
-        // env-overridden key keeps its env value the same way (its knob carries it).
-        script.set_cvar_saved_base(persist.saved_base().collect::<Vec<_>>());
-        script.register_cvars(registered_pairs());
+    // **The VM's writes first, the seed second.** A fresh VM loads the whole interface before
+    // this system's first turn against it, and an addon's `SetCVar` at load is already in the
+    // queue by then; seeding first would overwrite the mirror with the registry's older value
+    // and then apply the write to the registry alone, leaving `GetCVar` a frame behind for the
+    // rest of the session. Registrations before writes: an addon declares a row and sets it in
+    // the same breath.
+    let registrations = script.take_cvar_registrations();
+    let changes = script.take_cvar_changes();
+    if !registrations.is_empty() || !changes.is_empty() {
+        for (name, default) in registrations {
+            cvars.learn_addon_row(&name, &default);
+        }
+        for (name, value) in changes {
+            cvars.set_from_vm(&name, &value);
+        }
+    }
+    if seeded.claim(&script) {
+        // The file's unclaimed entries go in FIRST (decision 1291): an addon's `RegisterCVar`
+        // later starts its key at the saved value. Then the table itself, at its live values.
+        script.set_cvar_saved_base(cvars.orphans());
+        script.seed_cvars(cvars.vm_seed());
+        if cvars.has_outbox() {
+            cvars.take_outbox(); // the seed just carried everything
+        }
         // The Video dropdown's menu — what this device actually accepts, enumerated once at
         // `finish()` by `view::MsaaSupportPlugin` (decision 1631) and handed over whole. Pushed
         // here rather than owned by the VM because the list is a fact about the render adapter,
         // which `benilla-ui` has no way to ask and should not grow one.
         script.set_multisample_formats(
             msaa_formats
-                .formats
-                .iter()
-                .map(
-                    |&(color_bits, depth_bits, samples)| benilla_ui::script::MultisampleFormat {
-                        color_bits,
-                        depth_bits,
-                        samples,
-                    },
-                )
-                .collect(),
+                .as_deref()
+                .map(|f| {
+                    f.formats
+                        .iter()
+                        .map(|&(color_bits, depth_bits, samples)| {
+                            benilla_ui::script::MultisampleFormat {
+                                color_bits,
+                                depth_bits,
+                                samples,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         );
         // **What `GetVideoCaps` answers with** (decision 2177) — the seven values the stock video
         // window's `OptionsFrame_Load` destructures. Pushed beside the multisample list because it
@@ -1964,299 +1962,61 @@ fn sync_cvars(
             max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
             hardware_cursor: true,
         });
-        let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 87] = [
-            ("MasterVolume", sound.master.to_string()),
-            ("SoundVolume", sound.sfx.to_string()),
-            ("MusicVolume", sound.music.to_string()),
-            ("AmbienceVolume", sound.ambience.to_string()),
-            ("MasterSoundEffects", flag(sound.enabled)),
-            ("EnableMusic", flag(sound.music_enabled)),
-            ("EnableAmbience", flag(sound.ambience_enabled)),
-            ("EnableErrorSpeech", flag(sound.error_speech)),
-            (
-                "Sound_EnableSoundWhenGameIsInBG",
-                flag(sound.background_sound),
-            ),
-            ("SoundReverb", flag(sound.reverb)),
-            ("SoundOutputLimiter", flag(sound.limiter)),
-            (
-                "SoundListenerAtCharacter",
-                flag(sound.listener_at_character),
-            ),
-            ("EmoteSounds", flag(sound.emote_sounds)),
-            ("SoundZoneMusicNoDelay", flag(sound.zone_music_no_delay)),
-            ("uiScale", scale.0.to_string()),
-            ("farclip", view.farclip.to_string()),
-            ("nearclip", view.nearclip.to_string()),
-            ("deselectOnClick", flag(click.deselect_on_click)),
-            ("autoSelfCast", flag(auto_self_cast.0)),
-            ("assistAttack", flag(assist_attack.0)),
-            ("mouseInvertPitch", flag(look.invert_pitch)),
-            ("mousespeed", look.sensitivity.to_string()),
-            ("cameraYawMoveSpeed", look.yaw_speed.to_string()),
-            ("cameraPitchMoveSpeed", look.pitch_speed.to_string()),
-            ("cameraDistanceMaxFactor", zoom.factor().to_string()),
-            ("cameraSmoothStyle", follow.style.cvar().to_string()),
-            (
-                "cameraSmoothTrackingStyle",
-                follow.tracking_style.cvar().to_string(),
-            ),
-            ("cameraYawSmoothSpeed", follow.yaw_speed.to_string()),
-            ("cameraPivot", flag(camera_opts.pivot)),
-            ("cameraPivotDXMax", camera_opts.pivot_dx_max.to_string()),
-            ("cameraPivotDYMin", camera_opts.pivot_dy_min.to_string()),
-            (
-                "cameraTargetSmoothSpeed",
-                camera_opts.target_smooth_speed.to_string(),
-            ),
-            ("cameraWaterCollision", flag(camera_opts.water_collision)),
-            ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
-            (
-                "cameraGroundSmoothSpeed",
-                camera_opts.ground_smooth_speed.to_string(),
-            ),
-            (
-                "cameraTerrainTiltTimeMin",
-                camera_opts.tilt_time_min.to_string(),
-            ),
-            (
-                "cameraTerrainTiltTimeMax",
-                camera_opts.tilt_time_max.to_string(),
-            ),
-            ("cameraBobbing", flag(camera_opts.bobbing)),
-            (
-                "cameraBobbingLRAmplitude",
-                camera_opts.bob_lr_amplitude.to_string(),
-            ),
-            (
-                "cameraBobbingUDAmplitude",
-                camera_opts.bob_ud_amplitude.to_string(),
-            ),
-            (
-                "cameraBobbingFrequency",
-                camera_opts.bob_frequency.to_string(),
-            ),
-            (
-                "cameraBobbingSmoothSpeed",
-                camera_opts.bob_smooth_speed.to_string(),
-            ),
-            ("autoLootDefault", flag(loot.auto_loot)),
-            ("showLootSpam", flag(loot.show_loot_spam)),
-            ("guildMemberNotify", flag(guild_notify.0)),
-            ("BlockTrades", flag(block_trades.0)),
-            ("UnitNamePlayer", flag(names.player)),
-            ("UnitNameNPC", flag(names.npc)),
-            ("UnitNameOwn", flag(names.own)),
-            ("UnitNamePlayerGuild", flag(names.player_guild)),
-            (crate::vplates::CVAR_ENEMIES, flag(plates.enemies)),
-            (crate::vplates::CVAR_FRIENDS, flag(plates.friends)),
-            // The session density on the panel scale (×1..×3 → 0..2). An env-driven off-grid
-            // multiplier seeds off-grid honestly — the dropdown shows the raw number, checks
-            // nothing (the 0959 out-of-range posture, dropdown-flavored). A console
-            // `frillDensity` past the top stop reads off-grid here for the same reason, which is
-            // the reference's own inconsistency between its two writers (2151).
-            ("WorldDetail", (clutter.density - 1.0).to_string()),
-            // …and the same density in the reference's own cells-per-chunk (2151).
-            ("frillDensity", clutter.frill_density().to_string()),
-            ("weatherDensity", weather.weather_density.to_string()),
-            // Six decimals, matching `SetGamma`'s own `"%f"` — see the row's comment.
-            ("gamma", format!("{:.6}", display_gamma.0)),
-            ("ChatBubbles", flag(bubbles.all)),
-            ("ChatBubblesParty", flag(bubbles.party)),
-            ("profanityFilter", flag(text_filter.profanity)),
-            ("spamFilter", flag(text_filter.spam)),
-            ("showGameTips", flag(game_tip.show)),
-            ("gameTip", game_tip.next.to_string()),
-            ("minimapZoom", minimap.outdoor.to_string()),
-            ("minimapInsideZoom", minimap.inside.to_string()),
-            // **The machine's, not the player's** (2151): the live render backend, so `GetCVar`
-            // and pfUI's system tooltip answer what this run is actually on. `None` only in a
-            // headless app with no renderer, where the registered `""` stands and says so.
-            (
-                "gxApi",
-                adapter
-                    .as_ref()
-                    .map_or_else(String::new, |a| a.backend.to_str().to_string()),
-            ),
-            ("gxVSync", flag(video.vsync)),
-            // The reference's polarity: the CVar is `gxWindow`, so `1` is the WINDOWED state.
-            (
-                "gxWindow",
-                flag(video.display == crate::video::DisplayMode::Windowed),
-            ),
-            // The one string-valued row, composed in the reference's spelling.
-            (
-                "gxResolution",
-                format!("{}x{}", video.windowed.x, video.windowed.y),
-            ),
-            ("boothHalfRate", flag(pane_rate.half)),
-            ("renderScale", render_scale.0.to_string()),
-            ("gxMultisample", msaa.samples.to_string()),
-            ("trilinear", flag(tex_filter.trilinear)),
-            ("anisotropic", tex_filter.aniso.to_string()),
-            ("fpsJournal", flag(fps_journal.0)),
-            // The other string-valued row (1667): what the next logon attempt will actually dial,
-            // including a `$WOW_HOST` the player never typed.
-            (
-                crate::realmlist::CVAR_REALMLIST,
-                realmlist.address().to_string(),
-            ),
-            // The combat log's eight display ranges, off the live table — written out one class at
-            // a time rather than composed in a loop, because this array is the readable census of
-            // what a session's `GetCVar` answers and a loop would hide eight rows inside one.
-            (
-                "CombatLogRangeParty",
-                combat_ranges.class(CombatClass::Party).to_string(),
-            ),
-            (
-                "CombatLogRangePartyPet",
-                combat_ranges.class(CombatClass::PartyPet).to_string(),
-            ),
-            (
-                "CombatLogRangeFriendlyPlayers",
-                combat_ranges.class(CombatClass::FriendlyPlayer).to_string(),
-            ),
-            (
-                "CombatLogRangeFriendlyPlayersPets",
-                combat_ranges.class(CombatClass::FriendlyPet).to_string(),
-            ),
-            (
-                "CombatLogRangeHostilePlayers",
-                combat_ranges.class(CombatClass::HostilePlayer).to_string(),
-            ),
-            (
-                "CombatLogRangeHostilePlayersPets",
-                combat_ranges.class(CombatClass::HostilePet).to_string(),
-            ),
-            (
-                "CombatLogRangeCreature",
-                combat_ranges.class(CombatClass::Creature).to_string(),
-            ),
-            (
-                crate::ui_chat::combat::DEATH_LOG_RANGE_CVAR,
-                combat_ranges.death().to_string(),
-            ),
-            ("CombatDamage", flag(damage_text.combat_damage)),
-            ("PetMeleeDamage", flag(damage_text.pet_melee)),
-            ("PetSpellDamage", flag(damage_text.pet_spell)),
-            (
-                crate::ui_chat::combat::LOG_PERIODIC_CVAR,
-                flag(log_periodic.0),
-            ),
-        ];
-        for (name, value) in session {
-            script.set_cvar_host(name, &value);
+    }
+    if cvars.has_outbox() {
+        for (name, value) in cvars.take_outbox() {
+            script.set_cvar_host(&name, &value);
         }
     }
-    // Take the changes BEFORE touching the knobs: constructing `Knobs` deref-muts every knob
-    // resource, which trips Bevy change detection even when nothing is written — and the
-    // clutter re-scatter is downstream of exactly that signal staying honest (0992).
-    let changes = script.take_cvar_changes();
-    if changes.is_empty() {
-        return;
-    }
-    let mut knobs = params.knobs();
-    for (name, value) in changes {
-        if apply_to_knobs(&name, &value, &mut knobs) {
-            persist.dirty = true;
-            persist.last_change = Some(Instant::now());
+    if cvars.has_events() {
+        for event in cvars.take_events() {
+            commands.trigger(event);
         }
     }
 }
 
-/// **A HOST-side CVar write that persists** — the counterpart to a Lua `SetCVar`, for the one CVar
-/// the engine itself owns: `gameTip`, the loading screen's cursor (2077).
-///
-/// It has to go through the VM's table rather than through the knob alone, because
-/// [`save_config`] composes the file from `cvars_snapshot()` — the knob is only ever *seeded* into
-/// a VM at claim time, so a host write that stops at the knob is invisible to the file and the
-/// cursor resets every launch. Marking dirty here is what arms the debounced save.
-pub(crate) fn write_host_cvar(
-    script: &mut UiScript,
-    persist: &mut CvarPersist,
-    name: &str,
-    value: &str,
-) {
-    script.set_cvar_host(name, value);
-    persist.dirty = true;
-    persist.last_change = Some(Instant::now());
-}
-
-/// Fold the dying VM's CVar table into the persist state — the session edge's half of decision
+/// Fold the dying VM's last writes into the registry — the session edge's half of decision
 /// 1291's bridge (the seed in [`sync_cvars`] is the other). Called from
 /// [`crate::ui_script::end_ui_session`] **after** the shutdown events (an addon's
 /// `PLAYER_LOGOUT` handler may `SetCVar`, and in the reference that write lands in an
 /// engine-side store that survives) and **before** the VM is replaced.
 ///
-/// Two steps, both about the writes the per-frame sync never got to see:
-/// 1. drain the dying VM's change queue into the host knobs — a `SetCVar` in the final frame
-///    would otherwise be overwritten by the stale knob when the next VM's seed runs;
-/// 2. fold the table into `persist.file` with the same compose the saver uses, so the next VM's
-///    saved base — and the next save — both start from what the player actually set.
-///
-/// `dirty` is left alone: if nothing changed, the fold is an identity; if something did, the
-/// change that did it already marked the config dirty.
+/// The registry IS the store that survives, so there is nothing to copy back: only the writes
+/// the per-frame sync never got to see — a `SetCVar` in the final frame would otherwise be
+/// overwritten by the stale value when the next VM's seed runs. The observers fire here, so the
+/// knobs are current before the next VM is even built.
 pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
-    // A world with no persist state has no file to bridge — a test world or a stripped scenario
-    // that never added the plugin. It is checked up front because the knob set below is fetched
-    // NON-optionally, and the two facts are one: any world carrying `CvarPersist` carries every
-    // knob too (the plugin's own `load_config`/`sync_cvars` take them the same way, and would
-    // have panicked at startup otherwise).
-    if !world.contains_resource::<CvarPersist>() {
+    // A world with no registry has no file to bridge — a test world or a stripped scenario that
+    // never added the plugin.
+    if !world.contains_resource::<Cvars>() {
         return;
     }
-    let mut state: bevy::ecs::system::SystemState<(
-        Option<NonSendMut<UiScript>>,
-        ResMut<CvarPersist>,
-        KnobParams,
-    )> = bevy::ecs::system::SystemState::new(world);
-    let (script, mut persist, mut params) = state.get_mut(world);
-    let Some(mut script) = script else {
-        return;
+    let (registrations, changes) = {
+        let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() else {
+            return;
+        };
+        (script.take_cvar_registrations(), script.take_cvar_changes())
     };
-    let changes = script.take_cvar_changes();
-    if !changes.is_empty() {
-        let mut knobs = params.knobs();
+    let events = {
+        let mut cvars = world.resource_mut::<Cvars>();
+        for (name, default) in registrations {
+            cvars.learn_addon_row(&name, &default);
+        }
         for (name, value) in changes {
-            if apply_to_knobs(&name, &value, &mut knobs) {
-                persist.dirty = true;
-                persist.last_change = Some(Instant::now());
-            }
+            cvars.set_from_vm(&name, &value);
         }
-    }
-    let snapshot = script.cvars_snapshot();
-    if snapshot.is_empty() {
-        return; // a VM that never registered (a capture) has nothing to say about the file
-    }
-    persist.file = compose_file(&persist.file, &persist.session_owned, &snapshot);
-}
-
-/// Compose the file to save: the previous file as the merge base, every registered var that
-/// moved off its default written, every one back at its default removed — session-owned keys
-/// untouched (that value is the env's or the machine's, not the player's).
-fn compose_file(
-    previous: &BTreeMap<String, String>,
-    session_owned: &HashSet<String>,
-    snapshot: &[(String, String, String)],
-) -> BTreeMap<String, String> {
-    let mut out = previous.clone();
-    for (name, value, default) in snapshot {
-        let key = name.to_ascii_lowercase();
-        if session_owned.contains(&key) {
-            continue;
+        if cvars.has_outbox() {
+            cvars.take_outbox(); // the VM this was for is going away
         }
-        // Match any existing entry case-insensitively so a hand-edited spelling doesn't fork.
-        let existing = out.keys().find(|k| k.eq_ignore_ascii_case(name)).cloned();
-        if value == default {
-            if let Some(k) = existing {
-                out.remove(&k);
-            }
+        if cvars.has_events() {
+            cvars.take_events()
         } else {
-            out.insert(existing.unwrap_or_else(|| name.clone()), value.clone());
+            Vec::new()
         }
+    };
+    for event in events {
+        world.trigger(event);
     }
-    out
 }
 
 /// The file's header comment — where these values come from and where the law lives.
@@ -2265,59 +2025,86 @@ const HEADER: &str = "\
 # Managed by the client; hand edits are read on next launch and preserved on save.
 ";
 
-/// Dirty + one quiet second (or the app exiting) → rewrite `config.toml` atomically.
-fn save_config(
-    script: Option<NonSendMut<UiScript>>,
-    mut persist: ResMut<CvarPersist>,
-    mut exits: MessageReader<AppExit>,
-) {
+/// Dirty + one quiet second (or the app exiting) → rewrite `config.toml` atomically, from the
+/// registry — the store, not the VM's mirror, so a session with no VM at all (the glue screens,
+/// a headless run) saves exactly what it changed.
+fn save_config(mut cvars: ResMut<Cvars>, mut exits: MessageReader<AppExit>) {
     let exiting = exits.read().next().is_some();
-    if !persist.dirty {
+    if !cvars.dirty {
         return;
     }
-    let quiet = persist
-        .last_change
-        .is_none_or(|t| t.elapsed() >= SAVE_QUIET);
+    let quiet = cvars.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET);
     if !(quiet || exiting) {
         return;
     }
-    let Some(script) = script else { return };
     let Some(path) = crate::local_state::config_path() else {
-        persist.dirty = false; // hermetic/session-only: nothing to write, stop retrying
+        cvars.dirty = false; // hermetic/session-only: nothing to write, stop retrying
         return;
     };
-    let snapshot = script.cvars_snapshot();
-    // **An empty table is not a player who cleared their settings.** The file is composed from the
-    // VM's live table, so a VM whose table was never registered would compose the player's
-    // `config.toml` back out *stripped* — a silent, irreversible loss of everything they had set.
-    // The seed above is what keeps that from happening; this is the floor under it, because the
-    // failure is one-way and the next regression in that seed must not be able to reach the disk.
-    if snapshot.is_empty() {
-        warn!("config: the VM has no registered cvars — refusing to compose the file from nothing");
-        persist.dirty = false; // nothing to save, and retrying every frame changes nothing
-        return;
-    }
-    let cvars = compose_file(&persist.file, &persist.session_owned, &snapshot);
+    let file = cvars.compose();
     let body = toml::to_string(&LocalConfig {
-        cvars: cvars.clone(),
+        cvars: file.clone(),
     })
     .expect("string map serializes");
     match crate::local_state::write_atomic(&path, &format!("{HEADER}{body}")) {
         Ok(()) => {
-            persist.file = cvars;
-            persist.dirty = false;
+            cvars.file = file;
+            cvars.dirty = false;
         }
         Err(e) => {
             warn!("config: cannot write {}: {e}", path.display());
-            persist.dirty = false; // don't retry every frame into the same error
+            cvars.dirty = false; // don't retry every frame into the same error
         }
     }
+}
+
+/// Freeze the texture filter policy for the process, and say what it resolved to.
+///
+/// **A separate system, chained after [`load_config`], deliberately.** `load_config` returns early
+/// on an absent or malformed file, and the policy has to be published on every one of those paths:
+/// the sampler lanes are an async `AssetLoader` and a set of ordinary systems, none of which can
+/// read a resource the others own, so a run that never published would be reading
+/// [`benilla_assets::tex_filter`]'s fallback while a player's `config.toml` said otherwise.
+///
+/// The log line is not decoration — it is the same reasoning as `video::log_display_session`
+/// (1627). Every filtering report this client will get comes from a machine nobody here can run,
+/// and "which mode was that run actually in" must be readable off the log a player pastes rather
+/// than reasoned about.
+fn publish_filter_policy(filter: Res<benilla_assets::TexFilterSetting>) {
+    benilla_assets::publish_tex_filter(*filter);
+    let mode = filter.mode();
+    let name = match mode {
+        3 => "bilinear + nearest-mip select, aniso off",
+        4 => "trilinear, aniso off",
+        _ => "trilinear + aniso",
+    };
+    info!(
+        "texture filter: mode {mode} ({name}) — trilinear={} anisotropic={}",
+        u8::from(filter.trilinear),
+        filter.aniso
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_script::DEFAULT_UI_SCALE;
+    use crate::chat_bubble::BubbleConfig;
+    use crate::minimap::MinimapZoom;
+    use crate::nameplates::NameConfig;
+    use crate::player::camera::{
+        FollowConfig, FollowStyle, LookConfig, ZoomLimit, FOLLOW_SPEED_RANGE,
+    };
+    use crate::portrait::PaneRate;
+    use crate::sound::SoundConfig;
+    use crate::target::ClickConfig;
+    use crate::ui_loot::LootConfig;
+    use crate::ui_script::{UiScaleCvar, DEFAULT_UI_SCALE};
+    use crate::video::VideoConfig;
+    use crate::vplates::VPlateMode;
+    use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
+    use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
+    use benilla_world::clutter::ClutterConfig;
+    use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
 
     /// **The standard, enforced: a benilla option's default IS the reference's** (decision 1804)
     /// — every row's [`Reference`] column stands up.
@@ -2626,278 +2413,215 @@ mod tests {
         assert_eq!(d["renderScale"], 1.0);
     }
 
+    /// **Every arm, through the registry and its observers.** The old central `apply_to_knobs`
+    /// match is gone (2303); each arm lives beside the knob it writes, and this drives the whole
+    /// set through a real `App` — a host write, the observers firing synchronously — so a knob
+    /// whose observer forgot an arm, or clamps differently from what its row promises, fails here.
+    ///
+    /// `apply` crosses the latch boundary at once, so the arms are what is under test; the latch
+    /// itself has its own test.
     #[test]
-    fn apply_parses_clamps_and_reports_unknowns() {
-        let mut sound = SoundConfig::default();
-        let mut scale = UiScaleCvar(0.9);
-        let mut view = ViewDistance {
-            farclip: 350.0,
-            nearclip: benilla_world::view::NEARCLIP_DEFAULT,
-        };
-        let mut look = LookConfig::default();
-        let mut click = ClickConfig::default();
-        let mut loot = LootConfig::default();
-        let mut names = NameConfig::default();
-        let mut plates = VPlateMode::default();
-        let mut assist_attack = crate::target::AssistAttack::default();
-        let mut combat_ranges = crate::ui_chat::combat::CombatLogRanges::default();
-        let mut damage_text = crate::combat_text::DamageTextGates::default();
-        let mut log_periodic = crate::ui_chat::combat::LogPeriodicSpells::default();
-        // Literal fields, not Default: ClutterConfig::default() reads the env A/B vars.
-        let mut clutter = ClutterConfig {
-            density: 3.0,
-            scale: 1.0,
-            alpha_ref: 0.5,
-            fade_far: 70.0,
-        };
-        let mut weather = benilla_world::weather::WeatherState::default();
-        let mut display_gamma = crate::ui_gamma::DisplayGamma::default();
-        let mut minimap = MinimapZoom::default();
-        let mut bubbles = BubbleConfig::default();
-        let mut zoom = ZoomLimit::default();
-        let mut follow = FollowConfig::default();
-        let mut video = VideoConfig::default();
-        let mut pane_rate = PaneRate::default();
-        let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
-        let mut block_trades = crate::ui_trade::BlockTrades::default();
-        // Literal, not Default: MsaaSetting::default() reads $WOW_MSAA.
-        let mut msaa = MsaaSetting { samples: 1 };
-        // What an Apple GPU answers for the trio we render into (Rgba16Float / Depth32Float /
-        // the swapchain). 8 and 16 are NOT in it — which is the whole point below.
-        let msaa_formats = benilla_world::view::MsaaFormats {
-            formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
-        };
-        // Literal for the same reason: RenderScale::default() reads $WOW_RENDER_SCALE.
-        let mut render_scale = RenderScale(1.0);
-        // Literal for the same reason again (1642): TexFilterSetting::default() reads
-        // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
-        let mut tex_filter = benilla_assets::TexFilterSetting {
-            trilinear: true,
-            aniso: 1,
-        };
-        // Literal for the same reason once more (1667): Realmlist::default() reads $WOW_HOST, and
-        // a shell that happens to export it must not decide what this test asserts against.
-        let mut realmlist =
-            crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
-        let mut auto_self_cast = crate::ui_action::AutoSelfCast::default();
-        let mut fps_journal = crate::perf::FpsJournalSetting::default();
-        let mut text_filter = crate::text_filter::TextFilterSwitches::default();
-        let mut game_tip = crate::game_tip::GameTipSetting::default();
-        let mut camera_opts = crate::player::camera_dynamics::CameraOptions::default();
-        let mut knobs = Knobs {
-            camera_opts: &mut camera_opts,
-            sound: &mut sound,
-            auto_self_cast: &mut auto_self_cast,
-            text_filter: &mut text_filter,
-            game_tip: &mut game_tip,
-            scale: &mut scale,
-            view: &mut view,
-            look: &mut look,
-            click: &mut click,
-            loot: &mut loot,
-            names: &mut names,
-            plates: &mut plates,
-            clutter: &mut clutter,
-            weather: &mut weather,
-            display_gamma: &mut display_gamma,
-            minimap: &mut minimap,
-            bubbles: &mut bubbles,
-            zoom: &mut zoom,
-            follow: &mut follow,
-            video: &mut video,
-            render_scale: &mut render_scale,
-            pane_rate: &mut pane_rate,
-            guild_notify: &mut guild_notify,
-            block_trades: &mut block_trades,
-            msaa: &mut msaa,
-            tex_filter: &mut tex_filter,
-            msaa_formats: &msaa_formats,
-            realmlist: &mut realmlist,
-            fps_journal: &mut fps_journal,
-            assist_attack: &mut assist_attack,
-            combat_ranges: &mut combat_ranges,
-            damage_text: &mut damage_text,
-            log_periodic: &mut log_periodic,
-        };
-        assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
-        assert_eq!(knobs.sound.music, 0.7);
+    fn the_observers_apply_every_arm() {
+        let mut app = cvar_app();
+        apply(&mut app, "MusicVolume", "0.7");
+        assert_eq!(res::<SoundConfig>(&app).music, 0.7);
         // The second string-valued row (1667): it must reach the knob rather than being rejected
         // by the numeric parse every other row goes through, and a value that is not an address
         // must be consumed (known key) while leaving the knob's truth alone.
-        assert!(apply_to_knobs(
-            "realmList",
-            "logon.example.org:3724",
-            &mut knobs
-        ));
-        assert_eq!(knobs.realmlist.address(), "logon.example.org:3724");
-        assert!(apply_to_knobs(
+        apply(&mut app, "realmList", "logon.example.org:3724");
+        assert_eq!(
+            res::<crate::realmlist::Realmlist>(&app).address(),
+            "logon.example.org:3724"
+        );
+        apply(
+            &mut app,
             "realmlist",
             r#"SET realmlist "elsewhere.example.org""#,
-            &mut knobs
-        ));
-        assert_eq!(knobs.realmlist.address(), "elsewhere.example.org");
-        assert!(apply_to_knobs("realmList", "not an address", &mut knobs));
+        );
         assert_eq!(
-            knobs.realmlist.address(),
+            res::<crate::realmlist::Realmlist>(&app).address(),
+            "elsewhere.example.org"
+        );
+        apply(&mut app, "realmList", "not an address");
+        assert_eq!(
+            res::<crate::realmlist::Realmlist>(&app).address(),
             "elsewhere.example.org",
             "a known key with a bad value is consumed, and the resource keeps its truth",
         );
         // Clamps are the knob's own: volume to [0,1], farclip to FARCLIP_RANGE.
-        assert!(apply_to_knobs("mastervolume", "7", &mut knobs));
-        assert_eq!(knobs.sound.master, 1.0);
-        assert!(apply_to_knobs("farclip", "50", &mut knobs));
-        assert_eq!(knobs.view.farclip, *FARCLIP_RANGE.start());
+        apply(&mut app, "mastervolume", "7");
+        assert_eq!(res::<SoundConfig>(&app).master, 1.0);
+        apply(&mut app, "farclip", "50");
+        assert_eq!(res::<ViewDistance>(&app).farclip, *FARCLIP_RANGE.start());
         // `nearclip` clamps to the reference's own callback bounds `[0.01, 0.33]` (`0x688d90`),
         // both ends. pfUI's extended stops write 0.06..0.30, so its whole range passes untouched.
-        assert!(apply_to_knobs("nearclip", "0.001", &mut knobs));
+        apply(&mut app, "nearclip", "0.001");
         assert_eq!(
-            knobs.view.nearclip, 0.01,
+            res::<ViewDistance>(&app).nearclip,
+            0.01,
             "[0x8029d0], the callback's low bound"
         );
-        assert!(apply_to_knobs("nearclip", "9", &mut knobs));
-        assert_eq!(knobs.view.nearclip, 0.33, "[0x808300], its high bound");
-        assert!(apply_to_knobs("nearclip", "0.3", &mut knobs));
-        assert_eq!(knobs.view.nearclip, 0.3);
+        apply(&mut app, "nearclip", "9");
+        assert_eq!(
+            res::<ViewDistance>(&app).nearclip,
+            0.33,
+            "[0x808300], its high bound"
+        );
+        apply(&mut app, "nearclip", "0.3");
+        assert_eq!(res::<ViewDistance>(&app).nearclip, 0.3);
         // Multisampling clamps to the reference's own [1, 16] and takes an int the way its `atoi`
         // does — the value reaching the camera is a sample COUNT, where 1 is none (1629).
-        assert!(apply_to_knobs("gxMultisample", "4", &mut knobs));
-        assert_eq!(knobs.msaa.samples, 4);
+        apply(&mut app, "gxMultisample", "4");
+        assert_eq!(res::<MsaaSetting>(&app).samples, 4);
         // The filter policy's two rows: `anisotropic` takes the reference's own [1, 16] clamp,
         // `trilinear` is a flag. Both write the pending value; the process policy is already
         // published by the time either can be typed (1642).
-        assert!(apply_to_knobs("anisotropic", "99", &mut knobs));
-        assert_eq!(knobs.tex_filter.aniso, *benilla_assets::ANISO_RANGE.end());
-        assert!(apply_to_knobs("anisotropic", "0", &mut knobs));
-        assert_eq!(knobs.tex_filter.aniso, *benilla_assets::ANISO_RANGE.start());
+        apply(&mut app, "anisotropic", "99");
+        assert_eq!(
+            res::<benilla_assets::TexFilterSetting>(&app).aniso,
+            *benilla_assets::ANISO_RANGE.end()
+        );
+        apply(&mut app, "anisotropic", "0");
+        assert_eq!(
+            res::<benilla_assets::TexFilterSetting>(&app).aniso,
+            *benilla_assets::ANISO_RANGE.start()
+        );
         // Both directions: the knob starts at what ships (on), so only the flip to 0 proves the
         // arm does anything.
-        assert!(apply_to_knobs("trilinear", "0", &mut knobs));
-        assert!(!knobs.tex_filter.trilinear);
-        assert!(apply_to_knobs("trilinear", "1", &mut knobs));
-        assert!(knobs.tex_filter.trilinear);
+        apply(&mut app, "trilinear", "0");
+        assert!(!res::<benilla_assets::TexFilterSetting>(&app).trilinear);
+        apply(&mut app, "trilinear", "1");
+        assert!(res::<benilla_assets::TexFilterSetting>(&app).trilinear);
         // **The DEVICE's ceiling, not the reference's** (decision 1643). 99 clamps to the
         // reference's 16 and then to the 4 this GPU offers — before 1643 it stopped at 16 and the
         // camera was handed a sample count wgpu refuses, killing the render thread on frame one.
-        assert!(apply_to_knobs("gxmultisample", "99", &mut knobs));
-        assert_eq!(knobs.msaa.samples, 4);
+        apply(&mut app, "gxmultisample", "99");
+        assert_eq!(res::<MsaaSetting>(&app).samples, 4);
         // The realistic route in: a config written where 8x exists, opened where it does not.
-        assert!(apply_to_knobs("gxMultisample", "8", &mut knobs));
+        apply(&mut app, "gxMultisample", "8");
         assert_eq!(
-            knobs.msaa.samples, 4,
+            res::<MsaaSetting>(&app).samples,
+            4,
             "a device that stops at 4x must never be handed an 8"
         );
         // A count the device DOES offer is untouched.
-        assert!(apply_to_knobs("gxmultisample", "2", &mut knobs));
-        assert_eq!(knobs.msaa.samples, 2);
-        assert!(apply_to_knobs("gxmultisample", "0", &mut knobs));
-        assert_eq!(knobs.msaa.samples, *MSAA_RANGE.start());
+        apply(&mut app, "gxmultisample", "2");
+        assert_eq!(res::<MsaaSetting>(&app).samples, 2);
+        apply(&mut app, "gxmultisample", "0");
+        assert_eq!(res::<MsaaSetting>(&app).samples, *MSAA_RANGE.start());
         // Render scale takes a fraction and clamps to its own range at both ends (1639).
-        assert!(apply_to_knobs("renderScale", "0.75", &mut knobs));
-        assert_eq!(knobs.render_scale.0, 0.75);
-        assert!(apply_to_knobs("renderscale", "9", &mut knobs));
-        assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.end());
-        assert!(apply_to_knobs("renderscale", "0", &mut knobs));
-        assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.start());
+        apply(&mut app, "renderScale", "0.75");
+        assert_eq!(res::<RenderScale>(&app).0, 0.75);
+        apply(&mut app, "renderscale", "9");
+        assert_eq!(res::<RenderScale>(&app).0, *RENDER_SCALE_RANGE.end());
+        apply(&mut app, "renderscale", "0");
+        assert_eq!(res::<RenderScale>(&app).0, *RENDER_SCALE_RANGE.start());
         // The FPS journal switch (2008): a flag, case-insensitive, off as shipped.
-        assert!(!knobs.fps_journal.0);
-        assert!(apply_to_knobs("fpsJournal", "1", &mut knobs));
-        assert!(knobs.fps_journal.0);
-        assert!(apply_to_knobs("fpsjournal", "0", &mut knobs));
-        assert!(!knobs.fps_journal.0);
+        assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
+        apply(&mut app, "fpsJournal", "1");
+        assert!(res::<crate::perf::FpsJournalSetting>(&app).0);
+        apply(&mut app, "fpsjournal", "0");
+        assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
-        assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
-        assert!(!knobs.sound.music_enabled);
-        assert!(apply_to_knobs("mastersoundeffects", "1", &mut knobs));
-        assert!(knobs.sound.enabled);
+        apply(&mut app, "EnableMusic", "0");
+        assert!(!res::<SoundConfig>(&app).music_enabled);
+        apply(&mut app, "mastersoundeffects", "1");
+        assert!(res::<SoundConfig>(&app).enabled);
         // The Controls trio lands on its knobs (case-insensitive like everything else).
-        assert!(apply_to_knobs("deselectonclick", "0", &mut knobs));
-        assert!(!knobs.click.deselect_on_click);
-        assert!(apply_to_knobs("MouseInvertPitch", "1", &mut knobs));
-        assert!(knobs.look.invert_pitch);
+        apply(&mut app, "deselectonclick", "0");
+        assert!(!res::<ClickConfig>(&app).deselect_on_click);
+        apply(&mut app, "MouseInvertPitch", "1");
+        assert!(res::<LookConfig>(&app).invert_pitch);
         // The sensitivity multiplier clamps to the 1.12 slider's range at the knob.
-        assert!(apply_to_knobs("mousespeed", "1.4", &mut knobs));
-        assert_eq!(knobs.look.sensitivity, 1.4);
-        assert!(apply_to_knobs("mousespeed", "9", &mut knobs));
-        assert_eq!(knobs.look.sensitivity, 1.5);
+        apply(&mut app, "mousespeed", "1.4");
+        assert_eq!(res::<LookConfig>(&app).sensitivity, 1.4);
+        apply(&mut app, "mousespeed", "9");
+        assert_eq!(res::<LookConfig>(&app).sensitivity, 1.5);
         // The following style lands as the ENGINE's enum (0 Never / 1 Smart / 2 Always), and the
         // "3" the reference's own dropdown writes for Never still means Never.
-        assert!(apply_to_knobs("cameraSmoothStyle", "0", &mut knobs));
-        assert_eq!(knobs.follow.style, FollowStyle::Never);
-        assert!(apply_to_knobs("camerasmoothstyle", "2", &mut knobs));
-        assert_eq!(knobs.follow.style, FollowStyle::Always);
-        assert!(apply_to_knobs("cameraSmoothStyle", "3", &mut knobs));
-        assert_eq!(knobs.follow.style, FollowStyle::Never);
-        assert!(apply_to_knobs("cameraSmoothStyle", "1", &mut knobs));
-        assert_eq!(knobs.follow.style, FollowStyle::Smart);
+        apply(&mut app, "cameraSmoothStyle", "0");
+        assert_eq!(res::<FollowConfig>(&app).style, FollowStyle::Never);
+        apply(&mut app, "camerasmoothstyle", "2");
+        assert_eq!(res::<FollowConfig>(&app).style, FollowStyle::Always);
+        apply(&mut app, "cameraSmoothStyle", "3");
+        assert_eq!(res::<FollowConfig>(&app).style, FollowStyle::Never);
+        apply(&mut app, "cameraSmoothStyle", "1");
+        assert_eq!(res::<FollowConfig>(&app).style, FollowStyle::Smart);
         // Its two siblings land on the same knob — the tracking selector, and the rate, which
         // clamps to 1.12's AUTO_FOLLOW_SPEED slider range.
-        assert!(apply_to_knobs("cameraSmoothTrackingStyle", "2", &mut knobs));
-        assert_eq!(knobs.follow.tracking_style, FollowStyle::Always);
-        assert_eq!(knobs.follow.style, FollowStyle::Smart, "and only that one");
-        assert!(apply_to_knobs("cameraYawSmoothSpeed", "270", &mut knobs));
-        assert_eq!(knobs.follow.yaw_speed, 270.0);
-        assert!(apply_to_knobs("cameraYawSmoothSpeed", "9000", &mut knobs));
-        assert_eq!(knobs.follow.yaw_speed, *FOLLOW_SPEED_RANGE.end());
+        apply(&mut app, "cameraSmoothTrackingStyle", "2");
+        assert_eq!(
+            res::<FollowConfig>(&app).tracking_style,
+            FollowStyle::Always
+        );
+        assert_eq!(
+            res::<FollowConfig>(&app).style,
+            FollowStyle::Smart,
+            "and only that one"
+        );
+        apply(&mut app, "cameraYawSmoothSpeed", "270");
+        assert_eq!(res::<FollowConfig>(&app).yaw_speed, 270.0);
+        apply(&mut app, "cameraYawSmoothSpeed", "9000");
+        assert_eq!(
+            res::<FollowConfig>(&app).yaw_speed,
+            *FOLLOW_SPEED_RANGE.end()
+        );
         // The max-orbit factor lands as YARDS on the knob (base 15 x factor), clamped to 1..2.
-        assert!(apply_to_knobs("cameraDistanceMaxFactor", "1", &mut knobs));
-        assert_eq!(knobs.zoom.max, 15.0);
-        assert!(apply_to_knobs("cameradistancemaxfactor", "5", &mut knobs));
-        assert_eq!(knobs.zoom.max, 30.0);
-        assert!(apply_to_knobs("autoLootDefault", "1", &mut knobs));
-        assert!(knobs.loot.auto_loot);
-        assert!(apply_to_knobs("showLootSpam", "0", &mut knobs));
-        assert!(!knobs.loot.show_loot_spam);
+        apply(&mut app, "cameraDistanceMaxFactor", "1");
+        assert_eq!(res::<ZoomLimit>(&app).max, 15.0);
+        apply(&mut app, "cameradistancemaxfactor", "5");
+        assert_eq!(res::<ZoomLimit>(&app).max, 30.0);
+        apply(&mut app, "autoLootDefault", "1");
+        assert!(res::<LootConfig>(&app).auto_loot);
+        apply(&mut app, "showLootSpam", "0");
+        assert!(!res::<LootConfig>(&app).show_loot_spam);
         // Guild Member Alert (1589) — the row that ships OFF, so its ON is the interesting write.
-        assert!(apply_to_knobs("guildMemberNotify", "1", &mut knobs));
-        assert!(knobs.guild_notify.0);
+        apply(&mut app, "guildMemberNotify", "1");
+        assert!(res::<crate::ui_guild::GuildMemberNotify>(&app).0);
         // Block Trades (1764) — the other row that ships OFF; its ON is what refuses a trade.
-        assert!(apply_to_knobs("BlockTrades", "1", &mut knobs));
-        assert!(knobs.block_trades.0);
+        apply(&mut app, "BlockTrades", "1");
+        assert!(res::<crate::ui_trade::BlockTrades>(&app).0);
         // The name trio lands on its gates (0992).
-        assert!(apply_to_knobs("UnitNameNPC", "0", &mut knobs));
-        assert!(!knobs.names.npc);
-        assert!(apply_to_knobs("unitnameown", "1", &mut knobs));
-        assert!(knobs.names.own);
+        apply(&mut app, "UnitNameNPC", "0");
+        assert!(!res::<NameConfig>(&app).npc);
+        apply(&mut app, "unitnameown", "1");
+        assert!(res::<NameConfig>(&app).own);
         // …and the plate pair on the two bits of the bitmask, either casing.
-        assert!(apply_to_knobs(
-            crate::vplates::CVAR_ENEMIES,
-            "0",
-            &mut knobs
-        ));
-        assert!(!knobs.plates.enemies);
-        assert!(apply_to_knobs("nameplateshowfriends", "1", &mut knobs));
-        assert!(knobs.plates.friends);
+        apply(&mut app, crate::vplates::CVAR_ENEMIES, "0");
+        assert!(!res::<VPlateMode>(&app).enemies);
+        apply(&mut app, "nameplateshowfriends", "1");
+        assert!(res::<VPlateMode>(&app).friends);
         // The bubble pair lands on the spawn gate's own knob (1139).
-        assert!(apply_to_knobs("ChatBubbles", "0", &mut knobs));
-        assert!(!knobs.bubbles.all);
-        assert!(apply_to_knobs("chatbubblesparty", "0", &mut knobs));
-        assert!(!knobs.bubbles.party);
+        apply(&mut app, "ChatBubbles", "0");
+        assert!(!res::<BubbleConfig>(&app).all);
+        apply(&mut app, "chatbubblesparty", "0");
+        assert!(!res::<BubbleConfig>(&app).party);
         // WorldDetail: panel 0/1/2 → density ×1/×2/×3, clamped to the 1.12 slider's range.
-        assert!(apply_to_knobs("WorldDetail", "0", &mut knobs));
-        assert_eq!(knobs.clutter.density, 1.0);
-        assert!(apply_to_knobs("worlddetail", "7", &mut knobs));
-        assert_eq!(knobs.clutter.density, 3.0);
+        apply(&mut app, "WorldDetail", "0");
+        assert_eq!(res::<ClutterConfig>(&app).density, 1.0);
+        apply(&mut app, "worlddetail", "7");
+        assert_eq!(res::<ClutterConfig>(&app).density, 3.0);
         // frillDensity: the SAME field in the reference's cells-per-chunk (2151), and the two
         // arms' clamps are deliberately different — the stop's `[0, 2]` above, the cells'
         // `[1, 256]` here (callback `0x688de0`). The stops round-trip through both spellings,
         // which is the property that makes them one knob rather than two that agree by habit.
-        assert!(apply_to_knobs("frillDensity", "48", &mut knobs));
-        assert_eq!(knobs.clutter.density, 3.0);
-        assert!(apply_to_knobs("frilldensity", "16", &mut knobs));
-        assert_eq!(knobs.clutter.density, 1.0);
+        apply(&mut app, "frillDensity", "48");
+        assert_eq!(res::<ClutterConfig>(&app).density, 3.0);
+        apply(&mut app, "frilldensity", "16");
+        assert_eq!(res::<ClutterConfig>(&app).density, 1.0);
         // Past the top stop is HONOURED, not clamped to it — pfUI's `hdgraphic` drives exactly
         // this, `ConsoleExec("frillDensity " .. (arg+1)*16)` for arg up to 15.
-        assert!(apply_to_knobs("frillDensity", "256", &mut knobs));
-        assert_eq!(knobs.clutter.density, 16.0);
+        apply(&mut app, "frillDensity", "256");
+        assert_eq!(res::<ClutterConfig>(&app).density, 16.0);
         // …and the reference's own bounds hold at both ends. `0` is NOT clutter-off: the callback
         // pins it to 1, and turning grass off stays the `$WOW_CLUTTER_DENSITY` instrument's.
-        assert!(apply_to_knobs("frillDensity", "9000", &mut knobs));
-        assert_eq!(knobs.clutter.density, 16.0);
-        assert!(apply_to_knobs("frillDensity", "0", &mut knobs));
-        assert_eq!(knobs.clutter.density, 1.0 / 16.0);
+        apply(&mut app, "frillDensity", "9000");
+        assert_eq!(res::<ClutterConfig>(&app).density, 16.0);
+        apply(&mut app, "frillDensity", "0");
+        assert_eq!(res::<ClutterConfig>(&app).density, 1.0 / 16.0);
         // The row `GetCVar` answers is the same field seen the other way round.
-        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
-        assert_eq!(knobs.clutter.density, 2.0);
+        apply(&mut app, "WorldDetail", "1");
+        assert_eq!(res::<ClutterConfig>(&app).density, 2.0);
         // Weather Intensity (2181): the panel's four stops land whole, an off-grid value
         // truncates toward zero the way every int-valued row here does, and both ends clamp.
         for (wrote, want) in [
@@ -2909,9 +2633,10 @@ mod tests {
             ("9", 3),
             ("-4", 0),
         ] {
-            assert!(apply_to_knobs("weatherDensity", wrote, &mut knobs));
+            apply(&mut app, "weatherDensity", wrote);
             assert_eq!(
-                knobs.weather.weather_density, want,
+                res::<benilla_world::weather::WeatherState>(&app).weather_density,
+                want,
                 "weatherDensity {wrote}"
             );
         }
@@ -2920,33 +2645,40 @@ mod tests {
         // Both ends of the stock slider land whole, and the consumer's clamp holds the values the
         // reference accepts without one (`SetGamma(5)` writes -4 there).
         for (wrote, want) in [("1.000000", 1.0), ("0.500000", 0.5), ("1.500000", 1.5)] {
-            assert!(apply_to_knobs("gamma", wrote, &mut knobs));
-            assert_eq!(knobs.display_gamma.0, want, "gamma {wrote}");
+            apply(&mut app, "gamma", wrote);
+            assert_eq!(
+                res::<crate::ui_gamma::DisplayGamma>(&app).0,
+                want,
+                "gamma {wrote}"
+            );
         }
-        assert!(apply_to_knobs("gamma", "-4.000000", &mut knobs));
+        apply(&mut app, "gamma", "-4.000000");
         assert_eq!(
-            knobs.display_gamma.0,
+            res::<crate::ui_gamma::DisplayGamma>(&app).0,
             *crate::ui_gamma::GAMMA_RANGE.start(),
             "a negative exponent clamps at the consumer, where it cannot blank the screen"
         );
-        assert!(apply_to_knobs("gamma", "99", &mut knobs));
-        assert_eq!(knobs.display_gamma.0, *crate::ui_gamma::GAMMA_RANGE.end());
-        assert_eq!(knobs.clutter.frill_density(), 32.0);
-        // And the pair is NAMED as a pair, in the registered spelling and the lowercased one, so
-        // `$WOW_CLUTTER_DENSITY` cannot take one spelling of this knob for the session and leave
-        // the other free to persist the lever (2151).
-        for key in CLUTTER_DENSITY_CVARS {
-            assert!(
-                REGISTERED.iter().any(|r| r.name.eq_ignore_ascii_case(key)),
-                "{key}: named as a clutter-density spelling but not registered"
+        apply(&mut app, "gamma", "99");
+        assert_eq!(
+            res::<crate::ui_gamma::DisplayGamma>(&app).0,
+            *crate::ui_gamma::GAMMA_RANGE.end()
+        );
+        assert_eq!(res::<ClutterConfig>(&app).frill_density(), 32.0);
+        // Both spellings reach the same field, from a state neither of them holds — and
+        // `$WOW_CLUTTER_DENSITY` takes both for the session (`session_values`), so the lever
+        // cannot ride into `config.toml` through the other name (2151). Two different values,
+        // because a write of the sibling's mirrored value is the no-op it should be.
+        for (key, value) in [
+            (benilla_ui::script::CVAR_WORLD_DETAIL, "2"),
+            (benilla_ui::script::CVAR_FRILL_DENSITY, "16"),
+        ] {
+            app.world_mut().resource_mut::<ClutterConfig>().density = 0.5;
+            assert_eq!(apply(&mut app, key, value), SetOutcome::Changed);
+            assert_ne!(
+                res::<ClutterConfig>(&app).density,
+                0.5,
+                "{key}: reached no knob"
             );
-            assert_eq!(key.to_ascii_lowercase(), key, "the set is lowercased keys");
-        }
-        // Both of them reach the same field, from a state neither of them holds.
-        for key in CLUTTER_DENSITY_CVARS {
-            knobs.clutter.density = 0.5;
-            assert!(apply_to_knobs(key, "48", &mut knobs));
-            assert_ne!(knobs.clutter.density, 0.5, "{key}: reached no knob");
         }
         // **The engine verbs' half of the same weld** (2163). `SetWorldDetail`/`GetWorldDetail` live
         // in `benilla-ui`, which cannot see this table, so the two CVar names and the stop table it
@@ -2984,56 +2716,59 @@ mod tests {
             );
             // Either spelling of the stop lands on the same ground cover — which is what lets the
             // setter write `frillDensity` and the getter read `WorldDetail` without disagreeing.
-            assert!(apply_to_knobs("WorldDetail", &n.to_string(), &mut knobs));
-            let by_stop = knobs.clutter.density;
-            knobs.clutter.density = 0.5;
-            assert!(apply_to_knobs(
-                "frillDensity",
-                &frill.to_string(),
-                &mut knobs
-            ));
+            apply(&mut app, "WorldDetail", &n.to_string());
+            let by_stop = res::<ClutterConfig>(&app).density;
+            // Off the stop first — the mirror already wrote this spelling — then the stop's
+            // own cells through it.
+            apply(&mut app, "frillDensity", "1");
+            app.world_mut().resource_mut::<ClutterConfig>().density = 0.5;
+            apply(&mut app, "frillDensity", &frill.to_string());
             assert_eq!(
-                knobs.clutter.density, by_stop,
+                res::<ClutterConfig>(&app).density,
+                by_stop,
                 "stop {n}: the two spellings disagree"
             );
-            assert_eq!(knobs.clutter.frill_density(), *frill as f32);
+            assert_eq!(res::<ClutterConfig>(&app).frill_density(), *frill as f32);
         }
         // Back to the shipped stop, so the rows after this one read the default ground cover.
-        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
-        assert_eq!(knobs.clutter.density, 2.0);
+        apply(&mut app, "WorldDetail", "1");
+        assert_eq!(res::<ClutterConfig>(&app).density, 2.0);
         // The zoom pair (1131): each index lands on its own field, clamped like `set_zoom`.
-        assert!(apply_to_knobs("minimapZoom", "5", &mut knobs));
-        assert_eq!(knobs.minimap.outdoor, 5);
-        assert_eq!(knobs.minimap.inside, 3, "the two indices are independent");
-        assert!(apply_to_knobs("minimapinsidezoom", "9", &mut knobs));
-        assert_eq!(knobs.minimap.inside, MINIMAP_ZOOM_LEVELS - 1);
-        assert!(apply_to_knobs("minimapZoom", "-2", &mut knobs));
-        assert_eq!(knobs.minimap.outdoor, 0);
-        // A bad value is consumed (known key) and the resource keeps its truth.
-        assert!(apply_to_knobs("uiScale", "banana", &mut knobs));
-        assert_eq!(knobs.scale.0, 0.9);
-        assert!(!apply_to_knobs("bogus", "1", &mut knobs));
+        apply(&mut app, "minimapZoom", "5");
+        assert_eq!(res::<MinimapZoom>(&app).outdoor, 5);
+        assert_eq!(
+            res::<MinimapZoom>(&app).inside,
+            3,
+            "the two indices are independent"
+        );
+        apply(&mut app, "minimapinsidezoom", "9");
+        assert_eq!(res::<MinimapZoom>(&app).inside, MINIMAP_ZOOM_LEVELS - 1);
+        apply(&mut app, "minimapZoom", "-2");
+        assert_eq!(res::<MinimapZoom>(&app).outdoor, 0);
+        // A bad value on a numeric row is REFUSED by the registry (2303) — the resource keeps
+        // its truth and the row keeps its value; an unknown name is reported as such.
+        assert_eq!(apply(&mut app, "uiScale", "banana"), SetOutcome::Refused);
+        assert_eq!(res::<UiScaleCvar>(&app).0, 0.9);
+        assert_eq!(apply(&mut app, "bogus", "1"), SetOutcome::Unknown);
     }
 
     #[test]
     fn compose_writes_the_diff_and_preserves_what_it_does_not_own() {
-        let previous: BTreeMap<String, String> = [
-            ("FutureKnob".to_string(), "3".to_string()), // a newer build's key: preserved
-            ("uiScale".to_string(), "0.8".to_string()),  // env-overridden this session
-            ("farclip".to_string(), "400".to_string()),  // will return to default
-        ]
-        .into();
-        let env: HashSet<String> = ["uiscale".to_string()].into();
-        let snapshot = vec![
-            // (name, value, default)
-            ("MusicVolume".into(), "0.7".into(), "0.4".into()), // moved: written
-            ("MasterVolume".into(), "1".into(), "1".into()),    // default: absent
-            ("uiScale".into(), "1.2".into(), "0.9".into()),     // env value: file keeps 0.8
-            ("farclip".into(), "350".into(), "350".into()),     // back to default: removed
-        ];
-        let out = compose_file(&previous, &env, &snapshot);
+        let mut cvars = Cvars::default();
+        cvars.own_for_session("uiScale", Some("1.2")); // env-overridden this session
+        cvars.load_file(
+            [
+                ("FutureKnob".to_string(), "3".to_string()), // a newer build's key: preserved
+                ("uiScale".to_string(), "0.8".to_string()),  // the file's own, kept as found
+                ("farclip".to_string(), "400".to_string()),  // will return to default
+            ]
+            .into(),
+        );
+        cvars.set("MusicVolume", "0.7"); // moved: written
+        cvars.set("farclip", "350"); // back to default: removed
+        let out = cvars.compose();
         assert_eq!(out.get("MusicVolume").map(String::as_str), Some("0.7"));
-        assert!(!out.contains_key("MasterVolume"));
+        assert!(!out.contains_key("MasterVolume"), "at default: absent");
         assert_eq!(out.get("uiScale").map(String::as_str), Some("0.8"));
         assert!(!out.contains_key("farclip"));
         assert_eq!(out.get("FutureKnob").map(String::as_str), Some("3"));
@@ -3094,8 +2829,8 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// A client whose CVar host is real: every knob resource the [`KnobParams`] census wants,
-    /// [`CvarPlugin`] itself, and a VM for the table to live in. The three end-to-end tests below
+    /// A client whose CVar host is real: every knob resource an observer writes, every
+    /// observer, [`CvarPlugin`] itself, and a VM for the mirror to live in. The end-to-end tests below
     /// each stand a whole client up, and the census is one row per knob — copied per test, adding
     /// a knob meant editing every copy.
     fn cvar_app() -> App {
@@ -3151,8 +2886,105 @@ mod tests {
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
             .add_plugins(CvarPlugin);
+        for observer in ALL_OBSERVERS {
+            observer(&mut app);
+        }
         app.insert_non_send_resource(UiScript::new().unwrap());
         app
+    }
+
+    /// Every CVar observer in the crate, as the plugins register them — the census this test
+    /// module stands a client up with. A new observer is one line here and one
+    /// `add_observer` in its plugin.
+    const ALL_OBSERVERS: &[fn(&mut App)] = &[
+        |app| {
+            app.add_observer(crate::sound::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_script::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::video::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::player::camera::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::player::camera_dynamics::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::target::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_action::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::combat_text::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_chat::combat::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_loot::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::nameplates::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::vplates::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::game_tip::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::text_filter::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::chat_bubble::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_guild::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_trade::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::minimap::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::portrait::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::perf::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::realmlist::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::ui_gamma::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::world_backdrop::on_cvar);
+        },
+    ];
+
+    /// A host write, its latch committed at once, and its observers run before this returns.
+    fn apply(app: &mut App, name: &str, value: &str) -> SetOutcome {
+        let world = app.world_mut();
+        let (outcome, events) = {
+            let mut cvars = world.resource_mut::<Cvars>();
+            let outcome = cvars.set(name, value);
+            cvars.commit_latched();
+            (outcome, cvars.take_events())
+        };
+        for event in events {
+            world.trigger(event);
+        }
+        outcome
+    }
+
+    fn res<T: Resource>(app: &App) -> &T {
+        app.world().resource::<T>()
     }
 
     /// **The reported bug, end to end** (decision 1622): "char screen doesn't remember the last
@@ -3160,10 +2992,11 @@ mod tests {
     /// [`CvarPlugin`] and the real [`crate::char_select`] systems in between — entering the world
     /// as somebody has to survive the quit and bring the screen back to them.
     ///
-    /// The seam this covers and the per-module tests cannot: `set_cvar_engine`'s queued change is
-    /// only *persisted* if [`apply_to_knobs`] answers `true` for the name. A knobless CVar that
-    /// falls through to `_ => return false` reaches the VM's table, reads back correctly all
-    /// session, and is silently dropped at the save — which is this bug again, one layer down.
+    /// The seam this covers and the per-module tests cannot: the screen's host write has to
+    /// reach the file through the registry's own dirty/compose path. Before 2303 a knobless CVar
+    /// fell through the central arm match to `_ => return false`, reached the VM's table, read
+    /// back correctly all session, and was silently dropped at the save — this bug again, one
+    /// layer down.
     #[test]
     fn entering_the_world_survives_the_quit_and_comes_back_selected() {
         use crate::char_select::{ClientState, Roster};
@@ -3322,6 +3155,7 @@ mod tests {
         let parsed: LocalConfig = toml::from_str(hand).unwrap();
         assert_eq!(parsed.cvars.get("Farclip").map(String::as_str), Some("500"));
     }
+
     /// **The table's string-valued CVars, named — and each one's default asserted on its own
     /// terms.**
     ///
@@ -3337,14 +3171,14 @@ mod tests {
     /// cleanly, and inventing a realm name would be worse than admitting we have none yet.
     ///
     /// **`gxResolution` defaults to the pre-1627 window** (decision 1627), and **`realmList` to
-    /// `localhost`** (1667). These are the rows [`apply_to_knobs`] matches ahead of its numeric
-    /// parse, so each default is asserted through the same parser the live value goes through — a
-    /// spelling this table accepts but [`crate::video::parse_resolution`] or
-    /// [`crate::realmlist::normalize`] rejects would otherwise ship as a silent fall back.
+    /// `localhost`** (1667). These are the rows the registry takes any string for (a row's
+    /// default decides whether it is numeric — [`Cvars::set`]), so each default is asserted
+    /// through the parser its observer uses on the live value — a spelling this table accepts
+    /// but [`crate::video::parse_resolution`] or [`crate::realmlist::normalize`] rejects would
+    /// otherwise ship as a silent fall back.
     ///
-    /// The list itself is the load-bearing half: a new string-valued row that forgets its arm in
-    /// `apply_to_knobs` is a CVar the player can set and the client will never honour, and this is
-    /// what makes adding one impossible to do quietly.
+    /// The list itself is the load-bearing half: a new string-valued row has to come here and
+    /// name its parser, which is what makes adding one impossible to do quietly.
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
         let mut strings: Vec<&str> = REGISTERED
@@ -3383,30 +3217,331 @@ mod tests {
         );
     }
 
-    /// **The claim the test above only asserted in prose, now enforced.** Its doc says a string
-    /// row that forgets its arm in [`apply_to_knobs`] "is a CVar the player can set and the client
-    /// will never honour, and this is what makes adding one impossible to do quietly" — and then
-    /// `realmName` was added and did exactly that. It reached the numeric parse, which can only
-    /// reject it, so every launch after the first connect logged
-    /// `cvar realmName: unparseable value 'VMaNGOS' ignored`.
-    ///
-    /// It was the mild half of the failure — the persisted value still reaches `GetCVar` through
-    /// `set_cvar_saved_base`, so nothing was actually lost, and the warn was libel rather than
-    /// news. A string row that DID own a knob would have been silently dropped. Both directions
-    /// are pinned: a new non-numeric row that skips [`is_string_valued`] fails here, and a key
-    /// named there that stops being a registered string row fails here too.
+    /// A registry with the file's entries and the session's env values, no disk: the pure
+    /// half of the load, for the tests below.
+    fn registry(file: &[(&str, &str)]) -> Cvars {
+        let mut cvars = Cvars::default();
+        cvars.load_file(
+            file.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        cvars
+    }
+
+    /// **The latch** (decision 2303): a write to a row the reference registers with flag bit1
+    /// is staged, the applied value stands, nothing fires and nothing dirties — the reference's
+    /// `Set 0x63df50` storing to `latchedValue` with `InternalSet` skipped — until the boundary
+    /// commits it (`CVar::Update 0x63e060`), at which point it fires, persists and reaches the
+    /// mirror. Staging the applied value back clears the stage; a stage never committed is not
+    /// what the file gets.
     #[test]
-    fn every_string_valued_row_is_claimed_before_the_numeric_parse() {
-        for r in REGISTERED {
-            let key = r.name.to_ascii_lowercase();
-            assert_eq!(
-                r.default.parse::<f32>().is_err(),
-                is_string_valued(&key),
-                "{}: a row's default parsing as a number and `is_string_valued` must agree — \
-                 a string row that misses the guard falls to the numeric parse, which only \
-                 rejects it",
-                r.name,
+    fn a_latched_row_stages_the_write_until_the_boundary_commits_it() {
+        let mut cvars = Cvars::default();
+        assert!(
+            cvars.row("gxVSync").unwrap().latched,
+            "the reference's flags=3 row"
+        );
+        assert_eq!(cvars.set("gxVSync", "0"), SetOutcome::Staged);
+        assert_eq!(cvars.get("gxVSync"), Some("1"), "applied value stands");
+        assert_eq!(cvars.row("gxVSync").unwrap().pending.as_deref(), Some("0"));
+        assert!(!cvars.has_events(), "nothing fires before the boundary");
+        assert!(!cvars.dirty, "nothing to save before the boundary");
+        assert_eq!(
+            cvars.set("gxVSync", "0"),
+            SetOutcome::Unchanged,
+            "same stage"
+        );
+        assert!(
+            !cvars.compose().contains_key("gxVSync"),
+            "a stage that is never committed never reaches the file"
+        );
+        // The boundary.
+        assert_eq!(cvars.commit_latched(), 1);
+        assert_eq!(cvars.get("gxVSync"), Some("0"));
+        assert_eq!(cvars.row("gxVSync").unwrap().pending, None);
+        assert_eq!(
+            cvars.take_events(),
+            vec![CvarChanged {
+                name: "gxVSync".into(),
+                old: "1".into(),
+                new: "0".into()
+            }]
+        );
+        assert!(cvars.dirty);
+        assert_eq!(
+            cvars.compose().get("gxVSync").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            cvars.take_outbox(),
+            vec![("gxVSync".to_string(), "0".to_string())]
+        );
+        // Staging the applied value back over a stage clears the stage, and the next boundary
+        // has nothing to do.
+        cvars.set("gxVSync", "1");
+        assert_eq!(cvars.set("gxVSync", "0"), SetOutcome::Unchanged);
+        assert_eq!(cvars.row("gxVSync").unwrap().pending, None);
+        assert_eq!(cvars.commit_latched(), 0);
+        // An unlatched row applies at once, fires, and dirties.
+        assert_eq!(cvars.set("MusicVolume", "0.7"), SetOutcome::Changed);
+        assert_eq!(cvars.get("MusicVolume"), Some("0.7"));
+        assert_eq!(cvars.take_events().len(), 1);
+    }
+
+    /// **A numeric row refuses what does not parse** — the applied value stands, the mirror
+    /// that already stored the garbage is corrected through the outbox, and nothing fires. The
+    /// old central parse consumed the value and let it into the file; the registry does not.
+    /// A string row takes any string, and its observer is the one that judges it.
+    #[test]
+    fn a_numeric_row_refuses_what_does_not_parse_and_corrects_the_mirror() {
+        let mut cvars = Cvars::default();
+        assert_eq!(cvars.set_from_vm("uiScale", "banana"), SetOutcome::Refused);
+        assert_eq!(cvars.get("uiScale"), Some("0.9"));
+        assert!(!cvars.has_events());
+        assert!(!cvars.dirty);
+        assert_eq!(
+            cvars.take_outbox(),
+            vec![("uiScale".to_string(), "0.9".to_string())],
+            "the VM stored 'banana' synchronously; the host writes the truth back"
+        );
+        assert_eq!(cvars.set("uiScale", "banana"), SetOutcome::Refused);
+        assert!(
+            cvars.take_outbox().is_empty(),
+            "a host write has no mirror to correct"
+        );
+        assert_eq!(
+            cvars.set("realmList", "not an address"),
+            SetOutcome::Changed
+        );
+        assert_eq!(cvars.set("nosuchrow", "1"), SetOutcome::Unknown);
+    }
+
+    /// **An addon-declared row persists like the client's own** (decisions 1195, 1291, 2303):
+    /// the VM reports the registration, the registry gives it a row starting at the file's
+    /// value when the file carries one, a write to it dirties the config, and the save writes it
+    /// as a diff against the addon's default. Before the registry the write reached the VM's
+    /// table and nothing dirtied, so an addon-only change was saved only if something else
+    /// happened to move.
+    #[test]
+    fn an_addon_row_persists_like_the_clients_own() {
+        let mut cvars = registry(&[("myAddonKnob", "3")]);
+        assert_eq!(
+            cvars.orphans(),
+            vec![("myAddonKnob".to_string(), "3".to_string())],
+            "unclaimed until the addon declares it — the VM's saved base"
+        );
+        cvars.learn_addon_row("myAddonKnob", "1");
+        assert_eq!(
+            cvars.get("myAddonKnob"),
+            Some("3"),
+            "starts at the saved value"
+        );
+        assert_eq!(cvars.default_of("myAddonKnob"), Some("1"));
+        assert!(cvars.orphans().is_empty());
+        cvars.learn_addon_row("myAddonKnob", "9");
+        assert_eq!(
+            cvars.default_of("myAddonKnob"),
+            Some("1"),
+            "a re-declaration is a no-op"
+        );
+        assert!(!cvars.dirty);
+        assert_eq!(cvars.set_from_vm("myAddonKnob", "5"), SetOutcome::Changed);
+        assert!(cvars.dirty, "an addon-only change is a change");
+        assert_eq!(
+            cvars.compose().get("myAddonKnob").map(String::as_str),
+            Some("5")
+        );
+        cvars.set_from_vm("myAddonKnob", "1");
+        assert!(
+            !cvars.compose().contains_key("myAddonKnob"),
+            "back at the addon's default, it leaves the diff"
+        );
+        // A newer build's key stays an orphan and rides through the save verbatim.
+        let cvars = registry(&[("FutureKnob", "3")]);
+        assert_eq!(
+            cvars.compose().get("FutureKnob").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    /// **A session-owned row answers the env and never reaches the file**: the value the knob
+    /// is running at is what `GetCVar` answers, the file's own entry for the key is neither
+    /// applied nor rewritten, and a player's write to it during the session still works — it
+    /// just stays out of the diff.
+    #[test]
+    fn a_session_owned_row_answers_the_env_and_never_reaches_the_file() {
+        let mut cvars = Cvars::default();
+        cvars.own_for_session("uiScale", Some("1.2"));
+        cvars.load_file(BTreeMap::from([("uiScale".to_string(), "0.8".to_string())]));
+        assert_eq!(
+            cvars.get("uiScale"),
+            Some("1.2"),
+            "the env's, not the file's"
+        );
+        assert!(
+            !cvars.has_events(),
+            "the knob already read the env — nothing to apply"
+        );
+        assert_eq!(cvars.set("uiScale", "1.4"), SetOutcome::Changed);
+        assert_eq!(
+            cvars.compose().get("uiScale").map(String::as_str),
+            Some("0.8"),
+            "the file keeps what it said"
+        );
+        // A lever whose resource is absent still marks the row, so the file cannot apply over
+        // the env — the registered default stands as the truth.
+        cvars.own_for_session("farclip", None);
+        cvars.load_file(BTreeMap::from([("farclip".to_string(), "500".to_string())]));
+        assert_eq!(cvars.get("farclip"), Some("350"));
+        assert!(cvars.is_session_owned("FARCLIP"));
+    }
+
+    /// **The loaded file reaches a knob synchronously, before anything ordered after
+    /// [`CvarLoad`]** — the observers fire inside the exclusive load, which is what lets the
+    /// camera read `gxMultisample` at spawn (1629) and every other `Startup` reader of a knob
+    /// see the player's value rather than the default.
+    #[test]
+    fn the_loaded_file_reaches_a_knob_before_anything_ordered_after_cvar_load() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-load-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _m = EnvGuard::unset("WOW_MSAA");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        crate::local_state::write_atomic(
+            &tmp.join("config.toml"),
+            "[cvars]\nMusicVolume = \"0.1\"\ngxMultisample = \"4\"\n",
+        )
+        .unwrap();
+        #[derive(Resource, Default)]
+        struct SeenAtStartup(Option<(f32, u32)>);
+        fn after_load(
+            sound: Res<SoundConfig>,
+            msaa: Res<MsaaSetting>,
+            mut seen: ResMut<SeenAtStartup>,
+        ) {
+            seen.0 = Some((sound.music, msaa.samples));
+        }
+        let mut app = cvar_app();
+        app.init_resource::<SeenAtStartup>()
+            .add_systems(Startup, after_load.after(CvarLoad));
+        app.update();
+        assert_eq!(
+            app.world().resource::<SeenAtStartup>().0,
+            Some((0.1, 4)),
+            "both the plain row and the latched one are applied by the time CvarLoad is over"
+        );
+        assert_eq!(
+            app.world().resource::<Cvars>().get("gxMultisample"),
+            Some("4"),
+            "a file value is applied, not staged: the reference's LoadFile runs before Register"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// **Every registered row has a reader** — the honest-tree rule (module doc, 1140), made
+    /// structural now that the registry has no central arm to answer `false` from. A row's
+    /// reader is a string literal naming it somewhere in the crate's code or `benilla-ui`'s (an
+    /// observer's arm in the lowercased spelling, a `cvars.get("…")`, a `const` the row is
+    /// registered through), or the row is named in [`LUA_ONLY`] with the stock file that reads
+    /// it. Test files are not readers.
+    #[test]
+    fn every_registered_row_has_a_reader_in_the_source() {
+        /// Rows whose only reader is the stock interface, by decision.
+        const LUA_ONLY: &[(&str, &str)] = &[
+            (
+                "statusBarText",
+                "TextStatusBar.lua reads it on CVAR_UPDATE (1140)",
+            ),
+            (
+                "UberTooltips",
+                "GameTooltip's binding-line gate, stock and pfUI (1316)",
+            ),
+            ("gxApi", "pfUI's system tooltip names the backend (2151)"),
+            (
+                "useUiScale",
+                "UIOptionsFrame.lua and OptionsFrame.lua branch on it to gate the uiScale slider",
+            ),
+        ];
+        let app_src = crate::test_support::src_dir();
+        let ui_src = app_src
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/")
+            .join("benilla-ui")
+            .join("src");
+        let mut code = String::new();
+        for file in crate::test_support::rust_files(&app_src)
+            .into_iter()
+            .chain(crate::test_support::rust_files(&ui_src))
+        {
+            let rel = file.to_string_lossy().replace('\\', "/");
+            if rel.ends_with("/cvars.rs") && rel.contains("benilla-app") || rel.contains("tests") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).expect("source is readable");
+            for line in text.lines() {
+                if !line.trim_start().starts_with("//") {
+                    code.push_str(line);
+                    code.push('\n');
+                }
+            }
+        }
+        let mut orphans = Vec::new();
+        for row in REGISTERED {
+            if LUA_ONLY.iter().any(|(n, _)| *n == row.name) {
+                continue;
+            }
+            let exact = format!("\"{}\"", row.name);
+            let lower = format!("\"{}\"", row.name.to_ascii_lowercase());
+            if !(code.contains(&exact) || code.contains(&lower)) {
+                orphans.push(row.name);
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "registered rows nothing in the source reads (an observer arm, a `cvars.get`, or a \
+             `LUA_ONLY` entry with its stock reader): {orphans:?}"
+        );
+        for (name, _) in LUA_ONLY {
+            assert!(
+                REGISTERED.iter().any(|r| r.name == *name),
+                "{name}: named Lua-only but not registered"
             );
         }
+    }
+
+    /// The eight rows the reference latches that benilla registers, and no other — read off
+    /// `re/cvar/cvar-register-sites.tsv` (`flags` 2 or 3): the sound-init row, and the `gx*`
+    /// block `RestartGx` commits. `trilinear`/`anisotropic`/`farclip` register with `flags = 1`
+    /// there and apply live, so they are deliberately not here.
+    #[test]
+    fn the_latched_rows_are_the_references_own() {
+        let mut latched: Vec<&str> = REGISTERED
+            .iter()
+            .filter(|r| r.latched)
+            .map(|r| r.name)
+            .collect();
+        latched.sort_unstable();
+        assert_eq!(
+            latched,
+            vec![
+                "SoundBufferSize",
+                "gxApi",
+                "gxColorBits",
+                "gxDepthBits",
+                "gxMultisample",
+                "gxResolution",
+                "gxVSync",
+                "gxWindow",
+            ]
+        );
     }
 }

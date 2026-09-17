@@ -336,11 +336,23 @@ impl Plugin for CursorPlugin {
         app.init_resource::<DisplayedCursor>();
         #[cfg(target_os = "macos")]
         app.add_systems(Startup, macos::setup.after(AssetSet::Open))
-            .add_systems(Update, (drive_displayed_cursor, macos::drive).chain());
+            .add_systems(
+                Update,
+                (drive_displayed_cursor, macos::drive)
+                    .chain()
+                    // After the tick: a FrameXML `SetCursor` made this frame is read here.
+                    .after(crate::ui_script::UiInput),
+            );
         #[cfg(not(target_os = "macos"))]
         app.init_resource::<other::PayloadCursorImages>()
             .add_systems(Startup, other::setup.after(AssetSet::Open))
-            .add_systems(Update, (drive_displayed_cursor, other::drive).chain());
+            .add_systems(
+                Update,
+                (drive_displayed_cursor, other::drive)
+                    .chain()
+                    // After the tick: a FrameXML `SetCursor` made this frame is read here.
+                    .after(crate::ui_script::UiInput),
+            );
     }
 }
 

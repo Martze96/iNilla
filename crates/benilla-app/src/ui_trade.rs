@@ -57,7 +57,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::NpcSession;
 
 /// One side's offer as the wire delivered it — the seven slots (index 0 = trade slot 1 … index 6 =
@@ -492,8 +492,16 @@ impl NpcSession for TradeSession {
 
 pub(crate) struct UiTradePlugin;
 
+/// Block Trades' change callback (1764, 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut block: ResMut<BlockTrades>) {
+    if ev.is("BlockTrades") {
+        block.0 = ev.flag();
+    }
+}
+
 impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<TradeSession>()
             .init_resource::<BlockTrades>()
             .add_systems(
@@ -504,7 +512,7 @@ impl Plugin for UiTradePlugin {
                     // the same frame (the ui_mail ordering exactly). After the UnitFeed set so the
                     // resolved item-template store is landed. No range-guard registration — a
                     // trade's cancel is server-driven (the module doc).
-                    feed_trade.after(crate::ui_unit::UnitFeed).before(UiInput),
+                    feed_trade.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     // The incoming request's answer needs no VM at all — it is wire policy over
                     // engine state — so it sits ahead of the feed, and an accepted request's
                     // `partner` is on screen the same frame the window opens.

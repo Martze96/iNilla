@@ -214,7 +214,6 @@ impl Plugin for UiShapeshiftPlugin {
                 // after the input pass so a stance click goes out the same frame.
                 feed_shapeshift_bar
                     .in_set(UnitFeed)
-                    .before(UiInput)
                     .before(crate::ui_action::CooldownEvents)
                     .before(crate::ui_aura::AuraEvents),
                 drain_shapeshift_casts.after(UiInput),

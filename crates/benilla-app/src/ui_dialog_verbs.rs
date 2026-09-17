@@ -52,7 +52,7 @@ use crate::names::NameCache;
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The pet trainer's pending question: the latch (`0xc4d7b0/b4`) and the cost (`0xc4d7b8`).
@@ -1100,7 +1100,7 @@ impl Plugin for UiDialogVerbsPlugin {
                     // countdown popup, would be fired at the boot VM in 2214's one-frame window
                     // and lost. Gated, the queue waits; nothing here clears without a VM.
                     feed_dialog_verbs
-                        .before(UiInput)
+                        .in_set(UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
                     // **After the frame's pick, which is the reference's own order.** The poll
                     // is `0x4923b0`, called from `CGWorldFrame`'s OnUpdate at `0x4818ca` — and
@@ -1133,9 +1133,10 @@ impl Plugin for UiDialogVerbsPlugin {
                     // In-world only: the claim is about the VM, but the query is a world
                     // packet, and the boot VM exists at the glue screen too.
                     meeting_stone_enter_world
+                        .in_set(crate::ui_script::UiFeed)
                         .before(feed_meeting_stone)
                         .in_set(crate::char_select::InWorldGated),
-                    feed_meeting_stone.before(UiInput),
+                    feed_meeting_stone.in_set(UiFeed),
                     // **Before the target chain, not merely after the input pass** — and this one
                     // is a correctness order, not a tidiness one.
                     //

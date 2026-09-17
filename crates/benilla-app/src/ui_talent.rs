@@ -66,7 +66,7 @@ impl Plugin for UiTalentPlugin {
                 (
                     // Feed before UiInput (an N-key open this frame sees a populated window);
                     // the learn drain after (a click's wire goes out the same frame).
-                    feed_talents.in_set(UnitFeed).before(UiInput),
+                    feed_talents.in_set(UnitFeed),
                     drain_talent_learns.after(UiInput),
                 ),
             );

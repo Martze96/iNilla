@@ -55,7 +55,7 @@ use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 use crate::portrait::PaperDollBooth;
 use crate::ui_items::{find_equip_slot, item_link};
-use crate::ui_script::{gate, UiInput};
+use crate::ui_script::{gate, UiFeed, UiInput};
 
 /// Equipment slots, 0-based (`EQUIPMENT_SLOT_*`): the inv-slot array index of the main hand,
 /// off hand, and ranged slots the weapon-skill / offhand / wand resolutions read.
@@ -132,9 +132,9 @@ impl Plugin for UiCharPlugin {
                 // fire" rule, across the two feeds.
                 feed_char
                     .before(crate::ui_items::feed::feed_containers)
-                    .before(UiInput),
-                watch_skill_ups.before(UiInput),
-                feed_skills.before(UiInput),
+                    .in_set(UiFeed),
+                watch_skill_ups.in_set(UiFeed),
+                feed_skills.in_set(UiFeed),
                 drain_skill_abandons.after(UiInput),
             ),
         );

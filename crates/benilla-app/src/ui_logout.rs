@@ -45,7 +45,7 @@ use benilla_ui::script::{SessionRequest, UiScript};
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, LoggedOutMessage, NetCommands, SelfGuid};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The reference's refusal line, as a **catalog key** rather than a literal — message id `0x180`,
 /// the sole argument of the `DisplayError` at `0x5aaf26` (decision 1821). VERIFIED, superseding
@@ -264,7 +264,7 @@ impl Plugin for UiLogoutPlugin {
         app.init_resource::<LogoutState>().add_systems(
             Update,
             (
-                feed_logout.before(UiInput),
+                feed_logout.in_set(UiFeed),
                 drain_logout.after(UiInput),
                 exit_on_logout_complete.after(UiInput),
             ),

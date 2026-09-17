@@ -22,7 +22,6 @@ use bevy::prelude::*;
 use benilla_protocol::messages::{MirrorTimerKind, MirrorTimerStart};
 
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 /// One mirror-timer edge off the wire, queued by the net bridge for the bars.
@@ -197,7 +196,7 @@ pub(crate) struct UiMirrorPlugin;
 impl Plugin for UiMirrorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MirrorTimerFeed>()
-            .add_systems(Update, feed_mirror_timers.in_set(UnitFeed).before(UiInput));
+            .add_systems(Update, feed_mirror_timers.in_set(UnitFeed));
     }
 }
 

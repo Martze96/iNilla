@@ -428,8 +428,20 @@ fn claim_backdrop(
 /// See the module doc.
 pub(crate) struct WorldBackdropPlugin;
 
+/// Render scale's change callback (1639, 2303). Clamped at the knob's edge like every other
+/// numeric row; the backdrop re-sizes on the next frame and the world camera's target factor
+/// follows it in the same pass, which is what keeps the pick rays where they were.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<RenderScale>) {
+    if ev.is("renderScale") {
+        scale.0 = ev
+            .num()
+            .clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
+    }
+}
+
 impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(

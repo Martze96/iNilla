@@ -389,11 +389,25 @@ impl Default for ClickConfig {
 #[derive(Resource, Default)]
 pub(crate) struct AssistAttack(pub(crate) bool);
 
+/// The targeting rows' change callback (decision 2303): two flags.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut click: ResMut<ClickConfig>,
+    mut assist: ResMut<AssistAttack>,
+) {
+    match ev.key().as_str() {
+        "deselectonclick" => click.deselect_on_click = ev.flag(),
+        "assistattack" => assist.0 = ev.flag(),
+        _ => {}
+    }
+}
+
 /// Targeting: click-to-select + the ground selection ring.
 pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
             .init_resource::<AssistAttack>()
