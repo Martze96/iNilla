@@ -34,7 +34,8 @@ pub(crate) enum CastBarEdge {
     /// `SMSG_SPELL_DELAYED` — pushback: our cast took a hit and the server extended it by
     /// `delay_ms`. The bar slides its window out (spark jumps back), it does NOT cancel.
     Delayed { delay_ms: u32 },
-    /// `MSG_CHANNEL_START` (self-only on the wire) — a channel opened; the bar counts *down*.
+    /// `MSG_CHANNEL_START` (self-only on the wire) — a channel opened; the bar counts *down*,
+    /// and is labelled by [`channel_start_args`]'s law rather than the spell's name.
     ChannelStart { spell_id: u32, duration_ms: u32 },
     /// `MSG_CHANNEL_UPDATE` (self-only): time left; `0` = the channel is over.
     ChannelUpdate { remaining_ms: u32 },
@@ -575,12 +576,7 @@ fn local_self_cancel(
 /// **This is the CAST bar's law and it does not generalise to the channel bar** — which is why
 /// this is `SPELLCAST_START`'s label and not a shared helper. `0x6e7a2d` is the only
 /// `SpellRec+0x24 & 4` test in the whole image (censused twice), and the channel handler
-/// `0x6e7550` gates on entirely different bits: `AttributesEx3 & 0x2000` fires **no event at all**,
-/// and the name is `Name[locale]` only when `AttributesEx & 0x2000_0000` is set, otherwise the
-/// literal `GetText("CHANNELING")`. Neither is modelled yet — [`CastBarEdge::ChannelStart`] still
-/// passes the plain name — so a channel bar can read a spell name where the reference reads
-/// "Channeling". Named residual, not an oversight: it is a visible change to every channelled
-/// spell and wants the director's eye, not a silent fold-in.
+/// `0x6e7550` gates on entirely different bits. That law is [`channel_start_args`]'s, next door.
 fn cast_bar_label(spells: Option<&crate::ui_action::Spells>, id: u32) -> String {
     spells
         .and_then(|s| s.catalog.get(id))
@@ -589,11 +585,83 @@ fn cast_bar_label(spells: Option<&crate::ui_action::Spells>, id: u32) -> String 
         .unwrap_or_default()
 }
 
+/// The CHANNEL bar's own law — `SpellChannelStart 0x6e7550`, whole. Returns the
+/// `SPELLCAST_CHANNEL_START` argument list, or `None` where the reference fires **no event at
+/// all** and the bar never appears.
+///
+/// The handler is 147 bytes and every one of its gates is here, in its order (decomp
+/// `FUN_006e7550`; disassembly quoted in wow-re `system/spell/scratch/wave-cast.md` §0x6e7550):
+///
+/// ```text
+/// 6e7571  test eax,eax / jle 6e75d8      ; (1) duration <= 0            -> NO EVENT
+/// 6e7579  test eax,eax / jl              ; (2) id < 0                   -> NO EVENT
+/// 6e757d  cmp eax,[0xc0d78c] / jg        ; (2) id past the table        -> NO EVENT
+/// 6e758e  test eax,eax / je              ; (2) no SpellRec at that slot -> NO EVENT
+/// 6e7595  test ch,0x20                   ; (3) AttributesEx3 & 0x2000   -> NO EVENT
+/// 6e759a  test [rec+0x1c],0x20000000     ; (4) AttributesEx bit 29 ...
+/// 6e75a9  mov eax,[rec+0x1e0+locale*4]   ;     ... set   -> Name[locale]
+/// 6e75bc  ecx=0x870dd0 call 0x703bf0     ;     ... clear -> GetText("CHANNELING")
+/// 6e75cb  push 0x156 / call 0x703f50     ; fmt 0x8432cc "%d%s" — (duration, name)
+/// ```
+///
+/// **Bit 29 is the reverse default of the cast bar's naming rule.** A cast bar prints the spell's
+/// name unless a bit says not to; a channel bar prints the literal word "Channeling" unless a bit
+/// says to name the spell. Only **9** of the 323 channeled rows in the shipped 5875 `Spell.dbc`
+/// opt in (the four Fishing ranks, Cannibalize, Dream Vision, Using Control Console, and the two
+/// Blood Siphons that gate (3) hides anyway) — so on a real server this reads "Channeling" for
+/// Blizzard, Arcane Missiles, Mind Flay, Drain Life/Soul/Mana, Rain of Fire, Hurricane,
+/// Tranquility, Evocation and First Aid alike. Ours passed the plain `Spell.dbc` name to every
+/// one of them until decision 2284.
+///
+/// The word itself is read the way the reference reads it — `FrameScript_GetText` on the
+/// GlobalStrings key, i.e. the Lua global `CHANNELING`, off the player's own chain — not from a
+/// table of ours, so a localized or patched install gets its own word. A missing global resolves
+/// to `""` (`0x882748`, the shared empty string; `GetText` never returns NULL), and the event
+/// still fires: an untitled bar, not a hidden one.
+///
+/// **What this does NOT gate is [`ActiveChannel`]** (and so the action button's lit ring). The
+/// reference's channel mirror is `SPELLCAST+0x10` (`0xceac58`), written at the cast SEND
+/// (`0x6e4f88`) and never touched by this handler — so a Blood Siphon suppressed here still
+/// counts as the current channel there, and ours keeps arming it from the packet for the same
+/// reason.
+fn channel_start_args(
+    script: &UiScript,
+    spells: Option<&crate::ui_action::Spells>,
+    id: u32,
+    duration_ms: u32,
+) -> Option<Vec<ScriptValue>> {
+    if duration_ms == 0 {
+        return None;
+    }
+    // Gates (2) and (3): no record at that id, or the record forbids a channel bar outright. The
+    // `filter` is the `je`/`jne` pair — both leave with the event unfired.
+    let display = spells
+        .and_then(|s| s.catalog.get(id))
+        .filter(|d| !d.no_channel_bar())?;
+    let name = if display.channel_bar_own_name() {
+        display.name.clone()
+    } else {
+        script
+            .lua()
+            .globals()
+            .get::<String>("CHANNELING")
+            .unwrap_or_default()
+    };
+    Some(vec![
+        ScriptValue::Int(i64::from(duration_ms)),
+        ScriptValue::Str(name),
+    ])
+}
+
 /// Drain the queue into FrameScript events — the reference `CastingBarFrame` contract
 /// (extracted 1.12 `CastingBarFrame.lua`): `SPELLCAST_START(name, ms)`,
-/// `SPELLCAST_CHANNEL_START(ms, name)`, `SPELLCAST_CHANNEL_UPDATE(remaining_ms)`, and the
-/// argless STOP / FAILED / INTERRUPTED / CHANNEL_STOP. A channel update of `0` fires
-/// CHANNEL_STOP — the server ends both the natural finish and the interrupt that way.
+/// `SPELLCAST_CHANNEL_START(ms, name)` — arg order reversed, and not a slip —
+/// `SPELLCAST_CHANNEL_UPDATE(remaining_ms)`, and the argless STOP / FAILED / INTERRUPTED /
+/// CHANNEL_STOP. A channel update of `0` fires CHANNEL_STOP — the server ends both the natural
+/// finish and the interrupt that way.
+///
+/// An edge can resolve to **no event**: [`channel_start_args`] returns `None` for the three
+/// conditions under which `0x6e7550` returns without firing, and the bar then never appears.
 ///
 /// Also pushes the frame's stoppable mirror (running auto-repeat OR the [`Inflight`] slot — NOT
 /// a channel, which `SpellStopCasting()` answers nil for: wow-re `esc-stopcasting.md`) into the
@@ -631,49 +699,72 @@ fn feed_cast_bar(
     script.set_casting(
         auto_repeat.0.is_some() || inflight(&pending, &queued_melee, started, now).is_some(),
     );
-    // The two bars take their names from DIFFERENT laws — see [`cast_bar_label`]. The plain
-    // `Spell.dbc` name is the channel bar's (incomplete) one; the cast bar's is attribute-gated.
-    let channel_name = |id: u32| -> String {
-        spells
-            .as_ref()
-            .and_then(|s| s.catalog.get(id))
-            .map(|d| d.name.clone())
-            .unwrap_or_default()
-    };
     for edge in feed.0.drain(..) {
-        let (event, args): (&str, Vec<ScriptValue>) = match edge {
+        let Some((event, args)): Option<(&str, Vec<ScriptValue>)> = (match edge {
             CastBarEdge::Start {
                 spell_id,
                 cast_time_ms,
-            } => (
+            } => Some((
                 "SPELLCAST_START",
                 vec![
                     ScriptValue::Str(cast_bar_label(spells.as_deref(), spell_id)),
                     ScriptValue::Int(i64::from(cast_time_ms)),
                 ],
-            ),
-            CastBarEdge::Stop => ("SPELLCAST_STOP", vec![]),
-            CastBarEdge::Failed => ("SPELLCAST_FAILED", vec![]),
-            CastBarEdge::Interrupted => ("SPELLCAST_INTERRUPTED", vec![]),
-            CastBarEdge::Delayed { delay_ms } => (
+            )),
+            CastBarEdge::Stop => Some(("SPELLCAST_STOP", vec![])),
+            CastBarEdge::Failed => Some(("SPELLCAST_FAILED", vec![])),
+            CastBarEdge::Interrupted => Some(("SPELLCAST_INTERRUPTED", vec![])),
+            CastBarEdge::Delayed { delay_ms } => Some((
                 "SPELLCAST_DELAYED",
                 vec![ScriptValue::Int(i64::from(delay_ms))],
-            ),
+            )),
             CastBarEdge::ChannelStart {
                 spell_id,
                 duration_ms,
-            } => (
-                "SPELLCAST_CHANNEL_START",
-                vec![
-                    ScriptValue::Int(i64::from(duration_ms)),
-                    ScriptValue::Str(channel_name(spell_id)),
-                ],
-            ),
-            CastBarEdge::ChannelUpdate { remaining_ms: 0 } => ("SPELLCAST_CHANNEL_STOP", vec![]),
-            CastBarEdge::ChannelUpdate { remaining_ms } => (
-                "SPELLCAST_CHANNEL_UPDATE",
-                vec![ScriptValue::Int(i64::from(remaining_ms))],
-            ),
+            } => {
+                let args = channel_start_args(&script, spells.as_deref(), spell_id, duration_ms);
+                // The channel half of the cast trace. The other five edges are traced at RECV
+                // (`net::apply::spells`); these two are traced HERE because the decision that
+                // wants watching — which of `0x6e7550`'s legs the spell took — is made here,
+                // and the drain runs the same frame the packet lands.
+                if *crate::net::CAST_TRACE {
+                    match args.as_deref() {
+                        Some([_, ScriptValue::Str(label)]) => info!(
+                            "cast-trace: CHANNEL_START — spell {spell_id} {duration_ms}ms, \
+                             bar label {label:?}"
+                        ),
+                        _ => info!(
+                            "cast-trace: CHANNEL_START — spell {spell_id} {duration_ms}ms, \
+                             NO BAR (0x6e7550 gate: zero duration, no Spell.dbc row, or \
+                             AttributesEx3 & 0x2000)"
+                        ),
+                    }
+                }
+                args.map(|args| ("SPELLCAST_CHANNEL_START", args))
+            }
+            // `0x6e75f0`'s whole shape: nonzero re-times the window, zero ends it. It reads no
+            // SpellRec, so neither leg has an attribute gate — a channel whose START was
+            // suppressed still sends these, and the stock Lua's `IsShown()` guards absorb them.
+            CastBarEdge::ChannelUpdate { remaining_ms } => {
+                let over = remaining_ms == 0;
+                if *crate::net::CAST_TRACE {
+                    if over {
+                        info!("cast-trace: CHANNEL_STOP — update 0, the channel is over");
+                    } else {
+                        info!("cast-trace: CHANNEL_UPDATE — {remaining_ms}ms left");
+                    }
+                }
+                Some(if over {
+                    ("SPELLCAST_CHANNEL_STOP", vec![])
+                } else {
+                    (
+                        "SPELLCAST_CHANNEL_UPDATE",
+                        vec![ScriptValue::Int(i64::from(remaining_ms))],
+                    )
+                })
+            }
+        }) else {
+            continue;
         };
         script.fire_event(event, args);
     }
@@ -740,6 +831,128 @@ mod tests {
         // The pre-existing empty cases are untouched: an unknown id, and no client data at all.
         assert_eq!(cast_bar_label(Some(&spells), 133), "");
         assert_eq!(cast_bar_label(None, 6478), "");
+    }
+
+    /// The CHANNEL bar's law — [`channel_start_args`], the other half of `0x6e7550`, and the
+    /// **opposite default** to the cast bar's above: a channel says "Channeling" unless
+    /// `AttributesEx & 0x2000_0000` permits its own name. Shapes are the real shipped rows.
+    #[test]
+    fn the_channel_bar_says_channeling_unless_the_spell_may_name_itself() {
+        use benilla_formats::{SpellCatalog, SpellDisplay};
+        let row = |name: &str, attributes_ex: u32, attributes_ex3: u32| SpellDisplay {
+            name: name.to_string(),
+            attributes_ex,
+            attributes_ex3,
+            ..Default::default()
+        };
+        let spells = crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays(
+                [
+                    // Blizzard rank 1 — the real 5875 columns (bit 29 clear).
+                    (10, row("Blizzard", 0x1000_008c, 0)),
+                    // Fishing — one of the nine that name themselves.
+                    (7620, row("Fishing", 0x2100_4004, 0x0800_0000)),
+                    // Blood Siphon — the whole-event suppressor, both shipped rows.
+                    (24322, row("Blood Siphon", 0x2001_808c, 0x2000)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..crate::ui_action::Spells::empty_for_tests()
+        };
+        // `FrameScript_GetText` reads the Lua global, so the VM is the source of the word — the
+        // chain-backed end-to-end is `ui_script::cast_tests`; here it is set by hand so the four
+        // gates are exercised without client data.
+        let script = UiScript::new().expect("VM");
+        script.eval::<()>("CHANNELING = \"Channeling\"").unwrap();
+
+        let name_of = |id: u32, ms: u32| -> Option<String> {
+            channel_start_args(&script, Some(&spells), id, ms).map(|args| match &args[1] {
+                ScriptValue::Str(s) => s.clone(),
+                other => panic!("arg 2 is the name, got {other:?}"),
+            })
+        };
+        assert_eq!(
+            name_of(10, 8_000).as_deref(),
+            Some("Channeling"),
+            "Blizzard has AttributesEx bit 29 clear, so the bar reads the generic word"
+        );
+        assert_eq!(
+            name_of(7620, 20_000).as_deref(),
+            Some("Fishing"),
+            "bit 29 set takes Name[locale] instead"
+        );
+        assert_eq!(
+            name_of(24322, 8_000),
+            None,
+            "AttributesEx3 & 0x2000 fires NO event — a suppressed bar, not a blank one"
+        );
+        assert_eq!(name_of(10, 0), None, "0x6e7574: duration <= 0 -> no event");
+        assert_eq!(
+            name_of(133, 8_000),
+            None,
+            "0x6e7590: no SpellRec -> no event"
+        );
+        assert_eq!(
+            channel_start_args(&script, None, 10, 8_000),
+            None,
+            "no client data is the same no-record leg"
+        );
+
+        // Arg ORDER is the reverse of SPELLCAST_START's, and the stock Lua reads it that way.
+        assert_eq!(
+            channel_start_args(&script, Some(&spells), 10, 8_000).unwrap()[0],
+            ScriptValue::Int(8_000),
+            "fmt 0x8432cc is \"%d%s\" — duration first"
+        );
+    }
+
+    /// The word itself comes off the PLAYER's chain, not a table of ours — `FrameScript_GetText`
+    /// on the GlobalStrings key, so a localized install gets its own. Pinned against the real
+    /// `Interface\FrameXML\GlobalStrings.lua` (l.478 in the shipped enUS file, whose trailing
+    /// comment is literally "Channeling tag for the channeling bar"). Skips without client data.
+    #[test]
+    fn the_channeling_word_comes_off_the_players_own_chain() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        use benilla_formats::{SpellCatalog, SpellDisplay};
+        let script = UiScript::new().expect("VM");
+        crate::ui_script::test_ui::load_ui(&script, r"Interface\FrameXML\GlobalStrings.lua");
+        let spells = crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays(
+                [(
+                    10,
+                    SpellDisplay {
+                        name: "Blizzard".into(),
+                        attributes_ex: 0x1000_008c,
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..crate::ui_action::Spells::empty_for_tests()
+        };
+        assert_eq!(
+            channel_start_args(&script, Some(&spells), 10, 8_000).unwrap()[1],
+            ScriptValue::Str("Channeling".into()),
+        );
+    }
+
+    /// The suppressed channel still arms [`ActiveChannel`], so its action button stays lit: the
+    /// reference's channel mirror is `SPELLCAST+0x10` (`0xceac58`), written at the cast SEND
+    /// (`0x6e4f88`) and never touched by `0x6e7550`. That is why all four of the handler's gates
+    /// live in the DRAIN and none of them in `net::apply::spells::channel_start`, which arms this.
+    #[test]
+    fn suppressing_the_channel_bar_does_not_clear_the_channel_mirror() {
+        let t0 = Instant::now();
+        // What `MSG_CHANNEL_START` does for Blood Siphon 24322 — the suppressed row.
+        let mut channel = ActiveChannel::default();
+        channel.start(24322, 8_000, t0);
+        assert_eq!(
+            channel.current(t0 + Duration::from_secs(1)),
+            Some(24322),
+            "the wire edge arms the mirror regardless of what the bar does with it"
+        );
     }
 
     #[test]

@@ -154,7 +154,7 @@ fn feed_tabard(
     mut open: ResMut<TabardOpen>,
     mut design: ResMut<TabardDesign>,
     mut booth: ResMut<PaperDollBooth>,
-    mut guilds: ResMut<GuildState>,
+    guilds: Res<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut last_host: Local<crate::ui_script::VmMemo<Option<TabardHost>>>,
@@ -222,7 +222,7 @@ fn feed_tabard(
 fn drain_tabard(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TabardOpen>,
-    mut guilds: ResMut<GuildState>,
+    guilds: Res<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,

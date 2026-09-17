@@ -706,7 +706,7 @@ fn drive_mouseover_tooltip(
     // The stored GAMEOBJECT_STATE the lock lines' Action gate reads (decision 0752).
     anims: Query<&crate::go_anim::GoAnim>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     // The standing pair as one param — see [`crate::target::ReactionInputs`]. Bundled here and
     // not elsewhere because this system sits on Bevy's tuple limit.
@@ -715,7 +715,7 @@ fn drive_mouseover_tooltip(
     // hover and the click can never disagree about whether a lock is satisfiable — the same reason
     // `usable` and the click share one resolver (0752). Carries the go-template, Lock.dbc and
     // item caches this system used to take as three separate params.
-    mut go_inputs: crate::target::lock::GoLockInputs,
+    go_inputs: crate::target::lock::GoLockInputs,
     // The known-spell set the resolver's SKILL arm scans.
     player_actions: Res<crate::ui_action::PlayerActions>,
     // The cursor seat crosses the VM seam (0582/0584): the anchor below is UI units, not px.

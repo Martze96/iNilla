@@ -87,8 +87,6 @@
 //! 6. **Using a charter item opens it** — see [`crate::ui_items::ItemUseRoute::ShowPetition`],
 //!    where the evidence and its limits are written down.
 
-use std::collections::{HashMap, HashSet};
-
 use benilla_protocol::messages::{
     petition_result, PetitionQueryResponse, PetitionRename, PetitionShowList,
     PetitionShowSignatures, PetitionSignResults,
@@ -97,6 +95,7 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
+use crate::query_cache::QueryCache;
 use crate::ui_script::UiInput;
 use crate::ui_session::NpcSession;
 
@@ -194,12 +193,10 @@ impl NpcSession for GuildRegistrarState {
 #[derive(Resource, Default)]
 pub(crate) struct PetitionState {
     open: Option<OpenCharter>,
-    /// The lazy record cache, keyed by petition id — the guild-identity cache's twin. Session
-    /// state: a petition id means nothing across a reconnect.
-    records: HashMap<u32, Record>,
-    /// Petition ids with a `CMSG_PETITION_QUERY` in flight, so the ask happens once per id per
-    /// connection ([`crate::names::NameCache`]'s rule).
-    querying: HashSet<u32>,
+    /// The lazy record cache, keyed by petition id — the guild-identity cache's twin, ask-once
+    /// through [`QueryCache`] (decision 2288). Session state: a petition id means nothing across
+    /// a reconnect.
+    records: QueryCache<u32, Record>,
     /// `[0xbdce1c]` — set while a sign we sent is outstanding, cleared when its result lands.
     ///
     /// It exists for one reader, and that reader is easy to miss: the decline leg of a close is
@@ -262,6 +259,12 @@ struct Record {
     is_charter: bool,
 }
 
+impl crate::query_cache::AskOnce for PetitionState {
+    fn clear_pending(&mut self) {
+        self.records.clear_pending();
+    }
+}
+
 impl PetitionState {
     /// `SMSG_PETITION_SHOW_SIGNATURES` — open the window on this charter, and fire the record
     /// query if we have never seen this petition.
@@ -282,13 +285,12 @@ impl PetitionState {
     /// The lazy record fill: ask once per petition id, and answer nothing for the call that missed.
     /// The arrival simply lands in the cache; the feed's next rebuild picks it up (see
     /// [`feed`]'s note on why there is no flag).
-    fn request_record(&mut self, petition_id: u32, item: u64, commands: &NetCommands) {
-        if self.records.contains_key(&petition_id) || !self.querying.insert(petition_id) {
-            return;
-        }
-        let _ = commands
-            .0
-            .send(ClientCommand::PetitionQuery { petition_id, item });
+    fn request_record(&self, petition_id: u32, item: u64, commands: &NetCommands) {
+        self.records.get_or_ask(petition_id, || {
+            let _ = commands
+                .0
+                .send(ClientCommand::PetitionQuery { petition_id, item });
+        });
     }
 
     /// One step per landed or patched record — see [`Self::records_epoch`]'s own field doc.
@@ -299,16 +301,15 @@ impl PetitionState {
     /// `SMSG_PETITION_QUERY_RESPONSE` — fill the cache.
     fn apply_record(&mut self, response: PetitionQueryResponse) {
         self.records_epoch = self.records_epoch.wrapping_add(1);
-        self.querying.remove(&response.petition_id);
         self.records.insert(
             response.petition_id,
-            Record {
+            Some(Record {
                 owner: response.owner,
                 name: response.name,
                 body_text: response.body_text,
                 required: response.min_signatures as i32,
                 is_charter: response.flags & 1 != 0,
-            },
+            }),
         );
     }
 
@@ -326,14 +327,14 @@ impl PetitionState {
         &mut self,
         petition_id: u32,
         item: u64,
-        names: &mut NameCache,
+        names: &NameCache,
         commands: &NetCommands,
     ) -> Option<benilla_ui::script::PetitionSlotView> {
         if petition_id == 0 {
             return None;
         }
         self.request_record(petition_id, item, commands);
-        let rec = self.records.get(&petition_id)?;
+        let rec = self.records.get(petition_id)?;
         let (is_charter, title, owner_guid) = (rec.is_charter, rec.name.clone(), rec.owner);
         Some(benilla_ui::script::PetitionSlotView {
             is_charter,
@@ -360,7 +361,7 @@ impl PetitionState {
         &mut self,
         item: u64,
         signer: u64,
-        names: &mut NameCache,
+        names: &NameCache,
         commands: &NetCommands,
     ) -> Option<String> {
         let open = self.open.as_mut().filter(|o| o.item == item)?;
@@ -388,7 +389,7 @@ impl PetitionState {
         let Some(open) = self.open.as_ref() else {
             return;
         };
-        if self.signing || !self.records.contains_key(&open.petition_id) || open.owner == me {
+        if self.signing || !self.records.answered(open.petition_id) || open.owner == me {
             return;
         }
         let _ = commands
@@ -413,6 +414,7 @@ pub(crate) struct UiPetitionPlugin;
 
 impl Plugin for UiPetitionPlugin {
     fn build(&self, app: &mut App) {
+        crate::query_cache::register::<PetitionState>(app);
         app.init_resource::<GuildRegistrarState>()
             .init_resource::<PetitionState>()
             .add_systems(
@@ -489,7 +491,7 @@ pub(crate) mod apply {
     ///   success additionally **closes the window** (`0x5ef037` fires `PETITION_CLOSED`).
     pub(crate) fn sign_results(
         petition: &mut PetitionState,
-        names: &mut NameCache,
+        names: &NameCache,
         self_guid: u64,
         results: PetitionSignResults,
         commands: &NetCommands,
@@ -557,7 +559,12 @@ pub(crate) mod apply {
         else {
             return;
         };
-        petition.records.entry(id).or_default().name = rename.name;
+        if !petition.records.answered(id) {
+            petition.records.insert(id, Some(Record::default()));
+        }
+        if let Some(record) = petition.records.get_mut(id) {
+            record.name = rename.name;
+        }
         // A patched title is a changed record: the tooltip's line 3 reads it too.
         petition.records_epoch = petition.records_epoch.wrapping_add(1);
     }
@@ -595,7 +602,7 @@ mod tests {
     /// return, spelled once here rather than at three assertion sites.
     fn open_title(p: &PetitionState) -> Option<&str> {
         let open = p.open.as_ref()?;
-        p.records.get(&open.petition_id).map(|r| r.name.as_str())
+        p.records.get(open.petition_id).map(|r| r.name.as_str())
     }
 
     fn signatures(item: u64, owner: u64, id: u32, signers: &[u64]) -> PetitionShowSignatures {

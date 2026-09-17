@@ -575,7 +575,7 @@ pub(crate) fn collect_inventory(
 ///
 /// A slot whose item template is still in flight can't be judged and reads as "not a key"; the
 /// answer lands within a frame or two and the feed re-pushes.
-pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCommands) -> bool {
+pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommands) -> bool {
     // Every guid mode 0x4f reaches, in the walker's own order — a container is recursed into as it
     // is passed (the depth-first rule), which is why each bag's contents follow its own slot.
     // Collected first, then judged: the template lookup needs `items` mutably (the ask-once query).
@@ -843,7 +843,7 @@ pub(crate) fn send_item_use(
     };
     // The disarm ladder, asked of the caster's own inventory (decision 1903).
     let disarmed_hand = ctx.rel.self_store.and_then(|store| {
-        crate::items::disarmed_equipment_slot(store, &mut ladder.items, &ladder.commands)
+        crate::items::disarmed_equipment_slot(store, &ladder.items, &ladder.commands)
     });
     match item_use_route(it, aura_cancels, disarmed_hand) {
         ItemUseRoute::CantUseDisarmed => {
@@ -894,7 +894,7 @@ pub(crate) fn send_item_use(
             if !suppress
                 && it
                     .guid
-                    .is_some_and(|g| gate.use_binds(&mut ladder.items, &ladder.commands, g)) =>
+                    .is_some_and(|g| gate.use_binds(&ladder.items, &ladder.commands, g)) =>
         {
             gate.defer_use(script, it);
             false
@@ -1766,13 +1766,13 @@ mod find_item_tests {
         item(&mut items, 0xF2, BREAD, None);
 
         // Nothing at all.
-        assert!(!has_key(&player(&[]), &mut items, &commands));
+        assert!(!has_key(&player(&[]), &items, &commands));
         // A non-key in the backpack is not a key.
-        assert!(!has_key(&player(&[(23, 0xF2)]), &mut items, &commands));
+        assert!(!has_key(&player(&[(23, 0xF2)]), &items, &commands));
         // The director's own case: the key sitting in keyring slot 1.
-        assert!(has_key(&player(&[(81, 0xF1)]), &mut items, &commands));
+        assert!(has_key(&player(&[(81, 0xF1)]), &items, &commands));
         // And in the backpack, before it has been filed.
-        assert!(has_key(&player(&[(23, 0xF1)]), &mut items, &commands));
+        assert!(has_key(&player(&[(23, 0xF1)]), &items, &commands));
 
         // The BANK — reachable only because HasKey passes 0x4f rather than the walker's default
         // 0x47. `find_item` must NOT see the same copy (its mode omits 0x08).
@@ -1780,7 +1780,7 @@ mod find_item_tests {
         banked.insert(39u16, 0xF1u64);
         let store = bank_player(&banked);
         assert!(
-            has_key(&store, &mut items, &commands),
+            has_key(&store, &items, &commands),
             "a key in the bank still gives you a keyring"
         );
         assert_eq!(

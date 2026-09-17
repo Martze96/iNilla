@@ -45,9 +45,14 @@
 //! `0x5fcf90` = {107, 111, 112} exists and the `$BWR` handler never calls it, so those two match
 //! neither arm and get no prop animation at all.
 //!
-//! Three of that round's corrections are built in below, and one is not mine to build: the arms
-//! sit under a gate on `[CGUnit+0xac]` (the unit's in-flight cast/visual record list) whose
-//! **writer is still underived** — wow-re parked it. Nothing here models it; see the record.
+//! **Both arms sit under a gate, and it is the projectile queue** (decision 2288). `[CGUnit+0xac]`
+//! is not a spell-visual list, as this file first guessed from its readers — it is the queue of
+//! `CMissile` nodes waiting for the caster's release event, and `$BWR` reads it (`0x600182`) before
+//! draining it (`0x600294` → `0x60c940`, the launcher). So the prop's re-anim and the projectile's
+//! launch are two effects of one act: no missile queued, no flex. benilla already held that queue —
+//! [`crate::entities::PendingMissiles`], whose own doc named `+0xac` correctly long before this
+//! round — and the chain runs this arm ahead of the drain, which is the order the two addresses
+//! sit in.
 //!
 //! What this file does NOT own: the prop's rig and palette rows (the rider lane —
 //! [`benilla_world::rig_rider`], given a posed arm by 2281), the emitters' clock (`EmitClock::Host`
@@ -99,10 +104,19 @@ pub(crate) fn flex_ranged_props(
     // Disjoint from `props_mut` by the filter: a unit is never its own ranged prop.
     wearers: Query<(&AnimationPlayer, &ModelAnimations), Without<RangedProp>>,
     mut props_mut: Query<(&mut AnimationPlayer, &ModelAnimations), With<RangedProp>>,
+    // The `[+0xac]` gate — read here, drained by `entities::missile::spawn_missiles` on the same
+    // key. The creature-anim chain runs `.before(EntityVisualsSet)`, so this read lands ahead of
+    // that drain exactly as `0x600182` lands ahead of `0x600294`.
+    pending: Res<crate::entities::PendingMissiles>,
 ) {
     for ev in events.read() {
         let want = match &ev.ident {
             b"$BWP" => Some(BOW_PULL),
+            // **`0x60018a je 0x600299`** — no projectile waiting, no prop block at all. The gate
+            // is `$BWR`'s alone: `$BWP`'s handler (`0x624cc0`) reads nothing of the kind, and the
+            // nock-latch clear above it (`0x60016c`) and the ammo detach below it (`0x600299`) are
+            // both outside the skip, which is why `drive_nock_latch` stays ungated.
+            b"$BWR" if !pending.releasing(ev.entity) => None,
             b"$BWR" => {
                 if BOW_FAMILY.contains(&ev.anim_id) {
                     Some(STAND)
@@ -363,6 +377,7 @@ mod tests {
     ) -> Option<(AnimationNodeIndex, f32)> {
         let mut app = App::new();
         app.add_message::<AnimSoundEvent>();
+        app.init_resource::<crate::entities::PendingMissiles>();
         app.add_systems(Update, flex_ranged_props);
         let mut wearer_player = AnimationPlayer::default();
         let wearer_anims = match &body_clip {
@@ -382,6 +397,9 @@ mod tests {
                 RangedProp { owner: wearer },
             ))
             .id();
+        // A projectile queued on the wearer — the `[+0xac]` gate the `$BWR` arms sit under. Every
+        // leg but the gate's own test wants it open; `queue_a_shot` is what opens it.
+        crate::entities::PendingMissiles::queue_a_shot(&mut app, wearer);
         app.world_mut().write_message(AnimSoundEvent {
             entity: wearer,
             ident: *tag,
@@ -429,6 +447,53 @@ mod tests {
             fire(gun(), 0, None, b"$BWR"),
             None,
             "a body clip in neither family leaves the prop alone"
+        );
+    }
+
+    /// **The `[+0xac]` gate** (`0x600182`/`0x60018a`, decision 2288): a `$BWR` with no projectile
+    /// waiting to be released arms nothing on the prop. The reference skips the whole block —
+    /// prop re-anim and cast-point reposition together — because the flex and the launch are two
+    /// effects of one act, and there is no act without a missile to throw.
+    ///
+    /// Asserted as the difference the gate makes: the SAME key, the same rifle body clip, with and
+    /// without a queued shot.
+    #[test]
+    fn a_bwr_with_no_projectile_queued_arms_nothing() {
+        let mut app = App::new();
+        app.add_message::<AnimSoundEvent>();
+        app.init_resource::<crate::entities::PendingMissiles>();
+        app.add_systems(Update, flex_ranged_props);
+        let wearer = app.world_mut().spawn(anims(Vec::new())).id();
+        let prop = app
+            .world_mut()
+            .spawn((
+                AnimationPlayer::default(),
+                gun(),
+                RangedProp { owner: wearer },
+            ))
+            .id();
+        let fire = |app: &mut App| {
+            app.world_mut().write_message(AnimSoundEvent {
+                entity: wearer,
+                ident: *b"$BWR",
+                data: 0,
+                anim_id: 49,
+                pos: None,
+            });
+            app.update();
+            app.world()
+                .entity(prop)
+                .get::<AnimationPlayer>()
+                .unwrap()
+                .playing_animations()
+                .count()
+        };
+        assert_eq!(fire(&mut app), 0, "queue empty ⇒ the prop is not touched");
+        crate::entities::PendingMissiles::queue_a_shot(&mut app, wearer);
+        assert_eq!(
+            fire(&mut app),
+            1,
+            "…and the same key arms 161 once a shot is queued"
         );
     }
 

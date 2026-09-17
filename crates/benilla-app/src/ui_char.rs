@@ -440,12 +440,7 @@ fn slot_entry(store: &ObjectStore, items: &Items, slot0: u8) -> Option<u32> {
 
 /// The equipped item's weapon-skill line id: the vmangos `Item.cpp` subclass table for a class-2
 /// item, unarmed (162) for an empty hand or a non-weapon / unmapped subclass.
-fn weapon_skill_id(
-    store: &ObjectStore,
-    items: &mut Items,
-    commands: &NetCommands,
-    slot0: u8,
-) -> u32 {
+fn weapon_skill_id(store: &ObjectStore, items: &Items, commands: &NetCommands, slot0: u8) -> u32 {
     let Some(entry) = slot_entry(store, items, slot0) else {
         return SKILL_UNARMED;
     };
@@ -589,7 +584,7 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
 
 /// The player's snapshot: [`unit_combat_stats`] plus the half only *we* have — the two values that
 /// need the equipped items' templates, and the three `PLAYER_SKILL_INFO` pairs.
-fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) -> UnitCombatStats {
+fn combat_stats(store: &ObjectStore, items: &Items, commands: &NetCommands) -> UnitCombatStats {
     // The offhand-speed gate is an offhand *weapon* (a shield doesn't swing); the wand check is
     // the ranged item's subclass. Both read the equipped item's template (ask-once in flight →
     // false this frame, refined when it lands).
@@ -643,12 +638,12 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
 /// 64..=69). Everything past the guid — template, enchants, durability, the pending lock — is
 /// identical for both, which is the whole reason there is one function here and not two.
 fn slot_view(
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
-    names: &mut crate::names::NameCache,
+    names: &crate::names::NameCache,
     // `ItemSubClass.dbc` — the count gate below reads its `DisplayFlags` bit 2. `None` (the DBC
     // failed to load) leaves every bag at 0, which is the plain-bag answer and the safe one.
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
@@ -810,12 +805,12 @@ fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
 /// 0-based inv-slot array.
 fn inventory_slots(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
-    names: &mut crate::names::NameCache,
+    names: &crate::names::NameCache,
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
     classes: Option<&benilla_formats::ChrClasses>,
 ) -> InventorySlots {
@@ -905,12 +900,12 @@ fn inventory_slots(
 /// doll snapshot, rather than the `BankState` the bank window pushes.
 fn bank_bag_slots(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
-    names: &mut crate::names::NameCache,
+    names: &crate::names::NameCache,
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
 ) -> BankBagSlots {
     let mut bags: BankBagSlots = Default::default();
@@ -1051,7 +1046,7 @@ pub(crate) fn feed_char(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the equipped tooltip's enchant lines (decision 0915).
     enchants: Option<Res<crate::items::Enchants>>,
@@ -1061,7 +1056,7 @@ pub(crate) fn feed_char(
     mut feed: ResMut<CharFeedState>,
     mut booth: ResMut<PaperDollBooth>,
     pending: Res<PendingItemOps>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     // `ItemSubClass.dbc` — `GetInventoryItemCount`'s bag gate (`slot_view`'s own note).
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
 ) {
@@ -1164,7 +1159,7 @@ pub(crate) fn feed_char(
         return;
     }
 
-    let stats = combat_stats(store, &mut items, &commands);
+    let stats = combat_stats(store, &items, &commands);
     if memo.last_stats.as_ref() != Some(&stats) {
         gate.audit("feed_char", "the combat-stats snapshot");
         // PUSH before firing: event dispatch runs the Lua handlers synchronously, so the snapshot
@@ -1178,7 +1173,7 @@ pub(crate) fn feed_char(
 
     let inv = inventory_slots(
         store,
-        &mut items,
+        &items,
         icons.as_deref(),
         crate::items::RollCatalogs {
             enchants: enchants.as_deref(),
@@ -1186,13 +1181,13 @@ pub(crate) fn feed_char(
         },
         &commands,
         &pending,
-        &mut names,
+        &names,
         sub_classes.as_deref(),
         classes.as_deref().map(|t| &t.0),
     );
     let bank_bags = bank_bag_slots(
         store,
-        &mut items,
+        &items,
         icons.as_deref(),
         crate::items::RollCatalogs {
             enchants: enchants.as_deref(),
@@ -1200,7 +1195,7 @@ pub(crate) fn feed_char(
         },
         &commands,
         &pending,
-        &mut names,
+        &names,
         sub_classes.as_deref(),
     );
     // One transition for both bands: they are the same descriptor read at two offsets, and

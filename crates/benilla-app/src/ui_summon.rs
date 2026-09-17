@@ -130,7 +130,7 @@ impl SummonState {
 fn feed_summon(
     script: Option<NonSendMut<UiScript>>,
     mut summon: ResMut<SummonState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     areas: Option<Res<AreaTableRes>>,
     // Real, not virtual: the deadline was stamped on this clock by the net drain, and the server's

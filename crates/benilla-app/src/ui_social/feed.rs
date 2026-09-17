@@ -63,7 +63,7 @@ pub(super) struct FedSocial {
 pub(super) fn feed_social(
     script: Option<NonSendMut<UiScript>>,
     mut social: ResMut<SocialState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     areas: Option<Res<AreaTableRes>>,
     commands: Res<NetCommands>,
     mut sink: MessageSink,
@@ -80,7 +80,7 @@ pub(super) fn feed_social(
         let get = |key: &str| script.lua().globals().get::<String>(key).ok();
         // Each owed line carries a catalog key, so the surface AND the sound come from its row —
         // `ERR_FRIEND_ONLINE_SS`'s is `FRIENDJOINGAME`, which a straight chat push could not play.
-        let owed: Vec<Shown> = drain_result_lines(&mut social, &mut names, &commands)
+        let owed: Vec<Shown> = drain_result_lines(&mut social, &names, &commands)
             .iter()
             .filter_map(|e| {
                 crate::ui_action::ui_error_text(e, &get).map(|text| Shown::keyed(e.key, text))
@@ -88,7 +88,7 @@ pub(super) fn feed_social(
             .collect();
         // The row's away tag, through `CHAT_FLAG_AFK`/`_DND` — the chat frame's own pair.
         let away = |status: u8| status_flag_key(status).and_then(&get).unwrap_or_default();
-        let (friends, display_order) = friend_rows(&social, &mut names, &commands, areas, &away);
+        let (friends, display_order) = friend_rows(&social, &names, &commands, areas, &away);
         (owed, friends, display_order)
     };
 
@@ -96,7 +96,7 @@ pub(super) fn feed_social(
     // update that removes their zone.
     crate::ui_action::show_messages(&mut script, &mut sink, "ui_social", owed);
 
-    let (ignores, ignore_order) = ignore_rows(&social, &mut names, &commands);
+    let (ignores, ignore_order) = ignore_rows(&social, &names, &commands);
     let who = who_rows(&social, areas);
 
     let selected_friend = index_of(&display_order, social.selected_friend);
@@ -170,7 +170,7 @@ fn answer_goes_to_the_frame(to_ui: bool, shown: usize) -> bool {
 /// it" must not look the same.
 fn drain_result_lines(
     social: &mut SocialState,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Vec<UiError> {
     let mut still_pending = Vec::new();
@@ -251,7 +251,7 @@ fn who_lines(rows: &[WhoInfo], total: u32, get: &dyn Fn(&str) -> Option<String>)
 /// drain can map a row index back to a player.
 fn friend_rows(
     social: &SocialState,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     areas: Option<&AreaTableCatalog>,
     away: &dyn Fn(u8) -> String,
@@ -303,7 +303,7 @@ fn friend_rows(
 /// The ignore rows: names only, same ordering rule.
 fn ignore_rows(
     social: &SocialState,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> (Vec<String>, Vec<u64>) {
     let mut rows: Vec<(u64, String)> = social

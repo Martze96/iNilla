@@ -565,7 +565,7 @@ pub(super) fn emit_party_arrows(
 pub(super) fn drive_blip_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hover: Res<MinimapBlipHover>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<(String, Vec2)>>>,
 ) {

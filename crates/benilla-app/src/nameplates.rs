@@ -414,7 +414,7 @@ pub(crate) fn drive_nameplates(
         // The UnitName* cvar mask (0992) — the kind gates below read it.
         Res<NameConfig>,
     ),
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     // The guild-identity cache (1257) — the a5 line's text, and the lazy `CMSG_GUILD_QUERY` a
     // miss sends. `ResMut` because the read IS the ask ([`crate::ui_guild::unit_guild_name`]).
     mut guilds: ResMut<crate::ui_guild::GuildState>,

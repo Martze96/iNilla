@@ -45,7 +45,7 @@ pub(super) struct WorldReadout<'w, 's> {
     skybox_weight: Res<'w, benilla_world::skybox::SkyboxWeight>,
     streamer: Res<'w, benilla_world::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
-    names: ResMut<'w, crate::names::NameCache>,
+    names: Res<'w, crate::names::NameCache>,
     net_commands: Res<'w, crate::net::NetCommands>,
     camera: Query<'w, 's, &'static Transform, With<benilla_world::view::WorldCamera>>,
     land: MessageWriter<'w, LandHere>,

@@ -567,6 +567,37 @@ impl SpellDisplay {
         self.attributes_ex3 & ATTR_EX3_NO_CASTING_BAR_TEXT != 0
     }
 
+    /// `AttributesEx3 & 0x2000` — **this spell shows no channel bar at all**
+    /// ([`ATTR_EX3_NO_CHANNEL_BAR`]). The channel handler `0x6e7550` tests it before it composes
+    /// anything (`0x6e7595 test ch,0x20` → `jne` the return), so `SPELLCAST_CHANNEL_START` never
+    /// fires and the frame is never shown.
+    ///
+    /// A **different** suppression from [`Self::no_casting_bar_text`]'s and a total one: that bit
+    /// blanks the cast bar's *label* and still draws the bar; this one removes the event. The two
+    /// live one nibble apart in the same column and are easy to conflate — the channel path never
+    /// reads bit 2 at all (`0x6e7a2d` is the only bit-2 test on `SpellRec+0x24` image-wide, wow-re
+    /// `wave-cast.md`'s twice-run census).
+    ///
+    /// Both shipped rows are 24322/24323 "Blood Siphon", the Hakkar encounter's drain.
+    pub fn no_channel_bar(&self) -> bool {
+        self.attributes_ex3 & ATTR_EX3_NO_CHANNEL_BAR != 0
+    }
+
+    /// `AttributesEx & 0x2000_0000` — **the channel bar prints this spell's own name**
+    /// ([`ATTR_EX_CHANNEL_BAR_OWN_NAME`]); cleared, it prints the GlobalStrings word `CHANNELING`.
+    /// `0x6e759a test DWORD PTR [SpellRec+0x1c],0x20000000` — set takes `Name[locale]`
+    /// (`0x6e75a9`), clear takes `FrameScript_GetText(0x870dd0 = "CHANNELING")` (`0x6e75bc`).
+    ///
+    /// This is the whole of the channel bar's naming law, and it is the reverse default of the
+    /// cast bar's: a cast bar names its spell unless told not to, a channel bar says "Channeling"
+    /// unless told to name it. Nine of the 323 channeled rows in the shipped 5875 file opt in —
+    /// the four Fishing ranks, Cannibalize, Dream Vision, Using Control Console and the two
+    /// (suppressed) Blood Siphons. Blizzard, Arcane Missiles, Mind Flay, Drain Life/Soul/Mana,
+    /// Rain of Fire, Hurricane, Tranquility, Evocation and First Aid all read the generic word.
+    pub fn channel_bar_own_name(&self) -> bool {
+        self.attributes_ex & ATTR_EX_CHANNEL_BAR_OWN_NAME != 0
+    }
+
     /// The ranged-shot cooldown pad's gate (`0x6e2b60` at `0x6e2c2c`–`0x6e2c47`, byte-verified —
     /// wow-re `ranged-cooldown-sweep.md`): on the caster's own SPELL_GO self-insert, a
     /// `Attributes & 0x2` spell WITHOUT `AttributesEx2 & 0x20000`

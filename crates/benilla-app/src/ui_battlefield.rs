@@ -221,7 +221,7 @@ fn feed_battlefield(
     queue: Res<BattlefieldQueue>,
     maps: Option<Res<MapCatalogRes>>,
     player: Res<Player>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
 ) {

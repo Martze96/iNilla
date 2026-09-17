@@ -156,7 +156,7 @@ impl Plugin for QuestSharePlugin {
 fn feed_quest_share(
     script: Option<NonSendMut<UiScript>>,
     mut share: ResMut<QuestShare>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut sink: MessageSink,
 ) {

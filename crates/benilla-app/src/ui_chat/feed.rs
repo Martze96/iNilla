@@ -770,7 +770,7 @@ pub(super) fn feed_chat(
     mut log: ResMut<ChatLog>,
     mut windows: ResMut<ChatWindows>,
     mut channels: ResMut<ChannelState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut speaker: SpeakerEffects,
     commands: Res<NetCommands>,
     // The text-emote sentence seam (decision 1274): the tables, plus the guid the composer's
@@ -787,7 +787,7 @@ pub(super) fn feed_chat(
     // The combat log's item-name seam (1703): the four families whose sentence names an ITEM
     // (`TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`) resolve it
     // here, through the same ask-once cache the reference's own deferred queue re-runs against.
-    mut items: ResMut<crate::items::Items>,
+    items: Res<crate::items::Items>,
     // The two 1.12 text filters (decision 2077), bundled for the same reason `SpeakerEffects` is:
     // this list is at the sixteen-parameter ceiling. This IS the reference's `0x49a870`, so both
     // arms belong here and nowhere else.
@@ -862,7 +862,7 @@ pub(super) fn feed_chat(
                         subject_guid,
                         &guids,
                         &stores,
-                        &mut names,
+                        &names,
                         &commands,
                     );
                     let (text, clean) = crate::npc_text::substitute_checked(
@@ -1257,7 +1257,7 @@ pub(super) fn feed_chat(
                     if guid == 0 {
                         continue;
                     }
-                    match super::combat::object_name(guid, &mut names, &commands) {
+                    match super::combat::object_name(guid, &names, &commands) {
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
                         None => wait = true,
@@ -1278,7 +1278,7 @@ pub(super) fn feed_chat(
                         }
                     }
                     super::combat::Named::Unit(guid) => {
-                        match super::combat::object_name(guid, &mut names, &commands) {
+                        match super::combat::object_name(guid, &names, &commands) {
                             Some(name) => line.fills.named = name,
                             None => wait = true,
                         }

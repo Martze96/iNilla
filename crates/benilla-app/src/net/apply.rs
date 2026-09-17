@@ -418,8 +418,8 @@ pub(crate) fn apply_net_updates(
                     &mut stores,
                     &mut pending,
                     &mut speed_stage,
-                    &mut names,
-                    &mut go_templates,
+                    &names,
+                    &go_templates,
                     &net_commands,
                 )
             }
@@ -977,7 +977,7 @@ pub(crate) fn apply_net_updates(
                 &mut ui_error_keys,
                 &name,
                 &self_guid,
-                &mut names,
+                &names,
                 &net_commands,
             ),
             SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut ui_error_keys),
@@ -996,7 +996,7 @@ pub(crate) fn apply_net_updates(
                 members,
                 leader,
                 loot,
-                &mut names,
+                &names,
                 &index,
                 &net_commands,
             ),
@@ -1166,7 +1166,7 @@ pub(crate) fn apply_net_updates(
             }
             SessionEvent::PetitionSignResults(results) => crate::ui_petition::apply::sign_results(
                 &mut petition,
-                &mut names,
+                &names,
                 self_guid.0.unwrap_or(0),
                 results,
                 &net_commands,
@@ -1336,7 +1336,7 @@ pub(crate) fn apply_net_updates(
                     &mut combat_text_spawns,
                     &mut unit_combat_feedback,
                     &mut combat_text_events,
-                    &mut names,
+                    &names,
                     &net_commands,
                 )
             }
@@ -1348,7 +1348,7 @@ pub(crate) fn apply_net_updates(
                     &self_guid,
                     &mut unit_combat_feedback,
                     &mut combat_text_events,
-                    &mut names,
+                    &names,
                     &net_commands,
                 )
             }

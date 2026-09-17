@@ -227,7 +227,7 @@ pub(crate) fn difficulty(rank: u32, low: u32, high: u32) -> TradeSkillDifficulty
 fn recipe_icon(
     d: &benilla_formats::SpellDisplay,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<String> {
     let item = d.effect_item_type[0];
@@ -249,7 +249,7 @@ fn resolve_recipe(
     icons: Option<&ItemDisplays>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     cooldowns: &crate::cooldowns::Cooldowns,
     now: Instant,
@@ -375,7 +375,7 @@ fn feed_trade_skill(
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
     repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
@@ -416,7 +416,7 @@ fn feed_trade_skill(
                     icons.as_deref(),
                     subclasses.as_deref(),
                     store,
-                    &mut items,
+                    &items,
                     &commands,
                     &cooldowns,
                     now,
@@ -583,7 +583,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
             Some("ITEM".into()),
         );
     }
@@ -598,7 +598,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_ENCHANT_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
             Some("ITEM".into()),
         );
     }
@@ -614,24 +614,24 @@ mod tests {
         // EffectItemType[0] == 0: 0x55ba30 short-circuits on a zero id before hashing.
         let none = recipe(SPELL_EFFECT_ENCHANT_ITEM, 0);
         assert_eq!(
-            recipe_icon(&none, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&none, Some(&icons), &deps.items, &deps.commands),
             None,
         );
 
         // A template that never lands (the async row) — nil, and the ask goes out exactly once.
         let missing = recipe(SPELL_EFFECT_CREATE_ITEM, 999);
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
             None,
         );
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
             None,
         );
         assert_eq!(deps.queried_entries(), vec![999], "ask-once, not ask-often");
 
         // The template landed but ItemDisplayInfo is unresolved — still nil, still not "SPELL".
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
-        assert_eq!(recipe_icon(&d, None, &mut deps.items, &deps.commands), None);
+        assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
     }
 }

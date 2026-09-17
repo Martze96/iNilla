@@ -56,6 +56,9 @@ pub(crate) fn kit_decodes() -> u32 {
 }
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
+/// Named by the schedule tests' class table (`game_plugins::schedule_tests::Classes`, 2287).
+#[cfg(test)]
+pub(crate) use kit::SoundKits;
 pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
@@ -475,7 +478,7 @@ fn load_materials(mut commands: Commands, assets: Option<Res<benilla_assets::Wor
 /// object not streamed, and a template still in flight (asked once, answered next frame).
 pub(super) fn worn_chest_material(
     store: Option<&crate::net::ObjectStore>,
-    items: &mut crate::items::Items,
+    items: &crate::items::Items,
     net: &crate::net::NetCommands,
 ) -> Option<u32> {
     /// Index 4 of the inv-slot array — `0x62fa50`/`0x62fb86` read the fifth 8-byte guid.

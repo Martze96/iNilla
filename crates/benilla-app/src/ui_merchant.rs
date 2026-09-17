@@ -209,7 +209,7 @@ fn sell_error_key(reason: u8) -> Option<&'static str> {
 /// placeholder and fills in when the answer lands, exactly like a bag slot).
 fn resolve_item(
     item: &VendorItem,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> MerchantItem {
@@ -277,7 +277,7 @@ fn buyback_order(store: &benilla_protocol::ObjectFields) -> Vec<u8> {
 fn resolve_buyback(
     idx: u8,
     store: &benilla_protocol::ObjectFields,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> MerchantItem {
@@ -328,7 +328,7 @@ fn resolve_buyback(
 /// No reputation model yet → discount 0.
 fn item_repair_cost(
     guid: u64,
-    items: &mut Items,
+    items: &Items,
     tables: &RepairTables,
     commands: &NetCommands,
 ) -> u32 {
@@ -356,12 +356,12 @@ fn item_repair_cost(
 /// buyback).
 fn repair_all_cost(
     store: &benilla_protocol::ObjectFields,
-    items: &mut Items,
+    items: &Items,
     tables: &RepairTables,
     commands: &NetCommands,
 ) -> u32 {
     let mut total: u64 = 0;
-    let mut add = |guid: u64, items: &mut Items| {
+    let mut add = |guid: u64, items: &Items| {
         if guid != 0 {
             total += u64::from(item_repair_cost(guid, items, tables, commands));
         }
@@ -395,7 +395,7 @@ fn repair_all_cost(
 /// when no vendor is open.
 fn snapshot(
     open: &MerchantOpen,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     player: Option<&benilla_protocol::ObjectFields>,
@@ -435,13 +435,13 @@ fn snapshot(
 fn feed_merchant(
     script: Option<NonSendMut<UiScript>>,
     open: Res<MerchantOpen>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     units: Query<(&crate::net::Guid, &ObjectStore), Without<SelfPlayer>>,
     tables: Option<Res<RepairTables>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut errors: ResMut<MerchantErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<MerchantState>>>,
     mut last_money: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -495,7 +495,7 @@ fn feed_merchant(
     let player = self_q.iter().next().map(|s| &s.0);
     let fresh = snapshot(
         &open,
-        &mut items,
+        &items,
         icons.as_deref(),
         &commands,
         player,
@@ -799,14 +799,14 @@ mod tests {
 
     #[test]
     fn resolve_maps_unlimited_stock_to_minus_one() {
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         // Unlimited stock → numAvailable -1; a finite count passes through.
-        let unlimited = resolve_item(&row(159, 1, STOCK_UNLIMITED), &mut items, None, &commands);
+        let unlimited = resolve_item(&row(159, 1, STOCK_UNLIMITED), &items, None, &commands);
         assert_eq!(unlimited.num_available, -1);
         assert_eq!(unlimited.item_id, 159);
-        let finite = resolve_item(&row(4540, 2, 5), &mut items, None, &commands);
+        let finite = resolve_item(&row(4540, 2, 5), &items, None, &commands);
         assert_eq!(finite.num_available, 5);
         // No template answer yet → name + tooltip stats in flight (nil), the rest present.
         assert!(finite.name.is_none());
@@ -876,7 +876,7 @@ mod tests {
                 bag_family: 0,
             }),
         );
-        let resolved = resolve_item(&row(2129, 1, 3), &mut items, None, &commands);
+        let resolved = resolve_item(&row(2129, 1, 3), &items, None, &commands);
         let stats = resolved.stats.expect("template answered → stats present");
         assert_eq!(
             (

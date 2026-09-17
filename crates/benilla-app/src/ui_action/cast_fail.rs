@@ -34,11 +34,29 @@
 //! PREVENTED_BY_MECHANIC (decision 1948 — `0x6e2190`, and the one arm whose word is produced
 //! locally rather than read off the wire), `0x56` ONLY_SHAPESHIFT (decision 2280 — `0x6e1ff8`,
 //! the one arm that reads a **mask** and joins several names), and `0x78` TOTEMS / `0x5c`
-//! REAGENTS / `0x19`–`0x1b` EQUIPPED_ITEM_CLASS\* in the drain, which owns them because their
-//! fills need the item caches and the query-then-redisplay cache-miss behavior ("Requires Mining
-//! Pick", decisions 0545 + 0552). Still stripped rather than filled — each needs a DBC we do not
-//! load: `0x90` MIN_SKILL (`SkillLine.dbc`), `0x31` NEED_EXOTIC_AMMO and `0x84`
-//! PROSPECT_NEED_MORE. Stripping is a **deliberate divergence**, now byte-confirmed as one: on a
+//! REAGENTS / `0x19`–`0x1b` EQUIPPED_ITEM_CLASS\* / `0x31` NEED_EXOTIC_AMMO in the drain, which
+//! owns the totem/reagent pair because their fills need the item caches and the
+//! query-then-redisplay cache-miss behavior ("Requires Mining Pick", decisions 0545 + 0552), and
+//! the other two because they share `0x6e2380`'s subclass catalog.
+//!
+//! **That is every arm in the `0x6e1d8e` table, and the reasons that still read bare read bare
+//! for reasons that are not "a DBC we do not load"** — decision 2292, which found that claim
+//! false in all three places this paragraph used to make it — the same stale blocker that hid
+//! `0x56` behind a DBC we had been loading for a month:
+//!
+//! - `0x30` NEED_AMMO_POUCH — **the reference leaves its own `%s` literal.** There is no arm to
+//!   write: `0x6e1e3d` only clears `[caster+0xd58]` bit `0x200`, and no word is ever supplied.
+//! - `0x31` NEED_EXOTIC_AMMO — modeled, and argless on this stack. `Spell::SendCastResult` fills
+//!   `failureArg1` for four reasons and this is not one of them, so the arm declines.
+//! - `0x84` PROSPECT_NEED_MORE and `0x90` MIN_SKILL — **unreachable on 5875, not
+//!   unimplemented.** Neither is server-sent, and their only raise sites image-wide (`0x49614e`
+//!   and `0x496128`, both inside the item-target validator `0x495d60`) sit behind that
+//!   function's third leg, `Effect[i] == 0x7f` SPELL_EFFECT_PROSPECTING — which no shipped spell
+//!   carries, pinned on the real file by `real_prospecting_effect_is_absent_from_5875`.
+//!   `SkillLine.dbc`, the DBC `0x90` was said to be waiting on, has been loaded since the
+//!   spellbook grew tabs.
+//!
+//! Stripping is a **deliberate divergence**, now byte-confirmed as one: on a
 //! bad id or an absent word the reference jumps to the default arm with the pointer still on the
 //! *unfilled* template, so it displays a literal `Requires %s` (wow-re §WIRE-ARGS C3 — the fill
 //! path's own buffer swap sits after the printf and is skipped). We show the bare stem instead:

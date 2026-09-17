@@ -111,7 +111,7 @@ fn feed_battlefield_positions(
     group: Res<GroupState>,
     guids: Res<GuidIndex>,
     unit_pos: Query<&GlobalTransform, With<NetEntity>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     // What the empty push last carried (`(has_list, icon_scale bits)`): with no list the engine
     // is told once per change, not per frame; with one, every frame — the positions move.

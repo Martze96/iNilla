@@ -181,17 +181,32 @@ fn failed_cast_turns_red_holds_then_fades() {
 fn channel_counts_down_not_up() {
     let mut s = harness();
     // SPELLCAST_CHANNEL_START(ms, name) — args reversed vs START, per the reference contract.
+    // The name is whatever `ui_cast::channel_start_args` composed; for all but nine of the 323
+    // channeled rows that is the literal word, which is what the feed hands Starshards too.
     s.fire_event(
         "SPELLCAST_CHANNEL_START",
         vec![
             ScriptValue::Int(6000),
-            ScriptValue::Str("Starshards".into()),
+            ScriptValue::Str("Channeling".into()),
         ],
     );
     assert!(s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap());
     assert_eq!(
         s.eval::<String>("return CastingBarText:GetText()").unwrap(),
-        "Starshards"
+        "Channeling"
+    );
+
+    // **In 1.12 the channel bar is ORANGE** — the same `SetStatusBarColor(1.0, 0.7, 0.0)` the cast
+    // bar takes (stock `CastingBarFrame.lua` l.76 vs l.21, byte-identical to the copy in the
+    // player's `patch.MPQ`); green is the COMPLETION flash and nothing else. A channel is told
+    // apart by draining instead of filling, and by its label. **Classic Era's channel bar IS
+    // green** (`CastingBarType.Channel`'s `classicFillColor = CASTBAR_CLASSIC_GREEN`) — a real
+    // behaviour of a different client, which is why this is a gate and not a comment: if we ever
+    // take Era's colour it is a deliberate deviation that has to come here first (decision 2284).
+    let (r, g, b) = bar_color(&s);
+    assert!(
+        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        "a channel opens orange, exactly like a cast (got {r} {g} {b})"
     );
 
     let full = bar_value(&s);

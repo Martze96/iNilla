@@ -125,7 +125,7 @@ impl Plugin for UiPetStatsPlugin {
 /// (decision 1676).
 fn family_for(
     pet: Option<&ObjectStore>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     tables: Option<&PetFamilyTables>,
 ) -> (Option<String>, Option<String>, Vec<String>) {
@@ -242,7 +242,7 @@ fn feed_pet_stats(
     self_store: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     tables: Option<Res<PetStatTables>>,
     family_tables: Option<Res<PetFamilyTables>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<(bool, PetStats)>>>,
 ) {
@@ -251,7 +251,7 @@ fn feed_pet_stats(
     };
     let last = last.get(&script);
     let store = pet.store(bar.spells.pet_guid);
-    let family = family_for(store, &mut names, &commands, family_tables.as_deref());
+    let family = family_for(store, &names, &commands, family_tables.as_deref());
     let fresh = stats_for(store, self_store.iter().next(), tables.as_deref(), family);
     // Push only on change. Happiness moves on its own clock and the frame repaints off UNIT_*
     // events, so a per-frame push would be pure churn — but the DIFF is what makes this cheap,
@@ -592,8 +592,8 @@ mod tests {
         let (cmds, rx) = commands();
 
         // 1. No pet at all.
-        let mut names = NameCache::default();
-        assert_eq!(family_for(None, &mut names, &cmds, Some(&t)), no_family());
+        let names = NameCache::default();
+        assert_eq!(family_for(None, &names, &cmds, Some(&t)), no_family());
         assert!(rx.try_recv().is_err(), "nothing to ask about");
 
         // 2. A pet whose creature query has NOT answered yet — nil, and the ask goes out (once).
@@ -602,7 +602,7 @@ mod tests {
             (PETNUMBER, 7),
         ]));
         assert_eq!(
-            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
+            family_for(Some(&pet), &names, &cmds, Some(&t)),
             no_family(),
             "un-queried is nil, not a guess"
         );
@@ -617,17 +617,14 @@ mod tests {
 
         // 3. The answer lands with family 0 — a template with no family. Still nil, and this is
         //    the common case for every non-tameable creature.
-        let mut names = cache_with(IMP_ENTRY, 0);
-        assert_eq!(
-            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
-            no_family()
-        );
+        let names = cache_with(IMP_ENTRY, 0);
+        assert_eq!(family_for(Some(&pet), &names, &cmds, Some(&t)), no_family());
 
         // 4. The answer lands with the Imp's real family (23, from the live `creature_template`).
         //    A warlock minion: a word, and an EMPTY diet — mask 0 in the shipped DBC.
-        let mut names = cache_with(IMP_ENTRY, 23);
+        let names = cache_with(IMP_ENTRY, 23);
         assert_eq!(
-            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
+            family_for(Some(&pet), &names, &cmds, Some(&t)),
             (
                 Some("Imp".into()),
                 // The family row's own icon column (decision 1676) — and the shipped value for a
@@ -644,8 +641,8 @@ mod tests {
         );
 
         // 5. A hunter's boar (entry 113 → family 5): a word AND the six-diet list, in bit order.
-        let mut names = cache_with(BOAR_ENTRY, 5);
-        let (name, icon, diet) = family_for(Some(&boar()), &mut names, &cmds, Some(&t));
+        let names = cache_with(BOAR_ENTRY, 5);
+        let (name, icon, diet) = family_for(Some(&boar()), &names, &cmds, Some(&t));
         assert_eq!(name.as_deref(), Some("Boar"));
         assert_eq!(
             icon.as_deref(),
@@ -654,11 +651,8 @@ mod tests {
         assert_eq!(diet, ["Meat", "Fish", "Cheese", "Bread", "Fungus", "Fruit"]);
 
         // 6. No DBC tables at all: nil, degraded to exactly the blank level line 1057 shipped.
-        let mut names = cache_with(BOAR_ENTRY, 5);
-        assert_eq!(
-            family_for(Some(&boar()), &mut names, &cmds, None),
-            no_family()
-        );
+        let names = cache_with(BOAR_ENTRY, 5);
+        assert_eq!(family_for(Some(&boar()), &names, &cmds, None), no_family());
     }
 
     /// **The family WORD survives the hunter gate; the DIET does not** — the carved split

@@ -685,7 +685,7 @@ fn coin_icon(copper: u32) -> &'static str {
 /// rather than at each call site.
 fn resolve_item(
     item: &LootItem,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     rolls: RollCatalogs,
@@ -754,7 +754,7 @@ fn templates_outstanding(items: &Items, snap: &LootSnapshot) -> bool {
 /// shift up).
 fn snapshot(
     loot: &LootState,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     rolls: RollCatalogs,
@@ -886,7 +886,7 @@ fn receive_line(r: &PendingReceive, name: &str, quality: u32) -> String {
 /// an entry the server never answers for).
 fn drain_receives(
     loot: &mut LootState,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     chat: &mut crate::ui_chat::ChatLog,
@@ -946,7 +946,7 @@ fn drain_receives(
 fn feed_loot(
     script: Option<NonSendMut<UiScript>>,
     mut loot: ResMut<LootState>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
@@ -973,7 +973,7 @@ fn feed_loot(
     };
     drain_receives(
         &mut loot,
-        &mut items,
+        &items,
         icons.as_deref(),
         &commands,
         &mut chat,
@@ -985,7 +985,7 @@ fn feed_loot(
         group: &group,
         names: &names,
     };
-    let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands, rolls, who);
+    let fresh = snapshot(&loot, &items, icons.as_deref(), &commands, rolls, who);
     if fresh == *last {
         return;
     }
@@ -1040,7 +1040,7 @@ fn feed_loot(
                             // raises the confirm, and every later one in the same sweep is left
                             // in the window untouched — not taken, not asked about. Otherwise a
                             // three-blue corpse would stack three dialogs over one pending slot.
-                            if bind_confirm_required(&mut items, &commands, item_id) {
+                            if bind_confirm_required(&items, &commands, item_id) {
                                 if bind_confirm_fired {
                                     continue;
                                 }
@@ -1105,7 +1105,7 @@ fn feed_loot(
 /// has no name on it either, so it is not a row anyone has clicked. Asking (rather than peeking)
 /// costs nothing — the entry is already in flight from the snapshot — and keeps the answer right
 /// for the next click if one somehow arrives first.
-fn bind_confirm_required(items: &mut Items, commands: &NetCommands, item_id: u32) -> bool {
+fn bind_confirm_required(items: &Items, commands: &NetCommands, item_id: u32) -> bool {
     items
         .template(item_id, 0, commands)
         .is_some_and(|t| t.bonding == BIND_WHEN_PICKED_UP && t.quality >= BIND_CONFIRM_MIN_QUALITY)
@@ -1174,7 +1174,7 @@ fn drain_loot(
     // The bind-on-pickup deferral reads the row's template (`bonding`, `quality`). Already cached
     // by then in every reachable case — the snapshot asks for it to put a NAME on the row, and a
     // row with no name is a row nobody has clicked.
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     // The controller's move-start report (decision 2097) and the selection teardown the close
     // asks for — ahead of the VM check below, because neither depends on Lua.
     mut move_start: ResMut<LootMoveStart>,
@@ -1218,7 +1218,7 @@ fn drain_loot(
                 // confirm at all, which is why picking up a quest trinket never asks. The event
                 // carries the row out, the row is stashed, and NOTHING is sent; not even the
                 // pickup sound, which the reference plays only on the arm that actually sends.
-                if bind_confirm_required(&mut items, &commands, item_id) {
+                if bind_confirm_required(&items, &commands, item_id) {
                     debug!("ui_loot: row {index} (wire {wire_slot}) binds on pickup — confirming");
                     loot.pending_bind_confirm = Some(index);
                     script.fire_event(
@@ -2374,7 +2374,7 @@ mod tests {
 
     #[test]
     fn coin_row_uses_real_words_and_the_ladders_icon() {
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let (grp, nm) = nobody();
@@ -2383,7 +2383,7 @@ mod tests {
         loot.open(0x42, loot_type::CORPSE, 4, vec![]);
         let snap = snapshot(
             &loot,
-            &mut items,
+            &items,
             None,
             &commands,
             RollCatalogs::NONE,
@@ -2402,7 +2402,7 @@ mod tests {
 
     #[test]
     fn snapshot_prepends_coin_and_resolves_items() {
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let (grp, nm) = nobody();
@@ -2410,7 +2410,7 @@ mod tests {
         // Closed → no snapshot.
         assert!(snapshot(
             &loot,
-            &mut items,
+            &items,
             None,
             &commands,
             RollCatalogs::NONE,
@@ -2423,7 +2423,7 @@ mod tests {
         loot.open(0x42, loot_type::CORPSE, 12_345, vec![item(0, 117, 3)]);
         let snap = snapshot(
             &loot,
-            &mut items,
+            &items,
             None,
             &commands,
             RollCatalogs::NONE,
@@ -2449,7 +2449,7 @@ mod tests {
         loot.clear_money();
         let snap = snapshot(
             &loot,
-            &mut items,
+            &items,
             None,
             &commands,
             RollCatalogs::NONE,
@@ -2467,7 +2467,7 @@ mod tests {
         loot.remove_slot(0);
         let snap = snapshot(
             &loot,
-            &mut items,
+            &items,
             None,
             &commands,
             RollCatalogs::NONE,

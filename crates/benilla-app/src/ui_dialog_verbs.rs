@@ -391,7 +391,7 @@ fn stone_line(
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct MeetingStoneInputs<'w, 's> {
     areas: Option<Res<'w, AreaTableRes>>,
-    names: ResMut<'w, NameCache>,
+    names: Res<'w, NameCache>,
     commands: Res<'w, NetCommands>,
     visuals: Option<Res<'w, SpellVisuals>>,
     fx: MessageWriter<'w, SpellKitFx>,

@@ -26,7 +26,7 @@ use crate::target::Selection;
 /// ref's silent no-op). The name is cache-resolved — a streamed player target is always cached.
 fn target_player_name(
     selection: &Selection,
-    names: &mut crate::names::NameCache,
+    names: &crate::names::NameCache,
     commands: &NetCommands,
 ) -> Option<String> {
     let guid = selection.guid?;
@@ -641,7 +641,7 @@ pub(super) fn drain_chat_input(
             },
             ParsedChat::Invite { name } => {
                 if let Some(name) =
-                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                    name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
                     let _ = commands.0.send(ClientCommand::GroupInvite { name });
                 }
@@ -654,14 +654,14 @@ pub(super) fn drain_chat_input(
             }
             ParsedChat::Uninvite { name } => {
                 if let Some(name) =
-                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                    name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
                     let _ = commands.0.send(ClientCommand::GroupUninvite { name });
                 }
             }
             ParsedChat::Promote { name } => {
                 if let Some(name) =
-                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                    name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
                     // The 1.12 wire form is a guid (CMSG_GROUP_SET_LEADER) — resolve against the
                     // roster; a miss answers with the server's own would-be error string
@@ -692,7 +692,7 @@ pub(super) fn drain_chat_input(
             // player gate, arbiter echo) instead of a second one here.
             ParsedChat::Duel { name } => {
                 if let Some(name) =
-                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                    name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
                     script.queue_duel_request(benilla_ui::script::DuelRequest::StartByName(name));
                 }
@@ -710,7 +710,7 @@ pub(super) fn drain_chat_input(
             // GetSlashCmdTarget(msg)` guard does.
             ParsedChat::Target { name } => {
                 if let Some(name) =
-                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                    name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
                     chat_out
                         .target

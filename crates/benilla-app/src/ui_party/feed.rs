@@ -871,7 +871,7 @@ pub(super) fn drain_party(
     script: Option<NonSendMut<UiScript>>,
     mut group: ResMut<GroupState>,
     selection: Res<Selection>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,

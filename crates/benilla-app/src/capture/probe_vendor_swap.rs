@@ -168,7 +168,7 @@ fn vendor_swap_probe(
     mut probe: ResMut<VendorSwapProbe>,
     merchant: Res<MerchantOpen>,
     script: Option<NonSendMut<UiScript>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     panes: Res<BoothPanes>,
     images: Res<PortraitImages>,
     self_player: Query<(), With<SelfPlayer>>,
@@ -219,7 +219,7 @@ fn vendor_swap_probe(
             let (brog, dobbins) = (find(BROG_ENTRY), find(DOBBINS_ENTRY));
             // Both names must be cached before the legs read them back out of the VM — the
             // ask-once resolve is what the unit feed itself would send on the open frame.
-            let mut named = |g: Option<u64>| g.is_some_and(|g| names.resolve(g, &net).is_some());
+            let named = |g: Option<u64>| g.is_some_and(|g| names.resolve(g, &net).is_some());
             let (brog_named, dobbins_named) = (named(brog), named(dobbins));
             if brog_named && dobbins_named {
                 probe.brog = brog;

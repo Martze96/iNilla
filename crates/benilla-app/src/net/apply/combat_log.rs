@@ -255,7 +255,7 @@ pub(super) fn periodic_aura_log(
     text: &mut MessageWriter<CombatTextSpawn>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
-    names: &mut NameCache,
+    names: &NameCache,
     net: &NetCommands,
 ) {
     if benilla_assets::trace::enabled() {
@@ -433,7 +433,7 @@ pub(super) fn spell_heal_log(
     self_guid: &SelfGuid,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
-    names: &mut NameCache,
+    names: &NameCache,
     net: &NetCommands,
 ) {
     if let Some(&unit) = index.0.get(&s.target) {

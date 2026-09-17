@@ -156,7 +156,7 @@ enum CursorGesture {
 fn play_item_gesture_sounds(
     script: Option<NonSend<UiScript>>,
     mut prev: Local<crate::ui_script::VmMemo<Option<CursorPayload>>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     displays: Option<Res<ItemDisplays>>,
     sounds: Option<Res<ItemSounds>>,
     kits: Option<ResMut<SoundKits>>,

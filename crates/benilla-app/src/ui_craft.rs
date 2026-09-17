@@ -140,7 +140,7 @@ fn feed_craft(
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
 ) {

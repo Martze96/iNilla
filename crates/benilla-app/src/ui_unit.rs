@@ -1594,7 +1594,7 @@ fn feed_units(
     index: Option<Res<crate::net::GuidIndex>>,
     mut stores: UnitStores,
     mut feed: ResMut<UnitFeedState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,

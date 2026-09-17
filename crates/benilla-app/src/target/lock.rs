@@ -45,16 +45,16 @@ use crate::net::ObjectStore;
 /// spell). The `Option` members are absent without client data.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct GoLockInputs<'w> {
-    // ResMut, not Res: the tooltip arm of this bundle drives the ask-once template
-    // request on a miss (the click arm only reads).
-    pub(crate) templates: ResMut<'w, crate::go_templates::GameObjectTemplates>,
+    // Shared: the tooltip arm's ask-once template request on a miss marks itself through
+    // `&self` (decision 2288), so neither arm needs the store exclusively.
+    pub(crate) templates: Res<'w, crate::go_templates::GameObjectTemplates>,
     pub(crate) locks: Option<Res<'w, crate::go_templates::Locks>>,
     pub(crate) lock_types: Option<Res<'w, crate::go_templates::LockTypes>>,
     pub(crate) spells: Option<Res<'w, crate::ui_action::Spells>>,
     /// The skill-line catalog — the opener-value level term's spell→line hop
     /// ([`spell_skill_value`]). Absent without client data, which reads as skill 0 (fail-closed).
     pub(crate) skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
-    pub(crate) items: ResMut<'w, crate::items::Items>,
+    pub(crate) items: Res<'w, crate::items::Items>,
 }
 
 /// The GameObject facts the Action gate and the requirement fallback read off the wire — gathered

@@ -237,7 +237,7 @@ fn feed_shapeshift_bar(
     units: Query<&ObjectStore, Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<Reputations>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
@@ -303,7 +303,7 @@ fn feed_shapeshift_bar(
                         cooldowns: &cooldowns,
                         carried: &carried,
                     };
-                    usable::spell_usable(id, d, &spells, &ctx, &mut items, &commands).0
+                    usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
                 });
             let texture = form_texture(d, active);
             let cooldown = cooldowns

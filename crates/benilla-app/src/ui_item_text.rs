@@ -28,8 +28,6 @@
 //! bar) never fires — no translation mechanic on a private server's readables, and the `language`
 //! column (`data[1]`/`LanguageID`) is carried by neither source here.
 
-use std::collections::{HashMap, HashSet};
-
 use bevy::prelude::*;
 
 use benilla_ui::script::{ItemTextState, UiScript};
@@ -38,6 +36,7 @@ use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
+use crate::query_cache::QueryCache;
 use crate::ui_mail::MailOpen;
 use crate::ui_script::UiInput;
 
@@ -56,27 +55,30 @@ pub(crate) struct PageText {
 /// per-page fetch is still here for the server that answers one at a time.
 #[derive(Resource, Default)]
 pub(crate) struct PageTexts {
-    pages: HashMap<u32, PageText>,
-    pending: HashSet<u32>,
+    pages: QueryCache<u32, PageText>,
+}
+
+impl crate::query_cache::AskOnce for PageTexts {
+    fn clear_pending(&mut self) {
+        self.pages.clear_pending();
+    }
 }
 
 impl PageTexts {
     /// Record a page (and clear its in-flight flag).
     pub(crate) fn insert(&mut self, page_id: u32, text: String, next: u32) {
-        self.pending.remove(&page_id);
-        self.pages.insert(page_id, PageText { text, next });
+        self.pages.insert(page_id, Some(PageText { text, next }));
     }
 
     /// The cached page, asking for it once if this is the first asker. `guid` names the object
     /// doing the reading (the reference writes it after the page id; vmangos discards it).
-    fn get_or_ask(&mut self, page_id: u32, guid: u64, commands: &NetCommands) -> Option<&PageText> {
-        if !self.pages.contains_key(&page_id) && self.pending.insert(page_id) {
+    fn get_or_ask(&self, page_id: u32, guid: u64, commands: &NetCommands) -> Option<&PageText> {
+        self.pages.get_or_ask(page_id, || {
             debug!("page text: asking page {page_id} (object {guid:#x})");
             let _ = commands
                 .0
                 .send(ClientCommand::PageTextQuery { page_id, guid });
-        }
-        self.pages.get(&page_id)
+        })
     }
 }
 
@@ -180,6 +182,7 @@ pub(crate) struct UiItemTextPlugin;
 
 impl Plugin for UiItemTextPlugin {
     fn build(&self, app: &mut App) {
+        crate::query_cache::register::<PageTexts>(app);
         app.init_resource::<ItemTextOpen>()
             .init_resource::<PageTexts>()
             .add_systems(
@@ -214,8 +217,8 @@ struct Readable {
 /// is FrameXML's "Parchment". A GameObject whose template is not cached yet is asked for.
 pub(crate) fn object_material(
     guid: u64,
-    items: &mut Items,
-    go_templates: &mut GameObjectTemplates,
+    items: &Items,
+    go_templates: &GameObjectTemplates,
     materials: Option<&PageMaterials>,
     commands: &NetCommands,
 ) -> Option<String> {
@@ -239,7 +242,7 @@ pub(crate) fn object_material(
 /// single resolve serves both sources.
 fn readable(
     guid: u64,
-    items: &mut Items,
+    items: &Items,
     go_templates: &GameObjectTemplates,
     materials: Option<&PageMaterials>,
     commands: &NetCommands,
@@ -270,10 +273,10 @@ fn readable(
 fn feed_item_text(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<ItemTextOpen>,
-    mut mail: ResMut<MailOpen>,
-    mut pages: ResMut<PageTexts>,
-    mut items: ResMut<Items>,
-    mut names: ResMut<NameCache>,
+    mail: Res<MailOpen>,
+    pages: Res<PageTexts>,
+    items: Res<Items>,
+    names: Res<NameCache>,
     go_templates: Res<GameObjectTemplates>,
     materials: Option<Res<PageMaterials>>,
     commands: Res<NetCommands>,
@@ -298,7 +301,7 @@ fn feed_item_text(
     }
     let Some(readable) = readable(
         sess.object_guid,
-        &mut items,
+        &items,
         &go_templates,
         materials.as_deref(),
         &commands,
@@ -345,13 +348,15 @@ fn feed_item_text(
                 },
             };
             // The body: the shared ask-once item-text cache (fetch if this is the first asker).
-            let body = mail.bodies.get(text_id).cloned();
-            if body.is_none() && mail.pending_bodies.insert(*text_id) {
-                let _ = commands.0.send(ClientCommand::ItemTextQuery {
-                    text_id: *text_id,
-                    mail_id: 0,
-                });
-            }
+            let body = mail
+                .bodies
+                .get_or_ask(*text_id, || {
+                    let _ = commands.0.send(ClientCommand::ItemTextQuery {
+                        text_id: *text_id,
+                        mail_id: 0,
+                    });
+                })
+                .cloned();
             let Some(text) = body else {
                 return; // body query in flight
             };
@@ -377,7 +382,7 @@ fn feed_item_text(
 
     // Page/book text is server-authored, so it runs the `$`-macro expander — the reference does it
     // from two sites in `ItemTextFrame.cpp` (decision 0754), subject = the local player.
-    let subject = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let subject = crate::npc_text::player_identity(&self_q, &names, &commands);
     let text = crate::npc_text::substitute(
         &text,
         &crate::npc_text::MacroContext {
@@ -422,7 +427,7 @@ fn drain_item_text(
         let ReadSource::Pages { visited } = &mut sess.source else {
             continue; // a letter has no pages; its buttons never show
         };
-        if turn_page(visited, delta, |id| pages.pages.get(&id).map(|p| p.next)) {
+        if turn_page(visited, delta, |id| pages.pages.get(id).map(|p| p.next)) {
             // Repaint on the next feed, without re-firing BEGIN (within this VM; a fresh VM
             // re-begins regardless, which is the reload repaint).
             sess.told.get(&script).ready = false;
@@ -538,7 +543,7 @@ mod quest_material_tests {
     /// (FrameXML's Parchment); an uncached GameObject is asked for and answers nothing meanwhile.
     #[test]
     fn a_quest_sourced_from_an_object_paints_the_objects_material() {
-        let mut items = Items::default();
+        let items = Items::default();
         let mut gos = GameObjectTemplates::default();
         let (tx, rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -553,44 +558,24 @@ mod quest_material_tests {
         gos.insert(100, 2, "Wanted Poster".into(), &data);
         gos.insert(102, 10, "Chest".into(), &data);
         assert_eq!(
-            object_material(
-                go_guid(100),
-                &mut items,
-                &mut gos,
-                Some(&catalog),
-                &commands
-            )
-            .as_deref(),
+            object_material(go_guid(100), &items, &gos, Some(&catalog), &commands).as_deref(),
             Some("Stone")
         );
         assert_eq!(
-            object_material(
-                go_guid(102),
-                &mut items,
-                &mut gos,
-                Some(&catalog),
-                &commands
-            )
-            .as_deref(),
+            object_material(go_guid(102), &items, &gos, Some(&catalog), &commands).as_deref(),
             Some("Marble"),
             "a chest reads data[9]"
         );
         // A creature quest-giver: neither template, nothing asked.
         let creature = (u64::from(benilla_protocol::guid::HIGH_UNIT) << 48) | (6 << 24) | 1;
         assert_eq!(
-            object_material(creature, &mut items, &mut gos, Some(&catalog), &commands),
+            object_material(creature, &items, &gos, Some(&catalog), &commands),
             None
         );
         assert!(rx.try_recv().is_err(), "a creature source asks for nothing");
         // An uncached object: nothing yet, and the template is asked for.
         assert_eq!(
-            object_material(
-                go_guid(777),
-                &mut items,
-                &mut gos,
-                Some(&catalog),
-                &commands
-            ),
+            object_material(go_guid(777), &items, &gos, Some(&catalog), &commands),
             None
         );
         assert!(

@@ -143,7 +143,7 @@ impl NpcSession for StableOpen {
 /// gating the whole row: a pet whose query is in flight still shows its name and level.
 fn resolve_pet(
     wire: &StabledPet,
-    names: &mut NameCache,
+    names: &NameCache,
     families: Option<&PetFamilyTables>,
     stats: Option<&PetStatTables>,
     commands: &NetCommands,
@@ -195,7 +195,7 @@ fn resolve_pet(
 /// Build the Lua-facing snapshot from [`StableOpen`] — `None` when no stable is open.
 fn snapshot(
     open: &StableOpen,
-    names: &mut NameCache,
+    names: &NameCache,
     families: Option<&PetFamilyTables>,
     stats: Option<&PetStatTables>,
     next_slot_cost: u32,
@@ -236,7 +236,7 @@ fn feed_stable(
     stats: Option<Res<PetStatTables>>,
     prices: Option<Res<StableSlotPrices>>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut errors: ResMut<StableErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<StableState>>>,
     mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -271,7 +271,7 @@ fn feed_stable(
     let has_live_pet = bar.spells.pet_guid != 0;
     let fresh = snapshot(
         &open,
-        &mut names,
+        &names,
         families.as_deref(),
         stats.as_deref(),
         next_slot_cost,

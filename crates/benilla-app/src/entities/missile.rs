@@ -293,8 +293,58 @@ struct QueuedGo {
 
 /// Every caster's pending queue (the client's per-unit `+0xac` list heads). A caster that
 /// streams out drops its queue with it.
+///
+/// **It is also a GATE, not only a queue** (decision 2288, wow-re
+/// `missile-queue-gates-the-release-event.md`). `[CGUnit+0xac]` holds `CMissile` nodes — the
+/// binary names them itself (`Missile_C.cpp`) — inserted by the missile spawner `0x60a3d0` and
+/// drained by the release event, and the `$BWR` handler reads it *before* draining it
+/// (`0x600182 mov eax,[esi+0xac]; test eax,eax; je 0x600299`). Everything between those two points
+/// — the ranged prop's own re-anim and the cast-sound reposition — happens **only when a
+/// projectile is actually waiting to be released**. So a shot's flex and its launch are two
+/// effects of one act, and a consumer that arms the prop without asking this has half a mechanism.
 #[derive(Resource, Default)]
-pub(super) struct PendingMissiles(EntityHashMap<Vec<QueuedGo>>);
+pub(crate) struct PendingMissiles(EntityHashMap<Vec<QueuedGo>>);
+
+impl PendingMissiles {
+    /// Is a projectile queued on `caster`, waiting for its release keyframe? The reference's
+    /// `test eax,eax` on the list head — asked by [`crate::ranged_flex`] before the drain, which is
+    /// the order `0x600182` and `0x600294` sit in.
+    pub(crate) fn releasing(&self, caster: Entity) -> bool {
+        self.0.get(&caster).is_some_and(|q| !q.is_empty())
+    }
+
+    /// Queue one projectile on `caster` — **test-only**, for the consumers of the gate above
+    /// ([`crate::ranged_flex`]), which need the queue non-empty without standing up the whole GO
+    /// path to put something in it. The node's contents are irrelevant to every reader of
+    /// [`Self::releasing`]; only its presence is.
+    #[cfg(test)]
+    pub(crate) fn queue_a_shot(app: &mut bevy::app::App, caster: Entity) {
+        let spawn = MissileSpawn {
+            caster,
+            spell_id: 75,
+            path: None,
+            ammo_display_id: None,
+            dest_tag: None,
+            speed: 40.0,
+            targets: Vec::new(),
+            ground_aim: None,
+            weapon_visual: None,
+            missile_sound: None,
+            awaits_release: true,
+        };
+        app.world_mut()
+            .resource_mut::<Self>()
+            .0
+            .entry(caster)
+            .or_default()
+            .push(QueuedGo {
+                spawn,
+                key: None,
+                queued: 0.0,
+                saw_oneshot: false,
+            });
+    }
+}
 
 /// The ammo display's flight model as a [`SpellFx`] cache entry: the **shape rule** (module
 /// docs — right slot = `Ammo\`, left slot = `Weapon\`, thrown), with the row's own object skin.

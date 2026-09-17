@@ -69,7 +69,7 @@ pub(crate) fn score_columns(catalog: &WorldStateUiRes, map: u32) -> Vec<Battlefi
 /// Resolve the raw board through the name cache; `None` while any name is still in flight.
 fn resolve_board(
     log: &PvpLogData,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<Vec<BattlefieldScoreRow>> {
     let mut rows = Vec::with_capacity(log.rows.len());
@@ -109,7 +109,7 @@ pub(crate) fn feed_battlefield_score(
     board: Res<BattlefieldScoreboard>,
     mut queue: ResMut<BattlefieldQueue>,
     catalog: Option<Res<WorldStateUiRes>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<BattlefieldScores>>>,
 ) {
@@ -120,7 +120,7 @@ pub(crate) fn feed_battlefield_score(
     script.set_battlefield_run_time_ms(queue.run_time_ms(now));
 
     let fresh = board.log.as_ref().and_then(|log| {
-        let rows = resolve_board(log, &mut names, &commands)?;
+        let rows = resolve_board(log, &names, &commands)?;
         let columns = queue
             .active_map()
             .zip(catalog.as_deref())

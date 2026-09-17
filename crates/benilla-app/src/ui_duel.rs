@@ -255,7 +255,7 @@ pub(crate) mod apply {
 fn feed_duel(
     script: Option<NonSendMut<UiScript>>,
     mut duel: ResMut<DuelState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedDuel>>,

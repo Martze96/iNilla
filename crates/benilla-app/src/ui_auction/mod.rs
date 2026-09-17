@@ -423,9 +423,9 @@ fn time_left_bucket(ms: u32) -> u32 {
 fn resolve_row(
     entry: &AuctionListEntry,
     self_guid: Option<u64>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
 ) -> AuctionRow {
@@ -518,9 +518,9 @@ pub(crate) fn categories(
 fn rows_for(
     slot: &AuctionListSlot,
     self_guid: Option<u64>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
 ) -> Vec<AuctionRow> {
@@ -571,9 +571,9 @@ type AuctionCatalogs<'w> = (
 fn feed_auction(
     script: Option<NonSendMut<UiScript>>,
     mut auction: ResMut<AuctionOpen>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     time: Res<Time>,
     catalogs: AuctionCatalogs,
@@ -651,9 +651,9 @@ fn feed_auction(
             let rows = rows_for(
                 slot,
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );
@@ -737,9 +737,9 @@ fn drain_auction(
     mut auction: ResMut<AuctionOpen>,
     commands: Res<NetCommands>,
     time: Res<Time>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
     // The click→auction-id map re-derives the same sorted rows the feed pushed, so it resolves
     // them the same way, roll included (1547).
@@ -832,9 +832,9 @@ fn drain_auction(
             let rows = rows_for(
                 &auction.lists[bid.list],
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );
@@ -850,9 +850,9 @@ fn drain_auction(
             let rows = rows_for(
                 &auction.lists[OWNER],
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );

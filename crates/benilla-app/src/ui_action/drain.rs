@@ -416,7 +416,7 @@ pub(super) fn drain_action_uses(
                     crate::ui_items::send_auto_equip(
                         &mut script,
                         &mut gate,
-                        &mut ladder.items,
+                        &ladder.items,
                         &ladder.commands,
                         bag_index,
                         slot0,

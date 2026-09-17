@@ -209,7 +209,7 @@ pub(super) fn inspect_ui(
     drivers: Query<&crate::creature_anim::AnimDriver>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     net_commands: Res<crate::net::NetCommands>,
     // Bundled into one param (Bevy's system-function arity ceiling): the copy-click button, and
     // the flag it must yield to — a left press this frame the UI already consumed as a

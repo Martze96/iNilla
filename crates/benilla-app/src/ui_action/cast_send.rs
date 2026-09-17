@@ -96,7 +96,7 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) spells: Option<Res<'w, Spells>>,
     /// The item cache — the pre-send totem/reagent check reads it (decision 0552), and the item
     /// arms resolve templates through it.
-    pub(crate) items: ResMut<'w, Items>,
+    pub(crate) items: Res<'w, Items>,
     pub(crate) sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     pub(crate) ecs: Commands<'w, 's>,
     pub(crate) pending: ResMut<'w, crate::ui_cast::PendingCast>,

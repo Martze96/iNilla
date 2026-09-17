@@ -1063,11 +1063,7 @@ pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> O
 /// same ask-once name cache every other client-composed chat line waits on. `None` = not yet
 /// answered; the caller re-tries next frame, exactly as the reference's deferred-name queue
 /// (`DAT_00c4e208`, drained by the name-ready callback `0x6294b0`) replays its message.
-pub(crate) fn object_name(
-    guid: u64,
-    names: &mut NameCache,
-    commands: &NetCommands,
-) -> Option<String> {
+pub(crate) fn object_name(guid: u64, names: &NameCache, commands: &NetCommands) -> Option<String> {
     // Guid 0 = "the name is already in the fills" — no wire endpoint is ever guid 0, so the
     // sentinel costs nothing and is what lets `/chattest` drive the real drain with literal names.
     if guid == 0 {

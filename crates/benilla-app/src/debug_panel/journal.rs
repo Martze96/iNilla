@@ -161,7 +161,7 @@ pub(super) fn journal_ui(
     inspect: Res<InspectMode>,
     journal: Res<CastJournal>,
     self_guid: Res<SelfGuid>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     net_commands: Res<NetCommands>,
     time: Res<Time>,
     // The copied row's edge stamp (`CastRecord::at` is unique per row) + when the copy happened,

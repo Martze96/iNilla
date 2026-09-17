@@ -43,7 +43,7 @@ const ITEM_CLASS_WEAPON: u32 = 2;
 /// item whose icon would otherwise be shown.
 fn main_hand_item(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<(u32, Option<String>)> {
@@ -73,7 +73,7 @@ fn main_hand_item(
 pub(crate) fn melee_auto_attack_icon(
     store: &ObjectStore,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> String {
@@ -111,7 +111,7 @@ pub(crate) fn melee_auto_attack_icon(
 /// return hands over to the normal SpellIconID path).
 pub(crate) fn ranged_weapon_icon(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
@@ -143,7 +143,7 @@ pub(super) fn auto_attack_icon(
     spell: &SpellDisplay,
     store: Option<&ObjectStore>,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
@@ -216,13 +216,7 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        melee_auto_attack_icon(
-            &store,
-            &forms,
-            &mut deps.items,
-            Some(&icons),
-            &deps.commands,
-        )
+        melee_auto_attack_icon(&store, &forms, &deps.items, Some(&icons), &deps.commands)
     }
 
     /// **The disarmed guard on the Attack button** (`0x4e68df`, decision 1863 closing 0231's

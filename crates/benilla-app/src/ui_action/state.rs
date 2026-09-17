@@ -409,7 +409,7 @@ pub(super) fn feed_action_state(
     units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<crate::net::Reputations>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<StateMemory>>,
 ) {
@@ -533,7 +533,7 @@ pub(super) fn feed_action_state(
                         carried: &carried,
                     };
                     let (u, oom) =
-                        usable::spell_usable(button.action, d, sp, &ctx, &mut items, &commands);
+                        usable::spell_usable(button.action, d, sp, &ctx, &items, &commands);
                     st.usable = u;
                     st.not_enough_mana = oom;
                 } else {
@@ -603,7 +603,7 @@ pub(super) fn feed_action_state(
                         count > 0 || st.equipped,
                         &ctx,
                         spells.as_deref(),
-                        &mut items,
+                        &items,
                         &commands,
                     );
                     st.usable = u;

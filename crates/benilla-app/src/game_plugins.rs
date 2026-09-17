@@ -444,9 +444,11 @@ impl PluginGroup for GamePlugins {
 
 #[cfg(test)]
 pub(crate) mod schedule_tests {
-    use std::collections::HashMap;
+    use std::any::TypeId;
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     use super::*;
+    use bevy::ecs::component::ComponentId;
     use bevy::ecs::schedule::graph::Direction;
     use bevy::ecs::schedule::{LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel, SystemKey};
 
@@ -501,8 +503,13 @@ pub(crate) mod schedule_tests {
     pub(crate) struct Census {
         pub systems: HashMap<SystemKey, SystemInfo>,
         /// Pairs of systems with conflicting access and no path between them, each with what
-        /// they fight over, by name.
-        pub conflicts: Vec<(SystemKey, SystemKey, Vec<String>)>,
+        /// they fight over.
+        pub conflicts: Vec<(SystemKey, SystemKey, Vec<ComponentId>)>,
+        /// Everything any pair fights over, by name (a placeholder in a build without type
+        /// names — [`type_names_available`]).
+        pub components: HashMap<ComponentId, String>,
+        /// The explained classes, resolved against this world (decision 2287).
+        pub classes: Classes,
         /// Every declared `a` runs before `b`, at the system level.
         pub dependencies: Vec<(SystemKey, SystemKey)>,
         /// The systems that must run on the main thread (the VM's, the audio layer's).
@@ -515,6 +522,10 @@ pub(crate) mod schedule_tests {
                 .get(&key)
                 .map(|s| s.name.as_str())
                 .unwrap_or("?")
+        }
+
+        pub fn component(&self, id: ComponentId) -> &str {
+            self.components.get(&id).map(String::as_str).unwrap_or("?")
         }
     }
 
@@ -622,28 +633,31 @@ pub(crate) mod schedule_tests {
                     conditions: Vec::new(),
                 });
             }
+            let mut components = HashMap::new();
             let conflicts = schedule
                 .graph()
                 .conflicting_systems()
                 .0
                 .iter()
                 .map(|(a, b, ids)| {
-                    let what = ids
-                        .iter()
-                        .map(|id| {
+                    for id in ids.iter() {
+                        components.entry(*id).or_insert_with(|| {
                             world
                                 .components()
                                 .get_name(*id)
                                 .map(|n| n.to_string())
                                 .unwrap_or_else(|| format!("{id:?}"))
-                        })
-                        .collect();
-                    (*a, *b, what)
+                        });
+                    }
+                    (*a, *b, ids.to_vec())
                 })
                 .collect();
+            let classes = Classes::read(world);
             Census {
                 systems,
                 conflicts,
+                components,
+                classes,
                 dependencies,
                 non_send,
             }
@@ -660,18 +674,134 @@ pub(crate) mod schedule_tests {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
-    /// Is this conflict set nothing but the Lua VM?
-    fn vm_only(what: &[String]) -> bool {
-        what.iter()
-            .all(|w| w.contains("benilla_ui::script::UiScript"))
+    /// **The explained classes** (decision 2287) — what an undeclared order may be about
+    /// without anyone declaring it, argued once here instead of by every session that adds a
+    /// system. On 2287's eve three sessions raised the two constants this table replaced,
+    /// each with a paragraph, each through a rebase conflict on the same lines, none declaring
+    /// an order (2281, 2282, 2283) — because for most of what those counts held there was
+    /// nothing to declare:
+    ///
+    /// - **A non-`Send` owner** — the Lua VM, the audio layer's handles. Their systems run on
+    ///   the main thread one at a time under any executor, so no order among them is a race.
+    ///   *Which feed fires its Lua events first* is a real question — 2265 §A3(a)'s, answered
+    ///   once for the `UiFeed` set, not per pair. Derived, not listed: every registration that
+    ///   is not `Send + Sync`.
+    /// - **A pure cache** — a read is a write because a miss records itself: the ask-once
+    ///   caches mark the key pending and send one query (`NameCache`, the GameObject
+    ///   templates, the page texts), the load-once caches build the entry (`WorldAssets`,
+    ///   `Creatures`' display models). Two misses for one key commute — one query, or one
+    ///   build, whichever runs first — and the answer lands in the net drain, in packet order,
+    ///   inside `WorldStage::Net`. *Pure* is the condition: a resource that is a cache **and**
+    ///   a window's state (`Items`, `MailOpen`, `GuildState`, `QuestLog`, `PetitionState`) is
+    ///   not here, because its other writers do not commute; 2265 §A4 is what lets those
+    ///   split (decision 2288).
+    /// - **An append-only sink** — `ChatLog`, `MessageSounds`, `UiErrorKeys`, `UiErrorTexts`:
+    ///   writers commute, and a drain's order against a writer is one frame of latency, never
+    ///   a loss. (2283's ten pairs were all this shape: a new verb drain against its siblings
+    ///   over the chat and error sinks.)
+    /// - **A random stream** — `SoundKits`, which every sound system holds to play a kit: a
+    ///   decode cache, a per-kit last-variation memory and one xorshift stream. Any
+    ///   interleaving of draws is a valid draw, and that is the reference's own contract for
+    ///   its single stream, consumed in whatever order its callers happen to run.
+    ///
+    /// A pair is **explained** when everything it fights over is in one of the four, and
+    /// **actionable** otherwise; only the actionable count is ratcheted. Adding a type here is
+    /// the act raising the ceiling used to be — a claim, with its reason, made in review — and
+    /// it is a claim about *every* writer of that resource, which is why the pure caches are
+    /// pure. Resolved by `TypeId`, so the ratchet runs in the player build, which carries no
+    /// names (1451).
+    /// One row of the class table: the type's name for the message, and its `TypeId`.
+    type ClassRow = (&'static str, fn() -> TypeId);
+
+    pub(crate) struct Classes {
+        /// The VM's own id, for the executor census.
+        pub vm: Option<ComponentId>,
+        pub non_send: HashSet<ComponentId>,
+        pub caches: HashSet<ComponentId>,
+        pub sinks: HashSet<ComponentId>,
+        pub streams: HashSet<ComponentId>,
     }
 
-    /// …or nothing but the VM and the audio layer (kira's handles, the kit catalog, the
-    /// config) — the two non-`Send` owners 2265 §A3 names as the noise floor.
-    fn vm_or_audio_only(what: &[String]) -> bool {
-        what.iter().all(|w| {
-            w.contains("benilla_ui::script::UiScript") || w.contains("benilla_app::sound::")
-        })
+    impl Classes {
+        const CACHES: &[ClassRow] = &[
+            ("NameCache", TypeId::of::<crate::names::NameCache>),
+            (
+                "GameObjectTemplates",
+                TypeId::of::<crate::go_templates::GameObjectTemplates>,
+            ),
+            ("PageTexts", TypeId::of::<crate::ui_item_text::PageTexts>),
+            ("WorldAssets", TypeId::of::<benilla_assets::WorldAssets>),
+            ("Creatures", TypeId::of::<crate::entities::Creatures>),
+        ];
+        const SINKS: &[ClassRow] = &[
+            ("ChatLog", TypeId::of::<crate::ui_chat::ChatLog>),
+            ("MessageSounds", TypeId::of::<crate::sound::MessageSounds>),
+            ("UiErrorKeys", TypeId::of::<crate::ui_action::UiErrorKeys>),
+            ("UiErrorTexts", TypeId::of::<crate::ui_action::UiErrorTexts>),
+        ];
+        const STREAMS: &[ClassRow] = &[("SoundKits", TypeId::of::<crate::sound::SoundKits>)];
+
+        /// Resolve the table against a world whose schedules have initialized (every param
+        /// has registered its resource by then). A row that resolves to nothing is a stale
+        /// row, and the test says which.
+        fn read(world: &World) -> Self {
+            let comps = world.components();
+            let resolve = |rows: &[ClassRow]| -> HashSet<ComponentId> {
+                rows.iter()
+                    .map(|(name, type_id)| {
+                        comps.get_resource_id(type_id()).unwrap_or_else(|| {
+                            panic!("`{name}` is in the class table but is not a resource of this world")
+                        })
+                    })
+                    .collect()
+            };
+            Self {
+                vm: comps.get_resource_id(TypeId::of::<benilla_ui::script::UiScript>()),
+                non_send: comps
+                    .iter_registered()
+                    .filter(|info| !info.is_send_and_sync())
+                    .map(|info| info.id())
+                    .collect(),
+                caches: resolve(Self::CACHES),
+                sinks: resolve(Self::SINKS),
+                streams: resolve(Self::STREAMS),
+            }
+        }
+
+        fn explains(&self, id: ComponentId) -> bool {
+            self.non_send.contains(&id)
+                || self.caches.contains(&id)
+                || self.sinks.contains(&id)
+                || self.streams.contains(&id)
+        }
+
+        /// Which class explains this pair — `None` if it is actionable.
+        pub fn class_of(&self, what: &[ComponentId]) -> Option<&'static str> {
+            if !what.iter().all(|id| self.explains(*id)) {
+                return None;
+            }
+            Some(if self.vm_only(what) {
+                "VM only"
+            } else if self.non_send_only(what) {
+                "non-Send owners"
+            } else if what.iter().all(|id| self.caches.contains(id)) {
+                "pure caches"
+            } else if what.iter().all(|id| self.sinks.contains(id)) {
+                "append-only sinks"
+            } else if what.iter().all(|id| self.streams.contains(id)) {
+                "random streams"
+            } else {
+                "mixed"
+            })
+        }
+
+        pub fn vm_only(&self, what: &[ComponentId]) -> bool {
+            what.iter().all(|id| Some(*id) == self.vm)
+        }
+
+        pub fn non_send_only(&self, what: &[ComponentId]) -> bool {
+            what.iter().all(|id| self.non_send.contains(id))
+        }
     }
 
     #[test]
@@ -680,76 +810,42 @@ pub(crate) mod schedule_tests {
         assert!(app.world().contains_resource::<Schedules>());
     }
 
-    /// The standing count of ambiguous pairs in `Update` — two systems with conflicting access
-    /// and no declared order between them, which the executor runs in whatever order the graph
-    /// around them happens to produce (B354, 2220). Same shape as `world_api_wall.rs`: the
-    /// count may not rise past the ceiling, and the ceiling follows the count down.
-    ///
-    /// **Measured 2026-09-16 (decision 2279), 659 systems:** 16,437 pairs, of which 10,613 are
-    /// on the Lua VM alone and 1,107 on the VM or the audio layer — the two non-`Send` owners
-    /// that every feed and every sound call takes, so nearly every pair of them conflicts. The
-    /// 4,717 that remain fight over ordinary resources and components (`Transform` 716,
-    /// `WorldAssets` 362, `Items`, `NameCache`, `ChatLog`, `Player`…) and are the actionable
-    /// number; `UPDATE_OTHER_CEILING` ratchets it on its own. `WOW_AMBIGUITY_DUMP=1` prints
-    /// every non-VM, non-audio pair with what it fights over.
-    ///
-    /// Raising a ceiling is a claim that a new undeclared order is acceptable; make it with the
-    /// reason, or declare the order instead (`.after`, a set, a `chain`).
-    /// **16,538 (decision 2283), 660 systems** — `ui_dialog_verbs::drain_meeting_stone_joins`, the
-    /// meeting stone's use slot. +101, of which 91 are VM-only: it holds `NonSendMut<UiScript>` to
-    /// raise its refusal line, and the paragraph above is the reason that number is what it is —
-    /// every new feed or drain collides with every other VM holder by construction.
-    /// `UPDATE_OTHER_CEILING` below carries the ten that are actionable.
-    ///
-    /// **+4 (decision 2281)** — `ranged_flex`'s two systems, the `$BWP`/`$BWR` arm and the
-    /// un-nock's reset. Both write `AnimationPlayer` on the ranged weapon prop, so each joins the
-    /// accepted class its chain-mates already sit in: ambiguous against
-    /// `portrait::booth::drive_booth_turn` and `quest_markers::pose_markers` for exactly the
-    /// reason `driver::drive_animations` and `driver::grip::drive_hand_grip` are — four lanes
-    /// driving players on populations that never intersect (a held weapon, a booth model, a quest
-    /// marker), and the filter algebra cannot see the disjointness. Their *real* orders are
-    /// declared at the registration instead: against each other by the chain, and before the
-    /// per-sequence material samplers, which must answer for the clip armed this frame.
-    ///
-    /// **+6 (decision 2282), all the same shape:** `{tick_anim_materials, matanim_probe} ×
-    /// {attach_spell_fx, attach_missile_models, attach_item_glows}`, fighting over the two
-    /// mat-anim resources (`MatAnimTable`, `UvAnimMaterials`) alone — the three fx attaches now
-    /// register a per-instance UV clone where before they touched neither. Declared acceptable
-    /// rather than ordered,
-    /// because the order is immaterial *by construction* and an `.after` would assert a
-    /// dependency that does not exist: `register_fx_uv` writes the new entry's rows itself, at
-    /// attach, precisely so a tick that already ran this frame costs the instance nothing — and a
-    /// tick that runs after re-derives the same numbers from the same clock (sampling is
-    /// clock-indexed; the registration and the tick read one `AnimationPlayer`). The probe is a
-    /// one-shot diagnostic behind an env var, off in every ordinary run. The cost of declaring it
-    /// would be real: `tick_anim_materials` is engine-private, so the game would have to name a
-    /// new engine `SystemSet` — a `world_api_wall` crossing bought for no behavioural difference.
-    const UPDATE_CEILING: usize = 16_548;
-    const UPDATE_SLACK: usize = 100;
     /// `PostUpdate`, 181 systems: `GlobalTransform` and the particle `EffectQuads` are most of it.
     const POST_UPDATE_CEILING: usize = 351;
     const POST_UPDATE_SLACK: usize = 20;
-    /// The pairs in `Update` that are NOT explained by the VM or the audio layer.
+    /// The **actionable** pairs in `Update` — two systems with conflicting access and no
+    /// declared order, where [`Classes`] explains none of what they share, so the executor
+    /// runs them in whatever order the graph around them happens to produce (B354, 2220). Same
+    /// shape as `world_api_wall.rs`: the count may not rise past the ceiling, and the ceiling
+    /// follows the count down. `WOW_AMBIGUITY_DUMP=1` prints every actionable pair with what
+    /// it fights over.
     ///
-    /// **4,727 (decision 2283)** — the ten `drain_meeting_stone_joins` adds, every one of them
-    /// against a sibling `.after(UiInput)` drain (`drain_queue_verbs`, `drain_latch_verbs`,
-    /// `drain_battlefield`, `drain_talent_wipe`, `drain_party`, `drain_tabard`, the two chat-input
-    /// drains, `idle_handler`, `movement_clears_afk`). What they share is the append-only
-    /// chat/error sink and the outbound command channel — never a fact one reads and another
-    /// writes — and each pair is two independent player verbs that a single click cannot both
-    /// fire. Raised rather than ordered because a declared order here would assert a relationship
-    /// between, say, leaving a meeting-stone queue and typing in chat that does not exist; the
-    /// pair it *would* have been worth ordering, against the click that writes its message, is
-    /// declared (`.after(TargetUpdate)`) and so is not in this list.
+    /// **Measured 2026-09-17 (decision 2287), 662 systems:** 16,548 pairs in all, 12,849 of
+    /// them explained — 10,703 on the VM alone, 431 on the other non-`Send` owners, 556 on
+    /// the pure caches, 87 on the sinks, 41 on the stream, 1,031 on a mix of those — and
+    /// 3,699 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
+    /// alone): populations that never intersect, which the filter algebra cannot see. A lane
+    /// is not a class — the checker cannot tell a disjoint lane from two writers of the same
+    /// entity — so they stay here, and each new one is a claim made at the registration with
+    /// its reason:
     ///
-    /// **+4 (decision 2281)** — the same four pairs as above; all four are actionable-column, and
-    /// the reason they are raised rather than ordered is the one stated there.
+    /// - **2281:** the ranged prop's two `AnimationPlayer` writers against the booth's and the
+    ///   quest markers' (four lanes; the held weapon, a booth model, a marker).
+    /// - **2282:** the three fx attaches against the mat-anim tick and its probe, over
+    ///   `MatAnimTable`/`UvAnimMaterials` — immaterial by construction, because attach writes
+    ///   the rows a tick would, off the same clock.
     ///
-    /// **+6 (decision 2282)** — all six of 2282's new pairs land here too (they fight over
-    /// ordinary resources, not the VM), so both ceilings move by the same six; the reason is at
-    /// [`UPDATE_CEILING`].
-    const UPDATE_OTHER_CEILING: usize = 4_737;
-    const UPDATE_OTHER_SLACK: usize = 50;
+    /// **3,280 (decision 2288)** — the one query cache: a read that asks marks its miss through
+    /// `&self`, so a feed that only resolves a name or a template holds the owner shared, and
+    /// its pairs over `Items` (725 → 104, the largest non-class resource in the count) are gone;
+    /// the pairs over the pure caches moved into the VM-only class, where the same systems still
+    /// meet over the VM alone.
+    ///
+    /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
+    /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
+    /// about a resource that commutes by construction, the claim belongs in [`Classes`].
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_280;
+    const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
         eprintln!("{what}: {n} ambiguous pairs (ceiling {ceiling}, slack {slack})");
@@ -758,7 +854,8 @@ pub(crate) mod schedule_tests {
             "{n} ambiguous pairs in {what}; the ceiling is {ceiling}. A new system runs in an \
              undeclared order against something it shares state with — declare the order \
              (`.after`, a set, a `chain`), or raise the ceiling here with the reason. \
-             `WOW_AMBIGUITY_DUMP=1` on this test lists the pairs (decision 2279)."
+             `WOW_AMBIGUITY_DUMP=1` on this test lists the pairs; a resource that commutes by \
+             construction belongs in `Classes` instead (decisions 2279, 2287)."
         );
         assert!(
             n + slack >= ceiling,
@@ -767,61 +864,49 @@ pub(crate) mod schedule_tests {
         );
     }
 
-    /// The ratchet on the raw pair counts — name-free, so it runs in the player build too.
+    /// The ratchet. Ids, not names, so it runs in the player build too; prints the class
+    /// census beside the number it holds.
     #[test]
     fn the_schedules_have_no_more_undeclared_orders_than_the_ceilings_say() {
         let mut app = headless_client();
         let update = census(&mut app, Update);
         let post = census(&mut app, PostUpdate);
-        ratchet(
-            "Update",
-            update.conflicts.len(),
-            UPDATE_CEILING,
-            UPDATE_SLACK,
-        );
-        ratchet(
-            "PostUpdate",
-            post.conflicts.len(),
-            POST_UPDATE_CEILING,
-            POST_UPDATE_SLACK,
-        );
-    }
-
-    /// The ratchet on the actionable class, and the dump. Needs type names
-    /// ([`type_names_available`]).
-    #[test]
-    fn the_non_vm_ambiguities_do_not_grow() {
-        let mut app = headless_client();
-        let c = census(&mut app, Update);
-        if !type_names_available(&c) {
-            eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
-            );
-            return;
+        let mut explained: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut actionable = Vec::new();
+        for (a, b, what) in &update.conflicts {
+            match update.classes.class_of(what) {
+                Some(class) => *explained.entry(class).or_default() += 1,
+                None => actionable.push((*a, *b, what)),
+            }
         }
-        let vm = c.conflicts.iter().filter(|(_, _, w)| vm_only(w)).count();
-        let audio = c
-            .conflicts
-            .iter()
-            .filter(|(_, _, w)| !vm_only(w) && vm_or_audio_only(w))
-            .count();
-        let other = c.conflicts.len() - vm - audio;
         eprintln!(
-            "Update: {} systems, {} ambiguous pairs; {vm} VM-only; {audio} VM-or-audio-only; {other} other",
-            c.systems.values().filter(|s| !is_sync_point(&s.name)).count(),
-            c.conflicts.len(),
+            "Update: {} systems, {} ambiguous pairs; {} explained ({}); {} actionable",
+            update
+                .systems
+                .values()
+                .filter(|s| !is_sync_point(&s.name))
+                .count(),
+            update.conflicts.len(),
+            update.conflicts.len() - actionable.len(),
+            explained
+                .iter()
+                .map(|(class, n)| format!("{n} {class}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            actionable.len(),
         );
         if std::env::var_os("WOW_AMBIGUITY_DUMP").is_some() {
-            let mut rows: Vec<String> = c
-                .conflicts
+            let mut rows: Vec<String> = actionable
                 .iter()
-                .filter(|(_, _, w)| !vm_or_audio_only(w))
-                .map(|(a, b, w)| {
+                .map(|(a, b, what)| {
                     format!(
                         "  {}  <->  {}\n      on {}",
-                        c.name(*a),
-                        c.name(*b),
-                        w.join(", ")
+                        update.name(*a),
+                        update.name(*b),
+                        what.iter()
+                            .map(|id| update.component(*id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 })
                 .collect();
@@ -831,10 +916,16 @@ pub(crate) mod schedule_tests {
             }
         }
         ratchet(
-            "Update (neither VM nor audio)",
-            other,
-            UPDATE_OTHER_CEILING,
-            UPDATE_OTHER_SLACK,
+            "Update (actionable)",
+            actionable.len(),
+            UPDATE_ACTIONABLE_CEILING,
+            UPDATE_ACTIONABLE_SLACK,
+        );
+        ratchet(
+            "PostUpdate",
+            post.conflicts.len(),
+            POST_UPDATE_CEILING,
+            POST_UPDATE_SLACK,
         );
     }
 
@@ -851,7 +942,7 @@ pub(crate) mod schedule_tests {
     /// is its floor. Returned as `(waves, critical_path)`.
     fn waves(
         c: &Census,
-        keep_conflict: impl Fn(&[String]) -> bool,
+        keep_conflict: impl Fn(&[ComponentId]) -> bool,
         non_send: &[SystemKey],
     ) -> (usize, usize) {
         use std::collections::{HashMap, HashSet};
@@ -947,28 +1038,26 @@ pub(crate) mod schedule_tests {
     fn concurrency_census() {
         let mut app = headless_client();
         let c = census(&mut app, Update);
-        if !type_names_available(&c) {
-            eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
-            );
-            return;
-        }
-        let touches = |k: SystemKey, needle: &str| {
+        let holds = |k: SystemKey, pick: &dyn Fn(ComponentId) -> bool| {
             c.conflicts
                 .iter()
-                .any(|(a, b, w)| (*a == k || *b == k) && w.iter().any(|x| x.contains(needle)))
+                .any(|(a, b, w)| (*a == k || *b == k) && w.iter().any(|id| pick(*id)))
         };
         let vm: Vec<SystemKey> = c
             .non_send
             .iter()
             .copied()
-            .filter(|k| touches(*k, "UiScript"))
+            .filter(|k| holds(*k, &|id| Some(id) == c.classes.vm))
             .collect();
         let audio: Vec<SystemKey> = c
             .non_send
             .iter()
             .copied()
-            .filter(|k| touches(*k, "benilla_app::sound::"))
+            .filter(|k| {
+                holds(*k, &|id| {
+                    c.classes.non_send.contains(&id) && Some(id) != c.classes.vm
+                })
+            })
             .collect();
         let other_non_send: Vec<SystemKey> = c
             .non_send
@@ -1008,9 +1097,9 @@ pub(crate) mod schedule_tests {
             .copied()
             .filter(|k| !vm.contains(k) || audio.contains(k))
             .collect();
-        let (w1, _) = waves(&c, |w| !vm_only(w), &not_vm);
+        let (w1, _) = waves(&c, |w| !c.classes.vm_only(w), &not_vm);
         eprintln!("  VM Send-owned:         {w1} waves");
-        let (w2, _) = waves(&c, |w| !vm_or_audio_only(w), &other_non_send);
+        let (w2, _) = waves(&c, |w| !c.classes.non_send_only(w), &other_non_send);
         eprintln!("  VM + audio Send-owned: {w2} waves");
         let (w3, _) = waves(&c, |_| false, &[]);
         eprintln!("  declared edges only:   {w3} waves (every conflict ordered, everything Send)");

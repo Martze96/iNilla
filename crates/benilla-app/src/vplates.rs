@@ -451,7 +451,7 @@ fn drive_vplates(
     // the pointer is driving the camera.
     rig: Res<crate::player::CameraControl>,
     world: PlateWorld,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     net_commands: Res<NetCommands>,
     // The widget layer this drives (decision 2148). `None` in a VM-less run (a capture with the
     // interface off, a bare test app) — the gate below then costs one early return.

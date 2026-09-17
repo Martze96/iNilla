@@ -57,7 +57,7 @@ pub(super) fn service_icon(
     trainer_type: u32,
     spells: &SpellCatalog,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<String> {
     let wire = spells.get(wire_spell)?;

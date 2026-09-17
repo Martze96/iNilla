@@ -169,7 +169,7 @@ impl BindGate<'_> {
     pub(crate) fn equip_binds(
         &self,
         script: &UiScript,
-        items: &mut Items,
+        items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
@@ -198,7 +198,7 @@ impl BindGate<'_> {
     /// the fire site is reached the item has already passed it.
     pub(crate) fn use_binds(
         &self,
-        items: &mut Items,
+        items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {

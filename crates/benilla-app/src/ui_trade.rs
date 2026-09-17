@@ -597,7 +597,7 @@ fn streamed_player<'a>(
 fn answer_trade_request(
     mut trade: ResMut<TradeSession>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     social: Res<crate::ui_social::SocialState>,
     cinematic: Res<crate::cinematic::Cinematic>,
@@ -719,7 +719,7 @@ fn answer_trade_request(
 /// is decision 0592 P3.
 fn resolve_slot(
     item: &TradeItem,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> TradeSlotItem {
@@ -755,7 +755,7 @@ fn own_item_at(
     bag: i64,
     slot: u32,
     store: Option<&ObjectStore>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<TradeItem> {
     let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, items);
@@ -787,7 +787,7 @@ fn own_item_at(
 /// Resolve one side's wire offer into the Lua-facing side state.
 fn resolve_side(
     offer: &TradeOffer,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> TradeSideState {
@@ -804,9 +804,9 @@ fn resolve_side(
 /// Build the Lua-facing snapshot from [`TradeSession`] — `None` when no trade window is open.
 fn snapshot(
     trade: &TradeSession,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<TradeState> {
     if !trade.open {
@@ -829,9 +829,9 @@ fn snapshot(
 fn feed_trade(
     script: Option<NonSendMut<UiScript>>,
     mut trade: ResMut<TradeSession>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The status arms' second guard (`0x468460(guid, TYPEMASK_PLAYER)`) — see
@@ -853,7 +853,7 @@ fn feed_trade(
     let last_player_gold = last_player_gold.get(&script);
     let last_their_gold = last_their_gold.get(&script);
 
-    let fresh = snapshot(&trade, &mut items, icons.as_deref(), &mut names, &commands);
+    let fresh = snapshot(&trade, &items, icons.as_deref(), &names, &commands);
     let opened = !*last_open && trade.is_open();
     let closed = *last_open && !trade.is_open();
     let changed = fresh != *last;
@@ -983,7 +983,7 @@ fn drain_trade(
     commands: Res<NetCommands>,
     selection: Res<Selection>,
     group: Res<GroupState>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
 ) {
     let Some(mut script) = script else {
@@ -1040,7 +1040,7 @@ fn drain_trade(
         if let Some(trade_slot) = id.checked_sub(1).and_then(|n| u8::try_from(n).ok()) {
             // Optimistic own display: vmangos echoes the placement only to the partner, so resolve the
             // bag item and fill our own column client-side (decision 0592 P2).
-            if let Some(item) = own_item_at(bag, slot, store, &mut items, &commands) {
+            if let Some(item) = own_item_at(bag, slot, store, &items, &commands) {
                 trade.place_own_item(id, item);
             }
             info!(target: "trade", "set item: slot {id} <- bag {bag}/{slot} (wire {wire_bag}/{wire_slot}); sending CMSG_SET_TRADE_ITEM");

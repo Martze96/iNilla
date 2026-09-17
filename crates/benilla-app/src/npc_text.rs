@@ -209,7 +209,7 @@ fn trim_spaces(arm: &[char]) -> &[char] {
 /// re-substitutes when that happens.
 pub(crate) fn player_identity(
     self_q: &Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<Subject> {
     let (store, guid) = self_q.iter().next()?;
@@ -233,7 +233,7 @@ pub(crate) fn subject_for_guid(
     guid: u64,
     index: &GuidIndex,
     stores: &Query<&ObjectStore>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<Subject> {
     if guid == 0 {

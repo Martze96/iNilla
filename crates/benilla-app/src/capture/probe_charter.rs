@@ -458,7 +458,7 @@ fn charter_probe(
     mut probe: ResMut<CharterProbe>,
     gossip: Res<GossipState>,
     registrar: Res<GuildRegistrarState>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     player: Res<Player>,

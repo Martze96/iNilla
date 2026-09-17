@@ -45,8 +45,6 @@
 //! [`benilla_ui::script::UiScript::set_has_new_mail`] current, and fires `UPDATE_PENDING_MAIL` at
 //! the three sites the reference fires it (see [`MailPending::notify`]).
 
-use std::collections::{HashMap, HashSet};
-
 use benilla_protocol::messages::{mail_error, mail_message_type, MailListEntry};
 use bevy::prelude::*;
 
@@ -56,6 +54,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
+use crate::query_cache::QueryCache;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
@@ -112,10 +111,8 @@ pub(crate) struct MailOpen {
     pub(crate) mailbox: Option<u64>,
     /// The inbox rows (wire order = 1-based display order).
     pub(crate) mails: Vec<MailListEntry>,
-    /// Ask-once letter-body cache: `item_text_id` → body text.
-    pub(crate) bodies: HashMap<u32, String>,
-    /// `item_text_id`s with a `CMSG_ITEM_TEXT_QUERY` in flight (ask-once dedup).
-    pub(crate) pending_bodies: HashSet<u32>,
+    /// Ask-once letter-body cache: `item_text_id` → body text, through [`QueryCache`] (2288).
+    pub(crate) bodies: QueryCache<u32, String>,
     /// Fire `MAIL_SHOW` next feed — set on every mailbox click (the reference opens the window per
     /// use; wow-re §5). Consumed by [`feed_mail`].
     show_requested: bool,
@@ -131,6 +128,12 @@ pub(crate) struct MailOpen {
     /// feed, which is where the VM's `GlobalStrings` can be read
     /// ([`crate::ui_action::keyed_line`]).
     pub(crate) errors: Vec<&'static str>,
+}
+
+impl crate::query_cache::AskOnce for MailOpen {
+    fn clear_pending(&mut self) {
+        self.bodies.clear_pending();
+    }
 }
 
 impl MailOpen {
@@ -172,7 +175,6 @@ impl MailOpen {
         self.mailbox = None;
         self.mails.clear();
         self.bodies.clear();
-        self.pending_bodies.clear();
         self.show_requested = false;
         self.last_list_query = None;
         self.send_acks.clear();
@@ -203,6 +205,7 @@ pub(crate) struct UiMailPlugin;
 
 impl Plugin for UiMailPlugin {
     fn build(&self, app: &mut App) {
+        crate::query_cache::register::<MailOpen>(app);
         app.init_resource::<MailOpen>()
             .init_resource::<MailPending>()
             .add_systems(
@@ -285,11 +288,11 @@ use invoice::auction_mail;
 /// placeholder and fills in when the answer lands (the merchant/loot pattern).
 fn resolve_row(
     entry: &MailListEntry,
-    bodies: &HashMap<u32, String>,
-    items: &mut Items,
+    bodies: &QueryCache<u32, String>,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     stationery: Option<&Stationery>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
     macros: &crate::npc_text::MacroContext,
@@ -346,7 +349,7 @@ fn resolve_row(
     // `$`-substituted text below: the invoice is machine-written colon fields, and running a macro
     // expander over them would be expanding the auction house's own bookkeeping.
     let raw_body = (entry.item_text_id != 0)
-        .then(|| bodies.get(&entry.item_text_id))
+        .then(|| bodies.get(entry.item_text_id))
         .flatten();
 
     // ── The auction house's mail (`ui_mail::invoice`, wow-re §11.1a) ─────────────────────────
@@ -445,7 +448,7 @@ fn resolve_row(
 fn stationeries(
     catalog: &Stationery,
     self_q: &Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Vec<StationeryView> {
@@ -483,10 +486,10 @@ fn stationeries(
 
 fn snapshot(
     mail: &MailOpen,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     stationery: Option<&Stationery>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
     macros: &crate::npc_text::MacroContext,
@@ -532,10 +535,10 @@ struct MailFeedExtras<'w, 's> {
 fn feed_mail(
     script: Option<NonSendMut<UiScript>>,
     mut mail: ResMut<MailOpen>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     stationery: Option<Res<Stationery>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut pending: ResMut<MailPending>,
     time: Res<Time>,
@@ -602,7 +605,7 @@ fn feed_mail(
     // The macro subject, resolved before the row walk borrows the name cache again. `None` until
     // the player is streamed and named — the feed diffs on the substituted text, so a letter opened
     // that early re-substitutes as soon as it lands.
-    let subject = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let subject = crate::npc_text::player_identity(&self_q, &names, &commands);
     let macros = crate::npc_text::MacroContext {
         subject: subject.as_ref(),
         states: &states,
@@ -612,10 +615,10 @@ fn feed_mail(
         let get_text = |key: &str| script.lua().globals().get::<String>(key).ok();
         snapshot(
             &mail,
-            &mut items,
+            &items,
             icons.as_deref(),
             stationery.as_deref(),
-            &mut names,
+            &names,
             &commands,
             rolls,
             &macros,
@@ -646,7 +649,7 @@ fn feed_mail(
     let usable = stationery
         .as_deref()
         .filter(|_| !self_q.is_empty())
-        .map(|catalog| stationeries(catalog, &self_q, &mut items, icons.as_deref(), &commands))
+        .map(|catalog| stationeries(catalog, &self_q, &items, icons.as_deref(), &commands))
         .unwrap_or_default();
     let memo = last_stationeries.get(&script);
     if *memo != usable {
@@ -770,13 +773,12 @@ fn drain_mail(
                 .0
                 .send(ClientCommand::MailMarkAsRead { mailbox, mail_id });
         }
-        if text_id != 0
-            && !mail.bodies.contains_key(&text_id)
-            && mail.pending_bodies.insert(text_id)
-        {
-            let _ = commands
-                .0
-                .send(ClientCommand::ItemTextQuery { text_id, mail_id });
+        if text_id != 0 {
+            mail.bodies.get_or_ask(text_id, || {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::ItemTextQuery { text_id, mail_id });
+            });
         }
     }
 
@@ -965,7 +967,7 @@ mod tests {
         let mut m = MailOpen::default();
         m.click(0x1);
         m.mails.push(entry(1, Some(0xA), 0, 30.0));
-        m.bodies.insert(7, "hi".into());
+        m.bodies.insert(7, Some("hi".into()));
         m.clear();
         assert!(m.mailbox.is_none());
         assert!(m.mails.is_empty());
@@ -981,21 +983,21 @@ mod tests {
     #[test]
     fn resolve_row_derives_the_reply_and_delete_law() {
         let states = crate::world_state::WorldStates::default();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
-        let mut names = NameCache::default();
-        let bodies = HashMap::new();
+        let names = NameCache::default();
+        let bodies = QueryCache::default();
 
         // A plain letter from a player (no attachments) → replyable AND deletable.
         let from_player = entry(1, Some(0xA), 0, 30.0);
         let row = resolve_row(
             &from_player,
             &bodies,
-            &mut items,
+            &items,
             None,
             None,
-            &mut names,
+            &names,
             &commands,
             crate::items::RollCatalogs::NONE,
             &no_macros(&states),
@@ -1012,10 +1014,10 @@ mod tests {
         let row = resolve_row(
             &with_money,
             &bodies,
-            &mut items,
+            &items,
             None,
             None,
-            &mut names,
+            &names,
             &commands,
             crate::items::RollCatalogs::NONE,
             &no_macros(&states),
@@ -1029,10 +1031,10 @@ mod tests {
         let row = resolve_row(
             &returned,
             &bodies,
-            &mut items,
+            &items,
             None,
             None,
-            &mut names,
+            &names,
             &commands,
             crate::items::RollCatalogs::NONE,
             &no_macros(&states),
@@ -1046,10 +1048,10 @@ mod tests {
         let row = resolve_row(
             &system,
             &bodies,
-            &mut items,
+            &items,
             None,
             None,
-            &mut names,
+            &names,
             &commands,
             crate::items::RollCatalogs::NONE,
             &no_macros(&states),
@@ -1061,12 +1063,12 @@ mod tests {
     #[test]
     fn resolve_row_reads_the_item_and_body_caches() {
         let states = crate::world_state::WorldStates::default();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
-        let mut names = NameCache::default();
-        let mut bodies = HashMap::new();
-        bodies.insert(99, "the letter body".into());
+        let names = NameCache::default();
+        let mut bodies = QueryCache::default();
+        bodies.insert(99, Some("the letter body".into()));
 
         let mut e = entry(1, Some(0xA), 0, 30.0);
         e.item_text_id = 99;
@@ -1083,10 +1085,10 @@ mod tests {
         let row = resolve_row(
             &e,
             &bodies,
-            &mut items,
+            &items,
             None,
             None,
-            &mut names,
+            &names,
             &commands,
             crate::items::RollCatalogs::NONE,
             &no_macros(&states),

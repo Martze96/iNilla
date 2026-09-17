@@ -43,7 +43,7 @@ fn resolve_service(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
 ) -> TrainerService {
-    let mut deps = Deps::new();
+    let deps = Deps::new();
     super::resolve_service(
         wire,
         trainer_type,
@@ -51,7 +51,7 @@ fn resolve_service(
         skill_lines,
         known,
         None,
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
         &probe_strings,
     )
@@ -73,14 +73,14 @@ fn wire(spell: u32, state: u8, cost: u32, req_level: u8, req_skill: u32) -> Trai
 
 /// [`snapshot`] with the icon trio defaulted.
 fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
-    let mut deps = Deps::new();
+    let deps = Deps::new();
     snapshot(
         open,
         spells,
         None,
         &BTreeSet::new(),
         None,
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
         &probe_strings,
     )
@@ -134,7 +134,7 @@ fn icon_of(
         trainer_type,
         spells,
         icons.as_ref(),
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
     )
 }
@@ -222,7 +222,7 @@ fn trainer_icon_scans_every_effect_slot_for_either_learn_effect() {
 #[test]
 fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
     let spells = icon_catalog();
-    let mut deps = Deps::new();
+    let deps = Deps::new();
     let icons = ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::new()));
 
     let first = service_icon(
@@ -230,7 +230,7 @@ fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
         TRAINER_TYPE_TRADESKILL,
         &spells,
         Some(&icons),
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
     );
     assert_eq!(first, None, "no template yet → nil, not the wrapper's icon");
@@ -246,7 +246,7 @@ fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
         TRAINER_TYPE_TRADESKILL,
         &spells,
         Some(&icons),
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
     );
     assert!(
@@ -276,14 +276,14 @@ fn trainer_icon_on_real_data_reaches_for_the_crafted_item() {
 
     // A tradeskill trainer: gate 3 fires for item 2847 and the icon waits on the template —
     // crucially it is NOT the crown.
-    let mut deps = Deps::new();
+    let deps = Deps::new();
     let icons = ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::new()));
     let icon = service_icon(
         2756,
         TRAINER_TYPE_TRADESKILL,
         &spells,
         Some(&icons),
-        &mut deps.items,
+        &deps.items,
         &deps.commands,
     );
     assert_eq!(
@@ -297,8 +297,8 @@ fn trainer_icon_on_real_data_reaches_for_the_crafted_item() {
     );
 
     // A class trainer with the same wire spell: the wrapper's own icon, not the recipe's.
-    let mut deps = Deps::new();
-    let class_icon = service_icon(2756, 0, &spells, None, &mut deps.items, &deps.commands);
+    let deps = Deps::new();
+    let class_icon = service_icon(2756, 0, &spells, None, &deps.items, &deps.commands);
     assert_eq!(class_icon, wrapper_icon);
     assert_ne!(
         class_icon, recipe_icon,
@@ -596,9 +596,9 @@ fn tooltip_hops_to_the_taught_spell_where_the_icon_pins_the_wire() {
     );
     // The icon law, same row, same catalog: the WIRE spell's own art. Pinned together so the
     // disagreement is visible in one place and can't be "fixed" into agreement.
-    let mut deps = Deps::new();
+    let deps = Deps::new();
     assert_eq!(
-        super::service_icon(100, 0, &spells, None, &mut deps.items, &deps.commands),
+        super::service_icon(100, 0, &spells, None, &deps.items, &deps.commands),
         Some("WRAPPER".into()),
     );
 }

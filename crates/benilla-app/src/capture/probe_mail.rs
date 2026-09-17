@@ -377,7 +377,7 @@ fn mail_probe(
             };
             let landed = entry_of(&mail, letter_id).and_then(|e| {
                 (e.item_text_id != 0)
-                    .then(|| mail.bodies.get(&e.item_text_id).cloned())
+                    .then(|| mail.bodies.get(e.item_text_id).cloned())
                     .flatten()
                     .map(|body| (body, e.checked & CHECKED_READ != 0))
             });

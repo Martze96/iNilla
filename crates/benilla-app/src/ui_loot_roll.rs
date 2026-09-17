@@ -434,8 +434,8 @@ fn format_line_detailed(
 fn render(
     line: &RollLine,
     self_guid: Option<u64>,
-    items: &mut Items,
-    names: &mut NameCache,
+    items: &Items,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
     detailed: bool,
@@ -487,8 +487,8 @@ fn render(
 fn drain_lines(
     rolls: &mut LootRolls,
     self_guid: Option<u64>,
-    items: &mut Items,
-    names: &mut NameCache,
+    items: &Items,
+    names: &NameCache,
     commands: &NetCommands,
     chat: &mut ChatLog,
     catalogs: crate::items::RollCatalogs,
@@ -523,7 +523,7 @@ fn drain_lines(
 /// cache (`None`/`false` while in flight; the frame shows its placeholder and fills in later).
 fn snapshot(
     rolls: &LootRolls,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     catalogs: crate::items::RollCatalogs,
@@ -577,8 +577,8 @@ fn snapshot(
 fn feed_loot_rolls(
     script: Option<NonSendMut<UiScript>>,
     mut rolls: ResMut<LootRolls>,
-    mut items: ResMut<Items>,
-    mut names: ResMut<NameCache>,
+    items: Res<Items>,
+    names: Res<NameCache>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     self_guid: Res<SelfGuid>,
@@ -605,8 +605,8 @@ fn feed_loot_rolls(
     drain_lines(
         &mut rolls,
         self_guid.0,
-        &mut items,
-        &mut names,
+        &items,
+        &names,
         &commands,
         &mut chat,
         catalogs,
@@ -617,7 +617,7 @@ fn feed_loot_rolls(
     // item out of the model in its OnShow, and the roll it is about was added to `active` in the
     // same `start()` call that queued `opened`, so pushing after would hand every fresh roll an
     // empty lookup. Same order as ui_loot's window feed, for the same reason.
-    let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands, catalogs);
+    let fresh = snapshot(&rolls, &items, icons.as_deref(), &commands, catalogs);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
         *last = fresh;

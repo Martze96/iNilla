@@ -334,7 +334,7 @@ pub(super) fn load_spell_visuals(mut commands: Commands, assets: Option<Res<Worl
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct WeaponVisualSrc<'w, 's> {
     displays: Option<Res<'w, ItemDisplays>>,
-    items: Option<ResMut<'w, Items>>,
+    items: Option<Res<'w, Items>>,
     net: Option<Res<'w, NetCommands>>,
     units: Query<'w, 's, (Option<&'static NetEntity>, &'static ObjectStore)>,
 }
@@ -355,7 +355,7 @@ impl WeaponVisualSrc<'_, '_> {
             EntityKind::Player => s
                 .player_visible_item_entry(17)
                 .filter(|e| *e != 0)
-                .and_then(|entry| self.items.as_deref_mut()?.held(entry, self.net.as_deref()?))
+                .and_then(|entry| self.items.as_deref()?.held(entry, self.net.as_deref()?))
                 .map(|t| t.display_info_id),
             _ => None,
         }

@@ -35,7 +35,7 @@
 //! rather than left dead, so the retired law can't be reached for by accident.
 
 use crate::ui_items::{count_of, InventoryScope};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use bevy::prelude::*;
 
@@ -54,6 +54,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::query_cache::QueryCache;
 use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -73,16 +74,15 @@ struct Row {
 
 /// The quest-log state cache + per-frame bookkeeping.
 ///
-/// - `templates`/`pending` — the `SMSG_QUEST_QUERY_RESPONSE` cache, ask-once by quest id (the exact
-///   twin of [`Items`]'s item-template cache).
+/// - `templates` — the `SMSG_QUEST_QUERY_RESPONSE` cache, ask-once by quest id through
+///   [`QueryCache`] (the exact twin of [`Items`]'s item-template cache).
 /// - `entry_slots` — this frame's pushed entry order → descriptor slot, so
 ///   [`drain_quest_log_abandons`] can turn a confirmed abandon's 1-based Lua index back into the
 ///   `CMSG_QUESTLOG_REMOVE_QUEST` slot it came from (slots aren't contiguous — an abandoned/turned-in
 ///   quest leaves a gap).
 #[derive(Resource, Default)]
 pub(crate) struct QuestLog {
-    templates: HashMap<u32, QuestTemplate>,
-    pending: HashSet<u32>,
+    templates: QueryCache<u32, QuestTemplate>,
     entry_slots: Vec<Option<u8>>,
     /// Collapsed section headers, keyed by header TITLE (two zones sharing a name share a header
     /// row, so the fold state naturally shares too). Owned here — the engine only reports the
@@ -93,31 +93,28 @@ pub(crate) struct QuestLog {
     header_keys: Vec<Option<String>>,
 }
 
+impl crate::query_cache::AskOnce for QuestLog {
+    fn clear_pending(&mut self) {
+        self.templates.clear_pending();
+    }
+}
+
 impl QuestLog {
     /// The template for `quest_id`, if known — ask-once: a miss sends `CMSG_QUEST_QUERY` (deduped
     /// while in flight) and returns `None`; a cached negative (the server doesn't know the id) is
     /// also `None`, without a re-ask. The exact twin of [`Items::template`].
-    pub(crate) fn template(
-        &mut self,
-        quest_id: u32,
-        commands: &NetCommands,
-    ) -> Option<&QuestTemplate> {
-        if !self.templates.contains_key(&quest_id) {
-            if self.pending.insert(quest_id) {
-                debug!("ui_quest_log: asking quest template (quest {quest_id})");
-                let _ = commands
-                    .0
-                    .send(ClientCommand::QuestQuery { quest: quest_id });
-            }
-            return None;
-        }
-        self.templates.get(&quest_id)
+    pub(crate) fn template(&self, quest_id: u32, commands: &NetCommands) -> Option<&QuestTemplate> {
+        self.templates.get_or_ask(quest_id, || {
+            debug!("ui_quest_log: asking quest template (quest {quest_id})");
+            let _ = commands
+                .0
+                .send(ClientCommand::QuestQuery { quest: quest_id });
+        })
     }
 
     /// Record a template answer (`SMSG_QUEST_QUERY_RESPONSE`).
     pub(crate) fn insert_template(&mut self, template: QuestTemplate) {
-        self.pending.remove(&template.quest_id);
-        self.templates.insert(template.quest_id, template);
+        self.templates.insert(template.quest_id, Some(template));
     }
 
     /// Disconnect: drop everything, including the templates. Unlike item templates (which persist —
@@ -126,7 +123,6 @@ impl QuestLog {
     /// to re-ask that there's no reason to risk it.
     pub(crate) fn clear_session(&mut self) {
         self.templates.clear();
-        self.pending.clear();
         self.entry_slots.clear();
         self.collapsed.clear();
         self.header_keys.clear();
@@ -137,6 +133,7 @@ pub(crate) struct UiQuestLogPlugin;
 
 impl Plugin for UiQuestLogPlugin {
     fn build(&self, app: &mut App) {
+        crate::query_cache::register::<QuestLog>(app);
         app.init_resource::<QuestLog>()
             .add_systems(
                 Startup,
@@ -293,7 +290,7 @@ fn money_split(money: i32) -> (u32, u32) {
 fn resolve_template_item(
     entry: u32,
     count: u32,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> QuestItemView {
@@ -340,8 +337,8 @@ fn build_objectives(
     template: &QuestTemplate,
     log_slot: &QuestLogSlot,
     store: &ObjectFields,
-    items: &mut Items,
-    names: &mut NameCache,
+    items: &Items,
+    names: &NameCache,
     commands: &NetCommands,
     // The VM's own `GlobalStrings.lua`, for the leaderboard's three format keys.
     get: &dyn Fn(&str) -> Option<String>,
@@ -391,7 +388,7 @@ fn build_objectives(
 /// not — see [`build_objectives`]), so this no longer needs the descriptor slot at all.
 fn build_detail(
     template: &QuestTemplate,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     macros: &crate::npc_text::MacroContext,
@@ -545,8 +542,8 @@ fn feed_quest_log(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut quest_log: ResMut<QuestLog>,
-    mut names: ResMut<NameCache>,
-    mut items: ResMut<Items>,
+    names: Res<NameCache>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     header_names: Option<Res<QuestHeaderNamesRes>>,
@@ -663,7 +660,7 @@ fn feed_quest_log(
         let keyed: Vec<GroupRow> = rows
             .iter()
             .map(|r| {
-                let t = quest_log.templates.get(&r.quest_id);
+                let t = quest_log.templates.get(r.quest_id);
                 let zos = t.map(|t| t.zone_or_sort).unwrap_or(0);
                 GroupRow {
                     zone_or_sort: zos,
@@ -688,7 +685,7 @@ fn feed_quest_log(
 
     // Above the row loop because every row's detail substitutes through it now (the chat macros
     // in a quest's description/objectives paragraph), not just the selection's.
-    let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let player = crate::npc_text::player_identity(&self_q, &names, &commands);
     let macros = crate::npc_text::MacroContext {
         subject: player.as_ref(),
         states: &states,
@@ -739,21 +736,13 @@ fn feed_quest_log(
                         // button we wrongly enabled would push, and the party would get a detail panel
                         // for a quest the server then refuses (decision 1733).
                         t.flags & quest_flags::SHARABLE != 0,
-                        build_objectives(
-                            t,
-                            &r.log_slot,
-                            &store.0,
-                            &mut items,
-                            &mut names,
-                            &commands,
-                            &get,
-                        ),
+                        build_objectives(t, &r.log_slot, &store.0, &items, &names, &commands, &get),
                         // Every row, not just the selection (decision 2247) — the detail bindings
                         // resolve the live selection against these at call time, the way the
                         // reference peeks its quest cache inside the call.
                         Some(build_detail(
                             t,
-                            &mut items,
+                            &items,
                             icons.as_deref(),
                             &commands,
                             &macros,
@@ -1425,8 +1414,8 @@ mod tests {
             timer: 0,
         };
         let store = ObjectFields::default(); // empty bags — the item objective reads 0/5
-        let mut items = Items::default();
-        let mut names = NameCache::default();
+        let items = Items::default();
+        let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
@@ -1434,8 +1423,8 @@ mod tests {
             &template,
             &log_slot,
             &store,
-            &mut items,
-            &mut names,
+            &items,
+            &names,
             &commands,
             &probe_strings,
         );
@@ -1475,8 +1464,8 @@ mod tests {
             timer: 0,
         };
         let store = ObjectFields::default();
-        let mut items = Items::default();
-        let mut names = NameCache::default();
+        let items = Items::default();
+        let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
@@ -1484,8 +1473,8 @@ mod tests {
             &template,
             &log_slot,
             &store,
-            &mut items,
-            &mut names,
+            &items,
+            &names,
             &commands,
             &probe_strings,
         );
@@ -1517,8 +1506,8 @@ mod tests {
             timer: 0,
         };
         let store = ObjectFields::default();
-        let mut items = Items::default();
-        let mut names = NameCache::default();
+        let items = Items::default();
+        let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
@@ -1526,8 +1515,8 @@ mod tests {
             &template,
             &log_slot,
             &store,
-            &mut items,
-            &mut names,
+            &items,
+            &names,
             &commands,
             &probe_strings,
         );
@@ -1556,8 +1545,8 @@ mod tests {
             timer: 0,
         };
         let store = ObjectFields::default();
-        let mut items = Items::default();
-        let mut names = NameCache::default();
+        let items = Items::default();
+        let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
@@ -1565,8 +1554,8 @@ mod tests {
             &template,
             &log_slot,
             &store,
-            &mut items,
-            &mut names,
+            &items,
+            &names,
             &commands,
             &probe_strings,
         );
@@ -1591,8 +1580,8 @@ mod tests {
             timer: 0,
         };
         let store = ObjectFields::default();
-        let mut items = Items::default();
-        let mut names = NameCache::default();
+        let items = Items::default();
+        let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
@@ -1600,8 +1589,8 @@ mod tests {
             &template,
             &log_slot,
             &store,
-            &mut items,
-            &mut names,
+            &items,
+            &names,
             &commands,
             &probe_strings,
         );

@@ -360,7 +360,7 @@ type Pool = Vec<(u32, u32)>;
 /// in flight — the row shows a placeholder and fills in, exactly like a bag slot / vendor row).
 fn resolve_item(
     it: &QuestRewardItem,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> QuestItemView {
@@ -389,7 +389,7 @@ fn resolve_item(
 
 fn resolve_items(
     src: &[QuestRewardItem],
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Vec<QuestItemView> {
@@ -425,7 +425,7 @@ pub(crate) fn reward_spell_view(
 
 fn snapshot(
     giver: &QuestGiver,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     macros: &crate::npc_text::MacroContext,
@@ -501,14 +501,14 @@ fn panel_event(panel: QuestPanel) -> &'static str {
 fn feed_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     spells: Option<Res<Spells>>,
-    mut go_templates: ResMut<crate::go_templates::GameObjectTemplates>,
+    go_templates: Res<crate::go_templates::GameObjectTemplates>,
     materials: Option<Res<crate::ui_item_text::PageMaterials>>,
     mut sink: MessageSink,
     mut last: Local<crate::ui_script::VmMemo<Option<QuestState>>>,
@@ -539,10 +539,10 @@ fn feed_quest(
         })
         .collect();
     show_messages(&mut script, &mut sink, "ui_quest", lines);
-    let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let player = crate::npc_text::player_identity(&self_q, &names, &commands);
     let fresh = snapshot(
         &giver,
-        &mut items,
+        &items,
         icons.as_deref(),
         &commands,
         &crate::npc_text::MacroContext {
@@ -559,8 +559,8 @@ fn feed_quest(
         st.background_material = giver.npc.and_then(|source| {
             crate::ui_item_text::object_material(
                 source,
-                &mut items,
-                &mut go_templates,
+                &items,
+                &go_templates,
                 materials.as_deref(),
                 &commands,
             )
@@ -877,7 +877,7 @@ mod tests {
             }),
         );
         assert!(giver.is_open());
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let player = crate::npc_text::Subject {
@@ -888,7 +888,7 @@ mod tests {
         };
         let snap = snapshot(
             &giver,
-            &mut items,
+            &items,
             None,
             &commands,
             &crate::npc_text::MacroContext {
@@ -928,12 +928,12 @@ mod tests {
                 is_complete: true,
             }),
         );
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let snap = snapshot(
             &giver,
-            &mut items,
+            &items,
             None,
             &commands,
             &crate::npc_text::MacroContext {

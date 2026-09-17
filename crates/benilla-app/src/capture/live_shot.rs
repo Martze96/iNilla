@@ -134,7 +134,7 @@ fn fire_live_shot(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     subjects: Query<(&Guid, &Transform), (With<NetEntity>, Without<SelfPlayer>)>,
     camera: Query<(&Camera, &Transform), With<WorldCamera>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     net_commands: Res<NetCommands>,
     mut refused: Local<bool>,
     mut next_require_warn: Local<f32>,

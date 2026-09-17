@@ -192,7 +192,7 @@ pub(in crate::entities) fn resolve_equipment(
         Has<crate::net::SelfPlayer>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
-    mut templates: ResMut<Items>,
+    templates: Res<Items>,
     net: Res<NetCommands>,
     asset_server: Res<AssetServer>,
     // The creature display cache — a character-model NPC's helm/shoulder ids + race/sex live on its
@@ -638,7 +638,7 @@ pub(in crate::entities) fn resolve_equipment(
             EntityKind::Player if char_component => {
                 let race = s.unit_race().unwrap_or(1);
                 let sex = s.unit_gender().unwrap_or(0).min(1);
-                let mut resolve = |slot: u8| {
+                let resolve = |slot: u8| {
                     s.player_visible_item_entry(slot)
                         .filter(|e| *e != 0)
                         .and_then(|entry| templates.held(entry, &net))

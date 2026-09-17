@@ -99,7 +99,7 @@ impl Plugin for InspectUiPlugin {
 /// data the reference's own inspect tooltip has.
 fn inspect_slot_view(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
@@ -160,7 +160,7 @@ fn feed_inspect(
     mut target: ResMut<InspectTarget>,
     mut feed: ResMut<InspectFeedState>,
     mut booth: ResMut<InspectBooth>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the inspected item's enchant line (decision 0915) —
     // and `ItemRandomProperties`, the roll behind its "of the Monkey" name (1547).
@@ -233,7 +233,7 @@ fn feed_inspect(
     for slot in 1..=19u8 {
         slots[usize::from(slot)] = inspect_slot_view(
             store,
-            &mut items,
+            &items,
             icons.as_deref(),
             crate::items::RollCatalogs {
                 enchants: catalogs.0.as_deref(),

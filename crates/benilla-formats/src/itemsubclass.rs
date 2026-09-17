@@ -385,6 +385,28 @@ mod tests {
             Some("Fist Weapon")
         );
 
+        // Class 6 PROJECTILE — the lookup the cast-fail `0x31` NEED_EXOTIC_AMMO arm makes
+        // (`0x6e1e5e: mov ecx,0x6`, mask `1 << arg`), so "Requires exotic ammo: %s" names the
+        // ammo type. Only two of the five shipped rows are live in 1.12; the other three carry
+        // an `(OBSOLETE)` suffix in the data itself, and one is pinned below so a schema slip
+        // that silently shifted the class would be visible rather than merely returning `None`.
+        assert_eq!(
+            cat.requirement_display_name(6, 1 << 2).as_deref(),
+            Some("Arrow")
+        );
+        assert_eq!(
+            cat.requirement_display_name(6, 1 << 3).as_deref(),
+            Some("Bullet")
+        );
+        assert_eq!(
+            cat.requirement_display_name(6, 1 << 4).as_deref(),
+            Some("Thrown(OBSOLETE)")
+        );
+        // Past the shipped rows — the arm's own decline (`0x6e1e6a: je 0x6e21d8`, the shared
+        // default), which is where an absent or wild wire word lands.
+        assert_eq!(cat.requirement_display_name(6, 1 << 5), None);
+        assert_eq!(cat.requirement_display_name(6, 1 << 31), None);
+
         // Nothing to name.
         assert_eq!(cat.requirement_name(2, 0), None);
         assert_eq!(cat.requirement_name(99, 1), None);

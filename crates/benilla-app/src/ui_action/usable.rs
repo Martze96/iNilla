@@ -158,7 +158,7 @@ pub(crate) fn equipped_item_reason(d: &SpellDisplay) -> u8 {
 pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> bool {
     // The reference's four short-circuits, all answering "fits" without looking at a single slot
@@ -309,7 +309,7 @@ pub(crate) fn item_usable(
     held: bool,
     ctx: &UsableCtx,
     spells: Option<&Spells>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> (bool, bool) {
     if !held {
@@ -342,7 +342,7 @@ pub(crate) fn spell_usable(
     d: &SpellDisplay,
     spells: &Spells,
     ctx: &UsableCtx,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> (bool, bool) {
     // Early-out (`0x6e3d99`): a tradeskill "spell" is always usable.
@@ -559,7 +559,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(&needs_a_weapon, &store, &mut deps.items, &deps.commands)
+            equipped_item_fits(&needs_a_weapon, &store, &deps.items, &deps.commands)
         };
 
         // CONTROL — armed, the sword satisfies it.
@@ -622,7 +622,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(d, &store, &mut deps.items, &deps.commands)
+            equipped_item_fits(d, &store, &deps.items, &deps.commands)
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -695,7 +695,7 @@ mod tests {
                     ..Default::default()
                 },
                 &store,
-                &mut deps.items,
+                &deps.items,
                 &deps.commands,
             )
         };
@@ -731,7 +731,7 @@ mod tests {
         let cooldowns = Cooldowns::default();
         let reputations = Reputations(Vec::new());
         let spells = Spells::empty_for_tests();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let carried = crate::ui_items::carried_counts(&store.0, &items);
@@ -740,7 +740,7 @@ mod tests {
             d,
             &spells,
             &ctx(store, &cooldowns, &reputations, &carried),
-            &mut items,
+            &items,
             &commands,
         )
     }
@@ -860,7 +860,7 @@ mod tests {
         let cooldowns = Cooldowns::default();
         let reputations = Reputations(Vec::new());
         let spells = Spells::empty_for_tests();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let execute = SpellDisplay {
@@ -882,7 +882,7 @@ mod tests {
                 carried: &carried,
             };
             assert_eq!(
-                spell_usable(5308, &execute, &spells, &ctx, &mut items, &commands),
+                spell_usable(5308, &execute, &spells, &ctx, &items, &commands),
                 (expect, false)
             );
         }

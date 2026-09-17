@@ -135,7 +135,7 @@ fn feed_taxi(
     mut state: ResMut<TaxiState>,
     catalogs: Option<Res<TaxiCatalogs>>,
     player: Res<Player>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut cache: ResMut<TaxiRouteCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,

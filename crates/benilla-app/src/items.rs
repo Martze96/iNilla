@@ -17,13 +17,14 @@
 //!   reports "not yet". Negative answers are cached — a bad entry never becomes a query loop.
 //!   Templates survive disconnect: item definitions are stable across sessions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use benilla_protocol::{ItemInfo, ObjectFields};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore};
+use crate::query_cache::QueryCache;
 
 /// The slice of an item template that equipment rendering + combat animation consume (decisions
 /// 0072/0073): the ItemDisplayInfo key, the two placement inputs, and the weapon class pair the
@@ -291,28 +292,19 @@ impl RollCatalogs<'_> {
 #[derive(Resource, Default)]
 pub(crate) struct Items {
     objects: HashMap<u64, ObjectFields>,
-    /// `None` = the server flagged the entry unknown (the top-bit miss branch) — cached negative.
-    templates: HashMap<u32, Option<ItemInfo>>,
-    pending: HashSet<u32>,
+    /// The template cache — ask-once through [`QueryCache`] (decision 2288); a `None` answer is
+    /// the server's "unknown entry" (the top-bit miss branch), cached so it is never re-asked.
+    templates: QueryCache<u32, ItemInfo>,
     /// Entries whose template landed since the last [`Self::take_fresh`] drain — the push half of
     /// the tooltip store (every landed template goes to the UI unprompted, so the first hover of
     /// an item whose name is already on screen never misses).
     fresh: Vec<u32>,
-    /// Bumped by every landed answer ([`Self::insert_template`]), positive or negative. The
-    /// **broadcast** twin of [`Self::fresh`]: `fresh` is a DRAIN (exactly one consumer can take
-    /// it — the tooltip feed does), so a second consumer that caches a template-derived view
-    /// needs its own signal. A consumer keeps the epoch it last resolved at and re-resolves when
-    /// it advances — the modern stand-in for the ref's `DBCACHECALLBACK` redisplay (`0x6e29b0`),
-    /// which is how the real client repaints a view that was drawn while the item cache was still
-    /// answering. Any cache that gates a template read behind a change-flag needs this: the read
-    /// itself is what ISSUES the ask-once query, so the first resolve of a cold entry ALWAYS
-    /// misses (decision 0660).
-    template_epoch: u64,
     /// [`Self::template_epoch`]'s twin for the INSTANCE side (decision 1439): bumped by every
     /// object create/merge/destroy and every enchant-deadline write — everything wire-driven
-    /// that can change what a bag/equipment view reads. The pair exists because `is_changed` on
-    /// this resource says nothing: the feeds' own lazy `template()` resolves take `&mut self`
-    /// every frame, so the resource reads as changed even when nothing landed.
+    /// that can change what a bag/equipment view reads. The pair was born because `is_changed`
+    /// on this resource said nothing while the feeds' lazy `template()` resolves took `&mut
+    /// self` every frame; 2288 made those reads `&self`, and the counters stay as the finer
+    /// signal (a view keyed on one side does not rebuild for the other).
     object_epoch: u64,
     /// The **temporary-enchant deadlines**, keyed `(item guid, enchant slot)` — the reference's
     /// per-item `[obj + slot*4 + 0x324]` array (wow-re `tooltip-content-law.md` §E3), whose only
@@ -514,19 +506,15 @@ impl Items {
     /// template-only) and returns `None` — call again after the answer lands. A cached negative
     /// (server doesn't know the entry) is also `None`, without a re-ask.
     pub(crate) fn template(
-        &mut self,
+        &self,
         entry: u32,
         guid: u64,
         commands: &NetCommands,
     ) -> Option<&ItemInfo> {
-        if !self.templates.contains_key(&entry) {
-            if self.pending.insert(entry) {
-                debug!("items: asking template (entry {entry})");
-                let _ = commands.0.send(ClientCommand::ItemQuery { entry, guid });
-            }
-            return None;
-        }
-        self.templates.get(&entry).and_then(|t| t.as_ref())
+        self.templates.get_or_ask(entry, || {
+            debug!("items: asking template (entry {entry})");
+            let _ = commands.0.send(ClientCommand::ItemQuery { entry, guid });
+        })
     }
 
     /// Whether the server has ANSWERED the `entry` query with "unknown item" — the cached
@@ -535,13 +523,13 @@ impl Items {
     /// answer (the ref's `DBCACHECALLBACK` redisplay), negative → give up and show the ref's
     /// `"UNKNOWN"` fallback instead of waiting forever.
     pub(crate) fn template_answered_unknown(&self, entry: u32) -> bool {
-        self.templates.get(&entry).is_some_and(|t| t.is_none())
+        self.templates.answered_unknown(entry)
     }
 
     /// The held/worn display head for `entry` — the [`HeldTemplate`] view of [`Self::template`]
     /// (same ask-once discipline, template-only ask). Equipment rendering + the swing selector
     /// consume this Copy slice instead of borrowing the full info.
-    pub(crate) fn held(&mut self, entry: u32, commands: &NetCommands) -> Option<HeldTemplate> {
+    pub(crate) fn held(&self, entry: u32, commands: &NetCommands) -> Option<HeldTemplate> {
         self.template(entry, 0, commands).map(|i| HeldTemplate {
             display_info_id: i.display_info_id,
             inventory_type: i.inventory_type,
@@ -557,27 +545,29 @@ impl Items {
     /// rung runs inside a `&Items` borrow, and by the time a button is pressed the greying feed
     /// that shares its search has had the template for many frames.
     pub(crate) fn template_cached(&self, entry: u32) -> Option<&ItemInfo> {
-        self.templates.get(&entry)?.as_ref()
+        self.templates.get(entry)
     }
 
     /// Record a template answer (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`); `None` = unknown entry.
     pub(crate) fn insert_template(&mut self, entry: u32, info: Option<ItemInfo>) {
-        self.pending.remove(&entry);
         if info.is_some() {
             self.fresh.push(entry);
         }
+        // A NEGATIVE answer moves the generation too: it flips the entry from "still asking" to
+        // "answered unknown", which is a real display transition for anything that waits on the
+        // ask (the cast-fail redisplay's `"UNKNOWN"` literal, [`Self::template_answered_unknown`]).
         self.templates.insert(entry, info);
-        // A NEGATIVE answer bumps too: it flips the entry from "still asking" to "answered
-        // unknown", which is a real display transition for anything that waits on the ask (the
-        // cast-fail redisplay's `"UNKNOWN"` literal, [`Self::template_answered_unknown`]).
-        self.template_epoch = self.template_epoch.wrapping_add(1);
     }
 
-    /// The landed-template broadcast counter — see the [`Self::template_epoch`] field. Advances on
-    /// every answer; a consumer that caches a template-derived view compares it against the value
-    /// it last resolved at and re-resolves when they differ.
+    /// The landed-template broadcast counter — the cache's own generation, bumped by every
+    /// landed answer, positive or negative. The **broadcast** twin of [`Self::fresh`]: `fresh`
+    /// is a DRAIN (exactly one consumer can take it — the tooltip feed does), so a second
+    /// consumer that caches a template-derived view needs its own signal; it keeps the epoch it
+    /// last resolved at and re-resolves when it advances — the modern stand-in for the ref's
+    /// `DBCACHECALLBACK` redisplay (`0x6e29b0`), which is how the real client repaints a view
+    /// drawn while the item cache was still answering (decision 0660).
     pub(crate) fn template_epoch(&self) -> u64 {
-        self.template_epoch
+        self.templates.generation()
     }
 
     /// Drain the entries whose template landed since the last drain (see the `fresh` field).
@@ -609,14 +599,20 @@ impl Items {
     /// cost of a wrong latch (a feature dead all session, in silence) is nothing like the cost of
     /// a redundant re-ask.
     pub(crate) fn clear_pending(&mut self) {
-        self.pending.clear();
+        self.templates.clear_pending();
     }
 
     pub(crate) fn clear_session(&mut self) {
         self.objects.clear();
         self.enchant_deadlines.clear();
-        self.pending.clear();
+        self.templates.clear_pending();
         self.object_epoch = self.object_epoch.wrapping_add(1);
+    }
+}
+
+impl crate::query_cache::AskOnce for Items {
+    fn clear_pending(&mut self) {
+        Items::clear_pending(self);
     }
 }
 
@@ -668,7 +664,7 @@ pub(crate) const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
 /// slot or a template still in flight.
 fn equipped_class(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     slot: u8,
 ) -> Option<u8> {
@@ -689,7 +685,7 @@ fn equipped_class(
 /// was once missing from all three of its call sites.
 pub(crate) fn disarmed_equipment_slot(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<u8> {
     if store.0.unit_flags() & crate::creature_anim::UNIT_FLAG_DISARMED == 0 {

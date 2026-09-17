@@ -193,7 +193,7 @@ fn resolve_service(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     // The VM's own `GlobalStrings.lua`, for [`service_group`]'s three header labels.
     get: &dyn Fn(&str) -> Option<String>,
@@ -310,7 +310,7 @@ fn snapshot(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<TrainerState> {
@@ -355,10 +355,10 @@ fn feed_trainer(
     // A tradeskill trainer's rows front the CREATED ITEM's icon, so the feed needs the ask-once
     // template cache + `ItemDisplayInfo.dbc` — the tradeskill window's own pair ([`service_icon`]).
     icons: Option<Res<ItemDisplays>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TrainerState>>>,
     mut last_trainer: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
@@ -400,7 +400,7 @@ fn feed_trainer(
         Some(&skill_lines.catalog),
         &actions.spells,
         icons.as_deref(),
-        &mut items,
+        &items,
         &commands,
         &|key: &str| {
             script

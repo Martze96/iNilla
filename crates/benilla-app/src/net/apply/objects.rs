@@ -82,8 +82,8 @@ pub(super) fn object_create(
     stores: &mut Query<&mut ObjectStore>,
     pending: &mut HashMap<u64, ObjectFields>,
     speed_stage: &mut SpeedStage,
-    names: &mut NameCache,
-    go_templates: &mut GameObjectTemplates,
+    names: &NameCache,
+    go_templates: &GameObjectTemplates,
     net_commands: &NetCommands,
 ) {
     let net = NetEntity {

@@ -114,7 +114,7 @@ pub(super) fn feed_actions(
     mut ui_error_texts: ResMut<UiErrorTexts>,
     spells: Option<Res<Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     name_tables: FailNameTables,
@@ -181,6 +181,40 @@ pub(super) fn feed_actions(
                             )
                         })
                         .flatten()
+                    {
+                        let key = cast_fail::CAST_FAIL_KEYS[reason as usize];
+                        return get(key)
+                            .filter(|s| !s.is_empty())
+                            .map(|t| cast_fail::CastFailLine::passthrough(t.replace("%s", &name)));
+                    }
+                }
+                // `0x31` NEED_EXOTIC_AMMO (`0x6e1e54`) — the same `0x6e2380` helper as the arm
+                // above, one class over: `requirement_display_name(6 /* Projectile */, 1 << arg)`
+                // reads the singular DisplayName at `row + 0x28 + locale*4`, so "Requires exotic
+                // ammo: %s" names the ammo type. The shift is masked to five bits because the
+                // reference's is — `0x6e1e5c: shl edx,cl` takes x86's own `cl & 31` — and a
+                // subclass naming no row declines to the strip fallback exactly as
+                // `0x6e1e6a: je 0x6e21d8` does.
+                //
+                // **The player's arm only.** The pet handler's index table (`0x6e93d0`) is gated
+                // `cmp reason,0x8d; ja default` and carries no `0x31` entry, so a pet's exotic-ammo
+                // refusal takes its generic arm `0x6e936a` and shows the bare template — unlike
+                // `0x19`–`0x1b` just above, which the pet's own table *does* fill (`0x6e904d`).
+                // Same shape as `0x78`/`0x5c` below, and the same trap decision 2033 named.
+                //
+                // **It declines on a vmangos server, every time**, and that is the server's shape
+                // rather than a gap here: `Spell::SendCastResult` fills `failureArg1` for
+                // NOT_READY, REQUIRES_SPELL_FOCUS, REQUIRES_AREA and the EQUIPPED_ITEM_CLASS
+                // family and for nothing else, so `0x31` arrives with no word and the line reads
+                // "Requires exotic ammo:". Modeled anyway because the arm is the mechanism and the
+                // word is the server's to supply (decision 2292).
+                if let (false, 0x31, Some(arg), Some(subs)) =
+                    (pet, reason, fail.arg, sub_classes.as_deref())
+                {
+                    const ITEM_CLASS_PROJECTILE: u32 = 6;
+                    if let Some(name) = subs
+                        .0
+                        .requirement_display_name(ITEM_CLASS_PROJECTILE, 1u32 << (arg & 31))
                     {
                         let key = cast_fail::CAST_FAIL_KEYS[reason as usize];
                         return get(key)
@@ -456,7 +490,7 @@ pub(super) fn feed_actions(
                             d,
                             sp,
                             store,
-                            &mut items,
+                            &items,
                             icons.as_deref(),
                             &commands,
                         )
@@ -584,7 +618,7 @@ pub(super) fn feed_actions(
                                 d,
                                 sp,
                                 Some(store),
-                                &mut items,
+                                &items,
                                 icons.as_deref(),
                                 &commands,
                             );
@@ -634,7 +668,7 @@ fn spell_action_icon(
     d: &benilla_formats::SpellDisplay,
     spells: &super::Spells,
     store: Option<&crate::net::ObjectStore>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {

@@ -100,6 +100,7 @@ mod portrait;
 mod preflight;
 #[cfg(feature = "dev")]
 mod probe_shield;
+mod query_cache;
 mod quest_markers;
 mod raid_marks;
 mod ranged_flex;

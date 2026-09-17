@@ -94,7 +94,7 @@ pub(crate) use collision_height::CollisionHeight;
 /// spawned under the same attach-point joints as held items, lifetime per the kit stage.
 mod missile;
 use missile::{attach_missile_models, move_missiles, spawn_missiles};
-pub(crate) use missile::{MissileMiss, MissileSound};
+pub(crate) use missile::{MissileMiss, MissileSound, PendingMissiles};
 
 /// WMO-display GameObject doodad props (the ship's sails / the zeppelin's rotor): the WMO's MODD
 /// M2s spawned as children of the streamed gameobject, so they ride a moving transport.
