@@ -502,6 +502,21 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     script.set_realm_name(&realm);
     // …and so does the PLAYER, for the same reason and with more riding on it — see
     // [`seat_from_roster`], which is where the why lives.
+    //
+    // **The player RECORD first, and separately** (decisions 2261/2263). The reference keeps the
+    // local player's name, race, class and gender somewhere no cache, feed or object can reach — a
+    // copy of the char-enum row written at the Enter World commit (`0x5abd9e`) and never cleared —
+    // and `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only that, unconditionally, even after
+    // the descriptor exists. The snapshot below is the descriptor's stand-in until the real one
+    // streams in and is replaced when it does; the record outlives every push. Seeded here because
+    // our VM is rebuilt per login (1290) while the reference's record simply persists, so each new
+    // VM has to be told once — before the addon walk, like the realm.
+    if let Some(record) = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(record_from_roster)
+    {
+        script.set_player_record(record);
+    }
     if let Some(seat) = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(seat_from_roster)
@@ -660,6 +675,43 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     }
 }
 
+/// The wire's gender byte (0 male, 1 female) on `UnitSex`'s own 2/3 scale — the one mapping, so
+/// the record and the snapshot can never disagree about which is which.
+fn roster_sex(gender: u8) -> u8 {
+    match gender {
+        0 => 2,
+        1 => 3,
+        _ => 0,
+    }
+}
+
+/// **The local player record the UI loads under** — our copy of the char-enum row the reference
+/// copies at the Enter World commit (decision 2263; the bytes are on
+/// [`benilla_ui::script::PlayerRecord`]).
+///
+/// The same roster row [`seat_from_roster`] builds the `"player"` *snapshot* from, and
+/// deliberately the same `race_names`/`class_names` lookups: the reference resolves the record's
+/// race and class bytes through `ChrRaces`/`ChrClasses` at call time, so resolving them once here
+/// is the same answer, and sharing the lookup is what stops the record and the snapshot drifting
+/// into two opinions about what race 4 is.
+///
+/// **The level is not here, and that is byte-verified, not an omission** — the reference's record
+/// carries a level at `+0x108` and ships an accessor for it (`0x5abe00`) that *nothing calls*, so
+/// `UnitLevel("player")` reads the descriptor.
+pub(crate) fn record_from_roster(
+    roster: &crate::char_select::Roster,
+) -> Option<benilla_ui::script::PlayerRecord> {
+    let row = roster.pending_row()?;
+    let race = crate::ui_unit::race_names(row.race);
+    let class = crate::ui_unit::class_names(row.class);
+    Some(benilla_ui::script::PlayerRecord {
+        name: row.name.clone(),
+        race: race.map(|(n, f)| (n.to_string(), f.to_string())),
+        class: class.map(|(n, f)| (n.to_string(), f.to_string())),
+        sex: roster_sex(row.gender),
+    })
+}
+
 /// The `"player"` snapshot the UI loads **under**, built from the roster row of the pick in
 /// flight — `None` when there is no pick (a capture, a scenario, a test world).
 ///
@@ -693,20 +745,32 @@ pub(crate) fn seat_from_roster(
     let row = roster.pending_row()?;
     let race = crate::ui_unit::race_names(row.race);
     let class = crate::ui_unit::class_names(row.class);
+    let sex = roster_sex(row.gender);
     Some(benilla_ui::script::UnitState {
-        exists: true,
+        // **`exists` is FALSE, and the level is 0 — the reference's answers, byte-verified**
+        // (decision 2263). `UnitExists("player")` `0x515fb0` has no fast path: it resolves the
+        // token, and the resolver reads the GUID out of the OBJECT (`0x515994`), not out of
+        // `[mgr+0xc0]` — so with no object it holds `0:0`. The roster fallback `0x491900` then
+        // bails on a zero GUID at `0x4e80aa je` *before* it fetches the active player, so the
+        // `0 == 0` that would otherwise answer "yes, that's me" is never reached: `0x516001
+        // lua_pushnil`. `UnitLevel 0x517fc0` likewise carries no `"player"` compare at all and
+        // reaches its total-miss arm `0x51813e push 0; push 0` — the **number 0**, not nil. The
+        // two misses are deliberately asymmetric and a client that modelled "no data" uniformly
+        // would be wrong on one of them (wow-re `ui/scratch/unit-verbs-before-player-object.md`
+        // §2-§3; it also corrected that repo's own `main`, which had published the opposite).
+        //
+        // This seat is no longer what makes the player *answerable* — the record above is — so it
+        // no longer has to claim a unit exists in order to deliver a name. What it still carries
+        // is the handful of fields the corpus reads at file scope that are neither the record's
+        // nor the descriptor's to say yet, the faction side below chief among them.
+        exists: false,
         name: Some(row.name.clone()),
-        level: u32::from(row.level),
         race: race.map(|(n, _)| n.to_string()),
         race_file: race.map(|(_, f)| f.to_string()),
         class: class.map(|(n, _)| n.to_string()),
         class_file: class.map(|(_, f)| f.to_string()),
         // The wire's 0/1 on `UnitSex`'s 2/3 scale — `ui_unit::snapshot`'s own mapping.
-        sex: match row.gender {
-            0 => 2,
-            1 => 3,
-            _ => 0,
-        },
+        sex,
         is_player: true,
         player_controlled: true,
         // Nil here is not "no faction", it is a state a player character cannot be in, and

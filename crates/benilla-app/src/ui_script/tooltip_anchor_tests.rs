@@ -565,3 +565,44 @@ fn a_cursor_seated_gameobject_plate_survives_an_addons_on_show_hook() {
         s.errors()
     );
 }
+
+/// **The CORNER arm must end up owned too — the other half of the existence gate** (decision 2259).
+///
+/// The reference's corner arm (`0x492a42`) writes no owner itself; the owner is restored purely by
+/// the `+0x444` handler, `OnTooltipSetDefaultAnchor` → `GameTooltip_SetDefaultAnchor(this,
+/// UIParent)` → `SetOwner(UIParent, "ANCHOR_NONE")`. And the owner really is 0 on the way in:
+/// `Tooltip::Hide 0x530a60` *is* `SetOwner(NULL, 0, 0, 0)`, so every hover starts un-owned.
+///
+/// That makes this test the precondition for narrowing the placement fork at all. Moving an object
+/// from the cursor arm to the corner arm is only safe while the corner arm produces an OWNED,
+/// SHOWN plate — otherwise those objects would build their lines and then hide, which is precisely
+/// the failure 2255 had just fixed on the cursor arm.
+#[test]
+fn a_corner_seated_gameobject_plate_is_owned_and_shown() {
+    let mut s = harness(&[]);
+    assert!(s.world_tooltip_gameobject("Ironforge Main Gate", &[], None));
+    let owned: bool = s.eval("return GameTooltip:IsOwned(UIParent)").unwrap();
+    assert!(owned, "the corner plate is owned; errors: {:?}", s.errors());
+    let shown: bool = s
+        .eval("return GameTooltip:IsShown() and true or false")
+        .unwrap();
+    assert!(shown, "and it is on screen; errors: {:?}", s.errors());
+}
+
+/// And it survives the same addon hook the cursor arm had to: `!Questie`'s `OnShow` handler ends in
+/// `GameTooltip:Show()`, and `:Show()` is the existence gate `0x530a80`.
+#[test]
+fn a_corner_seated_gameobject_plate_survives_an_addons_on_show_hook() {
+    let mut s = harness(&[]);
+    s.run(r#"GameTooltip:SetScript("OnShow", function() GameTooltip:Show() end)"#)
+        .unwrap();
+    assert!(s.world_tooltip_gameobject("Ironforge Main Gate", &[], None));
+    let shown: bool = s
+        .eval("return GameTooltip:IsShown() and true or false")
+        .unwrap();
+    assert!(
+        shown,
+        "the corner plate is still up; errors: {:?}",
+        s.errors()
+    );
+}

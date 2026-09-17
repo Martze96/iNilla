@@ -118,8 +118,9 @@ pub(super) fn setup_composite(
     let image = images.add(image);
 
     // A 1×1 quad centred on the origin: every tile is this mesh under its own Transform, so a
-    // panning composite never rewrites a vertex buffer (1463).
-    let quad = meshes.add(Rectangle::new(1.0, 1.0));
+    // panning composite never rewrites a vertex buffer (1463). Its layout is a pipeline key axis
+    // and pipe_warm warms the same mesh, so the builder has one author (2262).
+    let quad = meshes.add(crate::ui_pass::tile_quad_mesh());
 
     let camera = commands
         .spawn((

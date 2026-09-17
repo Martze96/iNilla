@@ -110,7 +110,15 @@ pub(crate) fn plugin(app: &mut App) {
     });
     app.insert_resource(PipeWatch(shared.clone()));
     app.init_resource::<WarmPass>();
-    app.add_systems(Last, (publish_cover, publish_compile_burst));
+    app.add_systems(
+        Last,
+        (
+            publish_cover,
+            publish_compile_burst,
+            record_warmed_views,
+            census_view_classes,
+        ),
+    );
     // Before the Present stage so the loading screen reads this frame's gate, not last frame's.
     app.add_systems(
         Update,
@@ -321,6 +329,15 @@ pub(crate) struct WarmPass {
     /// LIVE" warn is exactly the instrument for it — which is why this can be a latch and not a
     /// guess. A timeout does NOT latch it: something was still pending.
     warmed_once: bool,
+    /// **The cameras the menagerie parents rigs to** — the world camera, one real portrait booth,
+    /// the twin booth and the orthographic twin. Recorded as entities at spawn so
+    /// [`record_warmed_views`] can read their LIVE view key each frame instead of restating what
+    /// the spawn code meant (2264).
+    anchors: Vec<Entity>,
+    /// **The view keys those anchors actually carried while the pass ran** — the census's only
+    /// notion of "warm". Never a rule, never an inference: if a rig did not render through it,
+    /// it is not in here.
+    warmed_views: Vec<ViewClass>,
     /// Pacing state (1116): rigs warmed so far, when the last slice went out, how many frames
     /// the reveal spanned, and the slice currently on screen (hidden again next frame).
     revealed: usize,
@@ -461,13 +478,23 @@ fn run_warm_pass(
         commands
             .entity(warm_booth.0)
             .insert((WarmRig, WarmBoothCam));
+        // The orthographic twin (2262): the THIRD projection class, the one the UI model tile
+        // atlas draws through. Same deal — a WarmRig, so the despawn paths take it too.
+        let warm_ortho = crate::ui_models::spawn_warm_tile_cam(&mut commands, &mut lanes.images);
+        commands.entity(warm_ortho.0).insert(WarmRig);
         // The effect lane's stand-in texture — held for the life of the pass.
         warm.effect_tex = Some(lanes.images.add(Image::default()));
+        // The anchors the census measures "warm" from (2264): every camera the menagerie actually
+        // hangs rigs on. Recorded as entities, not as remembered shapes.
+        warm.anchors = vec![cam, warm_booth.0, warm_ortho.0];
+        warm.anchors.extend(booth.iter().next().map(|(e, _)| e));
+        warm.warmed_views.clear();
         let count = spawn_menagerie(
             &mut commands,
             cam,
             booth.iter().next(),
             &warm_booth,
+            &warm_ortho,
             &mut meshes,
             &mut materials,
             &mut lanes,
@@ -549,6 +576,149 @@ fn run_warm_pass(
     }
 }
 
+/// **The view-class census** (2262, rebuilt by 2264) — 0958's claim, turned from a sentence into
+/// an instrument that can actually fire.
+///
+/// 0958 verified that "the whole 3-D view space is `(samples, projection class)`, and both classes
+/// of both sample counts are now warm". True the day it was written; false a month later, when
+/// 2013 gave the UI model tile atlas an orthographic camera — a third class, warmed by nothing,
+/// whose first tile compiled its whole batch set live. Neither lane-coverage gate test can see a
+/// *camera*, so nothing caught it.
+///
+/// **2262's first attempt at this census could not fire.** It decided what was warm from a rule it
+/// held in its own head — "samples=1 is warm in all three classes, and the world camera's own pair
+/// is warm" — and then skipped every camera matching it. But `gxMultisample` registers `"1"`
+/// (`cvars.rs`), `MsaaSetting::default()` is 1, and **only the world camera ever reads it**
+/// (`player/setup.rs:99`, `:118`); every other 3-D camera hard-codes `Msaa::Off` through
+/// `booth_view_shape()`. So `samples == 1` covered the entire population and the loop body was
+/// unreachable — including for the very camera 2013 added. An instrument that restates what the
+/// author believed is not an instrument.
+///
+/// So it no longer believes anything. [`WarmPass::warmed_views`] records the view key of each
+/// camera the menagerie **actually parented rigs to**, read off those cameras live while the pass
+/// runs; the census compares every `Camera3d` against that recorded set and nothing else. It also
+/// runs for the whole session rather than once at drain, warning once per distinct unwarmed key,
+/// because the class a booth is warm in is one it installs *at runtime* on its first bake — which
+/// a single read at drain is too early to see.
+fn census_view_classes(
+    warm: Res<WarmPass>,
+    mut reported: Local<Vec<ViewClass>>,
+    cams: ViewCamQuery,
+) {
+    if !warm.warmed_once {
+        return;
+    }
+    for (name, projection, msaa, hdr) in &cams {
+        let class = view_class(projection, msaa, hdr);
+        if warm.warmed_views.contains(&class) || reported.contains(&class) {
+            continue;
+        }
+        reported.push(class);
+        warn!(
+            "pipeline warm: camera {} draws through {} — a view key the menagerie never rendered \
+             a rig through, so its whole model-pipeline space compiles LIVE on first sight. Give \
+             it a warm arm (decisions 0958/2262/2264). Warm keys this session: {}.",
+            name.map_or("<unnamed>", Name::as_str),
+            class.describe(),
+            warm.warmed_views
+                .iter()
+                .map(ViewClass::describe)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+}
+
+/// Every 3-D camera in the world, for [`census_view_classes`]: the name it reports itself by, and
+/// the three components that decide its mesh-pipeline view key.
+type ViewCamQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static Name>,
+        Option<&'static Projection>,
+        Option<&'static Msaa>,
+        Has<bevy::render::view::Hdr>,
+    ),
+    With<Camera3d>,
+>;
+
+/// The key a 3-D view contributes to `MeshPipelineKey`, as [`census_view_classes`] compares them.
+///
+/// `hdr` is here because it is a key bit in its own right AND the gate on two more: bevy admits
+/// `TONEMAP_IN_SHADER` and `DEBAND_DITHER` into the key only when the view is **not** HDR
+/// (`bevy_pbr-0.18.1` `render/mesh.rs:418`), and `Camera3d`'s required components hand a camera
+/// both by default. 0958's "every 3-D camera is HDR so tonemap/dither are dead axes" is true of
+/// every camera we spawn today and is exactly the kind of sentence this census exists to stop
+/// trusting: a new 3-D camera that forgets `Hdr` flips three key bits at once, and 2262's version
+/// did not look at it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub(crate) struct ViewClass {
+    projection: &'static str,
+    samples: u32,
+    hdr: bool,
+}
+
+impl ViewClass {
+    fn describe(&self) -> String {
+        format!(
+            "{}/samples={}/{}",
+            self.projection,
+            self.samples,
+            if self.hdr { "hdr" } else { "no-hdr" }
+        )
+    }
+}
+
+fn view_class(projection: Option<&Projection>, msaa: Option<&Msaa>, hdr: bool) -> ViewClass {
+    ViewClass {
+        // bevy_pbr folds exactly these three into `MeshPipelineKey` (`bevy_pbr-0.18.1`
+        // `render/mesh.rs:397`); the match is exhaustive so a fourth variant upstream stops the
+        // build here rather than opening a silent hole. A view with no `Projection` at all sets
+        // no bits, which is the NONSTANDARD pattern — the same class as Custom.
+        projection: match projection {
+            Some(Projection::Perspective(_)) => "Perspective",
+            Some(Projection::Orthographic(_)) => "Orthographic",
+            Some(Projection::Custom(_)) | None => "Custom",
+        },
+        samples: msaa.copied().unwrap_or_default().samples(),
+        hdr,
+    }
+}
+
+/// The menagerie's anchor cameras, read for their LIVE view key by [`record_warmed_views`] —
+/// entity first, so the recorder can match against [`WarmPass::anchors`].
+type AnchorViewQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static Projection>,
+        Option<&'static Msaa>,
+        Has<bevy::render::view::Hdr>,
+    ),
+    With<Camera3d>,
+>;
+
+/// Record the view key of every camera the menagerie actually parents rigs to, while the pass is
+/// running. Read off the live cameras rather than restated from what the spawn code intended —
+/// that restatement is what made 2262's census unable to fire.
+fn record_warmed_views(mut warm: ResMut<WarmPass>, cams: AnchorViewQuery) {
+    if warm.spawned_at.is_none() || warm.done {
+        return;
+    }
+    let anchors = warm.anchors.clone();
+    for (e, projection, msaa, hdr) in &cams {
+        if !anchors.contains(&e) {
+            continue;
+        }
+        let class = view_class(projection, msaa, hdr);
+        if !warm.warmed_views.contains(&class) {
+            warm.warmed_views.push(class);
+        }
+    }
+}
+
 /// Tear the pass down by despawning only its ROOT entities. `despawn` is recursive, and the twin
 /// booth's rigs are *children* of the twin booth camera — itself a `WarmRig` — so despawning
 /// every query row queues the children twice (once explicitly, once via the parent's recursion):
@@ -576,11 +746,16 @@ fn despawn_rigs(commands: &mut Commands, rigs: &Query<(Entity, Option<&ChildOf>)
 /// half exercised too. Per-frame like the gizmo line: the stream clears every frame.
 ///
 /// [`EffectPipelineKey`]: benilla_world::particles::render::EffectPipelineKey
-/// The HUD-substrate warm (0958's sweep, residual): `UiQuadMaterial` is exactly ONE pipeline,
-/// and on a normal entry it compiles covered because the HUD's first quad batch lands under the
-/// cover — but nothing structural holds that timing (a slow Interface load would land it after
-/// the lift). One invisible overlay quad per warm frame pins the compile inside the cover
-/// window; the append lane clears itself every frame, so nothing lingers.
+/// The HUD-substrate warm (0958's sweep, residual): on a normal entry the HUD's first quad batch
+/// lands under the cover — but nothing structural holds that timing (a slow Interface load would
+/// land it after the lift). One invisible overlay quad per warm frame pins the compile inside the
+/// cover window; the append lane clears itself every frame, so nothing lingers.
+///
+/// This warms the HUD's **batch mesh** layout (POSITION + UV_0 + COLOR) only. 0958 read
+/// `UiQuadMaterial` as "exactly ONE pipeline"; it is two, because a `Material2d` pipeline is
+/// keyed on the mesh layout as well as the view, and the minimap interior composite draws the
+/// same material on a `Rectangle` (POSITION + NORMAL + UV_0). That second one is warmed as a rig
+/// in [`menagerie`], not here — this lane's stream only ever builds the batch layout (2262).
 fn warm_ui_quad_lane(warm: Res<WarmPass>, mut quads: ResMut<crate::ui_pass::UiQuads>) {
     if warm.spawned_at.is_none() || warm.done {
         return;
@@ -698,5 +873,79 @@ fn warm_effect_lane(
                 clip: None,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod census_tests {
+    use super::{view_class, ViewClass};
+    use bevy::camera::{OrthographicProjection, PerspectiveProjection, Projection};
+    use bevy::render::view::Msaa;
+
+    fn perspective() -> Projection {
+        Projection::Perspective(PerspectiveProjection::default())
+    }
+
+    fn orthographic() -> Projection {
+        Projection::Orthographic(OrthographicProjection::default_3d())
+    }
+
+    /// The warm set as it stood the day 2013 landed: the world camera's Perspective and the two
+    /// `Msaa::Off` booth classes. No orthographic arm — because there was no orthographic camera
+    /// when 0958 wrote the census down.
+    fn warm_set_before_2262() -> Vec<ViewClass> {
+        vec![
+            view_class(Some(&perspective()), Some(&Msaa::Off), true),
+            view_class(Some(&perspective()), Some(&Msaa::Sample4), true),
+            view_class(None, Some(&Msaa::Off), true),
+        ]
+    }
+
+    /// **The census must fire for decision 2013's tile camera.** This is the case 2262's first
+    /// version could not report: that camera is `Msaa::Off` like every other booth, and 2262
+    /// skipped `samples == 1` outright, so the loop body was unreachable for it — and for every
+    /// other camera the client spawns, since `gxMultisample` defaults to 1 and only the world
+    /// camera ever reads it. The census now compares against the keys rigs actually rendered
+    /// through, so a class nothing warmed is a class it names.
+    #[test]
+    fn the_census_fires_for_an_unwarmed_orthographic_camera() {
+        let warm = warm_set_before_2262();
+        let tile_cam = view_class(Some(&orthographic()), Some(&Msaa::Off), true);
+        assert!(
+            !warm.contains(&tile_cam),
+            "the ui_models tile camera's view key must read as unwarmed against a warm set that \
+             has no orthographic arm — this is the report 2262 was written to produce"
+        );
+        // And the rule 2262 actually shipped would have swallowed it.
+        assert_eq!(
+            tile_cam.samples, 1,
+            "the tile camera is Msaa::Off, like every booth"
+        );
+    }
+
+    /// The other half: a class the menagerie DID render through is silent, so the census cannot
+    /// cry wolf on the cameras it is meant to bless.
+    #[test]
+    fn the_census_is_silent_for_every_warmed_class() {
+        let warm = warm_set_before_2262();
+        for class in &warm {
+            assert!(warm.contains(class));
+        }
+        let booth_after_first_bake = view_class(None, Some(&Msaa::Off), true);
+        assert!(
+            warm.contains(&booth_after_first_bake),
+            "a booth's runtime-installed custom projection is the NONSTANDARD class, warmed by \
+             the twin booth (0958)"
+        );
+    }
+
+    /// `Hdr` is a key bit and the gate on two more (tonemap, deband — `bevy_pbr` `mesh.rs:418`).
+    /// 2262's census did not read it, so a 3-D camera that forgot `Hdr` was invisible to it.
+    #[test]
+    fn dropping_hdr_is_a_different_view_key() {
+        let with = view_class(Some(&perspective()), Some(&Msaa::Off), true);
+        let without = view_class(Some(&perspective()), Some(&Msaa::Off), false);
+        assert_ne!(with, without);
+        assert!(!warm_set_before_2262().contains(&without));
     }
 }

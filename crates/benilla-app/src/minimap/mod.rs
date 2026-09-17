@@ -129,7 +129,7 @@ fn texel_stretch(extent_yd: f32) -> f32 {
 /// above `224/255` (wow-re `system/minimap/scratch/wmo-interior-minimap-composite.md`, VERIFIED).
 /// Written as the exact f32 the client computes rather than the ratio, because that ULP is the
 /// value fragments are compared against.
-const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
+pub(crate) const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
 
 /// The corpse blip's edge as a fraction of the widget side (the POIIcons cell is authored 16px on
 /// a 140px minimap ≈ 0.11; INTERIM eyeball beside [`ARROW_FRACTION`]'s).

@@ -353,7 +353,7 @@ fn clear_ui_overlays(mut quads: ResMut<UiQuads>) {
 /// doesn't need a mesh-visible layer at all).
 const UI_RENDER_LAYER: usize = 1;
 
-fn ui_render_layers() -> RenderLayers {
+pub(crate) fn ui_render_layers() -> RenderLayers {
     RenderLayers::layer(UI_RENDER_LAYER)
 }
 
@@ -478,6 +478,21 @@ impl UiQuadMaterial {
             uv_clamp: UV_CLAMP_OFF,
         }
     }
+}
+
+/// The mesh every `UiQuadMaterial` quad that is **not** part of the HUD batch stream draws with:
+/// a 1×1 rectangle at the origin, scaled and placed by its own Transform (decision 1466 — a
+/// panning composite never rewrites a vertex buffer).
+///
+/// It has ONE author because a `Material2d` pipeline is keyed on `(view key, MESH LAYOUT)`, and
+/// these two quad families have different layouts: `Rectangle` gives POSITION + NORMAL + UV_0
+/// (`bevy_mesh` `primitives/dim2.rs`), the HUD's batch mesh POSITION + UV_0 + COLOR
+/// ([`rebuild_ui_mesh`]). So `UiQuadMaterial` is **two** pipelines, not one — the claim pipe_warm
+/// carried until decision 2262, which is why the composite's compiled live on the first step into
+/// a WMO interior. `pipe_warm`'s menagerie warms this exact mesh; drifting it here would take the
+/// warm rig with it.
+pub(crate) fn tile_quad_mesh() -> Mesh {
+    Rectangle::new(1.0, 1.0).into()
 }
 
 impl Material2d for UiQuadMaterial {

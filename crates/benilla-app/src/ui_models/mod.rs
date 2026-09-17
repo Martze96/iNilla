@@ -755,6 +755,63 @@ fn setup_tiles(
     let _ = light_buf;
 }
 
+/// pipe_warm's **orthographic twin camera** (decision 2262) — the ortho leg's view key space, the
+/// way [`crate::portrait::spawn_warm_booth`] is the custom-projection one (0958).
+///
+/// bevy_pbr folds the view's projection **class** into `MeshPipelineKey` (`bevy_pbr-0.18.1`
+/// `render/mesh.rs:397` — `Perspective | Orthographic | Custom`, emitted as the
+/// `VIEW_PROJECTION_*` shader def at `:2549`), so one material is a *different pipeline* per
+/// class. 0958's census closed with "the whole 3-D view space is `(samples, projection class)`,
+/// and both classes of both sample counts are now warm" — true on 2026-08-04, when the only
+/// classes were the world camera's Perspective and the booths' custom `WowPortraitProjection`.
+/// Decision 2013 added [`setup_tiles`]' orthographic camera a month later and nothing widened the
+/// warm pass, so the first UI model tile of a session — a cooldown pie, a minimap ping, an
+/// item-push card — compiled its batches live, uncovered, on the render thread.
+///
+/// This camera is that missing class in the tile camera's exact shape: [`booth_view_shape`]
+/// (`Msaa::Off`, HDR, no tonemap) and `FfxGlow::UI_PANE`, spawned right beside the real one above
+/// so the two cannot drift apart. The REAL tile camera is deliberately not borrowed for warming —
+/// it is `is_active: false` until a pane packs a cell, and switching it on would draw the whole
+/// menagerie into the live atlas. Only the projection's CLASS keys the pipeline, never its
+/// numbers; they mirror the real camera's regardless, for the same anti-drift reason.
+pub(crate) fn spawn_warm_tile_cam(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+) -> (Entity, RenderLayers) {
+    let layer = RenderLayers::layer(crate::portrait::WARM_ORTHO_LAYER);
+    // The atlas's own minimum size, the way `spawn_warm_booth` takes the real booths'. A render
+    // target's SIZE reaches no pipeline key (the combine pair is keyed on format; mesh pipelines
+    // specialise at queue time, before anything rasterises), so this could be tiny — and a 64²
+    // arm was measured against this one: 4.59 s vs 4.61 s of warm drain, i.e. nothing. The pass's
+    // extra cost is the wider cross it reveals, not the pixels this camera fills, so the size
+    // stays the one that matches the camera being warmed.
+    let image = images.add(new_target_image_sized(ATLAS_MIN, ATLAS_MIN));
+    let cam = commands
+        .spawn((
+            Name::new("pipe_warm orthographic twin camera"),
+            booth_view_shape(),
+            Camera {
+                order: TILE_CAMERA_ORDER - 1,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                ..default()
+            },
+            RenderTarget::Image(image.into()),
+            benilla_world::ffx_glow::FfxGlow::UI_PANE,
+            Projection::Orthographic(OrthographicProjection {
+                near: 0.1,
+                far: 2000.0,
+                scaling_mode: ScalingMode::Fixed {
+                    width: ATLAS_MIN as f32,
+                    height: ATLAS_MIN as f32,
+                },
+                ..OrthographicProjection::default_3d()
+            }),
+            layer.clone(),
+        ))
+        .id();
+    (cam, layer)
+}
+
 /// The bevy-space → tile-camera-space rotation: WoW `+X` (bevy `−Z`) to the right, WoW `+Y`
 /// (bevy `−X`) up, WoW `+Z` (bevy `+Y`) toward the viewer — the ortho leg's axes (§2). A proper
 /// rotation (determinant +1), so winding survives.

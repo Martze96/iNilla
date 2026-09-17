@@ -1657,3 +1657,68 @@ ScreenProbeHeight = GetScreenHeight()
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **The entry load seeds the player record, not just the snapshot** (decisions 2261/2263).
+///
+/// [`super::seat_from_roster`]'s `"player"` push is the descriptor's stand-in and is *replaced*
+/// the moment the real one streams in — which is how decision 2260's nameless push reached
+/// `UnitName("player")`. The buffer is seeded beside it, from the same roster row, and the verb
+/// reads only that; so the token can be replaced by a nameless snapshot or removed outright and
+/// the name still answers, exactly as the reference's never-cleared `0xc27d88` does.
+#[test]
+fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _capture, _home) = hermetic_probe("nameseed");
+    let mut world = booted_world();
+    log_in_as(&mut world, "Nelprifour", 0x2A);
+
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Nelprifour"),
+        "addon file scope reads the live character, as it always has (1230)"
+    );
+
+    let mut script = world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("a VM");
+    // The feed's 2260 push: the descriptor landed, the name cache missed for our own guid.
+    script.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            has_object: true,
+            name: None,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        script
+            .eval::<Option<String>>(r#"return UnitName("player")"#)
+            .unwrap()
+            .as_deref(),
+        Some("Nelprifour"),
+        "the record answers, so a nameless snapshot is invisible to the verb"
+    );
+    assert_eq!(
+        script
+            .eval::<Option<String>>(r#"local _, t = UnitClass("player"); return t"#)
+            .unwrap()
+            .as_deref(),
+        Some("WARRIOR"),
+        "…and the same for the other three fields the reference reads off that record (2263)"
+    );
+
+    // …and so does the logout despawn, which removes the token altogether.
+    script.set_unit("player", None);
+    assert_eq!(
+        script
+            .eval::<Option<String>>(r#"return UnitName("player")"#)
+            .unwrap()
+            .as_deref(),
+        Some("Nelprifour")
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

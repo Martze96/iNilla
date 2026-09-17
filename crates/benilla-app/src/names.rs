@@ -312,6 +312,36 @@ impl NameCache {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    /// **Install a realm cache read off disk — its CREATURE templates, and nothing else**
+    /// (decision 2260).
+    ///
+    /// The persisted file has carried creature templates alone since 2223, so this is the whole of
+    /// what a load can legitimately say. It used to be spelled `*names = loaded` in
+    /// [`crate::name_persist::load_name_cache`], which is the same thing only when the loader is
+    /// the first writer of the session — and it is not. The loader fires the first frame the realm
+    /// identity is known, which is the frame the *pick* is in flight; the login's
+    /// `SMSG_..._VERIFY_WORLD` seed of our OWN name ([`Self::insert_player`], from
+    /// `net::apply::session::connected`) lands in the same neighbourhood, and whichever arrives
+    /// second wins. When the load won, it discarded the player's own name — so `UnitName("player")`
+    /// answered nil for one wire round-trip while the feed re-asked for a guid it had just been
+    /// told about, and every addon reading it in that window saw nil (the KLHThreatMeter
+    /// `table index is nil` report; reproduced live 3 runs in 4).
+    ///
+    /// Once per process, because `NameCacheFile::realm` only goes `None` → `Some` once — which is
+    /// exactly the "first login of a fresh game start, and never again" shape the report named.
+    ///
+    /// So the rule is not an ordering to get right, it is a *scope*: this touches what the file
+    /// carries. Dropping the guid-keyed stores across a realm change is
+    /// [`Self::clear_world_session`]'s, and it runs at every world entry regardless.
+    ///
+    /// Replace rather than merge — the realm-change case, 2223's own reasoning: the previous
+    /// realm's templates are not this realm's. The generation ticks because a landed record is
+    /// exactly what the gated feeds watch for (1439).
+    pub(crate) fn install_persisted(&mut self, loaded: NameCache) {
+        self.creatures = loaded.creatures;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// The landed-answer counter — see the [`Self::generation`] field.
     pub(crate) fn generation(&self) -> u64 {
         self.generation

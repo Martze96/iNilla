@@ -224,12 +224,19 @@ pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
 /// rule as [`GLUE_LAYER`]). This camera exists only while the warm pass runs
 /// ([`spawn_warm_booth`]); nothing but menagerie rigs ever rides its layer.
 pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
+/// pipe_warm's **orthographic twin camera**'s layer ([`crate::ui_models::spawn_warm_tile_cam`],
+/// decision 2262) — the next one past the twin booth's, same ladder rule. bevy_pbr keys a mesh
+/// pipeline on the view's projection CLASS, and the tile atlas's one camera is
+/// `Projection::Orthographic`: a THIRD class beside the world camera's Perspective and the twin
+/// booth's custom `WowPortraitProjection`. Like [`WARM_BOOTH_LAYER`] this camera exists only while
+/// the warm pass runs, and nothing but menagerie rigs ever rides its layer.
+pub(crate) const WARM_ORTHO_LAYER: usize = WARM_BOOTH_LAYER + 1;
 /// The **minimap interior composite**'s render layer (decision 1466) — the next one past the warm
 /// booth's. Not a portrait booth, but it is an offscreen camera with its own layer, and 0775's rule
 /// is that EVERY such layer is computed in this one ladder: the two booths that each worked out
 /// "the next layer past the paper doll's" in their own file landed on the same number, and the
 /// clash was silent in both rendering and the emitter→camera match.
-pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
+pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_ORTHO_LAYER + 1;
 /// The UI model tiles' layer (`crate::ui_models`, decision 2008): every `<Model>` widget's M2
 /// renders into one atlas through one camera on this layer.
 pub(crate) const UI_MODELS_LAYER: usize = MINIMAP_COMPOSITE_LAYER + 1;
@@ -262,7 +269,8 @@ const _: () = assert!(
         && INSPECT_LAYER != GLUE_LAYER
         && DRESSUP_LAYER > GLUE_LAYER
         && WARM_BOOTH_LAYER > DRESSUP_LAYER
-        && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER
+        && WARM_ORTHO_LAYER > WARM_BOOTH_LAYER
+        && MINIMAP_COMPOSITE_LAYER > WARM_ORTHO_LAYER
         && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER
         && UI_MODEL_CAM_LAYER_BASE > UI_MODELS_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"

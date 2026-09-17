@@ -267,6 +267,31 @@ impl super::UiScript {
     ///
     /// Set at world entry from the realm the session actually connected to. Idempotent, and the
     /// empty string is a legitimate value (no realm yet), not a "clear".
+    /// Seed the **local player record** — the reference's `0xc27d80`, copied from the char-enum
+    /// row at the character-select Enter World commit (decisions 2261/2263, and see
+    /// [`super::PlayerRecord`] for the bytes and the four verbs that read it).
+    ///
+    /// Called from the world-entry UI load beside [`Self::set_realm_name`], and for the same
+    /// reason 1195 put the realm there: the values have to be in the VM before a single addon file
+    /// runs, because `local currentPlayer = UnitName("player")` at file scope is the corpus idiom.
+    /// The reference has them a whole login earlier still.
+    ///
+    /// **A record with no name is refused, not stored.** The only unset state is "no Enter World
+    /// has been committed in this process"; once the record holds a character, nothing in the
+    /// reference's image ever empties it again, so a caller with nothing to say must leave the
+    /// last answer standing rather than blank it. The write is whole-record because the
+    /// reference's is one `rep movsd`: these four fields describe one character and can never
+    /// legitimately be seeded from two.
+    pub fn set_player_record(&mut self, record: super::PlayerRecord) {
+        if record.name.is_empty() {
+            return;
+        }
+        let mut model = self.model_mut();
+        if model.player_record != record {
+            model.player_record = record;
+        }
+    }
+
     pub fn set_realm_name(&mut self, realm: &str) {
         {
             let mut model = self.model_mut();

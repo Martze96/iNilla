@@ -762,7 +762,18 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
 
-    let mixer = out.mixer.as_mut().context("no audio device")?;
+    // **No device is a no-op, not an error.** Running silent (`WOW_NOSOUND=1`, CI, an unattended
+    // probe — or a player whose device is genuinely gone) is a startup fact `sound::plugin`
+    // already warns about ONCE. Returning `Err` here turned that one fact into a warn PER EVENT
+    // at every one of this module's ~25 call sites: a 75 s lava probe logged 3975 identical
+    // `no audio device` lines, 89% of the file, which is why `liquid_loop` grew a guard of its
+    // own — and a probe sweep still footstepped one warn every half-second. The fix belongs here,
+    // at the one place that knows, rather than as a guard repeated at each caller. `false` is the
+    // signal this function already uses for "the gates dropped it", which is exactly what
+    // happened.
+    let Some(mixer) = out.mixer.as_mut() else {
+        return Ok(false);
+    };
     let (track, handle) = match pos {
         Some(p) => {
             // `EAXDef 0` = no `SoundSamplePreferences` row = the reference's NULL-slot skip at
@@ -984,7 +995,10 @@ pub(crate) fn play_file(
     if !claim_voice(out, amp) {
         return Ok(());
     }
-    let mixer = out.mixer.as_mut().context("no audio device")?;
+    // No device is a no-op here too — see the note in [`play_kit_ext`].
+    let Some(mixer) = out.mixer.as_mut() else {
+        return Ok(());
+    };
     let handle = mixer.play_2d(data)?;
     if let Some(probe) = out.probe.as_ref() {
         probe.note_play(0, path, "sfx", "2d");

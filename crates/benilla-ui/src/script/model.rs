@@ -1726,6 +1726,26 @@ pub(crate) struct Model {
     /// payload, so two calls in a frame are two captures.
     pub(crate) screenshot_asks: u32,
     pub(crate) realm_name: String,
+    /// **The local player record — `0xc27d80`, ours** (decisions 2261 and 2263).
+    ///
+    /// The bytes, the four verbs that read it and why `UnitLevel` is not among them are on
+    /// [`super::PlayerRecord`] itself; what belongs here is the *lifetime*, because that is what
+    /// this field's position in the `Model` decides.
+    ///
+    /// **Two writers, and the asymmetry between them is the mechanism.** The world-entry UI load
+    /// seeds it from the roster row of the pick in flight — our copy of the same char-enum record
+    /// — beside [`Self::realm_name`] and before the addon walk (1195's slot, 1230's source); and
+    /// [`super::UiScript::set_unit`] keeps it in step for any `"player"` push that **carries** the
+    /// field. A push that does not carry it leaves it standing. So the record can be corrected but
+    /// never blanked, which is the reference's never-cleared property expressed where it can be
+    /// relied on — and decision 2260 is why that matters: a name-cache miss for our own guid
+    /// reached Lua as a nameless player snapshot and took KLHThreatMeter down with it.
+    ///
+    /// Our VM is rebuilt per login (1290) where the reference's record simply persists, so each new
+    /// VM is told once. That is the whole of the difference, and it is unobservable: the four verbs
+    /// do not exist between logins either — they live only in the in-game table `0x850438`, which
+    /// `UI_Init` installs and the teardown nils, and `GlueScript_RegisterBindings 0x46abb0` skips.
+    pub(crate) player_record: super::PlayerRecord,
     /// The hearthstone bind location's NAME, behind `GetBindLocation()` — the app resolves the
     /// `SMSG_BINDPOINTUPDATE` area id through the same AreaTable catalog the hearthstone's `$z`
     /// token already uses, and pushes the resolved string here.
@@ -2224,6 +2244,7 @@ impl Model {
             played_time_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),
+            player_record: super::PlayerRecord::default(),
             bind_location: String::new(),
             gm_ticket_categories: Vec::new(),
             gm_ticket_intents: Vec::new(),

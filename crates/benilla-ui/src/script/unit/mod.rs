@@ -53,6 +53,59 @@ pub enum SelectionRequest {
     LastEnemy,
 }
 
+/// **The local player record — `0xc27d80`, ours** (decision 2263).
+///
+/// A copy of ONE `SMSG_CHAR_ENUM` `CHARACTER_INFO` row, and the source the reference answers four
+/// `"player"` verbs from. Each opens with the identical full-string, case-insensitive compare of
+/// the token against `0x847894` (`b"player\0"`) whose **match is the fall-through**, and each is
+/// unconditional — there is no arm that re-routes `"player"` to the unit resolver, so the
+/// descriptor never supersedes this record even once the object exists:
+///
+/// | verb | fast path | accessor | byte |
+/// |---|---|---|---|
+/// | `UnitName` `0x517020` | `0x51708c` | `0x5abdc0` | `+0x08` name |
+/// | `UnitRace` `0x518200` | `0x518269` | `0x5abdd0` | `+0x100` → `ChrRaces` |
+/// | `UnitClass` `0x518350` | `0x5183b9` | `0x5abde0` | `+0x101` → `ChrClasses` |
+/// | `UnitSex` `0x517e90` | `0x517ef9` | `0x5abdf0` | `+0x102` gender |
+///
+/// One writer image-wide — `0x5abd9e` (`rep movsd`, 0x44 dwords) inside `CGlueMgr::EnterWorld`,
+/// at the character-select commit — and **no instruction anywhere clears it**. It is filled before
+/// FrameXML loads and before `CMSG_PLAYER_LOGIN` is sent, which is why the reference can run addon
+/// `OnUpdate` for many frames with no local player object and still answer all four (wow-re
+/// `ui/scratch/unitname-player-seed-window.md` §6).
+///
+/// **`UnitLevel` is deliberately NOT here.** The record carries the level at `+0x108` and the
+/// client ships an accessor for it, `0x5abe00`, that **nothing calls** — so `UnitLevel("player")`
+/// reads the descriptor and answers `0` in exactly the window the four answer in.
+///
+/// **Resolved strings, not the raw bytes**, because this crate has no DBC: the reference resolves
+/// `+0x100`/`+0x101` through `ChrRaces`/`ChrClasses` at call time, and the app does that same
+/// resolution once when it seeds the record (it is the identical lookup
+/// `ui_unit::race_names`/`class_names` already does for the unit snapshot, so the two cannot
+/// disagree about what a race byte means).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayerRecord {
+    /// `+0x08` — the NUL-terminated name buffer at `0xc27d88`. Empty is the record's only unset
+    /// state, and the reference's only `UnitName("player")` nil: `lua_pushstring(NULL)` at
+    /// `0x517095` tail-jumps into `lua_pushnil`. Unreachable from Lua in the real client, because
+    /// the verb is not registered until `UI_Init` and only an Enter World commit gets there.
+    pub name: String,
+    /// `+0x100` resolved — `UnitRace`'s `(localized, file token)` pair, e.g.
+    /// `("Night Elf", "NightElf")`. `None` is the all-zero record: race 0 has no `ChrRaces` row,
+    /// and the reference's bound/NULL-row arms push `nil, nil` rather than reaching the resolver.
+    pub race: Option<(String, String)>,
+    /// `+0x101` resolved — `UnitClass`'s `(localized, UPPERCASE token)` pair, e.g.
+    /// `("Warrior", "WARRIOR")`. `None` for the all-zero record, same shape as [`Self::race`].
+    pub class: Option<(String, String)>,
+    /// `+0x102` on `UnitSex`'s scale (2 male, 3 female) — **not** the wire's 0/1.
+    ///
+    /// `0` is our unset marker and reads as `2`, which is not a fudge: `0x517ef9`'s accessor feeds
+    /// `fild [4*eax+0x808be4]` over `{2,3,1,6}` with **no bounds check at all**, so an all-zero
+    /// record answers `2` ("male") in the reference too. It is the one of the four with no
+    /// validity guard.
+    pub sex: u8,
+}
+
 /// One unit-token's game-state snapshot, pushed by the app each frame and read by the `Unit*`
 /// bindings. Plain data (no mlua handles, no ECS types) — the engine-free seam decision 0068 §3
 /// draws between the app's net/ECS feed and the Lua API.
@@ -539,6 +592,33 @@ impl super::UiScript {
                 // canonical lowercase token, so a feed that ever pushed `"Target"` could not create
                 // a second, shadowing entry.
                 Some(s) => {
+                    // **A `"player"` push keeps the record in step, field by field** (2261,
+                    // widened by 2263). The reference writes `0xc27d80` once per Enter World
+                    // commit and never clears it; our VM is rebuilt per login, so the entry load
+                    // seeds it — and this keeps it true for any later push that KNOWS a field,
+                    // without ever letting one that doesn't blank it.
+                    //
+                    // That asymmetry is the whole mechanism: 2260's nameless player snapshot is
+                    // exactly the push that must not be able to reach these four verbs. It is also
+                    // what keeps every fixture in the workspace correct without touching them — a
+                    // test that seats a full player is, by this rule, also seating the record.
+                    if token.eq_ignore_ascii_case("player") {
+                        let rec = &mut model.player_record;
+                        if let Some(name) = s.name.as_deref().filter(|n| !n.is_empty()) {
+                            if rec.name != name {
+                                rec.name = name.to_string();
+                            }
+                        }
+                        if let Some(race) = s.race.clone().zip(s.race_file.clone()) {
+                            rec.race = Some(race);
+                        }
+                        if let Some(class) = s.class.clone().zip(s.class_file.clone()) {
+                            rec.class = Some(class);
+                        }
+                        if s.sex != 0 {
+                            rec.sex = s.sex;
+                        }
+                    }
                     model.units_by_lower.insert(token.to_ascii_lowercase(), s);
                 }
                 None => {

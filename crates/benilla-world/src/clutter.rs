@@ -640,17 +640,29 @@ pub(crate) fn stream_chunk_clutter(
         );
         cc.built = built;
     }
+    // Two cases, and only one is a defect — the message always said so, but BOTH were warnings, so
+    // the benign one cried wolf. A login/teleport burst has a BACKLOG: the per-frame cap is why the
+    // near chunks are late, and the whole burst runs behind the loading cover. The director's
+    // 2026-09-15 log has three of these at t+1.7 s under a cover that did not lift until t+4.3 s —
+    // including one announcing grass at 4.4 yd that nobody could possibly have seen. With NO
+    // backlog the cap is not the cause: the distance gate let a near chunk through late on an
+    // ordinary frame, the player can see that one, and that one still warns.
     if late > 0 {
-        warn!(
-            "clutter: {late} chunk(s) built INSIDE the {:.0} yd horizon (nearest {late_nearest:.1} yd) \
-             — grass appeared where it could already be seen; {}",
-            cfg.fade_far,
-            if backlog > 0 {
-                format!("{backlog} more still queued behind the {CLUTTER_BUILDS_PER_FRAME}/frame cap (expected in a login/teleport burst)")
-            } else {
-                "no build backlog, so the DISTANCE GATE let it through late".to_string()
-            }
-        );
+        if backlog > 0 {
+            debug!(
+                "clutter: {late} chunk(s) built inside the {:.0} yd horizon (nearest \
+                 {late_nearest:.1} yd) — {backlog} more queued behind the \
+                 {CLUTTER_BUILDS_PER_FRAME}/frame cap (the expected login/teleport burst)",
+                cfg.fade_far,
+            );
+        } else {
+            warn!(
+                "clutter: {late} chunk(s) built INSIDE the {:.0} yd horizon (nearest \
+                 {late_nearest:.1} yd) — grass appeared where it could already be seen, and with \
+                 no build backlog, so the DISTANCE GATE let it through late",
+                cfg.fade_far,
+            );
+        }
     }
 }
 

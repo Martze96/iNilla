@@ -534,7 +534,11 @@ fn the_item_button_helpers_paint_a_slots_icon_and_count() {
 fn the_roster_seat_names_the_character_the_addons_will_meet() {
     let seat = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
     assert_eq!(seat.name.as_deref(), Some("Harness"));
-    assert_eq!(seat.level, 60);
+    // **0, not 60 — the reference's answer, byte-verified** (decision 2263). `UnitLevel 0x517fc0`
+    // carries no `"player"` fast path at all: it resolves the token, misses (no object, no roster
+    // record for a zero GUID) and reaches `0x51813e push 0; push 0` — the NUMBER 0, one return.
+    // The roster's real level arrives with the descriptor, within the second.
+    assert_eq!(seat.level, 0);
     assert_eq!(seat.race_file.as_deref(), Some("Human"));
     assert_eq!(seat.class_file.as_deref(), Some("WARRIOR"));
     assert_eq!(seat.sex, 2, "the wire's 0 is UnitSex's 2");
@@ -543,7 +547,17 @@ fn the_roster_seat_names_the_character_the_addons_will_meet() {
         Some("Alliance"),
         "nil here is 24 corpus addons stopping on AceDB-2.0's file-scope concatenation"
     );
-    assert!(seat.exists && seat.is_player);
+    // **`exists` is false, and that is the correction 2263 made** (it was `true` from 1230 until
+    // then). `UnitExists 0x515fb0` has no fast path either; its resolver reads the GUID out of the
+    // OBJECT (`0x515994`), so with none it holds `0:0`, and the roster fallback `0x491900` bails
+    // on a zero GUID at `0x4e80aa je` BEFORE fetching the active player — so the `0 == 0` that
+    // would answer "that's me" never runs, and `0x516001` pushes nil.
+    //
+    // Safe to correct only *because* of the record above: 1230 seated a whole unit in order to
+    // deliver a name at addon file scope, and the name no longer needs a unit to exist. The rest
+    // of the seat is untouched and still load-bearing — the faction side below above all.
+    assert!(!seat.exists);
+    assert!(seat.is_player);
     // Deliberately NOT invented — the descriptor says these, within the second.
     assert_eq!((seat.health, seat.max_health), (0, 0));
 

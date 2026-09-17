@@ -1,6 +1,6 @@
 //! The `Unit*` binding tests (the parent module is the unit under test).
 
-use crate::script::{PartyState, UiScript, UnitState};
+use crate::script::{PartyState, PlayerRecord, UiScript, UnitState};
 
 fn player() -> UnitState {
     UnitState {
@@ -1993,5 +1993,172 @@ fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
     assert!(
         err.to_string().contains(r#"Usage: UnitOnTaxi("unit")"#),
         "the gate's own message, not mlua's type error: {err}"
+    );
+}
+
+/// **The four `"player"` verbs read the seeded record, and nothing can blank it** (2261/2263).
+///
+/// The reference's `"player"` arm never reaches the resolver: `0x51708c` reads `0xc27d88`, a copy
+/// of the char-enum row written once at the Enter World commit and never cleared anywhere in the
+/// image. So the name survives everything that can happen to the *snapshot* — which is the whole
+/// of decision 2260's bug: a name-cache miss for our own guid produced a nameless player push, it
+/// replaced the roster seat, and the verb went nil in the world. That push is modelled here
+/// exactly, and it must now be invisible to this verb.
+#[test]
+fn the_player_record_outlives_every_snapshot() {
+    let mut s = UiScript::new().unwrap();
+
+    // Before any Enter World commit — the buffer's one empty state, and the reference's nil.
+    assert!(s
+        .eval::<bool>(r#"return UnitName("player") == nil"#)
+        .unwrap());
+
+    // The world-entry load seeds it from the roster row, before a single addon file runs.
+    s.set_player_record(PlayerRecord {
+        name: "Nelprifour".into(),
+        race: Some(("Night Elf".into(), "NightElf".into())),
+        class: Some(("Priest".into(), "PRIEST".into())),
+        sex: 2,
+    });
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Nelprifour",
+        "the buffer answers with no player snapshot at all — the reference runs addon OnUpdate \
+         for many frames with no local player object and this verb still answers"
+    );
+
+    // 2260's push, verbatim: the descriptor landed, the name cache missed for our own guid.
+    let nameless = UnitState {
+        exists: true,
+        has_object: true,
+        name: None,
+        level: 5,
+        ..Default::default()
+    };
+    s.set_unit("player", Some(nameless));
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Nelprifour",
+        "a nameless snapshot must not reach this verb — that push is the reported bug"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return UnitRace("player")"#).unwrap(),
+        "Night Elf",
+        "the same holds for the other three fields of the record (2263)"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"local _, t = UnitClass("player"); return t"#)
+            .unwrap(),
+        "PRIEST",
+        "UnitClass's second return is the UPPERCASE token"
+    );
+    assert_eq!(s.eval::<i64>(r#"return UnitSex("player")"#).unwrap(), 2);
+    // …and the snapshot is still the snapshot for everything else. `UnitLevel` is the boundary:
+    // the record carries a level byte and the client's accessor for it (`0x5abe00`) is DEAD, so
+    // this one reads the descriptor even for `"player"`.
+    assert_eq!(s.eval::<i64>(r#"return UnitLevel("player")"#).unwrap(), 5);
+
+    // The token going away entirely (the logout despawn frames) does not empty the buffer either.
+    s.set_unit("player", None);
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Nelprifour"
+    );
+    assert!(
+        s.eval::<bool>(r#"return UnitExists("player") == nil"#)
+            .unwrap(),
+        "the name and the unit are different questions — which is exactly what the buffer buys"
+    );
+
+    // An empty seed is refused, not stored: nothing in the reference ever empties this record.
+    s.set_player_record(PlayerRecord::default());
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Nelprifour"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return UnitRace("player")"#).unwrap(),
+        "Night Elf"
+    );
+
+    // A NAMED push does keep it in step — a second login as somebody else (1290's per-login VM
+    // is the usual route, but a push must never leave the two disagreeing).
+    let mut other = player();
+    other.name = Some("Onewarrior".into());
+    s.set_unit("player", Some(other));
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Onewarrior"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"local _, t = UnitClass("player"); return t"#)
+            .unwrap(),
+        "WARRIOR",
+        "a push that carries the field updates it; one that does not leaves it standing"
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitSex("player")"#).unwrap(),
+        3,
+        "player() is female — the record follows the push"
+    );
+
+    // Still the family's two returns, the second nil (1840).
+    assert_eq!(
+        s.eval::<i64>(r#"local t = {UnitName("player")}; return table.getn(t)"#)
+            .unwrap(),
+        1
+    );
+    // …and the case fold on the token holds on the fast path too.
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("PLAYER")"#).unwrap(),
+        "Onewarrior"
+    );
+}
+
+/// **The unset record's four answers, which are not uniform** (decision 2263).
+///
+/// The state is "no Enter World has been committed in this process" — unreachable from Lua in the
+/// reference, because the four verbs only exist inside `UI_Init`'s table and only an Enter World
+/// commit gets there. It is reachable *here* (a bare VM, a capture, a test world with no pick), so
+/// it is pinned to what the bytes do rather than left to whatever falls out:
+///
+/// - `UnitName` → nil, via `lua_pushstring(NULL)` at `0x517095` tail-jumping into `lua_pushnil`;
+/// - `UnitRace`/`UnitClass` → `nil, nil`, via the DBC bound and NULL-row arms — race 0 and class 0
+///   have no row, and those arms reach `pushnil` **without** falling back to the unit resolver;
+/// - `UnitSex` → the number **2**, because `0x517ef9`'s accessor feeds `fild [4*eax+0x808be4]`
+///   over `{2,3,1,6}` with **no bounds check at all**. It is the one of the four with no validity
+///   guard, and "male" is what an all-zero record means to it.
+#[test]
+fn an_unseeded_player_record_answers_the_references_four_ways() {
+    let s = UiScript::new().unwrap();
+    assert!(s
+        .eval::<bool>(r#"return UnitName("player") == nil"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitRace("player") == nil"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"local _, t = UnitRace("player"); return t == nil"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"return UnitClass("player") == nil"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"local _, t = UnitClass("player"); return t == nil"#)
+        .unwrap());
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitSex("player")"#).unwrap(),
+        2,
+        "the one of the four with no bounds check — an all-zero record reads male, not nil"
+    );
+    // And the fast path is the TOKEN, not a prefix: `"playerfoo"` is recognised but resolves to
+    // nothing, so it goes to the resolver and answers the resolver's nil.
+    assert!(s
+        .eval::<bool>(r#"return UnitName("playerfoo") == nil"#)
+        .unwrap());
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitSex("playerfoo")"#).unwrap(),
+        2,
+        "…which for UnitSex is the same 2, by the binding's own unresolved-token default"
     );
 }

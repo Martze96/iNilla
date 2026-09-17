@@ -845,22 +845,30 @@ fn drive_mouseover_tooltip(
         // distinction the director's two reference observations agree on — a **GENERIC(5)**
         // signpost follows the cursor, an interactable GameObject sits in the corner.
         //
-        // Not merely a guess-shaped proxy: after 0762 the only objects that are eligible for a
-        // tooltip *and* never highlightable are GENERIC ones, so "GENERIC" and "not interactable"
-        // pick out the same set here. They diverge only for the three always-eligible types
-        // (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25), which is exactly where a pin would
-        // settle it. Flagged INTERIM in 0766 rather than presented as verified.
+        // 0766 keyed this on "is it GENERIC(5)" and said plainly that it was a proxy: the real
+        // client asks the object's own `[vtbl+0x5c]`, and what selects it was not then pinned.
+        // **It is pinned now, and it is narrower** (decision 2259): `[vtbl+0x5c]` is `0x5f8630`,
+        // whose body is `template.data[0x621b00(type, semantic 0x13)] != 0`, and key `0x13`
+        // resolves for exactly ONE of the 31 GO types — GENERIC(5), at `data[0]`. Every other type
+        // gets `-1` back and `0x5f8150`'s unsigned bound turns that into FALSE.
         //
-        // **THE PIN HAS ARRIVED, AND IT IS NARROWER THAN THIS LINE** (2255): `[vtbl+0x5c]` is
-        // `0x5f8630` = `template.data[0x621b00(type, 0x13)] != 0`, and semantic key `0x13` exists
-        // on exactly ONE of the 31 types — GENERIC(5), at `data[0]`. So the cursor arm is "GENERIC
-        // **with `data[0]` set**", and a GENERIC with it clear is corner-seated; the three
-        // always-eligible types above are corner-seated too, so 0766's "GENERIC" reading wins over
-        // its "not interactable" one. Applying it moves 190 of the 1387 hoverable type-5 templates
-        // from the cursor to the corner — a visible change, so it is its own slice and not a
-        // passenger on a bug fix (2255 carries the counts and the reasoning).
-        let cursor_seated =
-            stores.get(entity).map(|s| s.0.gameobject_type_id()) == Ok(GO_TYPE_GENERIC);
+        // So the cursor arm is **GENERIC with `data[0]` set**, and a GENERIC with it clear is
+        // corner-seated like everything else. That also settles 0766's named divergence: the three
+        // always-eligible types (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25) carry no key
+        // `0x13`, so all three are corner-seated — 0766's "GENERIC" reading wins over its "not
+        // interactable" one.
+        //
+        // **`data[0]` is not `data[1]`.** The neighbouring slot is the mouseover-ELIGIBILITY column
+        // (0762, semantic `0x12`, `0x5f4830`), and the two answer different questions: `data[1]`
+        // says whether the object is hoverable at all, `data[0]` only says *where its plate sits*.
+        // 342 of the 447 type-5 entries in the reference's own `gameobjectcache.wdb` carry both;
+        // the objects that differ are hoverable and corner-seated, not silent.
+        let cursor_seated = stores.get(entity).map(|s| s.0.gameobject_type_id())
+            == Ok(GO_TYPE_GENERIC)
+            && go_inputs
+                .templates
+                .get(guid)
+                .is_some_and(|t| t.floating_tooltip);
         // Window px → the VM's y-up 768-virtual units (÷s, the input seam's own conversion) —
         // the anchor this point seats is resolved in UI units, so a raw-px point lands the
         // plate (s−1)× the cursor's distance from the bottom-left corner away from it.

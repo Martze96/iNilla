@@ -45,6 +45,22 @@ pub(crate) struct GoTemplate {
     /// (`0x5f6d80` — byte-for-byte the same shape, a different slot). `false` for every other type,
     /// which never consults it.
     pub(crate) highlight_column: bool,
+    /// GENERIC(5) only: the template's **`data[0]`**, the sole input of that type's `[vtbl+0x5c]`
+    /// (`0x5f8630`) — the fork in the mouseover publisher that decides whether this object's
+    /// tooltip FOLLOWS THE CURSOR (`0x492a01` → `0x52ffe0(owner, 6, 0, 0)`, the SetOwner core at
+    /// anchor state 6) or takes the default corner seat like a creature's (`0x492a42`, which
+    /// writes no owner and fires `OnTooltipSetDefaultAnchor` instead).
+    ///
+    /// The slot is named by `0x621b00(type, semantic 0x13)`, a key that resolves for exactly one
+    /// of the 31 GO types — so no other type can take the cursor arm, and 0766's INTERIM "GENERIC
+    /// vs not" proxy is replaced by the real key (decision 2259). **Distinct from
+    /// [`Self::highlight_column`]**, which is `data[1]` via semantic `0x12` and gates *eligibility*
+    /// rather than *placement*: an object can be hoverable and still be corner-seated.
+    ///
+    /// `false` for every other type. (The *name* is inferred from vmangos's field order; the index
+    /// and the fork are byte-verified, and the data is cross-checked against the reference client's
+    /// own `gameobjectcache.wdb` — 1890 entries, zero disagreements with the server's.)
+    pub(crate) floating_tooltip: bool,
     /// MEETINGSTONE (type 23) only: the template's `data[2]` = **areaID**, the sole input of that
     /// type's own `highlightable` slot (`0x5f6990` — decision 1106). `None` for every other type.
     pub(crate) meeting_stone_area: Option<u32>,
@@ -124,6 +140,10 @@ impl GameObjectTemplates {
             29 => data[19] != 0,
             _ => false,
         };
+        // GENERIC(5): data[0] = the tooltip-placement fork's input (decision 2259). Same shape as
+        // the highlight column above and deliberately beside it — they are adjacent slots that
+        // answer different questions, and reading them as one is the mistake 0766 made.
+        let floating_tooltip = type_id == 5 && data[0] != 0;
         // MEETINGSTONE (23): data[2] = areaID (vmangos `gameobject_template`), the one input of
         // that type's own highlightable slot.
         let meeting_stone_area = (type_id == 23).then(|| data[2].max(0) as u32);
@@ -150,6 +170,7 @@ impl GameObjectTemplates {
                 lock_id,
                 name,
                 highlight_column,
+                floating_tooltip,
                 meeting_stone_area,
                 mo_transport,
                 text_page,
@@ -268,5 +289,62 @@ mod tests {
             &data,
         );
         assert_eq!(t.get(guid).map(|g| g.lock_id), Some(38));
+    }
+
+    /// **`data[0]` and `data[1]` are different questions, and a GENERIC object can answer them
+    /// differently** — the pin that replaces 0766's INTERIM proxy (decision 2259).
+    ///
+    /// `data[1]` (semantic `0x12`, `0x5f4830`) is mouseover ELIGIBILITY: is this hoverable at all.
+    /// `data[0]` (semantic `0x13`, `0x5f8630`) is PLACEMENT: does its plate follow the cursor or
+    /// take the corner seat. Reading one as the other is exactly the mistake 0766 named as a proxy.
+    ///
+    /// The two rows are real, taken from the reference client's own `gameobjectcache.wdb`
+    /// (build 5875): `Brill` (entry 1630) is hoverable *and* cursor-seated, while
+    /// `Doodad_WoodSignPointerNice10` (175656) — the same family of wooden pointer sign — is
+    /// hoverable and CORNER-seated. Same model family, opposite answers, which is why the type
+    /// alone could never have been the key.
+    #[test]
+    fn a_generic_can_be_hoverable_and_still_corner_seated() {
+        let mut t = GameObjectTemplates::default();
+        let mut brill = [0i32; 24];
+        (brill[0], brill[1]) = (1, 1);
+        let mut pointer = [0i32; 24];
+        (pointer[0], pointer[1]) = (0, 1);
+        t.insert(1630, 5, "Brill".into(), &brill);
+        t.insert(175656, 5, "Doodad_WoodSignPointerNice10".into(), &pointer);
+
+        let brill = t.templates.get(&1630).expect("Brill cached");
+        assert!(brill.highlight_column, "Brill is hoverable");
+        assert!(brill.floating_tooltip, "Brill's plate follows the cursor");
+
+        let pointer = t.templates.get(&175656).expect("the pointer sign cached");
+        assert!(
+            pointer.highlight_column,
+            "the pointer sign is hoverable too"
+        );
+        assert!(
+            !pointer.floating_tooltip,
+            "but its plate takes the corner seat — eligibility did not decide placement"
+        );
+    }
+
+    /// The fork's key exists for GENERIC(5) and for no other type: `0x621b00` answers semantic
+    /// `0x13` for exactly one of the 31 types, so `data[0]` is never read as a placement flag
+    /// anywhere else — a CHEST's `data[0]` is its lockId, and must not move its tooltip.
+    #[test]
+    fn no_other_type_reads_data0_as_the_placement_fork() {
+        let mut t = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        data[0] = 1;
+        for type_id in [0u32, 1, 2, 3, 6, 7, 8, 9, 10, 16, 22, 23, 25, 29] {
+            t.insert(9000 + type_id, type_id, format!("type {type_id}"), &data);
+            assert!(
+                !t.templates
+                    .get(&(9000 + type_id))
+                    .expect("cached")
+                    .floating_tooltip,
+                "type {type_id} must not take the cursor arm — it carries no semantic 0x13"
+            );
+        }
     }
 }
