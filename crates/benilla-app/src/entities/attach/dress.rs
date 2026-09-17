@@ -103,6 +103,161 @@ pub(super) fn part_materials<'a>(
     }
 }
 
+/// The material store and the two animated-material registries, for the one entity population
+/// that needs a material of its **own** rather than the batch's (decision 2295).
+///
+/// Taken as one bundle, and taken by the dressing path itself rather than by a system that fixes
+/// parts up afterwards, because the cloned handles have to be in hand *before* the part's
+/// [`InteriorLit`](benilla_world::interior) and [`FadeMaterials`] are built from them — a later
+/// pass would have to reach into both and rewrite what the classifier already wrote.
+pub(super) struct OwnMats<'a> {
+    pub(super) store: &'a mut Assets<WowModelMaterial>,
+    pub(super) uv: &'a mut benilla_world::doodad_anim::UvAnimMaterials,
+    pub(super) tint: &'a mut benilla_world::doodad_anim::TintAnimMaterials,
+    pub(super) table: &'a mut benilla_world::mat_anim_table::MatAnimTable,
+}
+
+/// One part's **own** variant set — [`PartMaterials`]' owning twin, held by the spawn for as long
+/// as it takes to dress the part.
+struct OwnedMaterials {
+    steady: Handle<WowModelMaterial>,
+    interior: Option<Handle<WowModelMaterial>>,
+    fade_blend: Option<Handle<WowModelMaterial>>,
+    bake: Option<Handle<WowModelMaterial>>,
+    bake_blend: Option<Handle<WowModelMaterial>>,
+    zfill: Option<Handle<WowModelMaterial>>,
+}
+
+impl OwnedMaterials {
+    fn borrow(&self) -> PartMaterials<'_> {
+        PartMaterials {
+            steady: &self.steady,
+            interior: self.interior.as_ref(),
+            fade_blend: self.fade_blend.as_ref(),
+            bake: self.bake.as_ref(),
+            bake_blend: self.bake_blend.as_ref(),
+            zfill: self.zfill.as_ref(),
+        }
+    }
+}
+
+/// Give this part a material set of its **own**, registered against its own instance's anim host —
+/// or `None`, which is every part but a measured thirteen batches (decision 2295).
+///
+/// **Who needs one.** A batch whose file-sequence slots bake *different* UV or tint loops cannot be
+/// served by a material every instance of the model shares: the registries are keyed by material,
+/// so one row would have to answer for placements that are playing different slots. That is
+/// 1408's finding, and the entity side of it is six GameObject models — `BloodOfHeroes`'s five
+/// bubble sheets (slot 0 holds them still, slot 1 sweeps them, at freq 16384/16383, so the pools
+/// bubble independently), `Valentines_Blanket`, `G_GnomeTerminal`'s screen, and on the tint
+/// channel `G_FreezingTrap`'s glow card, `OrgrimmarPentagram` and `ScholomanceCrystalBall01`.
+/// **Four of the five tint batches bake nothing in slot 0**, so their shared material can only
+/// ever seed white however faithfully it is ticked — the hunter's trap glows flat instead of
+/// pulsing blue-white as it arms.
+///
+/// **Why it is gated on `GameObject`.** Not as a safety valve: the census is the reason. No unit,
+/// no player body, no corpse and no held item in the shipped corpus authors a per-sequence set on
+/// either channel (`benilla-extract entityuvscan`), so widening this past GameObjects would add a
+/// clone-and-register branch to the hottest spawn path in the client for an empty population. If
+/// a future model joins it, the gate is the line to move and this paragraph is why.
+fn own_per_sequence_materials(
+    part: &EntityPart,
+    dress: &PartDress<'_>,
+    own: &mut OwnMats<'_>,
+) -> Option<OwnedMaterials> {
+    let loops = part.uv_loops();
+    let (uv_seq, tint_seq) = (loops.seqs.is_some(), part.rgb_seq.is_some());
+    if dress.kind != ModelKind::GameObject || !(uv_seq || tint_seq) {
+        return None;
+    }
+    let src = part_materials(part, dress.char_mats);
+    // The shared variants may still be PARKED (`model_render::lazy` reserves a handle and holds
+    // the value until something view-visible binds it), so each is realized before it is read —
+    // the same order `spell_fx`'s clone takes, and the reason 2038's registrations all returned
+    // `None` when they skipped it.
+    let mut clone = |h: &Handle<WowModelMaterial>| -> Option<Handle<WowModelMaterial>> {
+        benilla_world::model_render::lazy::realize(own.store, h.id());
+        let mut mat = own.store.get(h.id()).cloned()?;
+        // A clone leaves the shared table (decision 1381): its rows are its own, and a carried
+        // slot would add the shared delta on top of them.
+        mat.extension.anim_slots = Vec4::ZERO;
+        Some(own.store.add(mat))
+    };
+    let owned = OwnedMaterials {
+        steady: clone(src.steady)?,
+        interior: src.interior.and_then(&mut clone),
+        fade_blend: src.fade_blend.and_then(&mut clone),
+        bake: src.bake.and_then(&mut clone),
+        bake_blend: src.bake_blend.and_then(&mut clone),
+        // The depth-prime twin is NOT cloned and NOT registered, exactly as on the placed-doodad
+        // lane: it draws only while the part feathers, and its alpha test reading unscrolled UVs
+        // for those frames is the behaviour the streamer has always had.
+        zfill: src.zfill.cloned(),
+    };
+    // Every variant the part can swap to over its life — indoors, feathering, both — takes a row,
+    // or a GameObject that walks under a roof would stop mid-scroll.
+    for id in [
+        Some(&owned.steady),
+        owned.interior.as_ref(),
+        owned.fade_blend.as_ref(),
+        owned.bake.as_ref(),
+        owned.bake_blend.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(Handle::id)
+    {
+        if uv_seq {
+            benilla_world::doodad_anim::register_entity_uv(
+                own.uv,
+                own.table,
+                own.store,
+                id,
+                &loops,
+                Some(dress.unit),
+            );
+        }
+        if let Some(seqs) = &part.rgb_seq {
+            benilla_world::doodad_anim::register_tint(
+                own.tint,
+                own.table,
+                own.store,
+                id,
+                benilla_world::doodad_anim::TintLoop::PerSeq {
+                    seqs: seqs.clone(),
+                    host: dress.unit,
+                },
+            );
+        }
+    }
+    Some(owned)
+}
+
+/// Put this part in `tick_anim_materials`' draw scan — **iff something registered a row for it**.
+///
+/// The marker and the registration have to ask ONE question, because 2038's whole bug class is the
+/// two disagreeing: a marked part with no registry entry trips the lane's own tripwire, and a
+/// registered material that no marked part accounts for freezes silently, which is how every
+/// waterfall in the game stood still for three days. So this is not a predicate over the part's
+/// channels — it is a statement about what actually happened a few lines up.
+///
+/// Two registrations can have happened. The **shared** UV lane's, made inside
+/// `entity_variants` when the batch's transform moves at all (`UvLoops::animates`, which is not
+/// `uv_anim.is_some()`: a rotate-only batch answers `None` there). And this instance's **own**
+/// clone, when it has one — which is the only way the TINT channel is ever registered on an
+/// entity, and why `owned` has to be consulted rather than the part's `rgb_seq` re-tested: the
+/// clone can decline (a full table, a dead handle), and a marker for a registration that did not
+/// happen is the first half of the bug above.
+fn mark_mat_anim(
+    child: &mut bevy::ecs::system::EntityCommands<'_>,
+    part: &EntityPart,
+    owned: &Option<OwnedMaterials>,
+) {
+    if part.uv_loops().animates() || owned.is_some() {
+        child.insert(benilla_world::doodad_anim::AnimMatPart);
+    }
+}
+
 /// Stamp a pickable part (or card) with the pick population its kind belongs to: the mouseover
 /// pickers filter by these markers instead of kind-comparing every `WorldObject` row per frame.
 /// One site for both the mesh-part and the billboard-card spawn, so the two can't drift.
@@ -183,10 +338,11 @@ pub(super) fn spawn_group(
     part: &EntityPart,
     group: &super::merge::BodyGroup,
     dress: &PartDress,
+    own: &mut OwnMats<'_>,
 ) -> bool {
     let members =
         (group.members.len() > 1).then(|| super::merge::DressedGroup(group.members.clone().into()));
-    spawn_part(commands, part, group.first() as usize, members, dress)
+    spawn_part(commands, part, group.first() as usize, members, dress, own)
 }
 
 /// Spawn one mesh part (or billboard card) of a body under `dress.unit`; `group` is the merged
@@ -197,11 +353,18 @@ pub(super) fn spawn_part(
     index: usize,
     group: Option<super::merge::DressedGroup>,
     dress: &PartDress,
+    own: &mut OwnMats<'_>,
 ) -> bool {
     if let Some(info) = &part.billboard {
-        return spawn_billboard_part(commands, part, index, info, dress);
+        return spawn_billboard_part(commands, part, index, info, dress, own);
     }
-    let mats = part_materials(part, dress.char_mats);
+    // A material of this instance's OWN, for the measured thirteen batches whose slots disagree
+    // (2295) — resolved first, because everything below dresses from whatever this returns.
+    let owned = own_per_sequence_materials(part, dress, own);
+    let mats = match &owned {
+        Some(o) => o.borrow(),
+        None => part_materials(part, dress.char_mats),
+    };
     let set = mats.fade_set();
     // A freshly-streamed CGObject appear-fades in (decision 0032): spawn already on the blend twin
     // with a ≈0 `MeshTag`, so it doesn't flash opaque for a frame before `apply_render_fade` ramps
@@ -314,6 +477,7 @@ pub(super) fn spawn_part(
             dress.unit,
         ));
     }
+    mark_mat_anim(&mut child, part, &owned);
     effective.dress(&mut child, &set)
 }
 
@@ -328,6 +492,7 @@ fn spawn_billboard_part(
     index: usize,
     info: &benilla_assets::BillboardInfo,
     dress: &PartDress,
+    own: &mut OwnMats<'_>,
 ) -> bool {
     let anchor = commands
         .spawn((
@@ -363,12 +528,15 @@ fn spawn_billboard_part(
     // (decision 0836). Splitting the batch into a world-root entity is benilla's parenting detail;
     // it is not a reason for the glow on a weapon's gems to blaze at full strength over a body that
     // has not appeared yet.
-    let set = FadeSet {
-        steady: &part.material,
-        blend: part.fade_blend.as_ref(),
-        bake_blend: part.material_interior_bake_blend.as_ref(),
-        zfill: part.zfill.as_ref(),
+    // A card may need a material of its own for exactly the same reason a mesh part does — and
+    // on this population it is the card that needs it: `World\Goober\G_FreezingTrap`'s animated
+    // batch IS the additive glow card, whose blue-white pulse is keyed in file slot 2 alone.
+    let owned = own_per_sequence_materials(part, dress, own);
+    let mats = match &owned {
+        Some(o) => o.borrow(),
+        None => part_materials(part, dress.char_mats),
     };
+    let set = mats.fade_set();
     let effective = PartFade::resolve(dress.fade, &set);
     let (init_mat, tag_alpha) = effective.seed(&set, dress.now);
     let mut card = commands.spawn((
@@ -401,9 +569,9 @@ fn spawn_billboard_part(
         card.insert(aabb);
     }
     if let Some(lit) = part_interior_lit(
-        &part.material,
-        part.material_interior.as_ref(),
-        part.material_interior_bake.as_ref(),
+        mats.steady,
+        mats.interior,
+        mats.bake,
         dress.bake_center,
         dress.unit,
     ) {
@@ -417,6 +585,11 @@ fn spawn_billboard_part(
             dress.unit,
         ));
     }
+    // …and its batch's material animation, on the same rule as a mesh part (2295). A card is a
+    // batch of the unit's own model; the split into a world-root entity is benilla's parenting
+    // detail, never a reason for one batch of a model to animate and its sibling not to — and on
+    // this population it is the card that carries it.
+    mark_mat_anim(&mut card, part, &owned);
     let armed = effective.dress(&mut card, &set);
     let card = card.id();
     // The card follows the JOINT when the unit is rigged, so it does not cascade with the anchor's
@@ -431,6 +604,28 @@ fn spawn_billboard_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A standalone [`OwnMats`] for the spawn tests — none of them dresses a GameObject, so the
+    /// lane is never taken; it exists so the spawn's signature can stay non-optional, which is
+    /// what stops a production caller passing `None` and silently losing the clone.
+    #[derive(Default)]
+    struct TestOwn {
+        store: Assets<WowModelMaterial>,
+        uv: benilla_world::doodad_anim::UvAnimMaterials,
+        tint: benilla_world::doodad_anim::TintAnimMaterials,
+        table: benilla_world::mat_anim_table::MatAnimTable,
+    }
+
+    impl TestOwn {
+        fn lane(&mut self) -> OwnMats<'_> {
+            OwnMats {
+                store: &mut self.store,
+                uv: &mut self.uv,
+                tint: &mut self.tint,
+                table: &mut self.table,
+            }
+        }
+    }
     use benilla_world::model_fade::{FadeMaterials, PendingAppearFade};
 
     /// One synthetic batch at `char_slot`/`two_sided`, carrying its own (distinguishable) built
@@ -456,6 +651,7 @@ mod tests {
             billboard: None,
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
             uv_anim: None,
             uv_seq: None,
             uv_rot_seq: None,
@@ -550,11 +746,12 @@ mod tests {
             now: 0.0,
             fade: JoinedFade::Steady,
         };
+        let mut own = TestOwn::default();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let armed = {
             let world = app.world();
             let mut commands = Commands::new(&mut queue, world);
-            spawn_part(&mut commands, &fadeable, 0, None, &dress)
+            spawn_part(&mut commands, &fadeable, 0, None, &dress, &mut own.lane())
         };
         queue.apply(app.world_mut());
         assert!(!armed, "steady: no ramp armed");
@@ -614,11 +811,12 @@ mod tests {
             now: 0.0,
             fade: JoinedFade::Pending { since: SINCE },
         };
+        let mut own = TestOwn::default();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let armed = {
             let world = app.world();
             let mut commands = Commands::new(&mut queue, world);
-            spawn_part(&mut commands, &card, 0, None, &dress)
+            spawn_part(&mut commands, &card, 0, None, &dress, &mut own.lane())
         };
         queue.apply(app.world_mut());
         assert!(
@@ -690,12 +888,20 @@ mod tests {
                 now: 0.0,
                 fade: JoinedFade::Steady,
             };
+            let mut own = TestOwn::default();
             let mut queue = bevy::ecs::world::CommandQueue::default();
             {
                 let world = app.world();
                 let mut commands = Commands::new(&mut queue, world);
-                spawn_part(&mut commands, &part(None, false), 0, None, &dress);
-                spawn_part(&mut commands, &billboard, 1, None, &dress);
+                spawn_part(
+                    &mut commands,
+                    &part(None, false),
+                    0,
+                    None,
+                    &dress,
+                    &mut own.lane(),
+                );
+                spawn_part(&mut commands, &billboard, 1, None, &dress, &mut own.lane());
             }
             queue.apply(app.world_mut());
             let world = app.world_mut();

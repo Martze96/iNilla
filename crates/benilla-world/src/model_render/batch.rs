@@ -58,6 +58,23 @@ pub struct BatchVariants {
     pub zfill: Option<Handle<WowModelMaterial>>,
 }
 
+/// The **UV lane** an [`M2BatchMaterials::entity_variants`] call registers into (decision 2295) —
+/// the animated-material registry, the delta table (decision 1381) and, for the one measured class
+/// that needs it, the instance the materials belong to.
+///
+/// A bundle rather than three arguments because they are one thing — *where this batch's texture
+/// transform is delivered* — and because the shape that keeps failing on this lane is a caller who
+/// takes some of the pieces and not the rest.
+pub struct EntityUvLane<'a> {
+    pub reg: &'a mut crate::doodad_anim::UvAnimMaterials,
+    pub table: &'a mut crate::mat_anim_table::MatAnimTable,
+    /// `Some` when these materials belong to ONE instance rather than to the batch — the clone a
+    /// spawner makes for a GameObject whose file-sequence slots bake different loops (1408's
+    /// population, reached from the entity side by 2295). `None` — the overwhelming majority — is
+    /// the shared, deduped material every instance of the batch draws through.
+    pub instance: Option<Entity>,
+}
+
 /// The pair one skybox batch draws with ([`M2BatchMaterials::skybox`]): the authored blend at full
 /// weight, and the promoted SRC_ALPHA twin the 4-second crossfade rides (equal to `steady` when the
 /// authored blend already blends).
@@ -239,11 +256,27 @@ impl M2BatchMaterials<'_> {
     /// The full variant set an **entity** part needs: every M2 entity — unit, player, GameObject,
     /// held item, spell effect — is built LIT and carries the same indoor pair, because the
     /// reference hands every entity M2 the same entity-node fill (wow-re `unit-m2-shader-light`).
+    ///
+    /// **It also puts the batch on the UV lane** (decision 2295), and takes `uv` for exactly that
+    /// reason rather than leaving it to the caller: seeding a material's `sun_scale.zw` and
+    /// registering it for the per-frame sample are one fact — *this batch's texture transform
+    /// runs* — and the recurring bug on this lane is a caller that does one and not the other
+    /// (2038 marked without registering and froze every waterfall; a `play_uv` flip without a
+    /// registration would freeze every entity batch at its first key instead of its identity,
+    /// which is a different wrong frame, not a fix). Every variant that carries the loop is
+    /// registered here, because a unit walking indoors or feathering in swaps material and would
+    /// otherwise stop scrolling mid-stride.
+    ///
+    /// The **depth-prime twin is deliberately not registered**, matching the placed-doodad lane
+    /// (`terrain_stream::spawn::assemble` registers the cutout and blend materials and no other):
+    /// it draws only while a batch feathers, and its alpha test reading unscrolled UVs for those
+    /// frames is the behaviour the streamer has always had.
     pub fn entity_variants(
         &mut self,
         sub: &ModelSubmesh,
         texture: Option<Handle<Image>>,
         order: u16,
+        uv: &mut EntityUvLane<'_>,
     ) -> Option<BatchVariants> {
         let light = self.light.as_ref()?.0.clone();
         let steady = self.build(
@@ -253,7 +286,7 @@ impl M2BatchMaterials<'_> {
             ShadeSel::Lit,
             false,
             false,
-            false,
+            true,
             &light,
         );
         let interior = self.build(
@@ -263,7 +296,7 @@ impl M2BatchMaterials<'_> {
             ShadeSel::Matte,
             false,
             false,
-            false,
+            true,
             &light,
         );
         let interior_bake = self.build(
@@ -273,7 +306,7 @@ impl M2BatchMaterials<'_> {
             ShadeSel::Matte,
             true,
             false,
-            false,
+            true,
             &light,
         );
         // A multiply batch (Mod/Mod2x) and an authored-Blend batch are their own twin: the first
@@ -296,7 +329,7 @@ impl M2BatchMaterials<'_> {
                 ShadeSel::Lit,
                 false,
                 true,
-                false,
+                true,
                 &light,
             )
         };
@@ -310,10 +343,31 @@ impl M2BatchMaterials<'_> {
                 ShadeSel::Matte,
                 true,
                 true,
-                false,
+                true,
                 &light,
             )
         };
+        // On the lane, now, in the same call that built and seeded them. `register_entity_uv` is
+        // idempotent per material, so the variants that collapsed onto each other cost nothing.
+        let loops = crate::doodad_anim::UvLoops::of(sub);
+        if loops.animates() {
+            for id in [
+                &steady,
+                &interior,
+                &interior_bake,
+                &interior_bake_blend,
+                &fade_blend,
+            ] {
+                crate::doodad_anim::register_entity_uv(
+                    uv.reg,
+                    uv.table,
+                    &mut self.materials,
+                    id.id(),
+                    &loops,
+                    uv.instance,
+                );
+            }
+        }
         Some(BatchVariants {
             steady,
             interior,

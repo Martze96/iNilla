@@ -493,9 +493,9 @@ enum Command {
     ///
     /// Decision 0271 deferred this channel on the claim that "no effect model in the current
     /// corpus needs it"; this is that claim, made countable — it is what 2282 read to size the
-    /// missing scroll, and it is how the same question is re-asked of the lanes that still run
-    /// none of it (the unit and GameObject batches, which `entity_variants` still builds with
-    /// `play_uv = false`). It asks the **bake**, not a transcription of it: a batch is in scope
+    /// missing scroll, and it is how the same question was re-asked of the unit / GameObject /
+    /// held-item corpus that 2295 then fixed (`entityuvscan`, its twin). It asks the **bake**,
+    /// not a transcription of it: a batch is in scope
     /// exactly when `tex_anim` emitted a loop on any of the three channels, the same test the
     /// lanes that DO run them use (`ui_models` 2019, `spell_fx` 2282).
     ///
@@ -520,6 +520,83 @@ enum Command {
     /// stage (`precast`/`cast`/`impact`/`state`/`channel`/`missile`/`area`).
     Fxuvscan {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all reachable effect
+        /// models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every model the **ENTITY lane** can render — every `CreatureDisplayInfo` →
+    /// `CreatureModelData` body (NPCs, critters, mounts, and every PLAYER, which resolves through
+    /// the same chain, decision 0041), every `GameObjectDisplayInfo` model, every
+    /// `ItemDisplayInfo` left/right model joined to the `Item\ObjectComponents\` folder the
+    /// archives actually hold it in, and the corpse lane's `<Race><Sex>DeathSkeleton` bone piles —
+    /// and census the batches whose **texture transform animates**, then classify each by what a
+    /// consumer that runs NONE of it renders.
+    ///
+    /// The twin of `Fxuvscan`, asked of the corpus that record's fix did NOT reach. Decision 2282
+    /// gave the spell-effect lane its texture transform and named this as its first deferral:
+    /// `model_render::batch::Materials::entity_variants` passed `play_uv = false`, and `build`
+    /// does `play_uv.then_some(sub.uv_anim.as_ref()).flatten()` — so every unit, player,
+    /// GameObject and held-item batch was handed no loop and drew its authored UVs, untransformed,
+    /// for ever. Nobody had measured how much content that is; this is that measurement, it is
+    /// what sized **decision 2295**, which closed it, and it shares `fxuvscan`'s whole per-batch
+    /// reader (`uv_batch`) so the two corpora cannot be judged by two different rules. It stays
+    /// because the census is how the claim "this lane needs no channel" is kept checkable — which
+    /// is the one thing 0271's deferral was missing.
+    ///
+    /// **Read the corpus from the tables, never from a path prefix.** "The path looks broken" and
+    /// "the path is reachable" are different questions and only the second one is worth a session
+    /// (2282's own closing note). A held item's directory is not even a column — the equipment lane
+    /// picks `Weapon`/`Shield`/`Shoulder`/`Head`/`Ammo`/`Quiver` from the slot the item is worn in
+    /// — so the sweep asks the archives which folder holds each display's basename, and expands a
+    /// helm stem into its sixteen per-race/sex files the way the attach does.
+    ///
+    /// The classes are `fxuvscan`'s, judged the same way — from the texture's own alpha through the
+    /// batch's authored address mode (INVISIBLE / NEVER / FROZEN / HELD / UNKNOWN; that command's
+    /// doc is where they are explained) — with one thing this corpus adds: a CREATURE batch's
+    /// `Monster1/2/3` sheet is **blank in the M2** and filled per display from
+    /// `CreatureDisplayInfo.textureVariation`, so one batch has as many sheets as the model has
+    /// skins and the verdict is asked once per skin. A character composite (body atlas, hair,
+    /// object skin) has no authored sheet at all and reads UNKNOWN, which is the honest answer
+    /// rather than a silent pass.
+    ///
+    /// **The load-bearing column is the CLOCK**, because it decides the SHAPE of the fix and not
+    /// merely its size:
+    ///
+    /// - **GSEQ** — every live loop rides a global sequence, a free-running per-scene clock the
+    ///   reference anchors once per instance at attach. One shared material uniform is faithful
+    ///   there; that is 0136 choice 1's lane, already built.
+    /// - **BAND** — every live loop rides its sequence band, i.e. the instance's own play head. Two
+    ///   units playing different animations, or the same one at different phases, are at different
+    ///   offsets, and no shared uniform can serve both: that is 2282's per-instance `UvLoop`.
+    /// - **MIXED** / **HOLD** — the batch's channels disagree, or it is keyed to a constant
+    ///   non-identity offset that needs a seed and no clock at all.
+    ///
+    /// Each affected batch prints its three channels (translation / rotation / scaling — a sweep
+    /// that looked only at translation would have missed `GroundingTotem_Impact` entirely, which is
+    /// scale-only), its per-axis texel reasoning, both frozen verdicts, its clock, which file
+    /// sequence slots carry the keys and what those sequences are *called*, and — where the bake
+    /// refused the shared lane — `uvslotscan`'s own `uniform()` verdict for the same set. The
+    /// report closes with every affected model sorted by POPULATION: how many table rows can put it
+    /// on screen, which is the difference between one gnome terminal and every murloc in the game.
+    ///
+    /// **And then the same corpus again for the M2COLOR TINT**, because the UV channel is not the
+    /// only one this lane drops. `build` passes `sub.rgb_anim.as_ref()` *unconditionally* — there
+    /// is no `play_rgb` to flip — so a tint-animating entity batch is seeded at the loop's first
+    /// key and then never re-sampled, because `doodad_anim::register_tint`'s only call sites (like
+    /// `register_uv`'s) are in the world streamer's `assemble.rs`. The hole is the missing
+    /// REGISTRATION, not a missing argument, which is why flipping `play_uv` alone would only
+    /// trade one frozen frame for another.
+    ///
+    /// A tint is a **multiply**, so its failure mode is the wrong colour rather than missing
+    /// geometry, and the classes say how wrong: BLACK (the frozen tint kills the batch), STRONG,
+    /// SLIGHT, NEGLIGIBLE — bands over one printed number, the worst per-channel distance between
+    /// the frozen value and anything the loop reaches. Two qualifications the raw count would
+    /// overstate without: a batch whose slot 0 bakes nothing seeds **white**, so it is the right
+    /// colour until a later slot's animation plays and wrong only *during* it (the `slots` line
+    /// names which); and the **ALPHA** channel is counted beside them precisely because this lane
+    /// DOES serve it — `attach::dress::spawn_part` gives every part a `MatAnim` that
+    /// `sample_mat_anim` ticks per instance. One of the three material-animation channels runs.
+    Entityuvscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all reachable entity
         /// models if omitted.
         prefix: Option<String>,
     },
@@ -982,6 +1059,7 @@ fn main() -> Result<()> {
         Command::Seqclockscan { prefix } => scan::seqclockscan(&mut chain, prefix.as_deref())?,
         Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
         Command::Fxuvscan { prefix } => scan::fxuvscan(&mut chain, prefix.as_deref())?,
+        Command::Entityuvscan { prefix } => scan::entityuvscan(&mut chain, prefix.as_deref())?,
         Command::Envmapscan { prefix } => scan::envmapscan(&mut chain, prefix.as_deref())?,
         Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,

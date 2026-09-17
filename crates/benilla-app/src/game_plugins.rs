@@ -834,6 +834,16 @@ pub(crate) mod schedule_tests {
     /// - **2282:** the three fx attaches against the mat-anim tick and its probe, over
     ///   `MatAnimTable`/`UvAnimMaterials` — immaterial by construction, because attach writes
     ///   the rows a tick would, off the same clock.
+    /// - **2295:** the same two readers against `entities::update_display_models` and
+    ///   `entities::attach::attach_entity_visuals`, over the same two resources, now that the
+    ///   entity lane registers its own texture transform. **+4**, measured pair by pair on the
+    ///   rebased tree rather than assumed additive — both writers already held
+    ///   `Assets<WowModelMaterial>`, so most of the systems they newly meet were already
+    ///   ambiguous against them for another reason, and `redress_player_looks` takes the
+    ///   identical three resources and adds no pair at all. Immaterial for 2282's reason plus
+    ///   one: a display is built ONCE, the frame its asset lands, and a row left unwritten for
+    ///   a frame reads as the material's own built seed — the batch's authored `t = 0`, not a
+    ///   wrong value — because the same call seeds `sun_scale.zw` at the loop's opening.
     ///
     /// **3,280 (decision 2288)** — the one query cache: a read that asks marks its miss through
     /// `&self`, so a feed that only resolves a name or a template holds the owner shared, and
@@ -844,7 +854,7 @@ pub(crate) mod schedule_tests {
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_280;
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_284;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

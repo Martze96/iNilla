@@ -164,9 +164,12 @@ impl ItemDisplayCatalog {
         self.displays.is_empty()
     }
 
-    /// Iterate the rows (order unspecified) — the cross-DBC join checks use it.
-    pub fn iter(&self) -> impl Iterator<Item = &ItemDisplay> {
-        self.displays.values()
+    /// Iterate `(displayId, row)` (order unspecified) — the cross-DBC join checks use it, and so
+    /// does the corpus sweep that has to name *which* display reaches a model
+    /// (`benilla-extract entityuvscan`). The id is carried because a census that cannot join back
+    /// to a row id answers "how many" and never "which one".
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &ItemDisplay)> {
+        self.displays.iter().map(|(&id, d)| (id, d))
     }
 }
 

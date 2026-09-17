@@ -449,7 +449,7 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// registration without a row, or a row without a registration, is that same shape. One verb
 /// cannot be half-taken. It is also why the three pieces went back to `pub(crate)` in the same
 /// commit, which is the rare crossing that *lowers* the surface it replaces.
-/// And 183 → 184: `doodad_anim::FxUvLoops`, the argument of the verb above. A texture transform is
+/// And 183 → 184: `doodad_anim::UvLoops`, the argument of the verb above. A texture transform is
 /// ONE authored record with four baked channels — 1408's two translation spellings plus 2019's
 /// per-slot rotation and scaling — and which of them a batch fills is not a thing the caller gets
 /// to reason about: a scale-only transform (`Spells\GroundingTotem_Impact.mdx`) and a
@@ -459,7 +459,36 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// in the engine, where the bake's rules live, instead of copied into the effect attach where they
 /// would drift. Four positional `Option`s would have been the alternative, and swapping two of
 /// them is a silent wrong-channel bug the compiler cannot see.
-const CEILING: usize = 184;
+/// And 184 → 186, both for the ENTITY lane (decision 2295), which is the same crossing 2282 made
+/// for the effect lane and made for the same reason.
+/// `doodad_anim::register_entity_uv` is the second PUBLISH verb on this lane: put a unit /
+/// GameObject / held-item batch material on the UV lane, picking the shared clock or the
+/// instance's play head from the authored record rather than making the caller reason about it.
+/// It is a separate verb from `register_fx_uv` and not a flag on it because the two lanes differ
+/// in the one thing a caller cannot get right by accident — an effect's clocks are measured from
+/// its own attach (0856/0858) and a resident entity's are the scene's — and a boolean spelling of
+/// that would read as a preference.
+/// `model_render::EntityUvLane` is the argument `entity_variants` grew, and the crossing it buys
+/// is the point of the decision: building an entity batch's material and putting it on the lane
+/// are ONE act, so the engine takes the registry and the delta table *in the same call* instead of
+/// handing back six handles and trusting the game to register them. That is 2038's law spelled in
+/// the signature — a `play_uv` flip without a registration freezes every entity batch at its first
+/// key instead of its identity, which is a different wrong frame and not a fix — and it is why the
+/// lane is a bundle rather than three arguments a caller can pass two of.
+/// And 186 → 189, the second half of 2295 — the ONE entity population that needs a material of
+/// its own rather than the batch's, which the dressing path clones and registers because the
+/// clone has to exist before the part's interior and fade records are built from it.
+/// `doodad_anim::AnimMatPart` is the draw-scan marker, and it crosses for the reason 1375 put it
+/// at the spawn site in the first place: the marker and the registration are one predicate, and
+/// the game is where an entity part is spawned. The engine cannot insert it — it does not know
+/// an entity part exists — and a lane that let the two drift is 2038's three frozen days.
+/// `doodad_anim::register_tint` and `doodad_anim::TintLoop` are the tint channel's twins of the
+/// UV verbs above, for the same five batches on three GameObject models: `G_FreezingTrap`'s glow
+/// card, `OrgrimmarPentagram`, `ScholomanceCrystalBall01` — four of whose five batches bake
+/// **nothing** in file slot 0, so a shared material can only ever seed white however faithfully it
+/// is ticked. They were already `pub` for the world streamer; what crosses here is the game naming
+/// them, and it is the same crossing the UV half makes one line up.
+const CEILING: usize = 189;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

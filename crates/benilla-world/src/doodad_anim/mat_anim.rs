@@ -258,7 +258,15 @@ pub struct AnimMatPart;
 /// decision 0785). Revisit if the population ever grows.
 pub enum UvLoop {
     /// Every sequence bakes the same loop: the shared material, on the free-running shared clock.
-    Shared(std::sync::Arc<benilla_formats::UvAnim>),
+    ///
+    /// `None` when the batch's transform carries **no translation at all** — a rotate-only or
+    /// scale-only transform, whose whole motion is the [`UvAnimEntry::affine`] row beside this
+    /// one. Two entity batches in the shipped corpus are exactly that
+    /// (`World\Goober\G_ScryingBowl`'s water and `G_ScourgeRuneCircleCrystal`'s rune ring, both
+    /// `chans —R—`), so a lane that made the translation mandatory would have to invent a
+    /// zero loop for them or drop them silently. The entry still holds its translation row; it
+    /// stays at zero, which is what that row means.
+    Shared(Option<std::sync::Arc<benilla_formats::UvAnim>>),
     /// The slots disagree: this material belongs to ONE placement, and the loop is whichever slot
     /// `host` is playing right now.
     PerSeq {
@@ -301,9 +309,9 @@ pub struct UvAnimEntry {
     pub anim: UvLoop,
     pub slot: u16,
     pub seed: [f32; 2],
-    /// The effect lane's **affine half** ([`FxAffine`], decision 2282) — `None` on every other
+    /// The effect lane's **affine half** ([`UvAffine`], decision 2282) — `None` on every other
     /// lane, and on an effect batch whose transform only translates (the common case).
-    affine: Option<FxAffine>,
+    affine: Option<UvAffine>,
 }
 
 /// A texture transform's ROTATION and SCALING, on the effect lane: the two channels the
@@ -315,7 +323,7 @@ pub struct UvAnimEntry {
 /// `Spells\GroundingTotem_Impact.mdx` is a **scale-only** transform, so a lane that ran only the
 /// scroll would still render both wrong. `benilla-extract fxuvscan` is where that population is
 /// read; it is three models today, which is exactly why nobody would have found them by eye.
-struct FxAffine {
+struct UvAffine {
     rot: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
     scale: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The affine row's slot (`anim_slots.z`). Its encoding is a delta from the IDENTITY, not
@@ -335,7 +343,7 @@ impl UvAnimEntry {
     /// table gives.
     pub(crate) fn delta(&self, now: f32, gseq_now: f64, playing: Option<(usize, f32)>) -> [f32; 4] {
         let uv = match &self.anim {
-            UvLoop::Shared(anim) => anim.sample(now),
+            UvLoop::Shared(anim) => anim.as_ref().map_or([0.0, 0.0], |a| a.sample(now)),
             UvLoop::PerSeq { seqs, .. } => playing
                 .and_then(|(seq, band_t)| {
                     seqs.seq(Some(seq))
@@ -369,21 +377,29 @@ impl UvAnimEntry {
     }
 
     /// This entry's **affine** row and the slot it goes in, or `None` when the transform only
-    /// translates. Sampled on the same instance clocks [`Self::delta`] uses, so the three channels
-    /// of one transform are always read at one instant.
+    /// translates. Sampled on **the same clocks [`Self::delta`] uses for this entry's own lane**,
+    /// so the three channels of one transform are always read at one instant — a rotation read on
+    /// the scene clock beside a translation read on an instance's play head would be two different
+    /// moments of the same matrix.
     pub(crate) fn affine(
         &self,
         now: f32,
+        gseq_now: f64,
         playing: Option<(usize, f32)>,
     ) -> Option<(u16, [f32; 4])> {
         let a = self.affine.as_ref()?;
-        let UvLoop::Instance { attached_at, .. } = &self.anim else {
-            return None; // the affine half is the effect lane's alone
+        // Per lane, exactly as `delta` does it: the shared lane reads the free-running scene clock
+        // on both, the per-placement lane its host's playing clip, and the effect lane its own
+        // age-anchored pair (decisions 0856/0858).
+        let (band_t, gseq) = match &self.anim {
+            UvLoop::Shared(_) => (now, gseq_now),
+            UvLoop::PerSeq { .. } => (playing.map_or(now, |(_, t)| t), gseq_now),
+            UvLoop::Instance { attached_at, .. } => {
+                let age = now - attached_at;
+                (playing.map_or(age, |(_, t)| t), f64::from(age))
+            }
         };
-        let age = now - attached_at;
-        let band_t = playing.map_or(age, |(_, t)| t);
         let seq = playing.map(|(seq, _)| seq);
-        let gseq = f64::from(age);
         let q = a
             .rot
             .as_ref()
@@ -421,7 +437,7 @@ impl UvAnimEntry {
     /// the same resolution [`Self::delta`] makes rather than a hand-rolled twin of it.
     fn resolved(&self, playing: Option<(usize, f32)>) -> Option<&benilla_formats::UvAnim> {
         match &self.anim {
-            UvLoop::Shared(a) => Some(a),
+            UvLoop::Shared(a) => a.as_deref(),
             UvLoop::PerSeq { seqs, .. } => seqs.seq(playing.map(|(seq, _)| seq)),
             UvLoop::Instance { seqs, single, .. } => seqs
                 .as_ref()
@@ -533,6 +549,41 @@ pub(crate) fn register_uv(
     );
 }
 
+/// Attach the ROTATION/SCALING half to an entry [`register_uv`] has just made, if the batch has
+/// one — the second table row, `anim_slots.z`, and 2019's `[cos − 1, sin, sx − 1, sy − 1]`
+/// encoding whose zero row IS the identity.
+///
+/// The translation half decides whether there is an entry at all (a full table, a dead handle);
+/// the affine half attaches to it or not at all. A transform that ONLY rotates or scales still
+/// takes a translation row that stays at zero — one row, on a population of five models corpus-
+/// wide, for a registration path with one shape instead of two.
+fn attach_affine(
+    reg: &mut UvAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    rot: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
+    scale: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+) {
+    if rot.is_none() && scale.is_none() {
+        return;
+    }
+    let Some(entry) = reg.0.get_mut(&id) else {
+        return;
+    };
+    match table.alloc() {
+        Some(slot) => {
+            crate::model_render::lazy::with_material_mut(materials, id, |mat| {
+                mat.extension.anim_slots.z = f32::from(slot);
+            });
+            entry.affine = Some(UvAffine { rot, scale, slot });
+        }
+        None => {
+            bevy::log::warn_once!("mat-anim table full — a UV rotation/scale stays at the identity")
+        }
+    }
+}
+
 /// Put one **spell-effect material clone** on the per-instance UV lane (decision 2282): the
 /// engine's whole door for `entities::spell_fx`, which owns the clone and nothing else about how
 /// the scroll is delivered.
@@ -552,11 +603,11 @@ pub fn register_fx_uv(
     table: &mut crate::mat_anim_table::MatAnimTable,
     materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
     id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
-    loops: FxUvLoops,
+    loops: UvLoops,
     host: Entity,
     attached_at: f32,
 ) {
-    let FxUvLoops {
+    let UvLoops {
         seqs,
         single,
         rot,
@@ -575,37 +626,70 @@ pub fn register_fx_uv(
             attached_at,
         },
     );
-    // The translation half decides whether there is an entry at all (a full table, a dead handle);
-    // the affine half attaches to it or not at all. A transform that ONLY rotates or scales still
-    // takes a translation row that stays at zero — one row, on a population of three models, for a
-    // registration path with one shape instead of two.
-    let Some(entry) = reg.0.get_mut(&id) else {
+    attach_affine(reg, table, materials, id, rot, scale);
+    let Some(entry) = reg.0.get(&id) else {
         return;
     };
-    if turns {
-        match table.alloc() {
-            Some(slot) => {
-                crate::model_render::lazy::with_material_mut(materials, id, |mat| {
-                    mat.extension.anim_slots.z = f32::from(slot);
-                });
-                entry.affine = Some(FxAffine { rot, scale, slot });
-            }
-            None => bevy::log::warn_once!(
-                "mat-anim table full — an effect's UV rotation/scale stays at the identity"
-            ),
-        }
-    }
+    let _ = turns;
     // **Both rows, written now.** `tick_anim_materials` runs once per frame in `Update` and this
     // registration happens in the same schedule, so an instance that attaches after the tick would
     // otherwise draw its first frame at row 0 — the identity, which on this population is the
     // authored-UV frame the whole decision is about (a Swipe strip renders NOTHING there). One
     // write at spawn costs nothing and removes the class.
     let (slot, row) = (entry.slot, entry.delta(attached_at, 0.0, None));
-    let affine = entry.affine(attached_at, None);
+    let affine = entry.affine(attached_at, 0.0, None);
     table.set(slot, row);
     if let Some((slot, row)) = affine {
         table.set(slot, row);
     }
+}
+
+/// Put one **unit / GameObject / held-item** batch material on the UV lane (decision 2295) — the
+/// engine's whole door for the entity lane, and the twin of [`register_fx_uv`] for a population
+/// that is resident rather than pooled.
+///
+/// It picks the lane from the authored record rather than making the caller reason about it,
+/// which is the same argument [`UvLoops`] itself rests on:
+///
+/// - **`host` is `Some` and the slots disagree** ⇒ [`UvLoop::PerSeq`]. This material belongs to
+///   that one instance (the caller owns the clone), and the loop is whichever file-sequence slot
+///   the instance is playing — 1408's lane, reached from the entity side for the first time.
+///   `World\Lordaeron\Plagueland\PassiveDoodads\BloodOfHeroes` is the class: slot 0 holds its
+///   bubble sheets still while slot 1 sweeps them, at freq 16384/16383, so its placements bubble
+///   independently and one shared row cannot serve two of them.
+/// - **otherwise** ⇒ [`UvLoop::Shared`], the free-running scene clock on the batch's shared,
+///   deduped material — 0136 choice 1. Exactly faithful for a global-sequence loop (the
+///   reference clocks those on one per-scene ms cursor), and 0136's recorded, still-invisible
+///   divergence for a seamless band loop.
+///
+/// A period-0 translation is not a loop — its seed IS its forever value, so registering it would
+/// buy a per-frame re-write of the same number (1375) — but a batch that only rotates or scales
+/// still registers, because its motion is the affine row and its translation row is the zero it
+/// is meant to be.
+pub fn register_entity_uv(
+    reg: &mut UvAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    loops: &UvLoops,
+    host: Option<Entity>,
+) {
+    if !loops.animates() {
+        return;
+    }
+    let lane = match (loops.seqs.clone(), host) {
+        (Some(seqs), Some(host)) => UvLoop::PerSeq { seqs, host },
+        _ => UvLoop::Shared(loops.single.clone().filter(|l| l.period > 0.0)),
+    };
+    register_uv(reg, table, materials, id, lane);
+    attach_affine(
+        reg,
+        table,
+        materials,
+        id,
+        loops.rot.clone(),
+        loops.scale.clone(),
+    );
 }
 
 /// The four baked channels of one batch's texture transform, as [`register_fx_uv`] takes them —
@@ -613,20 +697,45 @@ pub fn register_fx_uv(
 /// because they are one authored record, and a caller passing four `Option`s positionally is a
 /// caller that will eventually swap two of them.
 #[derive(Default)]
-pub struct FxUvLoops {
+pub struct UvLoops {
     pub seqs: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     pub single: Option<std::sync::Arc<benilla_formats::UvAnim>>,
     pub rot: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
     pub scale: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
 }
 
-impl FxUvLoops {
+impl UvLoops {
+    /// The record as one authored batch carries it — **the one place the four channels are read
+    /// off a submesh**, so a lane that registers and a spawner that marks can never disagree about
+    /// which batches animate (decision 2038's law, whose violation froze every waterfall in the
+    /// game for three days).
+    pub fn of(sub: &benilla_assets::ModelSubmesh) -> Self {
+        Self {
+            seqs: sub.uv_seq.clone(),
+            single: sub.uv_anim.clone(),
+            rot: sub.uv_rot_seq.clone(),
+            scale: sub.uv_scale_seq.clone(),
+        }
+    }
+
     /// Does this batch animate its texture transform at all? The test the effect attach makes
     /// before cloning a material: any of the four channels, because a scale-only transform
     /// (`Spells\GroundingTotem_Impact.mdx`) and a dead-slot-0 translation (1408) each answer
     /// `None` to the obvious one.
     pub fn any(&self) -> bool {
         self.seqs.is_some() || self.single.is_some() || self.rot.is_some() || self.scale.is_some()
+    }
+
+    /// Does it need a per-frame SAMPLE — i.e. does it move? [`Self::any`] minus the constants: a
+    /// translation keyed to one value for the whole clip is its material's seed and nothing more
+    /// (1375), while a rotate-only or scale-only batch answers `None` on the translation channel
+    /// and still moves. The **one predicate** the entity lane's registration and its
+    /// [`AnimMatPart`] marker both ask.
+    pub fn animates(&self) -> bool {
+        self.seqs.is_some()
+            || self.rot.is_some()
+            || self.scale.is_some()
+            || self.single.as_ref().is_some_and(|l| l.period > 0.0)
     }
 
     /// The offset the batch opens on — what a caller seeds the clone's `sun_scale.zw` with so its
@@ -717,7 +826,7 @@ pub(super) fn tick_anim_materials(
     // instance's frame-stepped `AnimationPlayer` — the `fxview` carve-out `MatAnim` and
     // `spell_fx::FxTintAnims` already take (decision 2282). A capture with no effect in it — every
     // golden scenario — holds no such entry, so it returns here exactly as it always has.
-    let frozen = crate::dev_state::deterministic_run();
+    let frozen = crate::dev_state::deterministic_run() && !matanim_live();
     if frozen && !uv_reg.0.values().any(UvAnimEntry::instance_lane) {
         return;
     }
@@ -770,7 +879,7 @@ pub(super) fn tick_anim_materials(
             table.set(entry.slot, entry.delta(now, gseq_now, playing));
             // …and the rotation/scale row beside it, for the effect models that turn or scale
             // their UVs rather than only sliding them (2282).
-            if let Some((slot, row)) = entry.affine(now, playing) {
+            if let Some((slot, row)) = entry.affine(now, gseq_now, playing) {
                 table.set(slot, row);
             }
         }
@@ -818,6 +927,22 @@ fn matanim_off(time: &Time<bevy::time::Real>) -> bool {
         let t = time.elapsed_secs() - start;
         t >= 0.0 && period > 0.0 && ((t / period) as u32) % 2 == 1
     })
+}
+
+/// **`WOW_MATANIM_LIVE=1` — run the shared lanes inside a deterministic capture too.**
+///
+/// The freeze above is what makes a golden frame reproducible, and it is right for every scenario
+/// in the sweep. It also means `fxview` — the fixture whose whole job is to age a subject — cannot
+/// show a **unit's or GameObject's** texture transform at all, because those are shared-clock
+/// entries (decision 2295); the effect lane is exempt only because its clock is one instance's
+/// frame-stepped player. Without this knob the A/B for "does this creature's skin scroll" does not
+/// exist, and the answer would have to come from the director's screen, which is not what §7 means
+/// by leaving the look to them.
+///
+/// Off by default, read once, and no golden scenario sets it — so the sweep is untouched.
+fn matanim_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_MATANIM_LIVE").is_ok_and(|v| v != "0"))
 }
 
 /// The **tint-animated materials** registry — the M2Color-RGB twin of [`UvAnimMaterials`]: each
@@ -972,7 +1097,12 @@ pub(super) fn matanim_probe(
         // The per-placement lane has one loop per sequence, so its phase sweep is meaningless
         // without a play head — it prints the head instead, and samples on the shared clock.
         let (lane, period) = match &e.anim {
-            UvLoop::Shared(a) => (format!("shared period {:.3}s", a.period), a.period),
+            UvLoop::Shared(a) => {
+                // `None` = a rotate-/scale-only transform: the translation row is real and stays
+                // at zero, and the period the sweep needs is the AFFINE channel's, not this one's.
+                let p = a.as_ref().map_or(0.0, |a| a.period);
+                (format!("shared period {p:.3}s"), p)
+            }
             UvLoop::PerSeq { .. } => (format!("per-seq playing {playing:?}"), 0.0),
             // The effect lane HAS a resolved loop (the clip it opened on), so unlike the
             // per-placement lane its sweep is meaningful — read across the instance's own
@@ -1001,7 +1131,7 @@ pub(super) fn matanim_probe(
         let live = e.delta(now, gseq_now, playing);
         // The affine half, when the transform has one: `[cos − 1, sin, sx − 1, sy − 1]`, so all
         // zeros IS the identity and a flat row there says the turn/scale never reached the shader.
-        let affine = e.affine(now, playing).map_or(String::new(), |(slot, want)| {
+        let affine = e.affine(now, gseq_now, playing).map_or(String::new(), |(slot, want)| {
             let row = table.row(slot);
             format!(
                 " · affine slot {slot} row ({:+.4},{:+.4},{:+.4},{:+.4}) live ({:+.4},{:+.4},{:+.4},{:+.4})",
@@ -1124,6 +1254,100 @@ mod delta_tests {
         }
     }
 
+    /// A rotation-only loop, as `G_ScryingBowl`'s water and `G_ScourgeRuneCircleCrystal`'s rune
+    /// ring author one: a quarter turn about Z over two seconds, keyed in file slot 0 only.
+    fn quarter_turn() -> std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>> {
+        const Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        const QUARTER: [f32; 4] = [0.0, 0.0, Q, Q];
+        std::sync::Arc::new(
+            benilla_formats::SeqLoops::new(vec![Some(benilla_formats::KeyAnim {
+                period: 2.0,
+                step: false,
+                wrap: true,
+                gseq: false,
+                // 90° about Z = (0, 0, sin 45°, cos 45°).
+                keys: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (2.0, QUARTER)],
+            })])
+            .expect("one animating slot"),
+        )
+    }
+
+    /// **`animates()` is the one predicate, and it is not `uv_anim.is_some()`** (decision 2295).
+    /// Two entity batches in the shipped corpus rotate and never translate, so the channel a
+    /// reader would check first answers `None` for them; and a translation keyed to one constant
+    /// value is the material's seed, not a loop to sample (1375).
+    #[test]
+    fn the_animates_predicate_sees_a_rotation_only_batch() {
+        let rot_only = UvLoops {
+            rot: Some(quarter_turn()),
+            ..Default::default()
+        };
+        assert!(rot_only.single.is_none(), "the obvious channel is empty");
+        assert!(rot_only.animates(), "and it still moves");
+
+        let constant = UvLoops {
+            single: Some(std::sync::Arc::new(benilla_formats::UvAnim {
+                period: 0.0,
+                step: false,
+                wrap: false,
+                gseq: false,
+                keys: vec![(0.0, [0.25, 0.0])],
+            })),
+            ..Default::default()
+        };
+        assert!(constant.any(), "it has a channel");
+        assert!(
+            !constant.animates(),
+            "…but a period-0 translation is a seed, never a per-frame sample"
+        );
+        assert!(!UvLoops::default().animates());
+    }
+
+    /// **The affine half runs on whichever clock its own lane runs on** (decision 2295 widening
+    /// 2282's). A shared entity entry has no host and no attach time, so its rotation reads the
+    /// free-running scene clock — which is what makes a rune ring on a shared, deduped material
+    /// turn at all.
+    #[test]
+    fn a_shared_entry_turns_on_the_scene_clock() {
+        let e = UvAnimEntry {
+            anim: UvLoop::Shared(None),
+            slot: 4,
+            seed: [0.0, 0.0],
+            affine: Some(UvAffine {
+                rot: Some(quarter_turn()),
+                scale: None,
+                slot: 5,
+            }),
+        };
+        // No translation channel at all: the row it still owns stays at the zero it means.
+        assert_eq!(e.delta(1.0, 1.0, None), [0.0, 0.0, 0.0, 0.0]);
+        // Half-way through the turn, and the row is `[cos − 1, sin, sx − 1, sy − 1]` of the
+        // **raw, unnormalised** lerped quaternion — which is the reference's own arithmetic, not
+        // an oversight: `0x713ea0` lerps each component and `0x7bddb0` consumes the result as is,
+        // so between two keys `|q| < 1` and the 2×2 is a rotation with a slight shrink (wow-re
+        // `modelframe-texanim-and-sequence-law.md` §3.4: *"a re-implementation that slerps, or
+        // normalises before building the matrix, diverges from the reference between keys"*).
+        // Here `q = (0, 0, 0.35355, 0.85355)`, so `c = 1 − 2z² = 0.75` and `s = 2zw = 0.60355` —
+        // NOT the 0.7071/0.7071 a normalised 45° would give. Asserted exactly so a future
+        // "obvious fix" to normalise fails here.
+        let (slot, row) = e.affine(1.0, 1.0, None).expect("the affine row");
+        assert_eq!(slot, 5);
+        assert!(
+            (row[0] + 0.25).abs() < 1e-4 && (row[1] - 0.603_553).abs() < 1e-4,
+            "the unnormalised lerp at t = 1 s of a 2 s turn: {row:?}"
+        );
+        assert!(
+            row[2].abs() < 1e-6 && row[3].abs() < 1e-6,
+            "no scaling authored, so the scale half is the identity: {row:?}"
+        );
+        // …and the clock really is `now`: a different scene time gives a different angle.
+        let later = e.affine(1.5, 1.5, None).expect("the affine row").1;
+        assert!(
+            (later[1] - row[1]).abs() > 1e-2,
+            "the shared lane's affine must move with the scene clock: {row:?} vs {later:?}"
+        );
+    }
+
     /// **The effect lane reads its INSTANCE's play head, not the scene clock** (decision 2282).
     /// The band clock is the clip time the host's `AnimationPlayer` reports, so two casts a minute
     /// apart are at the same point of their own scroll — the property a shared-material lane
@@ -1163,10 +1387,10 @@ mod delta_tests {
     fn the_effect_lane_samples_rotation_and_scale_on_the_same_clock() {
         let mut e = fx_entry(100.0);
         assert!(
-            e.affine(100.5, Some((0, 0.5))).is_none(),
+            e.affine(100.5, 0.0, Some((0, 0.5))).is_none(),
             "a translation-only transform takes no affine row"
         );
-        e.affine = Some(FxAffine {
+        e.affine = Some(UvAffine {
             rot: None,
             scale: Some(std::sync::Arc::new(
                 benilla_formats::SeqLoops::new(vec![Some(benilla_formats::UvAnim {
@@ -1180,7 +1404,9 @@ mod delta_tests {
             )),
             slot: 12,
         });
-        let (slot, row) = e.affine(100.0, Some((0, 1.0))).expect("the affine row");
+        let (slot, row) = e
+            .affine(100.0, 0.0, Some((0, 1.0)))
+            .expect("the affine row");
         assert_eq!(slot, 12);
         // Half-way: scale 0.625, encoded as `sx − 1`; rotation untouched, so `cos − 1` and `sin`
         // are the identity's zeros.
@@ -1212,7 +1438,7 @@ mod delta_tests {
         let anim = uv_loop();
         let seed = anim.sample(0.0);
         let entry = UvAnimEntry {
-            anim: UvLoop::Shared(anim.clone()),
+            anim: UvLoop::Shared(Some(anim.clone())),
             slot: 3,
             seed,
             affine: None,

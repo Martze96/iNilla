@@ -44,9 +44,9 @@ fn a_modelless_head_display_is_not_a_worn_helm() {
     );
 
     // 3. A real helm still hides what it should — the change must not disarm the mechanism.
-    let helm = items
+    let (_, helm) = items
         .iter()
-        .find(|d| d.model[0].is_some() && d.helmet_vis != [0, 0])
+        .find(|(_, d)| d.model[0].is_some() && d.helmet_vis != [0, 0])
         .expect("some display is a modelled helm with a vis row");
     assert_eq!(
         helm.worn_helm_vis(),
@@ -57,10 +57,10 @@ fn a_modelless_head_display_is_not_a_worn_helm() {
     // 4. The blast radius, pinned: of the 1314 rows that author a vis pair, exactly 12 leave the
     //    LEFT model slot empty. If the shipped data ever changes, this test says so rather than the
     //    change silently growing.
-    let masked = items.iter().filter(|d| d.helmet_vis != [0, 0]).count();
+    let masked = items.iter().filter(|(_, d)| d.helmet_vis != [0, 0]).count();
     let masked_modelless = items
         .iter()
-        .filter(|d| d.helmet_vis != [0, 0] && d.model[0].is_none())
+        .filter(|(_, d)| d.helmet_vis != [0, 0] && d.model[0].is_none())
         .count();
     assert_eq!((masked, masked_modelless), (1314, 12));
 
@@ -70,11 +70,11 @@ fn a_modelless_head_display_is_not_a_worn_helm() {
     //    reference's answer is the left slot's.
     let right_only = items
         .iter()
-        .filter(|d| d.model[0].is_none() && d.model[1].is_some())
+        .filter(|(_, d)| d.model[0].is_none() && d.model[1].is_some())
         .count();
     let right_only_masked = items
         .iter()
-        .filter(|d| d.model[0].is_none() && d.model[1].is_some() && d.helmet_vis != [0, 0])
+        .filter(|(_, d)| d.model[0].is_none() && d.model[1].is_some() && d.helmet_vis != [0, 0])
         .count();
     assert_eq!((right_only, right_only_masked), (41, 0));
 }

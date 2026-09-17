@@ -9,7 +9,8 @@
 //! - [`geometry`] — what geometry a model draws: billboards, geosets, flat ground quads.
 //! - [`material`] — how a batch is textured and blended: blend modes, UV wrap, env stages,
 //!   the batches whose UV/tint loop differs between sequence slots, and what the spell-effect
-//!   corpus's animated texture transforms render for a consumer that runs none of them.
+//!   (`fxuvscan`) and unit/GameObject/held-item (`entityuvscan`) corpora's animated texture
+//!   transforms render for a consumer that runs none of them.
 //! - [`particles`] — particle and ribbon emitters, and the features the corpus authors.
 //! - [`skeleton`] — the bone tree and the attachment table that addresses it.
 //! - [`sequence`] — which sequence an arm plays, what breaks when it is the wrong one, and
@@ -33,7 +34,7 @@ mod world;
 pub use geometry::{animboundscan, bbfacescan, bbscan, geosetscan, groundscan, normalscan};
 pub use lighting::{darkpropscan, m2lightscan, shadeat};
 pub use material::{
-    alphascan, blendscan, envmapscan, fxuvscan, texmodescan, uvslotscan, uvwrapscan,
+    alphascan, blendscan, entityuvscan, envmapscan, fxuvscan, texmodescan, uvslotscan, uvwrapscan,
 };
 pub use particles::{
     cellscan, fxordercensus, partcensus, partscan, partslotscan, ribbonscan, shardcensus,

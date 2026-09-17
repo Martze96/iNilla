@@ -115,6 +115,15 @@ impl AlphaAnim {
         self.seq(seq).sample(elapsed, shared_now)
     }
 
+    /// Every file sequence slot's pair, file order — the census instrument's read
+    /// (`benilla-extract entityuvscan`), the twin of [`SeqLoops::slots`] and there for the same
+    /// reason: an instrument that re-implements the per-slot walk can drift from the one the
+    /// runtime takes. Without it a sweep cannot even tell how many slots a batch was baked across,
+    /// because [`Self::seq`] degrades an out-of-range slot to slot 0 rather than refusing it.
+    pub fn slots(&self) -> &[AlphaSeq] {
+        &self.per_seq
+    }
+
     /// Whether ANY sequence can drive this batch's alpha to zero — i.e. whether the batch is ever
     /// culled. The spawn-side gate for "does this part need a live sampler at all".
     pub fn ever_hides(&self) -> bool {

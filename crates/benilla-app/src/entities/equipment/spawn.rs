@@ -645,6 +645,14 @@ fn spawn_slot(
                     benilla_world::doodad_anim::MatAnim::resting(anim.clone())
                 });
             }
+            // …and the batch's texture transform (decision 2295), on the same one predicate every
+            // other entity spawn asks. One held-item batch in the whole 1.12 corpus animates one —
+            // `Item\ObjectComponents\Shield\shield_epic_a_01`, the Drillborer Disk, whose
+            // Ragnaros-skinned lava is a 6.7 s global-sequence scroll — which is exactly why the
+            // marker is a property of the batch here and not of a list somebody maintains.
+            if part.uv_loops().animates() {
+                child.insert(benilla_world::doodad_anim::AnimMatPart);
+            }
             effective.dress(&mut child, &set);
         }
     });
@@ -715,6 +723,9 @@ fn spawn_slot(
         // keyed 0.30) — same pinned lane as the mesh parts.
         if let Some(anim) = &part.alpha_anim {
             card.insert(benilla_world::doodad_anim::MatAnim::resting(anim.clone()));
+        }
+        if part.uv_loops().animates() {
+            card.insert(benilla_world::doodad_anim::AnimMatPart);
         }
         effective.dress(&mut card, &set);
     }
@@ -911,6 +922,7 @@ mod tests {
             billboard: None,
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
             uv_anim: None,
             uv_seq: None,
             uv_rot_seq: None,

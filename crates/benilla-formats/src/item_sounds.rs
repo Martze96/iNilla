@@ -113,7 +113,7 @@ mod tests {
         let displays = crate::load_item_display_catalog(&mut chain).expect("load ItemDisplayInfo");
         let mut nonzero = 0usize;
         let mut valid = 0usize;
-        for d in displays.iter() {
+        for (_, d) in displays.iter() {
             if d.group_sounds != 0 {
                 nonzero += 1;
                 if sounds.groups.contains_key(&d.group_sounds) {

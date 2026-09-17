@@ -622,7 +622,7 @@ pub fn spawn_model_entities(
                     anim_table,
                     materials,
                     id,
-                    crate::doodad_anim::UvLoop::Shared(anim.clone()),
+                    crate::doodad_anim::UvLoop::Shared(Some(anim.clone())),
                 );
             }
         }

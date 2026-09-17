@@ -387,7 +387,7 @@ mod tests {
         let displays = crate::load_item_display_catalog(&mut chain).expect("load ItemDisplayInfo");
 
         let (mut carried, mut minus_one, mut resolved, mut models) = (0, 0, 0, 0);
-        for d in displays.iter() {
+        for (_, d) in displays.iter() {
             if d.item_visual == 0 {
                 continue;
             }

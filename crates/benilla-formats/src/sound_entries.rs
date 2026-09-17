@@ -122,6 +122,37 @@ fn sound_entries_schema() -> Schema {
     s
 }
 
+/// Join one variation's `DirectoryBase` and `File[i]` into the path the archive is asked for —
+/// **the reference's own rule, byte-for-byte** (`0x45be10`, the sole caller `0x45c167` inside the
+/// `SOUNDDEFINITION` loader; wow-re `sound/scratch/soundentries-path-join.md`).
+///
+/// The client formats `"%s%s%s"` over `(dir, sep, file)` and chooses `sep` with exactly two tests:
+/// it is the empty string when `DirectoryBase` is **NULL/empty**, and when `SStrChrR(dir, '\')`
+/// says the directory **already ends in a separator**; otherwise it is `"\"`. That is the whole
+/// normalization in the client, at this layer or any other — and it has to be spelled here,
+/// because the archive layer below rescues nothing: `HashString` folds ASCII `a`–`z` to upper and
+/// maps `/` → `\` per character into the hash, and does **not** strip a leading separator, collapse
+/// a doubled one, or touch a trailing one (wow-re `mpq.md`, an evidenced absence — the hash loop
+/// read end to end). There is no loose-file fallback either: `SFileOpenFileEx`'s disk diversion
+/// takes `\\`, `X:` and a flag WoW's own startup clears, never a single leading `\`.
+///
+/// **27 of the 5875 data's 8961 variations do not resolve, and the reference cannot play them
+/// either** — 17 are simply absent from the archives (`GhostMusic01/02`, `mOgreFidget3`, and ids
+/// 195/196, where `mHumanFemaleWoundVoxA.wav` was authored across two `File` cells as
+/// `mHumanFemaleWoundVoxA` and `wav`), and the other 10 are kit **8940 `Ashbringer`**, whose
+/// `DirectoryBase` is `\Sound\Creature\Ashbringer\`: the client suppresses the *trailing*
+/// separator and then emits the *leading* one verbatim, so the path it opens
+/// (`\Sound\Creature\Ashbringer\ASH_SPEAK_01.wav`) misses in every archive although the asset is
+/// there. The Ashbringer's speak lines are dead data in the real client, and are meant to stay
+/// dead here: a leading-separator strip would be a deviation, not a fix.
+fn join_variation(dir: &str, file: &str) -> String {
+    if dir.is_empty() || dir.ends_with('\\') {
+        format!("{dir}{file}")
+    } else {
+        format!("{dir}\\{file}")
+    }
+}
+
 /// Read SoundEntries.dbc off the patch chain into a [`SoundKitCatalog`].
 pub fn load_sound_kit_catalog(chain: &mut Chain) -> Result<SoundKitCatalog> {
     let bytes = chain
@@ -140,11 +171,7 @@ pub fn load_sound_kit_catalog(chain: &mut Chain) -> Result<SoundKitCatalog> {
                 continue;
             };
             let weight = u32_at(r, 13 + i).unwrap_or(0);
-            let path = if dir.is_empty() {
-                file
-            } else {
-                format!("{dir}\\{file}")
-            };
+            let path = join_variation(&dir, &file);
             files.push((path, weight));
         }
         if !name.is_empty() {
@@ -251,6 +278,95 @@ mod tests {
         assert!(
             barks.iter().any(|k| k.eax_def != 0) && barks.iter().any(|k| k.eax_def == 0),
             "creature barks split wet/dry"
+        );
+    }
+
+    /// The join's three legs, in the reference's own order (`0x45be10`): an empty directory emits
+    /// the file verbatim (26 shipped rows, e.g. 1103 `WyvernWingFlap`, whose variations are
+    /// themselves full paths), a directory that already ends in a separator gets none added, and
+    /// everything else gets exactly one. A **leading** separator is carried through untouched —
+    /// the client normalizes nothing there, and neither do we.
+    #[test]
+    fn the_variation_join_is_the_reference_s_separator_rule() {
+        assert_eq!(
+            join_variation("Sound\\Spells", "Dispel_Low_Base.wav"),
+            "Sound\\Spells\\Dispel_Low_Base.wav"
+        );
+        assert_eq!(
+            join_variation("Sound\\interface\\", "igNewTaxiNodeDiscovered.wav"),
+            "Sound\\interface\\igNewTaxiNodeDiscovered.wav"
+        );
+        assert_eq!(
+            join_variation("", "Sound\\Creature\\Wyvern\\WyvernWingFlap1.wav"),
+            "Sound\\Creature\\Wyvern\\WyvernWingFlap1.wav"
+        );
+        assert_eq!(
+            join_variation("\\Sound\\Creature\\Ashbringer\\", "ASH_SPEAK_01.wav"),
+            "\\Sound\\Creature\\Ashbringer\\ASH_SPEAK_01.wav",
+            "the leading separator survives — the reference emits it and misses too"
+        );
+    }
+
+    /// **Every kit path this loader builds, asked of the real chain.** The numbers are the
+    /// reference's own: the binary's join resolves 8934 of 8961 variations, and the 27 it does not
+    /// are authentic dead data. An unconditional `format!("{dir}\\{file}")` — what this loader did
+    /// before the join was derived — resolves exactly three fewer, and those three are whole kits:
+    /// 1519 `TaxiNodeDiscovered`, 2988 `Unarmed Small`, 3412 `Pirate Agro` each carry one variation
+    /// and a `DirectoryBase` that already ends in a separator, so every one of them was silent.
+    ///
+    /// The test pins both sides — what resolves and what is *meant* not to — so neither a
+    /// regression nor an over-eager "fix" of the Ashbringer can land quietly. Skips without client
+    /// data.
+    #[test]
+    fn real_sound_entries_paths_resolve_exactly_as_the_reference_s_do() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_sound_kit_catalog(&mut chain).expect("load sound kits");
+
+        let mut total = 0usize;
+        let mut dead: Vec<(u32, &str, &str)> = Vec::new();
+        for kit in cat.kits.values() {
+            for (path, _) in &kit.files {
+                total += 1;
+                if !chain.contains(path) {
+                    dead.push((kit.id, &kit.name, path));
+                }
+            }
+        }
+        dead.sort_unstable();
+        assert_eq!(total, 8961, "non-empty variation cells in the 5875 table");
+        assert_eq!(
+            total - dead.len(),
+            8934,
+            "variations that resolve — the binary's own count; {dead:?}"
+        );
+
+        // The ten that are one kit, and the one kit that is therefore silent — in the reference
+        // too (its `DirectoryBase` opens with a separator the client passes straight through).
+        let ashbringer: Vec<_> = dead.iter().filter(|(id, ..)| *id == 8940).collect();
+        assert_eq!(ashbringer.len(), 10, "every ASH_SPEAK line misses");
+        assert!(
+            chain.contains("Sound\\Creature\\Ashbringer\\ASH_SPEAK_01.wav"),
+            "the asset ships — it is the authored path that cannot reach it"
+        );
+
+        // …and the other 17 are ordinary absent assets, spread across kits that mostly still play.
+        assert_eq!(dead.len() - ashbringer.len(), 17, "absent assets: {dead:?}");
+
+        // No OTHER kit is fully silent through a path benilla built. 8588 is, and is meant to be:
+        // its single variation is simply not in the archives.
+        let silent: Vec<u32> = cat
+            .kits
+            .values()
+            .filter(|k| !k.files.is_empty() && !k.files.iter().any(|(p, _)| chain.contains(p)))
+            .map(|k| k.id)
+            .collect();
+        let mut silent = silent;
+        silent.sort_unstable();
+        assert_eq!(
+            silent,
+            vec![8588, 8940],
+            "the only kits with no playable variation at all"
         );
     }
 }

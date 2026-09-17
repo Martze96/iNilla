@@ -1203,6 +1203,10 @@ fn update_display_models(
     mut forms: ResMut<benilla_world::model_forms::ModelForms>,
     asset_server: Res<AssetServer>,
     mut mats: benilla_world::model_render::M2BatchMaterials,
+    // The UV lane a batch's texture transform is delivered on (decision 2295): an entity batch is
+    // seeded AND registered in one call, so a display built here can never be marked-but-frozen.
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     // The bone-pile display cache + the ChrRaces fileStrings its paths are built from (1706).
     mut bones: ResMut<corpse::BonesModels>,
     // The glue-preview want (decisions 0423 + 0465): the glue screens' look's body displayId, so
@@ -1218,6 +1222,15 @@ fn update_display_models(
         return; // no lighting yet → no materials to build
     }
     let (m2s, wmos) = (&model_assets.0, &model_assets.1);
+    // `instance: None` — every display cache here is keyed by display id and shared by every unit
+    // wearing it, so these materials belong to the batch. The one population that needs its own
+    // (a GameObject whose file-sequence slots bake different loops) takes its clone at spawn,
+    // where the host entity exists (`attach::dress`).
+    let mut uv = benilla_world::model_render::EntityUvLane {
+        reg: &mut uv_reg,
+        table: &mut anim_table,
+        instance: None,
+    };
 
     // The (kind, display) pairs live in the world this frame — cheap to collect.
     let mut actives: Vec<(EntityKind, u32)> = entities
@@ -1310,6 +1323,7 @@ fn update_display_models(
                             &mut forms,
                             &asset_server,
                             &mut mats,
+                            &mut uv,
                             false, // gameobject: creatures — no hull collider, no bake variant
                         );
                     }
@@ -1340,6 +1354,7 @@ fn update_display_models(
                             &mut forms,
                             &asset_server,
                             &mut mats,
+                            &mut uv,
                             true, // gameobject: hull collider + the interior BAKE material variant
                         );
                     }
@@ -1365,6 +1380,7 @@ fn update_display_models(
                         &mut forms,
                         &asset_server,
                         &mut mats,
+                        &mut uv,
                         false, // gameobject: a prop body — unit lighting, no hull collider
                     );
                 }
@@ -1391,6 +1407,7 @@ fn update_display_models(
                         &mut forms,
                         &asset_server,
                         &mut mats,
+                        &mut uv,
                         false, // gameobject: held items — unit lighting, no collider
                     );
                 }
@@ -1411,6 +1428,7 @@ fn update_display_models(
                         &mut forms,
                         &asset_server,
                         &mut mats,
+                        &mut uv,
                         false, // gameobject: effects — unit lighting, no collider
                     );
                 }
@@ -1431,6 +1449,7 @@ fn update_display_models(
                         &mut forms,
                         &asset_server,
                         &mut mats,
+                        &mut uv,
                         false, // gameobject: effects — unit lighting, no collider
                     );
                 }
@@ -1631,6 +1650,7 @@ mod display_mirror_tests {
             }),
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
             uv_anim: None,
             uv_seq: None,
             uv_rot_seq: None,

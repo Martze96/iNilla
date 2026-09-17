@@ -115,6 +115,15 @@ pub(in crate::entities) fn redress_player_looks(
         ResMut<Assets<Mesh>>,
         ResMut<MergedFormsCache>,
     ),
+    // The animated-material lane a re-dressed part may need a material of its own on (2295).
+    // Plumbing here rather than a live case: a re-dress is a PLAYER's gear change, and no
+    // character batch in the corpus carries a per-sequence loop — but the dressing law is one law,
+    // and a path that could not express it would be a place for the two to drift.
+    mut own_lane: (
+        ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+        ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
+        ResMut<benilla_world::mat_anim_table::MatAnimTable>,
+    ),
     time: Res<Time>,
 ) {
     let (
@@ -288,7 +297,18 @@ pub(in crate::entities) fn redress_player_looks(
             }
             let forms = merged.forms(parts, group, &mut meshes);
             let part = merge::group_part(parts, group, forms);
-            spawn_group(&mut commands, &part, group, &dress);
+            spawn_group(
+                &mut commands,
+                &part,
+                group,
+                &dress,
+                &mut super::dress::OwnMats {
+                    store: mats.materials(),
+                    uv: &mut own_lane.0,
+                    tint: &mut own_lane.1,
+                    table: &mut own_lane.2,
+                },
+            );
             shown += 1;
         }
         // One line per re-dress — a handful per session, and the only readout of a mechanism whose
@@ -398,6 +418,7 @@ mod tests {
             billboard: None,
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
             uv_anim: None,
             uv_seq: None,
             uv_rot_seq: None,
@@ -429,7 +450,12 @@ mod tests {
             .init_resource::<MergedFormsCache>()
             // The engine's material cache — normally `model_render::plugin`'s, which this bare
             // harness does not install.
-            .init_resource::<benilla_world::model_render::ModelMaterials>();
+            .init_resource::<benilla_world::model_render::ModelMaterials>()
+            // The animated-material lane the dressing path now takes (2295) — never exercised by
+            // a re-dress, which is a player's gear change, but the system asks for it.
+            .init_resource::<benilla_world::doodad_anim::UvAnimMaterials>()
+            .init_resource::<benilla_world::doodad_anim::TintAnimMaterials>()
+            .init_resource::<benilla_world::mat_anim_table::MatAnimTable>();
 
         let mut dm = empty_display();
         dm.parts = Some(geosets.iter().map(|g| part(*g)).collect());

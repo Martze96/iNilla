@@ -178,18 +178,6 @@ pub(crate) struct FxMaterials<'a> {
     pub(crate) table: &'a mut benilla_world::mat_anim_table::MatAnimTable,
 }
 
-/// This part's four baked texture-transform channels, in the shape the engine's effect lane takes
-/// them (`FxUvLoops::any` is the "does it animate at all" test — a scale-only transform and a
-/// dead-slot-0 translation each answer `None` to the obvious channel).
-fn part_uv_loops(part: &EntityPart) -> benilla_world::doodad_anim::FxUvLoops {
-    benilla_world::doodad_anim::FxUvLoops {
-        seqs: part.uv_seq.clone(),
-        single: part.uv_anim.clone(),
-        rot: part.uv_rot_seq.clone(),
-        scale: part.uv_scale_seq.clone(),
-    }
-}
-
 /// Resolve one part's material for a NEW effect instance. The shared handle, unless a channel has
 /// to run **per instance** — an animated M2Color RGB (decision 0271) or a texture transform
 /// (decision 2282) — and then a clone of it, seeded at each live loop's first key and registered
@@ -201,7 +189,7 @@ fn fx_part_material(
     host: Entity,
     mats: &mut FxMaterials,
 ) -> Handle<WowModelMaterial> {
-    let loops = part_uv_loops(part);
+    let loops = part.uv_loops();
     if part.rgb_anim.is_none() && !loops.any() {
         return part.material.clone();
     }

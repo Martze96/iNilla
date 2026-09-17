@@ -364,6 +364,7 @@ mod tests {
             welded_billboard: false,
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
             uv_anim: None,
             uv_seq: None,
             uv_rot_seq: None,

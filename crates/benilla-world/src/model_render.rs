@@ -17,7 +17,7 @@ pub mod lazy;
 pub mod park;
 mod visibility;
 
-pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials, SkyboxBatch};
+pub use batch::{BatchVariants, EntityUvLane, M2BatchMaterials, ModelMaterials, SkyboxBatch};
 
 /// Yards of transparent-pass sort bias per authored batch-order step (`MatKey::batch_order` ×
 /// this, on `StandardMaterial::depth_bias` — bevy adds that field to the phase item's sort

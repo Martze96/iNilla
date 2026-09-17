@@ -41,8 +41,8 @@ mod mat_anim;
 pub(crate) use lazy::{LazyRig, SkinnedTwin};
 use mat_anim::tick_anim_materials;
 pub use mat_anim::{
-    playing_seq, register_fx_uv, register_tint, sample_mat_anim, AnimMatPart, FxUvLoops, MatAnim,
-    TintAnimMaterials, TintLoop, UvAnimMaterials,
+    playing_seq, register_entity_uv, register_fx_uv, register_tint, sample_mat_anim, AnimMatPart,
+    MatAnim, TintAnimMaterials, TintLoop, UvAnimMaterials, UvLoops,
 };
 pub(crate) use mat_anim::{register_uv, UvLoop};
 

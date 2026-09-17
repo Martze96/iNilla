@@ -348,6 +348,14 @@ pub(super) fn attach_entity_visuals(
         // The merged-group forms (`merge`): built on a body's first silhouette, shared after.
         ResMut<Assets<Mesh>>,
         ResMut<merge::MergedFormsCache>,
+        // …and the animated-material lane a spawned part may need a material of its OWN on
+        // (decision 2295) — a GameObject whose file-sequence slots bake different UV or tint
+        // loops. Taken by the dressing path itself, because the clone has to exist before the
+        // part's interior and fade records are built from it; nested here for this tuple's own
+        // stated reason, the 16-param limit.
+        ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+        ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
+        ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ),
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
@@ -365,6 +373,9 @@ pub(super) fn attach_entity_visuals(
         mut mats,
         mut meshes,
         mut merged,
+        mut uv_reg,
+        mut tint_reg,
+        mut anim_table,
     ) = skin_build;
     // Arm each entity's appear-fade at the moment its visual attaches (≈ its first-visible moment).
     let now = time.elapsed_secs();
@@ -870,7 +881,18 @@ pub(super) fn attach_entity_visuals(
             for group in &groups {
                 let forms = merged.forms(parts, group, &mut meshes);
                 let part = merge::group_part(parts, group, forms);
-                unit_will_fade |= spawn_group(&mut commands, &part, group, &dress);
+                unit_will_fade |= spawn_group(
+                    &mut commands,
+                    &part,
+                    group,
+                    &dress,
+                    &mut dress::OwnMats {
+                        store: mats.materials(),
+                        uv: &mut uv_reg,
+                        tint: &mut tint_reg,
+                        table: &mut anim_table,
+                    },
+                );
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item
             // / helm / shoulder attaching later reads this to join the same ramp
