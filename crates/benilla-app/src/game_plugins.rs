@@ -262,6 +262,11 @@ impl PluginGroup for GamePlugins {
             // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
             // attack target stands and no swing lands.
             .add(crate::swing_refusal::SwingRefusalPlugin)
+            // The talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`): the wire
+            // fills them, world-enter clears them, and `usable::power_cost` reads op 14 out of
+            // them. Beside the swing refusal because both are the same shape — a small wire-fed
+            // store with a world-entry reset — and neither has a feed of its own.
+            .add(crate::spell_mods::SpellModsPlugin)
             // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
             // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
             // server-asked question whose only wire answer is yes — and here for that reason.
@@ -839,7 +844,7 @@ pub(crate) mod schedule_tests {
     /// **Measured 2026-09-17 (decision 2287), 662 systems:** 16,548 pairs in all, 12,849 of
     /// them explained — 10,703 on the VM alone, 431 on the other non-`Send` owners, 556 on
     /// the pure caches, 87 on the sinks, 41 on the stream, 1,031 on a mix of those — and
-    /// 3,705 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
+    /// 3,699 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
     /// alone): populations that never intersect, which the filter algebra cannot see. A lane
     /// is not a class — the checker cannot tell a disjoint lane from two writers of the same
     /// entity — so they stay here, and each new one is a claim made at the registration with
@@ -867,17 +872,37 @@ pub(crate) mod schedule_tests {
     /// the pairs over the pure caches moved into the VM-only class, where the same systems still
     /// meet over the VM alone.
     ///
-    /// **3,290 (decision 2291)** — the area-spirit-healer poll's `&Transform` read against the frame's
-    /// movers (motion, transports, the portrait booths, the quest markers' bake): **+6**, measured
-    /// on the rebased tree rather than assumed additive, the same discipline 2295 used one
-    /// paragraph up. Its one write-write pair — against the click, which also holds
-    /// `AreaSpiritHealer` — is *declared*, and declared where the reference puts it: after the
-    /// frame's pick, because `0x4923b0` runs from the same `CGWorldFrame` OnUpdate that ran the
-    /// pick eighty bytes earlier at `0x48184a`. What is left is reading a unit's position one
-    /// mover early or late, which moves a 20 yd acquire decision by at most one frame of walking
-    /// — and the poll is **level**-triggered, re-deriving the whole cache every frame, so a
-    /// boundary case decided early is decided again next frame. The target scanner carries the
-    /// same class for the same reason.
+    /// **3,288 (decision 2291, corrected)** — the area-spirit-healer poll. Its **four** remaining
+    /// pairs, named one by one because the first version of this paragraph named the wrong ones:
+    /// `portrait::booth::face_booth_billboards`, `quest_markers::bake_seat_scale` and
+    /// `entities::live_display::tick_scale_ease` over `Transform`, and
+    /// `entities::live_display::refresh_live_display` over **`NetEntity`** — a row read, not a
+    /// `Transform` pair at all. All four are the poll seeing a unit one mover early or late, which
+    /// moves a 20 yd acquire decision by at most one frame of walking; the poll is
+    /// **level**-triggered, re-deriving the whole cache every frame, so a boundary case decided
+    /// early is decided again next frame. The target scanner carries the same class for the same
+    /// reason.
+    ///
+    /// **The correction is the part worth keeping.** This paragraph first claimed "+6, all
+    /// `&Transform`", and that the poll's "one write-write pair … is *declared*". Both were wrong,
+    /// and the second one hid a real defect. There were **two** undeclared write-write pairs, and
+    /// the system on the other side of both was `drain_latch_verbs` — the one that turns
+    /// `AcceptAreaSpiritHeal()` into `CMSG_AREA_SPIRIT_HEALER_QUEUE`. It met the poll *and*
+    /// `target::click::act_on_right_click` over `AreaSpiritHealer`, because `.after(UiInput)`
+    /// orders it against neither (`UiInput` precedes `WorldStage::Input`; `TargetUpdate` follows
+    /// it). The drain takes its presses unconditionally and only then reads the healer, so that
+    /// undeclared order decided whether a ghost's Accept became a packet or vanished with no
+    /// message. Declaring `drain_latch_verbs.before(TargetUpdate)` — the reference's own order, the
+    /// dialog's Lua handler running in the UI dispatch ahead of `CGWorldFrame`'s poll and pick —
+    /// removed exactly those two.
+    ///
+    /// **Re-measured at 3,289 on the rebased tree**, not carried across as arithmetic. This branch
+    /// measured 3,290 → 3,288 on its own base; a neighbour landed 3,291 first, and the resolution
+    /// is the number the dump prints on the merged tree — which happens to agree with 3,291 − 2
+    /// this time, and is right for the reason that it was read rather than that it adds up.
+    ///
+    /// A ceiling raised with the wrong reason is a ratchet that has stopped meaning anything. The
+    /// lesson this one cost: **read the dump, do not reason about what the new pairs must be.**
     ///
     /// **3,291 (decision 2300)** — the glue create/main-menu scene's material lane: exactly **one**
     /// new pair, `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene`
@@ -894,7 +919,7 @@ pub(crate) mod schedule_tests {
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_291;
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_289;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1189,6 +1214,8 @@ pub(crate) mod schedule_tests {
     const EXEMPT: &[(&str, &str, Because, &str)] = &[
         ("bindings.rs", "sync_dispatch", Because::MemoLatched,
          "`seen_generation` is a `VmMemo`: a new VM reads `None`, rebuilds and re-fires UPDATE_BINDINGS"),
+        ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
+         "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the boot VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
         ("death.rs", "feed_death", Because::MemoLatched,
          "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo makes the first snapshot an edge and re-announces a held offer, confirm and corpse range"),
         ("screenshot.rs", "ask_for_captures", Because::FilledByVm,

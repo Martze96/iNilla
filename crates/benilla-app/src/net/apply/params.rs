@@ -298,6 +298,9 @@ pub(crate) struct ActionStores<'w> {
     /// `SMSG_UPDATE_AURA_DURATION` lands here keyed by raw slot, timestamped on
     /// [`Clocks::real`] for the `ui_aura` slot-join.
     pub aura_durations: ResMut<'w, crate::ui_aura::AuraDurations>,
+    /// The two talent spell-modifier tables (`crate::spell_mods`) — one wire packet is one
+    /// absolute cell, and this is its only writer.
+    pub spell_mods: ResMut<'w, crate::spell_mods::SpellModifiers>,
 }
 
 /// Every animation-bearing or audible message the drain emits, in packet order, plus the

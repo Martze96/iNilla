@@ -27,20 +27,25 @@
 //! then starts a battleground as soon as *either* side has one player
 //! (`BattleGroundMgr.cpp:557/623/756`). It is `SEC_ADMINISTRATOR` (6), exactly what a probe account
 //! holds, and it is **in-memory only** — `m_testing` is initialised `false` in the manager's
-//! constructor, so a server restart clears it whatever happens here. The probe turns it on at
-//! Setup and off again at Report; a crashed run leaves it on until the next restart, which is
-//! surprising but harmless (a solo queue would pop).
+//! constructor, so a server restart clears it whatever happens here.
 //!
-//! Note that `.debug bg` is a **toggle, not a set**, and it announces itself to the whole realm
+//! `.debug bg` is a **toggle, not a set**, and it announces itself to the whole realm
 //! (`LANG_DEBUG_BG_ON`/`_OFF`). Both facts are reported on the probe's own lines so a run that
 //! started from the wrong state reads as such rather than as a broken queue.
 //!
-//! **It is turned back off once the match is running** (see `DOORS_SAMPLE`), because leaving it on
-//! makes a solo battleground unendable: vmangos decrements its premature-finish countdown inside an
-//! `else if (!sBattleGroundMgr.isTesting())` branch (`BattleGround.cpp:337`), so while testing is on
-//! the countdown is armed and then **frozen**. Decision 2290 said the opposite, from reading
-//! `GetPrematureFinishTime()` without the branch that consumes it; 2296 corrects it, having watched
-//! a run sit in Warsong Gulch for 492 s with `GetBattlefieldWinner()` nil the whole way.
+//! **The lever is tracked by PARITY, not by state** ([`BgProbe::toggles_sent`]), and put back by
+//! [`leave_testing_as_found`] — which every road to [`Phase::Done`] goes through, failures
+//! included. "What is it now?" can only be answered by a world-text reply that may never arrive;
+//! "how far from where I found it?" needs no reply at all. It is restored **as soon as the probe
+//! is inside the instance**, because that is the moment the lever has finished its job: it is
+//! needed for `CheckNormalMatch` to *form* the match, not to run one.
+//!
+//! Leaving it on also makes a solo battleground unendable: vmangos decrements its premature-finish
+//! countdown inside an `else if (!sBattleGroundMgr.isTesting())` branch (`BattleGround.cpp:337`),
+//! so while testing is on the countdown is armed and then **frozen**. Decision 2290 said the
+//! opposite, from reading `GetPrematureFinishTime()` without the branch that consumes it; 2296
+//! corrects it, having watched a run sit in Warsong Gulch for 492 s with `GetBattlefieldWinner()`
+//! nil the whole way.
 //!
 //! ## What the census reports, and why each column is there
 //!
@@ -56,15 +61,32 @@
 //! | `status` | `GetBattlefieldStatus(1..3)`, straight out of the VM |
 //! | `score` | `GetNumBattlefieldScores()` / `GetBattlefieldWinner()` |
 //! | `guide` | the nearest `SPIRITGUIDE`-flagged unit — the graveyard's resurrect wave |
-//! | `lua` | script errors collected since the last sample; a non-zero count is the finding |
+//! | `dropped` | every opcode the codec threw on the floor, by name |
+//! | `events` | the Lua event tap's window — or an explicit "the tap is broken", never silence |
+//! | `mapinfo` | (at Report) `GetMapInfo()` and the overlay/landmark counts — whether the battle
+//!   map has anything to **draw**, which `IsShown()` cannot tell you |
+//!
+//! There is deliberately **no `lua` column**; see the note at the end of [`census`] for why the one
+//! that used to be here could not measure what it claimed.
+//!
+//! ## What this probe cannot see
+//!
+//! It calls [`crate::ui_chat::idle::LastInput::stamp_present`] every frame, which suppresses the
+//! whole idle band — auto-sit, auto-AFK and camp alike (`ui_chat::idle::idle_action`). That is
+//! deliberate and necessary (see the note at the top of [`bg_probe`]), but it means the one
+//! long-running instrument that otherwise sits still for minutes can never exercise the idle
+//! handler. A regression there has to be caught somewhere else.
 //!
 //! ## The run recipe
 //!
 //! ```sh
 //! cd <slot> && WOW_USER=probe7 WOW_PASS=pprobe7 WOW_CHAR=Probeseven \
 //!   WOW_UNATTENDED=1 WOW_NOSOUND=1 WOW_GM=off WOW_PROBE_BG=wsg \
-//!   timeout 420 cargo run -p benilla 2>&1 | grep -E 'PROBE bg:'
+//!   timeout 600 cargo run -p benilla 2>&1 | grep -E 'PROBE bg:'
 //! ```
+//!
+//! Raise the `timeout` with [`census_samples`]: a default run needs ~5 min including login, and a
+//! run sized to reach a match's ending needs ~10.
 //!
 //! `WOW_GM=off` is not optional here: GM mode re-templates the body's faction to 35, and a
 //! battleground is the one place where every reaction, every objective and the server's own team
@@ -161,6 +183,32 @@ const MAX_REJOINS: u32 = 3;
 /// interaction check; this only keeps the probe from greeting a battlemaster it has not reached.
 const NEAR_YD: f32 = 20.0;
 
+/// `PLAYER_FLAGS_GM` — the bit that says the body carries GM mode's faction-35 re-template
+/// (`crate::probe_shield` names the same constant).
+const PLAYER_FLAGS_GM: u32 = 0x0000_0008;
+
+/// How long the exit waits for the battleground leave to land before going anyway. The teleport
+/// out is a server round trip plus a worldport; five seconds is far more than a local server needs
+/// and is a backstop, not a budget.
+const LEAVE_GRACE: f64 = 5.0;
+
+/// How long to wait for `probe_shield`'s `.gm off` to land before refusing the run.
+///
+/// **Sized by that module's own sequencing, not by guesswork** — five seconds was measured as too
+/// tight and refused a run that had `WOW_GM=off` set and was about to comply. `probe_shield` waits
+/// up to `NAME_WAIT_SECS` (3 s) for the body's name to resolve, then spaces its commands
+/// `STEP_SECS` (0.8 s) apart with the god line *before* the `.gm off` (the shield must be up first,
+/// 0679), and the flag only clears once the server's field update comes back. Twenty seconds
+/// clears all of that with room, and still fails fast against a run that is never going to comply.
+const GM_DROP_WAIT: f64 = 20.0;
+
+/// How long to keep listening for `.debug bg`'s world-text reply before giving up and saying so.
+///
+/// The reply crosses the network, the chat pipeline and the Lua event dispatch before it reaches
+/// the tap. The old code took **one** destructive look 1.5 s after the send, which is both too
+/// narrow to be reliable and, being a single sample, unable to tell "not yet" from "never".
+const TOGGLE_REPLY_WINDOW: f64 = 6.0;
+
 /// How often a census line is printed once inside.
 const CENSUS_EVERY: f64 = 12.0;
 
@@ -170,11 +218,11 @@ const CENSUS_EVERY: f64 = 12.0;
 /// in it: vmangos holds every arrival behind closed doors for `BG_START_DELAY_2M` = **120 s**
 /// (`BattleGround.cpp:248`, the four `BG_STARTING_EVENT_*` steps at 2 min / 1 min / 30 s / go),
 /// and `.debug bg` does not shorten it. A window that ended before then would census nothing but
-/// the pen and report it as the whole battleground. Sixteen × 12 s = **192 s** covers the full
-/// prep, the doors dropping, and ~70 s of live match — while staying inside vmangos's
-/// `BattleGround.PrematureFinishTimer` (5 min), the clock that ends an under-populated one.
-/// Twelve × 12 s = **144 s**: the full prep, the doors dropping at ~116 s, and one sample past it,
-/// which leaves room for the graveyard leg inside the same run.
+/// the pen and report it as the whole battleground.
+///
+/// Twelve × 12 s = **144 s**: the full prep, the doors dropping at ~116 s, and two samples past
+/// them, which leaves room for the flag and graveyard legs inside the same run. Reaching the
+/// *ending* is a different window — see [`census_samples`].
 const CENSUS_SAMPLES_DEFAULT: u32 = 12;
 
 /// The census sample count, overridable with `WOW_PROBE_BG_SAMPLES`.
@@ -183,14 +231,25 @@ const CENSUS_SAMPLES_DEFAULT: u32 = 12;
 /// of a match: with one body inside, vmangos starts its `BattleGround.PrematureFinishTimer` (5 min,
 /// because `CreateNewBattleGround` reads `min_players_per_team` from the template and not from the
 /// testing override, so a solo match is permanently under-populated) and then ends the battleground
-/// with no winner. `WOW_PROBE_BG_SAMPLES=30` is a ~6-minute window, which reaches it — the
-/// `MSG_PVP_LOG_DATA` "ended" byte, `GetBattlefieldWinner()` and the automatic scoreboard, all of
-/// which are built and none of which anything here has watched.
+/// **with no winner** — `WINNER_NONE` = 2, not a team (`BattleGroundDefines.h:204`).
+///
+/// **Sizing it is arithmetic, not taste.** The countdown is armed when the battleground reaches
+/// `STATUS_IN_PROGRESS` — the doors, ≈T+120 s — and runs 300 s from there, so the ending lands at
+/// ≈T+420 s ≈ **35 samples**. `WOW_PROBE_BG_SAMPLES=36` reaches it; the 30 this doc used to
+/// recommend stops 60 s short and reports "the match never ended", which reads as a defect rather
+/// than as a window that was too small.
+///
+/// **Alterac Valley can never be ended this way at all**: the whole premature-finish block is
+/// guarded by `GetTypeID() != BATTLEGROUND_AV` (`BattleGround.cpp:318`).
+///
+/// A value below 1 is meaningless and is clamped to 1 — the first sample is also where the testing
+/// lever is put back, and a run that never censuses never restores it.
 fn census_samples() -> u32 {
     std::env::var("WOW_PROBE_BG_SAMPLES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(CENSUS_SAMPLES_DEFAULT)
+        .max(1)
 }
 
 /// How often the ghost leg samples, and for how long. The battleground resurrect wave is a 30 s
@@ -202,10 +261,6 @@ const GHOST_SAMPLES: u32 = 11;
 
 /// How many 3 s samples the flag leg takes after the use.
 const FLAG_SAMPLES: u32 = 5;
-
-/// The census sample by which the doors have opened (they drop ~116 s after entry, and the census
-/// ticks every 12 s). The testing flag is turned back off here — see the `Inside` arm.
-const DOORS_SAMPLE: u32 = 11;
 
 /// `SPIRITGUIDE` — `UNIT_NPC_FLAGS` bit 6, the flag the reference's area-spirit-healer acquire
 /// scan keys on (wow-re `interact-dead-fork-and-npc-service-ladder.md` §C row 6).
@@ -246,12 +301,22 @@ BenillaBgTap:RegisterEvent("ZONE_CHANGED_NEW_AREA");
 "#;
 
 /// Drain the tap: everything it recorded since the last census, then empty it.
+///
+/// **It reports the tap's own liveness first**, and that is not decoration. `BenillaBgLog` is set
+/// on `EVENT_TAP`'s first line, so a tap that raised *after* that line — or a tap installed into a
+/// VM that has since been thrown away and minted fresh — leaves a table that drains cleanly to `""`
+/// forever. An empty string would then be indistinguishable from "the battleground fired nothing",
+/// which is the one answer this instrument must never give by accident. The sentinel makes the
+/// difference readable, and [`bg_probe`] re-installs on seeing it.
+const TAP_GONE: &str = "<tap-gone>";
+
+/// See [`TAP_GONE`]: both globals are checked, because the frame is what actually receives events
+/// and the table is what holds them — either one missing means the readings are not trustworthy.
 const EVENT_DRAIN: &str = r#"
 local out = "";
-if BenillaBgLog then
-    for i = 1, table.getn(BenillaBgLog) do out = out .. "  " .. BenillaBgLog[i]; end
-    BenillaBgLog = {};
-end
+if not BenillaBgLog or not BenillaBgTap then return "<tap-gone>" end
+for i = 1, table.getn(BenillaBgLog) do out = out .. "  " .. BenillaBgLog[i]; end
+BenillaBgLog = {};
 return out;
 "#;
 
@@ -259,17 +324,54 @@ pub(crate) struct ProbeBgPlugin;
 
 impl Plugin for ProbeBgPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BgProbe>().add_systems(Update, bg_probe);
+        app.init_resource::<BgProbe>()
+            .add_systems(Update, (bg_probe, bg_probe_exit).chain());
     }
 }
 
 #[derive(Resource, Default)]
 struct BgProbe {
     phase: Phase,
-    /// The Lua event tap is in (or failed once and said so).
+    /// The Lua event tap is in and believed live. **Not a latch** — the drain re-checks the tap's
+    /// own global every sample and clears this if the VM went away underneath it, because the
+    /// interface VM is minted fresh on every world entry (`ui_script::lifecycle::mint_entry_vm`)
+    /// and a tap installed into the boot VM is silently gone after the port. A dead tap that still
+    /// reads `tap_installed` prints `EVENTS  (none)` forever, which is the exact inversion this
+    /// instrument exists to avoid.
     tap_installed: bool,
+    /// The tap raised on install and cannot be trusted. Kept apart from `tap_installed` so an
+    /// `EVENTS` line can say *"the tap is broken"* rather than *"the battleground fired nothing"*.
+    tap_broken: bool,
+    /// **How many `.debug bg` toggles this run has sent — parity, not state.**
+    ///
+    /// `.debug bg` is a toggle, so "what is it now?" is the wrong question and the one the old code
+    /// asked: it can only be answered by reading a world-text reply that may never arrive. "How far
+    /// from where I found it?" is always answerable, needs no reply, and is what a restore actually
+    /// needs. An odd count means this run left the lever flipped and owes the realm one more send;
+    /// an even count means it is already as found — including the normal road, where the run turns
+    /// testing on to queue and off again once inside.
+    toggles_sent: u32,
+    /// What the tap last said the lever reads: `Some(true)` = on ("…for debugging"), `Some(false)` =
+    /// off ("…normal playercount"), `None` = no reply seen yet. Consumed once so a second pass
+    /// cannot re-decide on a stale marker.
+    testing_seen: Option<bool>,
+    /// The lever was **read back** as on before the join, rather than merely assumed. The `Joined`
+    /// failure text says which, because "the flag was confirmed ON, so look elsewhere" sends the
+    /// reader past the actual suspect when nothing was ever confirmed.
+    testing_confirmed: bool,
     /// How many times the queue has been dropped and re-taken (see the `Joined` arm).
     rejoins: u32,
+    /// The `AppExit` has been written — `Done` is re-entered every frame until the app actually
+    /// stops, and a second exit write would be noise.
+    exited: bool,
+    /// When [`Phase::Done`] was first seen, so the exit can wait for the leave to land.
+    done_at: Option<f64>,
+    /// When the `Wait` arm first saw a body, so the GM-mode gate can time out rather than hang.
+    waiting_since: Option<f64>,
+    /// Events drained before the first census (during the toggle read-back and the queue road).
+    /// Carried rather than discarded: the old code threw them away and then attributed them to the
+    /// first 12 s census window, which is a reading about the wrong interval.
+    pending_events: String,
 }
 
 /// `Wait` → (levelled, hop sent) `Hopped` → (`.debug bg` sent) `Toggled` → (reply read, testing
@@ -286,6 +388,13 @@ enum Phase {
     Toggled {
         sent_at: f64,
         corrected: bool,
+    },
+    /// Looking for the battlemaster, **after** the testing lever is settled. Split out of `Toggled`
+    /// so the reply read happens once: the old code re-ran its destructive drain every frame of the
+    /// 15 s scan, which threw away every tap event that arrived during it and re-printed a
+    /// "TESTING unread" warning over the "TESTING on" line it had already printed.
+    Scanning {
+        since: f64,
     },
     Greeted {
         master: u64,
@@ -343,6 +452,76 @@ fn gm(net: &NetCommands, text: impl Into<String>) {
     });
 }
 
+/// Drain the event tap, distinguishing its three outcomes rather than flattening them to `""`.
+///
+/// Returns the events, or a bracketed reason. A `TAP_GONE` sentinel also **clears
+/// `tap_installed`**, so the next frame re-installs into whatever VM is live now — which is the
+/// self-heal for the one-frame world-entry window where the tap can land in a boot VM that is
+/// about to be discarded (`ui_script::lifecycle`).
+fn drain_events(probe: &mut BgProbe, script: &mut UiScript) -> String {
+    match script.eval::<String>(EVENT_DRAIN) {
+        Ok(s) if s.trim() == TAP_GONE => {
+            probe.tap_installed = false;
+            format!("  {TAP_GONE} — the VM was replaced under the tap; re-installing")
+        }
+        Ok(s) => s,
+        Err(e) => format!("  <drain raised: {e}>"),
+    }
+}
+
+/// Put the realm's `.debug bg` lever back if **this run** is the one that moved it.
+///
+/// Every road to [`Phase::Done`] goes through this, and that is the whole point. `.debug bg` is a
+/// realm-global, in-memory toggle (`BattleGroundMgr::ToggleTesting`) that announces itself to every
+/// player in the world, and it is a **toggle, not a set** — so a run that ends without restoring it
+/// hands the next run the opposite of what it expects. That is not hypothetical: it is how runs 2,
+/// 4 and 5 of this probe failed (2290 §2). The old code restored it at exactly one place, an
+/// equality test on the census counter, which every failure path and every
+/// `WOW_PROBE_BG_SAMPLES < DOORS_SAMPLE` run skipped silently.
+fn leave_testing_as_found(probe: &mut BgProbe, net: &NetCommands) {
+    if probe.toggles_sent % 2 == 1 {
+        info!(
+            "PROBE bg: TESTING — {} toggle(s) sent this run; one more puts the realm's \
+             `.debug bg` lever back as found",
+            probe.toggles_sent
+        );
+        toggle_testing(probe, net);
+    } else {
+        info!(
+            "PROBE bg: TESTING — {} toggle(s) sent this run; the lever is already as found",
+            probe.toggles_sent
+        );
+    }
+}
+
+/// Send `.debug bg` and count it. **Every** send goes through here — the parity in
+/// [`leave_testing_as_found`] is only as good as the counting.
+fn toggle_testing(probe: &mut BgProbe, net: &NetCommands) {
+    probe.toggles_sent += 1;
+    gm(net, ".debug bg");
+}
+
+/// End the run, restoring anything this run changed on the server first.
+fn finish(probe: &mut BgProbe, net: &NetCommands) {
+    leave_testing_as_found(probe, net);
+    probe.phase = Phase::Done;
+}
+
+/// A world state, distinguishing **absent** from **zero**.
+///
+/// [`WorldStates::get`] is reference-faithful: a key the server never sent reads `0`, because that
+/// is what the real client's table does. That is right for the client and wrong for an instrument —
+/// `ws2338=0` reads as a well-formed "the flag is at its base" when it actually means "no
+/// `SMSG_INIT_WORLD_STATES` ever carried this key". vmangos writes only 1 or 2 into the flag rows
+/// (`BattleGroundWS.cpp:509-515`, all eight call sites), so a `0` there is *always* a missing
+/// reading — and the person reading the log is exactly the person who does not know that yet.
+fn ws(states: &WorldStates, key: u32) -> String {
+    states
+        .pairs()
+        .find(|(k, _)| *k == key)
+        .map_or_else(|| "absent".to_string(), |(_, v)| v.to_string())
+}
+
 // One Bevy system's full input set — the guard-poi probe's shape, plus the census reads.
 #[allow(clippy::too_many_arguments)]
 fn bg_probe(
@@ -392,6 +571,7 @@ fn bg_probe(
                 }
                 Err(e) => {
                     probe.tap_installed = true; // a raise will not fix itself; say so once
+                    probe.tap_broken = true; // …and every later EVENTS line says so too
                     error!("PROBE bg: TAP FAILURE — {e}");
                 }
             }
@@ -400,11 +580,50 @@ fn bg_probe(
 
     match probe.phase {
         Phase::Wait => {
+            // **GM mode makes every objective in this probe fail silently, so refuse to start in
+            // it.** vmangos's `Player::CanUseBattleGroundObject` opens with
+            // `if (IsGameMaster()) return false;` (`Player.cpp:20576`), which means the flag click,
+            // the Arathi Basin banners and Alterac Valley's towers are all rejected server-side
+            // with no reply — while the queue, the port, the census, the world states and the
+            // scoreboard all keep working perfectly. That is the worst possible failure shape: a
+            // run that looks 90% right and is wrong exactly where the objectives are.
+            //
+            // MEASURED, by getting it wrong: a run without `WOW_GM=off` reached the Warsong Flag at
+            // 1.8 yd, sent `CMSG_GAMEOBJ_USE`, and reported `ws2339=1` with no banner aura and no
+            // `CHAT_MSG_BG_SYSTEM_ALLIANCE` — indistinguishable, from the probe's own lines, from a
+            // client that cannot pick up flags. `probe_shield` drops GM mode when `WOW_GM=off` is
+            // set (0679), so this WAITS for the flag to clear rather than refusing outright: the
+            // shield arms and drops GM a few hundred ms into the world, after this arm first runs.
+            if store.0.player_flags() & PLAYER_FLAGS_GM != 0 {
+                let since = *probe.waiting_since.get_or_insert(now);
+                if now - since < GM_DROP_WAIT {
+                    return;
+                }
+                error!(
+                    "PROBE bg: FAILURE — GM mode is still on after {GM_DROP_WAIT:.0}s. A \
+                     battleground is the one place it cannot be left on: \
+                     `CanUseBattleGroundObject` refuses a GM outright (vmangos \
+                     `Player.cpp:20576`), so every objective fails silently while the queue, the \
+                     port, the census and the scoreboard all keep working. Re-run with \
+                     `WOW_GM=off` — and if it WAS set, look for `probe-shield:` lines: the drop \
+                     is sequenced behind the shield and a refused command shows up there."
+                );
+                finish(&mut probe, &net);
+                return;
+            }
             // Revive first, unconditionally: `CanInteractWithNPC` refuses a dead player outright,
             // and the refusal surfaces as an anticheat line about an "invalid creature" — which
             // reads like a wrong guid, not like a corpse (`probe_bg_queue`'s note).
             gm(&net, ".revive");
-            let level = store.0.unit_level().unwrap_or(0);
+            // **Wait for the real level rather than assuming one.** `unit_level()` is `None` until
+            // `UNIT_FIELD_LEVEL` is in the store, and this arm fires on the first frame the
+            // `SelfPlayer` entity is queryable. Reading a missing field as `0` sends
+            // `.levelup 60` to a body that may already be 60 — which makes it **120**, above every
+            // bracket ceiling (`battleground_template.max_lvl = 60`), and the run then dies at
+            // `Greeted` blaming a level *under* the floor. A missing reading is not a zero.
+            let Some(level) = store.0.unit_level() else {
+                return;
+            };
             if level < QUEUE_LEVEL {
                 gm(&net, format!(".levelup {}", QUEUE_LEVEL - level));
             }
@@ -436,45 +655,76 @@ fn bg_probe(
             // fills — `BattleGroundMgr.cpp:1005-1028`). Flipping the flag under a queue entry that
             // is already sitting there schedules nothing, so the entry waits forever. Hence: get
             // the flag right first, then join once.
-            gm(&net, ".debug bg");
+            toggle_testing(&mut probe, &net);
             probe.phase = Phase::Toggled {
                 sent_at: now,
                 corrected: false,
             };
         }
         Phase::Toggled { sent_at, corrected } => {
-            if now - sent_at < 1.5 {
-                return; // let the world text come back and reach the tap
+            // **Drain every frame and keep what comes back**, rather than taking one destructive
+            // look 1.5 s in. The reply is a world text that crosses the network, reaches the chat
+            // pipeline and then the tap; a single window wide enough to be reliable is wider than
+            // one worth waiting on every run, and a single window narrow enough to be quick misses
+            // the reply often enough to matter — a missed reply is how this probe misdiagnoses
+            // itself. Anything drained here that is *not* the reply is kept for the first census
+            // instead of being thrown on the floor.
+            if let Some(s) = script.as_deref_mut() {
+                let seen = drain_events(&mut probe, s);
+                // The LAST marker in the chunk wins, because both can appear in one drain when the
+                // correcting send's reply arrives alongside the first. `contains` cannot express
+                // that and was the reason a corrected run could read its own first reply again.
+                let on = seen.rfind("debugging");
+                let off = seen.rfind("normal playercount");
+                match (on, off) {
+                    (Some(a), Some(b)) => probe.testing_seen = Some(a > b),
+                    (Some(_), None) => probe.testing_seen = Some(true),
+                    (None, Some(_)) => probe.testing_seen = Some(false),
+                    (None, None) => {}
+                }
+                probe.pending_events.push_str(&seen);
             }
-            let seen = script
-                .as_deref_mut()
-                .and_then(|s| s.eval::<String>(EVENT_DRAIN).ok())
-                .unwrap_or_default();
-            if seen.contains("normal playercount") {
-                if corrected {
+            match probe.testing_seen.take() {
+                Some(true) => {
+                    info!(
+                        "PROBE bg: TESTING on (1v0) — confirmed from the tap after {:.1}s",
+                        now - sent_at
+                    );
+                    probe.testing_confirmed = true;
+                    probe.phase = Phase::Scanning { since: now };
+                }
+                Some(false) if corrected => {
                     error!(
                         "PROBE bg: FAILURE — `.debug bg` reads OFF after two sends; the account \
                          may be below SEC_ADMINISTRATOR (6) for it"
                     );
-                    probe.phase = Phase::Done;
-                    return;
+                    finish(&mut probe, &net);
                 }
-                info!("PROBE bg: TESTING was on; that send turned it OFF — sending once more");
-                gm(&net, ".debug bg");
-                probe.phase = Phase::Toggled {
-                    sent_at: now,
-                    corrected: true,
-                };
-                return;
+                Some(false) => {
+                    info!("PROBE bg: TESTING was on; that send turned it OFF — sending once more");
+                    toggle_testing(&mut probe, &net);
+                    probe.phase = Phase::Toggled {
+                        sent_at: now,
+                        corrected: true,
+                    };
+                }
+                None if now - sent_at > TOGGLE_REPLY_WINDOW => {
+                    // Unread is a THIRD outcome, and it is carried forward rather than rounded to
+                    // "on": the `Joined` failure text used to assert the flag "was confirmed ON
+                    // before the join" even on this path, sending the reader to look at Deserter
+                    // and brackets when the lever was the actual suspect.
+                    warn!(
+                        "PROBE bg: TESTING unread — no `.debug bg` reply reached the tap in \
+                         {TOGGLE_REPLY_WINDOW:.0}s; continuing, but if the queue never pops, this \
+                         is the first thing to doubt"
+                    );
+                    probe.phase = Phase::Scanning { since: now };
+                }
+                // Still inside the window: stay in `Toggled` and look again next frame.
+                None => {}
             }
-            if seen.contains("debugging") {
-                info!("PROBE bg: TESTING on (1v0)");
-            } else {
-                warn!(
-                    "PROBE bg: TESTING unread — no `.debug bg` reply in the tap ({seen:?}); \
-                     continuing, but a queue that never pops is why"
-                );
-            }
+        }
+        Phase::Scanning { since: sent_at } => {
             let here = player.pos;
             // By ENTRY, not by "the nearest battlemaster": all three stand in one alcove.
             let master = units.iter().find(|(guid, kind, store, tf)| {
@@ -495,10 +745,10 @@ fn bg_probe(
                 };
             } else if now - sent_at > 15.0 {
                 error!(
-                    "PROBE bg: FAILURE — {} (entry {}) never streamed within 15 yd in 15 s",
+                    "PROBE bg: FAILURE — {} (entry {}) never streamed within {NEAR_YD:.0} yd in 15 s",
                     arena.npc_name, arena.npc_entry
                 );
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             }
         }
         Phase::Greeted { master, sent_at } => {
@@ -518,17 +768,23 @@ fn bg_probe(
                     "PROBE bg: FAILURE — no SMSG_BATTLEFIELD_LIST 8 s after the hello \
                      (a level under the bracket floor is refused here, silently)"
                 );
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             }
         }
         Phase::Joined { sent_at } => {
             // Status 2 is "your battleground is ready, confirm within the deadline". The probe
             // takes it through the STOCK VERB, not through a hand-built packet: the whole point
             // is that the reference's own dialog road works.
-            let ready = queue
-                .slots()
-                .iter()
-                .position(|s| s.as_ref().is_some_and(|(st, _)| st.status == 2));
+            // **Matched on the MAP as well as the status**, because a slot is not ours just because
+            // it is ready. A killed run can leave this character queued for another battleground,
+            // and vmangos re-sends that `SMSG_BATTLEFIELD_STATUS` at login — so a status-2 slot for
+            // Arathi Basin would be taken here, port the body into map 529, and the `Ported` arm
+            // would then time out complaining that the map "is still 529, not 489". The cause would
+            // read as a broken worldport; it is a stale queue entry the probe confirmed on purpose.
+            let ready = queue.slots().iter().position(|s| {
+                s.as_ref()
+                    .is_some_and(|(st, _)| st.status == 2 && st.map_id == arena.map)
+            });
             if let Some(index) = ready {
                 let slot = index + 1; // the verbs are 1-based
                 info!("PROBE bg: CONFIRM — slot {slot} is ready; AcceptBattlefieldPort({slot}, 1)");
@@ -536,12 +792,12 @@ fn bg_probe(
                     if let Err(e) = script.eval::<()>(&format!("AcceptBattlefieldPort({slot}, 1)"))
                     {
                         error!("PROBE bg: FAILURE — AcceptBattlefieldPort raised: {e}");
-                        probe.phase = Phase::Done;
+                        finish(&mut probe, &net);
                         return;
                     }
                 } else {
                     error!("PROBE bg: FAILURE — no VM to take the port through");
-                    probe.phase = Phase::Done;
+                    finish(&mut probe, &net);
                     return;
                 }
                 probe.phase = Phase::Ported { sent_at: now };
@@ -581,13 +837,21 @@ fn bg_probe(
                     })
                     .collect();
                 error!(
-                    "PROBE bg: FAILURE — no slot reached status 2 in 30 s (slots: {}). \
-                     The testing flag was confirmed ON before the join, so the cause is not that: \
-                     look for Deserter (26013) on the body, a bracket the server refused, or a \
-                     battleground this body is still registered in from a killed run.",
-                    slots.join(" ")
+                    "PROBE bg: FAILURE — no slot reached status 2 in 30 s (slots: {}). {} \
+                     Also worth checking: Deserter (26013) on the body, a bracket the server \
+                     refused, or a battleground this body is still registered in from a killed run.",
+                    slots.join(" "),
+                    if probe.testing_confirmed {
+                        "The testing flag was READ BACK as on before the join, so the cause is \
+                         probably not that."
+                    } else {
+                        "The testing flag was NEVER READ BACK (no `.debug bg` reply reached the \
+                         tap), so it is the first suspect: a previous run that died before its \
+                         own restore leaves the lever inverted, and a queue entry is only ever \
+                         evaluated when a join or a leave schedules it."
+                    },
                 );
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             }
         }
         Phase::Ported { sent_at } => {
@@ -609,7 +873,7 @@ fn bg_probe(
                     "PROBE bg: FAILURE — 30 s after the port the map is still {here}, not {}",
                     arena.map
                 );
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             }
         }
         Phase::Inside {
@@ -622,9 +886,15 @@ fn bg_probe(
             }
             let Some(mut script) = script else {
                 error!("PROBE bg: FAILURE — the VM went away inside the battleground");
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
                 return;
             };
+            // Drained HERE, not inside `census`, so the tap's self-heal can reach `probe` — and so
+            // everything the tap caught on the queue road is attributed to the window it actually
+            // happened in rather than being folded into the first census.
+            let mut events = std::mem::take(&mut probe.pending_events);
+            events.push_str(&drain_events(&mut probe, &mut script));
+            let tap_broken = probe.tap_broken;
             census(
                 now - entered_at,
                 arena,
@@ -638,26 +908,29 @@ fn bg_probe(
                 &go_templates,
                 &queue,
                 &mut script,
+                &events,
+                tap_broken,
             );
             let samples = samples + 1;
 
-            // **Flip the testing flag back OFF once the match is running**, which is the only way
-            // a solo battleground can ever end. vmangos decrements `m_prematureCountDownTimer`
-            // inside an `else if (!sBattleGroundMgr.isTesting())` branch (`BattleGround.cpp:337`),
-            // so while testing is on the countdown is armed and **frozen** — the arm above it runs
-            // once, the fire below it never reaches its condition, and a one-player Warsong Gulch
-            // runs forever (vanilla WSG has no time limit; three captures is its only other end).
-            // A run that measured this stayed in for 492 s with `winner` nil the whole way.
+            // **Once inside, the lever has done its job — put it back immediately.**
             //
-            // Turned off at the first sample past the doors, so the flag is only on for the queue
-            // that needed it. The countdown then runs its full `BattleGround.PrematureFinishTimer`
-            // (5 min) from that moment, which is what [`census_samples`] has to cover.
-            if samples == DOORS_SAMPLE {
+            // It was an equality test on `DOORS_SAMPLE` (11), and that was wrong twice over. Any
+            // `WOW_PROBE_BG_SAMPLES` below 11 — a documented, user-facing dial — skipped it
+            // entirely and left the realm-global flag flipped for the next run, which is the exact
+            // breakage 2290 §2 records as having cost runs 2, 4 and 5. And there was no reason to
+            // wait: the flag is needed only for `CheckNormalMatch` to *form* the match, which has
+            // already happened by the time we are standing in it. vmangos arms the premature
+            // countdown when the battleground reaches `STATUS_IN_PROGRESS` (the doors) and
+            // decrements it inside `else if (!sBattleGroundMgr.isTesting())` (`BattleGround.cpp:337`),
+            // so restoring it now simply lets that clock run from the doors rather than from
+            // sample 11 — twelve seconds *earlier* to an ending, not later.
+            if samples == 1 {
                 info!(
-                    "PROBE bg: TESTING off — the premature-finish countdown is frozen while it is \
-                     on, so a solo match could never end"
+                    "PROBE bg: TESTING — inside the instance; the lever has done its job and the \
+                     premature-finish countdown is frozen while it is on"
                 );
-                gm(&net, ".debug bg");
+                leave_testing_as_found(&mut probe, &net);
             }
 
             if samples >= census_samples() {
@@ -692,7 +965,7 @@ fn bg_probe(
             }
             let Some(master) = battlefield.battlemaster() else {
                 error!("PROBE bg: FAILURE — the battlemaster list went away before the rejoin");
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
                 return;
             };
             let _ = net.0.send(ClientCommand::BattlemasterJoin {
@@ -708,7 +981,7 @@ fn bg_probe(
                 return; // the hop crosses the map; let the far base stream in
             }
             let Some((entry, _)) = arena.flag else {
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
                 return;
             };
             let found = units.iter().find(|(guid, kind, _, tf)| {
@@ -744,8 +1017,9 @@ fn bg_probe(
             if now - at < f64::from(samples + 1) * 3.0 {
                 return;
             }
-            let Some(script) = script else {
-                probe.phase = Phase::Done;
+            let Some(mut script) = script else {
+                error!("PROBE bg: FAILURE — the VM went away during the flag leg");
+                finish(&mut probe, &net);
                 return;
             };
             // **The two readings that say the flag is on the body.** World state 2339 is the
@@ -767,14 +1041,14 @@ fn bg_probe(
                     "#,
                 )
                 .unwrap_or_else(|e| format!("<raised: {e}>"));
-            let events = script.eval::<String>(EVENT_DRAIN).unwrap_or_default();
+            let events = drain_events(&mut probe, &mut script);
             info!(
                 "PROBE bg: FLAG t={:.0}s ws2338={} ws2339={} captures={}/{} buffs=[{}]{}",
                 now - at,
-                states.get(2338),
-                states.get(2339),
-                states.get(1581),
-                states.get(1582),
+                ws(&states, 2338),
+                ws(&states, 2339),
+                ws(&states, 1581),
+                ws(&states, 1582),
                 auras.trim(),
                 if events.trim().is_empty() {
                     String::new()
@@ -804,7 +1078,7 @@ fn bg_probe(
                 error!(
                     "PROBE bg: FAILURE — still alive 15 s after `.die` (is the shield re-armed?)"
                 );
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             }
         }
         Phase::Ghost {
@@ -816,7 +1090,7 @@ fn bg_probe(
                 return;
             }
             let Some(mut script) = script else {
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
                 return;
             };
             // The whole point of this leg, in four readings: are we a ghost, is a spirit guide in
@@ -838,7 +1112,7 @@ fn bg_probe(
                      tostring(StaticPopup_Visible and StaticPopup_Visible(\"AREA_SPIRIT_HEAL\"))",
                 )
                 .unwrap_or_else(|e| format!("<raised: {e}>"));
-            let events = script.eval::<String>(EVENT_DRAIN).unwrap_or_default();
+            let events = drain_events(&mut probe, &mut script);
             info!(
                 "PROBE bg: GHOST t={:.0}s ghost={ghost} pos=({:.0},{:.0},{:.0}) area={:?} guide={} wave={wave}{}",
                 now - released_at,
@@ -846,10 +1120,7 @@ fn bg_probe(
                 player.pos.y,
                 player.pos.z,
                 area.as_deref().and_then(|a| a.0),
-                nearest.map_or_else(
-                    || "none".to_string(),
-                    |(g, d)| format!("{g:#x}@{d:.1}yd")
-                ),
+                nearest.map_or_else(|| "none".to_string(), |(g, d)| format!("{g:#x}@{d:.1}yd")),
                 if events.trim().is_empty() {
                     String::new()
                 } else {
@@ -865,7 +1136,7 @@ fn bg_probe(
                     Err(e) => error!("PROBE bg: GHOST AcceptAreaSpiritHeal() raised: {e}"),
                 }
                 report(arena, &net, &queue, &mut script);
-                probe.phase = Phase::Done;
+                finish(&mut probe, &net);
             } else {
                 probe.phase = Phase::Ghost {
                     released_at,
@@ -876,6 +1147,58 @@ fn bg_probe(
         }
         Phase::Done => {}
     }
+}
+
+/// **Reaching `Done` ends the process.** This probe was the one live probe here without it
+/// (`probe_auction`'s tail and `ProbeExitPlugin::fire_probe_exit` are the established shape), so
+/// the client simply idled at `Done` until whatever external `timeout` wrapped the run killed it:
+/// a four-minute Warsong Gulch census cost a fifteen-minute wall clock, and a sequence of runs
+/// spent most of its time watching a finished probe stand still.
+///
+/// It is its own system rather than an arm of [`bg_probe`] only because that system is already at
+/// Bevy's parameter ceiling — there is nothing conditional about the split.
+///
+/// **It waits for the leave to land before it goes**, and that wait is the whole reason this is not
+/// a one-liner. [`report`] ends by teleporting the body out to map 0, and `AppExit` stops the
+/// Update schedule — so exiting on the next frame can cut the connection before the worldport
+/// completes and strand the body **inside a live battleground**, which is precisely the poisoned
+/// state this probe warns the next run about. So: leave first, confirmed by the map actually
+/// changing, then exit; with [`LEAVE_GRACE`] as the backstop for a leave that never lands, because
+/// hanging forever would be worse than logging out somewhere awkward.
+///
+/// The polite `AppExit` plus a hard backstop on its own OS thread is the pattern, not belt and
+/// braces: `AppExit` stops the Update schedule, so an in-schedule backstop could never fire, and a
+/// net/winit teardown hang would otherwise leave a zombie client holding the probe account.
+fn bg_probe_exit(
+    time: ProbeClock,
+    mut probe: ResMut<BgProbe>,
+    map: Option<Res<CurrentMap>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if probe.phase != Phase::Done || probe.exited {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    let since = *probe.done_at.get_or_insert(now);
+    let left = map.as_ref().is_none_or(|m| m.0 != arena().map);
+    if !left && now - since < LEAVE_GRACE {
+        return;
+    }
+    if !left {
+        warn!(
+            "PROBE bg: still on map {} {LEAVE_GRACE:.0}s after the leave — exiting anyway, but \
+             this body may still be registered in the battleground",
+            arena().map
+        );
+    }
+    probe.exited = true;
+    info!("PROBE bg: exiting");
+    exit.write(AppExit::Success);
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        warn!("PROBE bg: still alive 5s after AppExit — hard exit");
+        std::process::exit(0);
+    });
 }
 
 /// One census sample — eleven greppable `PROBE bg:` lines describing everything the client can see
@@ -895,6 +1218,8 @@ fn census(
     go_templates: &crate::go_templates::GameObjectTemplates,
     queue: &BattlefieldQueue,
     script: &mut UiScript,
+    events: &str,
+    tap_broken: bool,
 ) {
     use benilla_protocol::EntityKind as K;
 
@@ -909,8 +1234,11 @@ fn census(
         },
     );
     info!(
+        // `map=none` rather than `map=0`: 0 is Eastern Kingdoms, a real answer, and printing it
+        // for "there is no `CurrentMap` resource" is the same missing-reads-as-a-value mistake
+        // the world-state column had.
         "PROBE bg: CENSUS t={t:.0}s map={} area={:?} pos=({:.0},{:.0},{:.0}) terrain={terrain}",
-        map.map_or(0, |m| m.0),
+        map.map_or_else(|| "none".to_string(), |m| m.0.to_string()),
         area.and_then(|a| a.0),
         p.x,
         p.y,
@@ -1067,28 +1395,29 @@ fn census(
     );
 
     // The event tap's window (see `EVENT_TAP`): what the VM was actually told since the last
-    // sample. An empty window while the server is running the start countdown is a finding.
-    let events = script
-        .eval::<String>(EVENT_DRAIN)
-        .unwrap_or_else(|e| format!("<raised: {e}>"));
+    // sample. An empty window while the server is running the start countdown is a finding —
+    // **provided the tap is alive**, which is why a broken tap says so instead of printing
+    // `(none)`. "The battleground fired nothing" and "nobody was listening" are opposite
+    // conclusions and used to produce identical lines.
     info!(
         "PROBE bg: EVENTS{}",
-        if events.trim().is_empty() {
+        if tap_broken {
+            "  <tap broken — see TAP FAILURE above; this is NOT 'no events'>".to_string()
+        } else if events.trim().is_empty() {
             "  (none)".to_string()
         } else {
-            events
+            events.to_string()
         }
     );
 
-    let errors = script.take_errors();
-    if errors.is_empty() {
-        info!("PROBE bg: LUA clean");
-    } else {
-        for e in &errors {
-            error!("PROBE bg: LUA ERROR {e}");
-        }
-    }
-    let _ = arena;
+    // **No `LUA` column, deliberately.** It used to print `LUA clean` off `take_errors()`, which
+    // reads as "the interface raised nothing inside a battleground for the last 12 s". It cannot
+    // mean that: `take_errors` is a DRAIN, and two systems already drain it every frame
+    // (`ui_script::input` and `ui_script::extract::extract`), so this call could only ever see
+    // whatever our own `eval`s in this same frame had just raised. A column that reports a 12 s
+    // window while measuring a fraction of one frame is worse than no column, because it reads as
+    // evidence. Engine-side Lua raises appear as `WARN ui_script:` lines — grep for those.
+    let _ = (arena, script);
 }
 
 /// The run's last act: drive the two battleground windows the census cannot reach by watching
@@ -1105,6 +1434,24 @@ fn report(arena: &Arena, net: &NetCommands, queue: &BattlefieldQueue, script: &m
     //
     // Through `getglobal`, because `BattlefieldMinimap` is LoadOnDemand: indexing it before the
     // toggle that loads it is a nil-index raise, and "not loaded yet" is a reading, not an error.
+    // **Does the battle map have anything to draw?** `IsShown()` alone cannot say: the stock
+    // `BattlefieldMinimap_Update` bails on its fourth line when `GetMapInfo()` is nil, so a window
+    // that is up and completely empty reports exactly the same `IsShown=1` as one full of terrain.
+    // These four readings are the difference, and they are the ones the minimap round never took.
+    let mapinfo = script
+        .eval::<String>(
+            r#"
+            local f, sx, sy, ox, oy = GetMapInfo();
+            return "file=" .. tostring(f)
+                .. " continent=" .. tostring(GetCurrentMapContinent())
+                .. " zone=" .. tostring(GetCurrentMapZone())
+                .. " overlays=" .. tostring(GetNumMapOverlays())
+                .. " landmarks=" .. tostring(GetNumMapLandmarks());
+            "#,
+        )
+        .unwrap_or_else(|e| format!("<raised: {e}>"));
+    info!("PROBE bg: MAPINFO {mapinfo}");
+
     for name in ["WorldStateScoreFrame", "BattlefieldMinimap"] {
         let shown = script
             .eval::<String>(&format!(
@@ -1148,8 +1495,15 @@ fn report(arena: &Arena, net: &NetCommands, queue: &BattlefieldQueue, script: &m
         queue.active_map()
     );
     let _ = script.eval::<()>("LeaveBattlefield()");
-    gm(net, ".recall");
-    // The lever was already put back at `DOORS_SAMPLE` (see the `Inside` arm) — a second toggle
-    // here would turn it back ON and leave it that way for the next run.
+    // **NOT `.recall`.** vmangos saves the recall point on *every* `.go`
+    // (`HandleGoHelper` → `SaveRecallPosition()`, `TeleportCommands.cpp:755`), so the flag leg's
+    // `.go xyz … 489` overwrote it with a position **inside the battleground**. `.recall` then
+    // resolves to the same map and `Player::TeleportTo` takes its near-teleport arm — the probe
+    // printed `LEAVING map 489` and went nowhere, leaving the body logged out inside a live
+    // instance and the queue slot uncleared. That is the poisoned state the `Joined` failure text
+    // warns the *next* run about, manufactured by this one. An explicit hop to the battlemaster
+    // alcove on map 0 is a real map change, which is what clears the slot.
+    let [x, y, z] = arena.at;
+    gm(net, format!(".go xyz {x} {y} {z} 0"));
     info!("PROBE bg: DONE");
 }

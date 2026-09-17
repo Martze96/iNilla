@@ -60,6 +60,9 @@ struct ViewCtx<'a> {
     items: &'a mut Items,
     commands: &'a NetCommands,
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+    /// The talent spell-modifier tables — the cost cell shows the RESOLVED cost, which since
+    /// `SPELLMOD_COST` landed means the modified one (`crate::ui_action::usable::power_cost`).
+    spell_mods: &'a crate::spell_mods::SpellModifiers,
     /// The VM's own `GlobalStrings.lua` (decision 2045) — every cell this builder composes is a
     /// key, and this is where they resolve. `text` is the `%d`-filling twin the `$`-engine's
     /// keyed tokens take (`benilla_formats::TokenContext::text`).
@@ -118,9 +121,9 @@ fn spell_tooltip_view(
     // replaces was unfaithful (B152). No store (a DBC-only view) degrades to the flat cost.
     // HAPPINESS_COST has no GlobalStrings entry and no 5875 player spell reaches powerType 4;
     // the unit word is a dead arm kept for the array's shape.
-    let resolved_cost = vctx
-        .store
-        .map_or(d.mana_cost, |s| crate::ui_action::usable::power_cost(d, s));
+    let resolved_cost = vctx.store.map_or(d.mana_cost, |s| {
+        crate::ui_action::usable::power_cost(d, s, vctx.spell_mods)
+    });
     let cost = {
         // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
         // hand-rolled copies of it and one of them had been applied at a single site out of four.
@@ -437,10 +440,17 @@ fn feed_spell_tooltips(
     home_bind: Option<Res<crate::net::HomeBind>>,
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
     mut items: ResMut<Items>,
-    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
+    // One tuple param (Bevy's 16-SystemParam ceiling): the two lookups the view builder reads
+    // straight through — the item sub-class names for the required-item line, and the talent
+    // spell-modifier tables the cost cell resolves through.
+    lookups: (
+        Option<Res<crate::ui_items::ItemSubClasses>>,
+        Res<crate::spell_mods::SpellModifiers>,
+    ),
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,
 ) {
+    let (sub_classes, spell_mods) = &lookups;
     let Some(mut script) = script else {
         return;
     };
@@ -566,6 +576,14 @@ fn feed_spell_tooltips(
         memory.combat_reach = Some(reaches);
         wanted.extend(memory.pushed.drain());
     }
+    // …and so does the cost cell, whose resolved number now goes through the talent
+    // spell-modifier tables: a respec changes what every affected spell costs, and this feed is
+    // the one consumer of `power_cost` that memoizes its build (the action bar recomputes every
+    // frame). The reference has no cache here at all — it reads the tables live at every call
+    // site — so this is what keeps the cell honest about the same change (`crate::spell_mods`).
+    if spell_mods.is_changed() {
+        wanted.extend(memory.pushed.drain());
+    }
     let watched: Vec<u32> = memory.reagents.keys().copied().collect();
     let reagent_state: std::collections::BTreeMap<u32, (u32, bool)> = watched
         .into_iter()
@@ -597,6 +615,7 @@ fn feed_spell_tooltips(
             items: &mut items,
             commands: &commands,
             sub_classes: sub_classes.as_deref().map(|c| &c.0),
+            spell_mods,
             get: &get,
             text: &text,
         };

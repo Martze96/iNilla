@@ -14,9 +14,11 @@
 //! * **Area spirit healer** — `SMSG_AREA_SPIRIT_HEALER_TIME {guid, ms}` arms the wave clock and
 //!   fires `AREA_SPIRIT_HEALER_IN_RANGE` when the guid is the cached healer's; Accept sends
 //!   `0x2E3` with that guid, Cancel is the cancel-aura of spell 2584 plus `_OUT_OF_RANGE`. **The
-//!   cache has no writer yet**: the reference's per-frame proximity scan (20 yd to acquire, 22 to
-//!   retain, `0x4923b0`) is not carved for its unit filter, so no healer is ever cached here and
-//!   Accept stays silent — named in the record, not guessed at.
+//!   cache has two writers** (2291), which is what made Accept reachable at all: the reference's
+//!   per-frame proximity scan [`poll_area_spirit_healer`] (`0x4923b0` — ghost-gated, acquire at
+//!   20 yd, retain to 22) and the SPIRITGUIDE click arm [`AreaSpiritHealer::click_guide`]
+//!   (`0x5df950`, whose deliberate cache-bust makes a second click re-ask). Until 2291 this said
+//!   "no writer yet", which was true when 1963 wrote it and false from the moment the scan landed.
 //! * **Battlefield queue** — `SMSG_BATTLEFIELD_STATUS` fills one of three slots and fires
 //!   `UPDATE_BATTLEFIELD_STATUS`; `AcceptBattlefieldPort(index, accept)` sends the slot's map id
 //!   with the answer as one byte.
@@ -792,6 +794,24 @@ fn meeting_stone_leave_world(mut stone: ResMut<MeetingStone>) {
     stone.leave_world();
 }
 
+/// Drop the cached spirit guide when the world does.
+///
+/// **A resurrect wave is the most session-bound state this module holds**, and it was the one
+/// resource here with no leave-world leg. A ghost who logs out at a Warsong Gulch graveyard with a
+/// guide latched and a wave armed carried `healer`, `deadline` and `in_range` into the character
+/// screen and into the *next* character's session — where, on the first frame the interface came
+/// up, [`feed_dialog_verbs`] pushed the stale healer into the fresh VM and could fire
+/// `AREA_SPIRIT_HEALER_IN_RANGE` at a living body standing in Stormwind, and the poll's ghost gate
+/// then cleared it and sent a `CMSG_CANCEL_AURA(2584)` the reference never sends there.
+///
+/// The reference does not need this leg because its equivalents are process-lifetime globals whose
+/// poll keeps running over the character screen's frames; ours is a resource in a world that goes
+/// away. Resetting at the seam is how every other per-session cache here behaves
+/// (`crate::ui_aura::end_session_aura_state` is the established shape).
+fn area_spirit_healer_leave_world(mut spirit: ResMut<AreaSpiritHealer>) {
+    *spirit = AreaSpiritHealer::default();
+}
+
 pub(crate) fn feed_dialog_verbs(
     script: Option<NonSendMut<UiScript>>,
     mut pet: ResMut<PetUnlearnState>,
@@ -1116,7 +1136,30 @@ impl Plugin for UiDialogVerbsPlugin {
                         .before(feed_meeting_stone)
                         .in_set(crate::char_select::InWorldGated),
                     feed_meeting_stone.before(UiInput),
-                    drain_latch_verbs.after(UiInput),
+                    // **Before the target chain, not merely after the input pass** — and this one
+                    // is a correctness order, not a tidiness one.
+                    //
+                    // `drain_latch_verbs` takes `AcceptAreaSpiritHeal`'s presses with
+                    // `take_area_spirit_accepts()` **unconditionally**, and only then gates the
+                    // send on `spirit.healer()`. Both systems that can *clear* that healer —
+                    // `poll_area_spirit_healer` (which drops it past the 22 yd retain radius) and
+                    // `act_on_right_click` (which re-points it at another guide) — live in or
+                    // after `TargetUpdate`, and `.after(UiInput)` alone constrains this against
+                    // neither: `UiInput` sits *before* `WorldStage::Input` and `TargetUpdate`
+                    // after it. So with the order undeclared, a ghost who clicks **Accept** on the
+                    // same frame they step out of range either sends
+                    // `CMSG_AREA_SPIRIT_HEALER_QUEUE` or has the press silently eaten — decided by
+                    // graph layout, with no message either way.
+                    //
+                    // `before` is the reference's own answer, not a coin toss: the dialog's Lua
+                    // handler runs inside the UI dispatch, while `0x4923b0` (the poll) and
+                    // `0x48184a` (the pick) both run later in the same frame off `CGWorldFrame`'s
+                    // OnUpdate. The press is resolved against the healer the frame *began* with.
+                    // Its neighbour `drain_meeting_stone_joins` below argued the same hazard and
+                    // declared its way out of it; this one was missed.
+                    drain_latch_verbs
+                        .after(UiInput)
+                        .before(crate::target::TargetUpdate),
                     drain_queue_verbs.after(UiInput),
                     // MEETINGSTONE(23)'s use slot (2283): the click resolved the object, this
                     // runs the validator and sends. Ordered after the **target chain**, not just
@@ -1132,7 +1175,7 @@ impl Plugin for UiDialogVerbsPlugin {
             )
             .add_systems(
                 OnExit(crate::char_select::ClientState::InWorld),
-                meeting_stone_leave_world,
+                (meeting_stone_leave_world, area_spirit_healer_leave_world),
             );
     }
 }
@@ -1265,14 +1308,204 @@ mod tests {
         assert_eq!(spirit.healer(), Some(7));
     }
 
-    /// The two radii are the reference's `.rdata` f32s, not round numbers someone picked:
-    /// `[0x8044d0] = 20.0` to acquire and `× [0x804580] = 1.1` to retain. The hysteresis is the
-    /// point — equal radii would re-send a query every frame a body jittered across the boundary.
+    /// `UNIT_FIELD_FLAGS`, absolute field 46 — `UNIT_FLAG_PVP` (`0x1000`) is what carries a
+    /// non-player-controlled unit through `can_assist`'s last gate.
+    const UNIT_FLAGS_FIELD: u16 = 46;
+    /// `UNIT_NPC_FLAGS`, absolute field 147.
+    const NPC_FLAGS_FIELD: u16 = 147;
+    /// `PLAYER_FLAGS`, absolute field 190; bit `0x10` is GHOST.
+    const PLAYER_FLAGS_FIELD: u16 = 190;
+
+    fn fields(pairs: &[(u16, u32)]) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs))
+    }
+
+    /// A world holding exactly what [`poll_area_spirit_healer`] reads, with the body at the origin
+    /// and one candidate unit at `dist` yards along +X.
+    ///
+    /// `ghost` drives `PLAYER_FLAGS 0x10`; `guide` drives `UNIT_NPC_FLAGS` bit 6. The candidate
+    /// carries `UNIT_FLAG_PVP` and faction template **35** ("friendly to all"), against a body on
+    /// template **1** (PLAYER, Human) — a real friendly pair out of the shipped DBC, so
+    /// `can_assist` passes for the same reason it passes on the live server rather than by
+    /// accident. A test that wants the acquire walk to *run* must therefore hand over the real
+    /// catalog; `None` serves the cases that refuse **before** the walk (not a ghost, not a guide,
+    /// too far), which is why those need no client data and never skip.
+    fn poll_world(
+        ghost: bool,
+        guide: bool,
+        dist: f32,
+        factions: Option<benilla_formats::FactionCatalog>,
+    ) -> (World, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<AreaSpiritHealer>();
+        world.init_resource::<crate::net::Reputations>();
+        world.init_resource::<crate::net::GuidIndex>();
+        if let Some(catalog) = factions {
+            world.insert_resource(crate::target::Factions::from_catalog(catalog));
+        }
+        world.spawn((
+            SelfPlayer,
+            fields(&[
+                (PLAYER_FLAGS_FIELD, if ghost { 0x10 } else { 0 }),
+                (FACTION_TEMPLATE_FIELD, 1),
+            ]),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        world.spawn((
+            crate::net::Guid(GUIDE),
+            crate::net::NetEntity {
+                kind: benilla_protocol::EntityKind::Unit,
+                display_id: None,
+                scale: 1.0,
+            },
+            fields(&[
+                (NPC_FLAGS_FIELD, if guide { 1 << 6 } else { 0 }),
+                (UNIT_FLAGS_FIELD, 0x1000),
+                (FACTION_TEMPLATE_FIELD, 35),
+            ]),
+            Transform::from_xyz(dist, 0.0, 0.0),
+        ));
+        (world, rx)
+    }
+
+    /// `UNIT_FIELD_FACTIONTEMPLATE`, absolute field 35.
+    const FACTION_TEMPLATE_FIELD: u16 = 35;
+
+    /// The shipped FactionTemplate.dbc, or an early return when this machine has no client data —
+    /// the same `wow_data_or_skip!` shape `target::ring`'s own reaction tests use.
+    macro_rules! catalog_or_skip {
+        () => {{
+            let data = benilla_formats::wow_data_or_skip!();
+            let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+            benilla_formats::load_faction_catalog(&mut chain).expect("FactionTemplate.dbc")
+        }};
+    }
+
+    const GUIDE: u64 = 0x9111;
+
+    fn run_poll(world: &mut World) {
+        use bevy::ecs::system::RunSystemOnce;
+        world.run_system_once(poll_area_spirit_healer).unwrap();
+    }
+
+    fn queries(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<u64> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::AreaSpiritHealerQuery { healer } => Some(healer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The ghost gate is the poll's first test** (`0x4923b0`, the `0x5df74a`-shaped read of
+    /// `[[player+0xe68]+8] bit 4`). A living body standing on top of a spirit guide adopts nothing
+    /// and sends nothing — which is what keeps the resurrect dialog off the screen of everyone who
+    /// is merely walking through a graveyard.
     #[test]
-    fn the_acquire_and_retain_radii_are_the_reference_pair() {
-        assert!((SPIRIT_GUIDE_ACQUIRE_YD - 20.0).abs() < f32::EPSILON);
-        assert!((SPIRIT_GUIDE_RETAIN_YD - 22.0).abs() < 1e-5);
-        const { assert!(SPIRIT_GUIDE_RETAIN_YD > SPIRIT_GUIDE_ACQUIRE_YD) };
+    fn a_living_body_never_adopts_a_spirit_guide() {
+        let (mut world, rx) = poll_world(false, true, 1.0, None);
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), None);
+        assert!(queries(&rx).is_empty(), "no clock is asked for");
+    }
+
+    /// The acquire leg: a ghost inside 20 yd adopts, and the adopt is what sends
+    /// `CMSG_AREA_SPIRIT_HEALER_QUERY` — the packet that was unreachable before 2291.
+    #[test]
+    fn a_ghost_adopts_a_guide_inside_the_acquire_radius_and_asks_for_the_clock() {
+        let catalog = catalog_or_skip!();
+        let (mut world, rx) = poll_world(true, true, 19.0, Some(catalog));
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), Some(GUIDE));
+        assert_eq!(
+            queries(&rx),
+            vec![GUIDE],
+            "exactly one query, for that guide"
+        );
+    }
+
+    /// …and 20 yd is a real boundary, not decoration: one yard further and nothing is adopted.
+    #[test]
+    fn a_guide_past_the_acquire_radius_is_not_adopted() {
+        let (mut world, rx) = poll_world(true, true, 21.0, None);
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), None);
+        assert!(queries(&rx).is_empty());
+    }
+
+    /// **The hysteresis, which is the whole reason there are two radii.** A guide adopted at 19 yd
+    /// is RETAINED at 21 — past the acquire radius — and only dropped past 22
+    /// (`20.0 × 1.1`). Equal radii would re-query every frame a body jittered over the boundary.
+    /// The drop is not silent: it cancels the wave (`CMSG_CANCEL_AURA` on 2584), which on vmangos
+    /// takes the player out of the resurrect queue.
+    #[test]
+    fn an_adopted_guide_is_retained_past_the_acquire_radius_and_dropped_past_the_retain_one() {
+        let catalog = catalog_or_skip!();
+        let (mut world, rx) = poll_world(true, true, 19.0, Some(catalog));
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), Some(GUIDE));
+        let _ = queries(&rx);
+
+        // 21 yd: outside acquire, inside retain — kept, and no second query.
+        let guide = world
+            .query_filtered::<Entity, With<crate::net::Guid>>()
+            .iter(&world)
+            .next()
+            .expect("the guide entity");
+        world
+            .entity_mut(guide)
+            .insert(Transform::from_xyz(21.0, 0.0, 0.0));
+        run_poll(&mut world);
+        assert_eq!(
+            world.resource::<AreaSpiritHealer>().healer(),
+            Some(GUIDE),
+            "retained between the two radii"
+        );
+        assert!(queries(&rx).is_empty(), "a retained guide is not re-asked");
+
+        // 23 yd: outside both — dropped.
+        world
+            .entity_mut(guide)
+            .insert(Transform::from_xyz(23.0, 0.0, 0.0));
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), None);
+    }
+
+    /// The unit filter is the `SPIRITGUIDE` bit and nothing else. A unit standing in the same spot
+    /// without it — a battle master, a herald, another player's corpse-side NPC — is skipped.
+    #[test]
+    fn a_unit_without_the_spiritguide_flag_is_never_adopted() {
+        let (mut world, rx) = poll_world(true, false, 1.0, None);
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), None);
+        assert!(queries(&rx).is_empty());
+    }
+
+    /// Resurrecting drops the guide. The poll is **level**-triggered, so the release happens on the
+    /// first frame the ghost flag clears — with the guide still standing right there.
+    #[test]
+    fn losing_the_ghost_state_drops_the_guide() {
+        let catalog = catalog_or_skip!();
+        let (mut world, _rx) = poll_world(true, true, 5.0, Some(catalog));
+        run_poll(&mut world);
+        assert_eq!(world.resource::<AreaSpiritHealer>().healer(), Some(GUIDE));
+
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .iter(&world)
+            .next()
+            .expect("the body");
+        world
+            .entity_mut(me)
+            .insert(fields(&[(PLAYER_FLAGS_FIELD, 0)]));
+        run_poll(&mut world);
+        assert_eq!(
+            world.resource::<AreaSpiritHealer>().healer(),
+            None,
+            "alive again: the cache clears even though the guide has not moved"
+        );
     }
 
     /// The four client-side refusals of MEETINGSTONE(23)'s use slot (`0x5f69d0`, decision 2283),

@@ -1046,6 +1046,23 @@ pub(super) fn aura_duration(
     durations.set(slot, remaining_ms, now_secs);
 }
 
+/// One cell of one talent spell-modifier table (`SMSG_SET_FLAT_SPELL_MODIFIER` /
+/// `SMSG_SET_PCT_SPELL_MODIFIER`) — `HandleSetSpellModifier 0x6e9950`'s whole body, which is a
+/// single store: the server sends the absolute value of that `(family bit, op)` pair, never a
+/// delta, so there is nothing to accumulate and nothing to invalidate.
+///
+/// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
+/// documents why it is ours and not the reference's).
+pub(super) fn set_spell_modifier(
+    flat: bool,
+    mask_bit: u8,
+    op: u8,
+    value: i32,
+    mods: &mut crate::spell_mods::SpellModifiers,
+) {
+    mods.set(flat, mask_bit, op, value);
+}
+
 /// The caster's chain-target hop array, filled from a wire target list — the reference's
 /// `0x605780` (decision 0955): it **clears before it fills** and **skips any entry equal to the
 /// unit's own guid** (`0x6057bf`/`0x6057c9`). Targets not streamed to us drop out here: an endpoint
@@ -1365,6 +1382,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1657,6 +1675,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1825,6 +1844,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1959,6 +1979,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -2089,6 +2110,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<AutoRepeatActive>();
 
         let self_e = app
@@ -2370,6 +2392,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2559,6 +2582,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<AutoRepeatActive>()
                 .init_resource::<crate::ui_action::ChainCasts>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();

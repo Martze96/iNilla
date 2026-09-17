@@ -19,6 +19,9 @@ struct TestCtx {
     /// glue tests onto the loader's own assembly.
     get: Box<Getter>,
     text: Box<Filler>,
+    /// Empty tables, which is the un-talented character every cell here is graded as: the cost
+    /// cell's modifier hop must be the identity when nothing has been sent.
+    spell_mods: crate::spell_mods::SpellModifiers,
 }
 
 /// The two lookup shapes, named so the harness's fields read.
@@ -36,6 +39,7 @@ impl TestCtx {
             commands: NetCommands(tx),
             _rx: rx,
             get: Box::new(move |key| benilla_ui::strings::global(for_get.lua(), key)),
+            spell_mods: crate::spell_mods::SpellModifiers::default(),
             text: Box::new(move |key, args: &[i64]| {
                 let template = benilla_ui::strings::global(for_text.lua(), key)?;
                 let args: Vec<_> = args
@@ -85,6 +89,7 @@ impl TestCtx {
             items: &mut self.items,
             commands: &self.commands,
             sub_classes,
+            spell_mods: &self.spell_mods,
             get: self.get.as_ref(),
             text: self.text.as_ref(),
         }

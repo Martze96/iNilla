@@ -764,6 +764,26 @@ pub enum ServerPacket {
         slot: u32,
         seconds: u32,
     },
+    /// `SMSG_SET_FLAT_SPELL_MODIFIER` / `SMSG_SET_PCT_SPELL_MODIFIER` — one cell of one of the two
+    /// talent spell-modifier tables, absolutely (layout + the index law in
+    /// [`super::spells::read_set_spell_modifier`]).
+    ///
+    /// One variant for both opcodes because the reference has one handler for both
+    /// (`0x6e9950`), reading the identical body and forking on the opcode alone to pick the table
+    /// — so `flat` IS the opcode, and nothing else differs.
+    SpellModifier {
+        /// `true` = `0x266`, the FLAT table (summed and added); `false` = `0x267`, the PCT table
+        /// (summed, then `+100`, clamped at 0, then used as a raw multiplier).
+        flat: bool,
+        /// The spell's `SpellFamilyFlags` **bit index**, 0..=63 — the table's row. The wire does
+        /// not bound it (the reference's own store overruns into the neighbouring global on a
+        /// 64); the consumer refuses it.
+        mask_bit: u8,
+        /// The SpellModOp, 0..=28 — the table's column. Likewise unbounded on the wire.
+        op: u8,
+        /// The cell's new value, **signed** and **absolute** — never a delta.
+        value: i32,
+    },
     /// `SMSG_COOLDOWN_EVENT` — start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's
     /// parked timers now (layout in [`super::spellbook::read_cooldown_event`]).
     CooldownEvent {
@@ -1752,6 +1772,14 @@ impl ServerPacket {
             ServerPacket::ItemCooldown { .. } => "SMSG_ITEM_COOLDOWN".into(),
             ServerPacket::ItemTime { .. } => "SMSG_ITEM_TIME_UPDATE".into(),
             ServerPacket::ItemEnchantTime { .. } => "SMSG_ITEM_ENCHANT_TIME_UPDATE".into(),
+            // The opcode IS the table, so the name recovers it — unlike the collapsed
+            // `AttackSwingError` arm above, nothing here is lost.
+            ServerPacket::SpellModifier { flat, .. } => if *flat {
+                "SMSG_SET_FLAT_SPELL_MODIFIER"
+            } else {
+                "SMSG_SET_PCT_SPELL_MODIFIER"
+            }
+            .into(),
             ServerPacket::CooldownEvent { .. } => "SMSG_COOLDOWN_EVENT".into(),
             ServerPacket::ClearCooldown { .. } => "SMSG_CLEAR_COOLDOWN".into(),
             ServerPacket::CooldownCheat { .. } => "SMSG_COOLDOWN_CHEAT".into(),

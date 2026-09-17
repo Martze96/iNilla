@@ -10,14 +10,20 @@
 //!   `Map.dbc` localized names ("Eastern Kingdoms", not the art folder's "Azeroth"); zones
 //!   sorted case-insensitively by AreaTable localized name (the `0x4a6390` comparator's
 //!   `SStrCmpI`); the zone grids remapped from raw AreaTable ids by the client's one-hop parent
-//!   rollup + (mapId, areaId) match — here straight to 1-based zone indices.
+//!   rollup + (mapId, areaId) match — here straight to 1-based zone indices. Beside that it
+//!   builds the **orphan list** ([`DirectAreaEntry`]) — the instance maps, which belong to no
+//!   continent and so appear in neither list above; the reference fills the same second container
+//!   in the same walk (`0x4a5d00`), and it is what the `−2` direct-area selection resolves
+//!   against.
 //! - [`feed_world_map`] (every frame): reads the engine-owned selection back, projects the
 //!   player's world position onto the displayed map via [`benilla_world::map_proj`] (world sheet:
-//!   WorldMapContinent constants; continent/zone: the WorldMapArea rect lerp), resolves the
-//!   player's `(continent, zone)` from `CurrentArea` through the AreaTable parent chain, and
-//!   pushes the trio + facing. (The client matches its zone-level area global directly —
-//!   `0x4a6650`; our MCNK `CurrentArea` is the leaf sub-area, so the parent walk lands on the
-//!   same zone.) It also runs the **landmark pass** — the reference's `0x4a67a0` builder
+//!   WorldMapContinent constants; continent/zone: the WorldMapArea rect lerp; an instance map:
+//!   that row's own rect), resolves where the player's own position puts the selection
+//!   ([`resolve_player_selection`], the reference's `0x4a6650` — continent × zone, then the
+//!   orphan list) from `CurrentArea` through the AreaTable parent chain, and pushes the trio +
+//!   facing. (The client matches its zone-level area global directly; our MCNK `CurrentArea` is
+//!   the leaf sub-area, so the parent walk lands on the same zone.) It also runs the **landmark
+//!   pass** — the reference's `0x4a67a0` builder
 //!   ([`landmark_gates_pass`], decision 1586): the `AreaPOI.dbc` rows the displayed level admits,
 //!   then the guard-directions marker. That pass is keyed rather than per-frame ([`LandmarkKey`]),
 //!   because the reference rebuilds it on events, not on a clock.
@@ -50,6 +56,11 @@ use benilla_world::world_map::CurrentMap;
 #[derive(Resource)]
 pub(crate) struct WorldMapUiData {
     continents: Vec<ContinentEntry>,
+    /// The **orphan list** — the instance maps, which are no continent's child and so appear in
+    /// neither list above. `0x4a5d00`'s third array, in `WorldMapArea.dbc` file order with no
+    /// sort; the rows the `−2` direct-area selection resolves against (see [`DirectAreaEntry`]).
+    /// It also carries what the engine is pushed, so the two copies cannot drift apart.
+    direct: Vec<DirectAreaEntry>,
 }
 
 pub(crate) struct ContinentEntry {
@@ -64,12 +75,79 @@ struct ZoneEntry {
     rect: ZoneRect,
 }
 
+/// One orphan row: an instance map (a battleground, a dungeon) selected **directly** rather than
+/// through the continent/zone pair. In 5875 there are exactly three, all battlegrounds.
+struct DirectAreaEntry {
+    /// The `WorldMapArea` row **ID** — the value the reference's third selection cell
+    /// `[0x845074]` holds verbatim (`0x4a6717 mov edx,[esi]`). Not a position in this list:
+    /// nothing indexes it, the resolver looks rows up by id.
+    id: u32,
+    /// The row's `Map.dbc` id. The resolver matches the player's own map against this
+    /// (`0x4a66f6`), and the projection admits a body only when its map is this one
+    /// (`0x4a7437`) — which is what makes a teammate elsewhere answer the (0,0) hide sentinel.
+    map_id: u32,
+    /// The row's own loc rect — the window `0x4a7360`'s direct-area leg projects through, the
+    /// same tail the zone case uses.
+    rect: ZoneRect,
+    /// What the engine is handed for this row (`GetMapInfo`'s art folder, the overlays).
+    view: WorldMapZoneView,
+}
+
 fn zone_rect(a: &WorldMapArea) -> ZoneRect {
     ZoneRect {
         left: a.loc_left,
         right: a.loc_right,
         top: a.loc_top,
         bottom: a.loc_bottom,
+    }
+}
+
+/// One `WorldMapArea` row as the engine sees it — a zone, a city, or an instance map: the client
+/// makes no structural distinction (the same `0x4a6cf0` id lookup answers `GetMapInfo` for all
+/// three, and the same overlay gate reveals their art), so neither do we.
+///
+/// `name` is passed in because the zone list sorts on it before the views are built.
+fn map_row_view(
+    wma_id: u32,
+    a: &WorldMapArea,
+    name: String,
+    areas: &benilla_formats::AreaTableCatalog,
+    wmo: &benilla_formats::WorldMapOverlayCatalog,
+) -> WorldMapZoneView {
+    WorldMapZoneView {
+        name,
+        area_id: a.area_id,
+        map_file: a.name.clone(),
+        loc_rect: (a.loc_left, a.loc_right, a.loc_top, a.loc_bottom),
+        // The row's discovery overlays: WorldMapOverlay rows joined by its WMA id, their reveal
+        // bits = each covered area's AreaTable exploreFlag.
+        overlays: wmo
+            .for_area(wma_id)
+            .iter()
+            .map(|o| WorldMapOverlayView {
+                texture: format!("Interface\\WorldMap\\{}\\{}", a.name, o.texture_name),
+                width: o.texture_width,
+                height: o.texture_height,
+                offset_x: o.offset_x,
+                offset_y: o.offset_y,
+                explore_bits: o
+                    .area_id
+                    .iter()
+                    .filter(|&&aid| aid != 0)
+                    .filter_map(|&aid| areas.get(aid).map(|r| r.explore_flag))
+                    .collect(),
+                hit_rect: (
+                    o.hit_rect_top,
+                    o.hit_rect_left,
+                    o.hit_rect_bottom,
+                    o.hit_rect_right,
+                ),
+                // The zone-level hover's label inside that rect: the FIRST area slot's AreaTable
+                // name — `0x4a7fa0` reads `+0x8` only (wow-re 15b2a8ea §1d); a slot that resolves
+                // to no row makes the overlay invisible to the hover, never to the draw.
+                area_name: areas.name(o.area_id[0]).map(str::to_string),
+            })
+            .collect(),
     }
 }
 
@@ -84,7 +162,7 @@ pub(crate) fn build_catalog(
     chain: &mut benilla_formats::Chain,
     areas: &benilla_formats::AreaTableCatalog,
     maps: &MapCatalogRes,
-) -> Option<(Vec<WorldMapContinentView>, Vec<ContinentEntry>)> {
+) -> Option<(Vec<WorldMapContinentView>, WorldMapUiData)> {
     let loaded = load_world_map_area_catalog(&mut *chain).and_then(|wma| {
         let wmc = load_world_map_continent_catalog(&mut *chain)?;
         let wmo = load_world_map_overlay_catalog(&mut *chain)?;
@@ -184,42 +262,7 @@ pub(crate) fn build_catalog(
             zone_grid,
             zones: zones
                 .iter()
-                .map(|(wma_id, a, name)| WorldMapZoneView {
-                    name: name.clone(),
-                    area_id: a.area_id,
-                    map_file: a.name.clone(),
-                    loc_rect: (a.loc_left, a.loc_right, a.loc_top, a.loc_bottom),
-                    // The zone's discovery overlays: WorldMapOverlay rows joined by the zone's
-                    // WMA id, their reveal bits = each covered area's AreaTable exploreFlag.
-                    overlays: wmo
-                        .for_area(*wma_id)
-                        .iter()
-                        .map(|o| WorldMapOverlayView {
-                            texture: format!("Interface\\WorldMap\\{}\\{}", a.name, o.texture_name),
-                            width: o.texture_width,
-                            height: o.texture_height,
-                            offset_x: o.offset_x,
-                            offset_y: o.offset_y,
-                            explore_bits: o
-                                .area_id
-                                .iter()
-                                .filter(|&&aid| aid != 0)
-                                .filter_map(|&aid| areas.get(aid).map(|r| r.explore_flag))
-                                .collect(),
-                            hit_rect: (
-                                o.hit_rect_top,
-                                o.hit_rect_left,
-                                o.hit_rect_bottom,
-                                o.hit_rect_right,
-                            ),
-                            // The zone-level hover's label inside that rect: the FIRST area
-                            // slot's AreaTable name — `0x4a7fa0` reads `+0x8` only (wow-re
-                            // 15b2a8ea §1d); a slot that resolves to no row makes the overlay
-                            // invisible to the hover, never to the draw.
-                            area_name: areas.name(o.area_id[0]).map(str::to_string),
-                        })
-                        .collect(),
-                })
+                .map(|(wma_id, a, name)| map_row_view(*wma_id, a, name.clone(), areas, &wmo))
                 .collect(),
         });
         entries.push(ContinentEntry {
@@ -235,7 +278,43 @@ pub(crate) fn build_catalog(
                 .collect(),
         });
     }
-    Some((views, entries))
+
+    // ── The THIRD list: the orphans — the instance maps (wow-re
+    // `system/ui/scratch/worldmap-direct-area-selection.md` §2). `0x4a5d00` fills a container
+    // beside the continents with every row that has `areaID != 0` and whose mapID matches **no**
+    // continent record's mapID, in `WorldMapArea.dbc` **file order with no sort** — the passes at
+    // `0x4a6130` (count) and `0x4a61c9` (fill), whose predicate is the exact complement of the
+    // child rule above. In 5875 that is Alterac Valley (WMA 401, map 30), Warsong Gulch (443,
+    // 489) and Arathi Basin (461, 529), and nothing else.
+    //
+    // The `areaID != 0` gate is carried although it is **provably inert on the shipped data**:
+    // every `areaID == 0` row becomes a continent record and so matches its own mapID at
+    // `0x4a6170`. It is the reference's predicate, not a filter we inferred from the data.
+    let continent_maps: Vec<u32> = entries.iter().map(|c| c.map_id).collect();
+    let direct: Vec<DirectAreaEntry> = wma
+        .iter()
+        .filter(|(_, a)| a.area_id != 0 && !continent_maps.contains(&a.map_id))
+        .map(|(id, a)| DirectAreaEntry {
+            id,
+            map_id: a.map_id,
+            rect: zone_rect(a),
+            view: map_row_view(
+                id,
+                a,
+                areas.name(a.area_id).unwrap_or(a.name.as_str()).to_string(),
+                areas,
+                &wmo,
+            ),
+        })
+        .collect();
+
+    Some((
+        views,
+        WorldMapUiData {
+            continents: entries,
+            direct,
+        },
+    ))
 }
 
 /// The built catalog, kept for the life of the process. A static `WorldMapArea` × `AreaTable` ×
@@ -247,6 +326,9 @@ pub(crate) fn build_catalog(
 /// the test plants a catalog and drives the entry edge, which is the ordering question without
 /// the DBC walk (the walk itself is covered against the real chain by
 /// `world_map_tests::the_real_feralas_catalog_names_dire_maul_under_the_cursor`).
+///
+/// The **continent** half only: the orphan half of the same build rides [`WorldMapUiData`], where
+/// each instance map's row already sits beside its projection rect.
 #[derive(Resource)]
 pub(crate) struct WorldMapCatalog(pub(crate) Vec<WorldMapContinentView>);
 
@@ -269,32 +351,41 @@ pub(crate) struct WorldMapCatalog(pub(crate) Vec<WorldMapContinentView>);
 /// load, and the getters read it whenever they are asked.
 pub(crate) fn seed_world_map_catalog(world: &mut World, script: &mut UiScript) {
     if !world.contains_resource::<WorldMapCatalog>() {
-        let Some((views, entries)) = build_catalog_from_world(world) else {
+        let Some((views, data)) = build_catalog_from_world(world) else {
             return;
         };
         info!(
-            "world map: catalog — {} continents, {} zones",
+            "world map: catalog — {} continents, {} zones, {} instance maps",
             views.len(),
-            views.iter().map(|c| c.zones.len()).sum::<usize>()
+            views.iter().map(|c| c.zones.len()).sum::<usize>(),
+            data.direct.len()
         );
-        world.insert_resource(WorldMapUiData {
-            continents: entries,
-        });
+        world.insert_resource(data);
         world.insert_resource(WorldMapCatalog(views));
     }
     let Some(catalog) = world.get_resource::<WorldMapCatalog>() else {
         return;
     };
     script.set_world_map_catalog(catalog.0.clone());
+    // The orphan half of the same build, pushed at the same edge and for the same reason (the
+    // reference fills both containers in one walk). It rides [`WorldMapUiData`] rather than
+    // [`WorldMapCatalog`] because that is where the rows and their projection rects already live
+    // together — one list, one order, nothing to drift.
+    if let Some(data) = world.get_resource::<WorldMapUiData>() {
+        script.set_world_map_direct_areas(
+            data.direct
+                .iter()
+                .map(|d| (d.id, d.view.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
 }
 
 /// [`build_catalog`] over the resources the app holds — `None` when the patch chain or either DBC
 /// catalog is missing, which in a real run cannot happen at this edge: all three are `Startup`
 /// systems and the initial state transition is after `PostStartup` (decision 1038). A bare test
 /// world takes the `None`.
-fn build_catalog_from_world(
-    world: &World,
-) -> Option<(Vec<WorldMapContinentView>, Vec<ContinentEntry>)> {
+fn build_catalog_from_world(world: &World) -> Option<(Vec<WorldMapContinentView>, WorldMapUiData)> {
     let assets = world.get_resource::<WorldAssets>()?;
     let maps = world.get_resource::<MapCatalogRes>()?;
     let areas = world.get_resource::<crate::area::AreaTableRes>()?;
@@ -302,31 +393,37 @@ fn build_catalog_from_world(
     build_catalog(&mut chain, &areas.0, maps)
 }
 
-/// Which of the map's three levels is displayed — the reference's `(continent, zone)` globals
-/// `[0x84506c]`/`[0x845070]` reduced to the thing every landmark gate actually branches on.
+/// Which of the map's levels is displayed — the reference's three selection cells
+/// `[0x84506c]`/`[0x845070]`/`[0x845074]` reduced to the thing every landmark gate actually
+/// branches on.
 ///
-/// The reference has a fourth, `ORPHAN` (`continent == -2`, a map selected directly rather than
-/// through the continent/zone pair). We have no way to reach it: [`UiScript::world_map_selection`]
-/// is a `(u32, u32)` pair with `0` for "whole", so a direct-area selection is unrepresentable.
-/// Where the reference's gates test "zone **or** orphan", ours test zone — the same answer for
-/// every state our map can be in.
+/// **The direct-area state answers [`MapLevel::Zone`], and that is the reference's own law rather
+/// than an approximation** (wow-re `worldmap-direct-area-selection.md` §6). Both gates that read
+/// this enum test "zone **or** orphan": the AreaPOI level flag falls into the zone-level
+/// `test [rec+0x20],0x4` at `-2` (`0x4a79de cmp eax,-2; jne`), and `GetMapLandmarkInfo`'s
+/// `textureIndex` substitution is reached when the zone cell is `-1` **and** the continent is `-2`
+/// (`0x4a8856`/`0x4a885f` both fall through to `0x4a8868`). A fourth variant would be two arms
+/// that copy `Zone` exactly — so the fact is recorded here instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MapLevel {
     /// Both continents on one sheet (the reference's `continent == -1`).
     World,
     /// One continent, no zone selected (`continent >= 0, zone == -1`).
     Continent,
-    /// One zone (`continent >= 0, zone >= 0`).
+    /// One zone (`continent >= 0, zone >= 0`) — or an instance map (`continent == -2`).
     Zone,
 }
 
 impl MapLevel {
-    /// Our 1-based `(continent, zone)` selection, `0` = "whole", mapped onto the reference's
-    /// `-1`-for-whole pair.
-    fn of(continent: u32, zone: u32) -> Self {
-        match (continent, zone) {
-            (0, _) => Self::World,
-            (_, 0) => Self::Continent,
+    /// The engine's selection ([`UiScript::world_map_selection`]) — our 1-based
+    /// `(continent, zone)` with `0` for "whole", plus the direct-area row id — mapped onto the
+    /// reference's levels. The direct cell is read FIRST: it shares the `(0, 0)` pair with the
+    /// world sheet and overrides it.
+    fn of((continent, zone, direct): (u32, u32, Option<u32>)) -> Self {
+        match (continent, zone, direct) {
+            (_, _, Some(_)) => Self::Zone,
+            (0, _, None) => Self::World,
+            (_, 0, None) => Self::Continent,
             _ => Self::Zone,
         }
     }
@@ -346,7 +443,9 @@ impl MapLevel {
 /// input that silently hides map icons when it is wrong.
 #[derive(PartialEq, Eq)]
 struct LandmarkKey {
-    selection: (u32, u32),
+    /// All three selection cells — the direct-area one included, or an instance map's landmark
+    /// list would never rebuild when the selection moved onto it.
+    selection: (u32, u32, Option<u32>),
     map: u32,
     states: u64,
     /// Owned rather than borrowed, and compared before it is ever cloned — see
@@ -364,7 +463,7 @@ impl LandmarkKey {
     /// changed — compares without allocating.
     fn matches(
         &self,
-        selection: (u32, u32),
+        selection: (u32, u32, Option<u32>),
         map: u32,
         states: u64,
         explored: &[u32],
@@ -467,27 +566,57 @@ fn landmark_texture_index(poi: &benilla_formats::AreaPoi, level: MapLevel) -> u3
     }
 }
 
-/// `SetMapToCurrentZone`'s resolver, whose two halves fail SEPARATELY — see the call site in
-/// [`feed_world_map`] for the byte citation. `map_id` is the player's `Map.dbc` id; `top_zone` is
-/// their current area walked up to its top-level zone, or `None` while the area feed has not
-/// answered. The answer is the 1-based `(continent, zone)` the Lua selection verbs speak, with
-/// **zone 0 meaning the continent map** — the reference's `SetMap(continent, −1)` as
-/// `GetCurrentMapZone` reads it back.
-fn resolve_player_zone(
+/// `0x4a6650`'s answer — which map the player's own position selects — in the Lua-visible
+/// encoding. Its two legs are mutually exclusive by construction: the resolver runs the continent
+/// loop first and reaches the orphan loop only on a miss (`0x4a66c3`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct PlayerSelection {
+    /// The continent/zone leg: the 1-based pair, with **zone 0 meaning the continent map** (the
+    /// reference's `SetMap(continent, −1)` as `GetCurrentMapZone` reads it back). `None` = no
+    /// continent record carried the player's map.
+    zone: Option<(u32, u32)>,
+    /// The orphan leg: the `WorldMapArea` row **ID** whose mapID is the player's own map.
+    direct: Option<u32>,
+}
+
+/// `SetMapToCurrentZone`'s resolver (`0x4a7e20` is `call 0x4a6650`, and the engine's own
+/// world-enter sync `0x4947ac` calls the same function — there is no second resolver).
+///
+/// Three exits, in the reference's own precedence:
+///
+/// 1. **A continent whose mapID is the player's**, and then its child zones — whose two halves
+///    fail SEPARATELY (see the call site in [`feed_world_map`] for the byte citation).
+/// 2. **Only on a continent miss**, the orphan list, matched on `row.mapID == playerMapId`, first
+///    match wins: the direct-area selection `SetMap(-2, row.id)` (`0x4a6717`–`0x4a671e`). This is
+///    the leg a battleground takes — map 489 is no continent's, so nothing above can match.
+/// 3. Neither: the world view (both cells `None`), which is also what an empty orphan list gives.
+fn resolve_player_selection(
     data: &WorldMapUiData,
     map_id: u32,
     top_zone: Option<u32>,
-) -> Option<(u32, u32)> {
-    let ci = data.continents.iter().position(|c| c.map_id == map_id)?;
-    let zone = top_zone
-        .and_then(|top| {
-            data.continents[ci]
-                .zones
-                .iter()
-                .position(|z| z.area_id == top)
-        })
-        .map_or(0, |zi| zi as u32 + 1);
-    Some((ci as u32 + 1, zone))
+) -> PlayerSelection {
+    if let Some(ci) = data.continents.iter().position(|c| c.map_id == map_id) {
+        let zone = top_zone
+            .and_then(|top| {
+                data.continents[ci]
+                    .zones
+                    .iter()
+                    .position(|z| z.area_id == top)
+            })
+            .map_or(0, |zi| zi as u32 + 1);
+        return PlayerSelection {
+            zone: Some((ci as u32 + 1, zone)),
+            direct: None,
+        };
+    }
+    PlayerSelection {
+        zone: None,
+        direct: data
+            .direct
+            .iter()
+            .find(|d| d.map_id == map_id)
+            .map(|d| d.id),
+    }
 }
 
 /// The engine-side world-enter sync's gate and answer — `0x494780`'s `old == 0` leg into the
@@ -502,39 +631,56 @@ fn resolve_player_zone(
 ///   would sync on frame 1 to the bare continent and — since the reference never re-syncs — stay
 ///   there.
 /// - **Every exit of `0x4a6650` writes the selection**, including its two failure legs
-///   (`0x4a667e`/`0x4a670b` ⇒ `SetMap(−1, −1)`). So an unresolvable player — an instance map, no
-///   continent row — still counts as synced, at the world view, rather than re-arming the gate
-///   every frame. That is `player_zone.unwrap_or((0, 0))`: our `None` IS the reference's
-///   `(−1, −1)`, which `GetCurrentMapContinent` reads back to Lua as `0`.
+///   (`0x4a667e`/`0x4a670b` ⇒ `SetMap(−1, −1)`). So an unresolvable player — a map in neither
+///   list — still counts as synced, at the world view, rather than re-arming the gate every
+///   frame. That is the all-`None` [`PlayerSelection`]: it IS the reference's `(−1, −1)`, which
+///   `GetCurrentMapContinent` reads back to Lua as `0`.
+///
+/// A player logging straight into a battleground takes the *direct* leg here, which is why this
+/// hands the whole answer on rather than the pair: the sync happens once per session, so dropping
+/// the third cell would strand such a session on the world sheet for its whole life.
 fn world_enter_selection(
     synced: bool,
     top_zone: Option<u32>,
-    player_zone: Option<(u32, u32)>,
-) -> Option<(u32, u32)> {
-    (!synced && top_zone.is_some()).then(|| player_zone.unwrap_or((0, 0)))
+    player: PlayerSelection,
+) -> Option<PlayerSelection> {
+    (!synced && top_zone.is_some()).then_some(player)
 }
 
 /// Per frame: selection read-back → projection → feed push (see the module doc).
 /// One projection law for every blip on the DISPLAYED map: world-sheet mode (selection
 /// `(0, _)`) projects through the POSITION's own map's continent constants; continent and zone
-/// mode through the selected rect, gated to that continent's map. Off-map — the wrong continent,
-/// an instance map, outside the rect — is `None`, the reference's `(0, 0)` hide sentinel once it
+/// mode through the selected rect, gated to that continent's map; **direct-area mode through the
+/// selected row's own rect**, gated to that row's map. Off-map — the wrong continent, a body in
+/// another instance, outside the rect — is `None`, the reference's `(0, 0)` hide sentinel once it
 /// reaches Lua.
+///
+/// The direct arm is `0x4a7360`'s own (`0x4a73e0 jl 0x4a7414`): it reads `[0x845074]`, resolves
+/// the row, requires `[row+0x4] == mapId` (`0x4a7437`) and then runs the **same tail the zone case
+/// uses** — it never touches the continent record array. The gate is what makes it right for
+/// every caller and not just the player: `0x4a7870` passes the *unit's own* map id, so a
+/// teammate standing in the battleground projects and one who is elsewhere answers `(0, 0)`.
 pub(crate) fn project_on_displayed(
     data: &WorldMapUiData,
-    selection: (u32, u32),
+    selection: (u32, u32, Option<u32>),
     pos_map: u32,
     px: f32,
     py: f32,
 ) -> Option<(f32, f32)> {
     match selection {
-        (0, _) => data
+        // The direct cell first: it shares the `(0, 0)` pair with the world sheet.
+        (_, _, Some(id)) => data
+            .direct
+            .iter()
+            .find(|d| d.id == id && d.map_id == pos_map)
+            .map(|d| map_proj::zone_uv(d.rect, px, py)),
+        (0, _, None) => data
             .continents
             .iter()
             .find(|cont| cont.map_id == pos_map)
             .and_then(|cont| cont.proj)
             .map(|p| map_proj::world_uv(p, px, py)),
-        (c, z) => data
+        (c, z, None) => data
             .continents
             .get(c as usize - 1)
             .filter(|cont| cont.map_id == pos_map)
@@ -625,11 +771,15 @@ fn feed_world_map(
     // every consumer that assumes a zone uv — Astrolabe, and so every addon built on it — silently
     // mis-scales it.
     //
-    // NOT modelled, and deliberately: the `−2` orphan/direct-area leg for a map that is no
-    // continent's child (the instance maps). We have no orphan list, so those still land on the
-    // world view rather than the reference's direct-area selection.
+    // And when NO continent matched, the resolver falls through to its third leg: the orphan
+    // list, i.e. the instance maps (`0x4a66c3`). Inside a battleground that is the only leg that
+    // can answer — map 489 is no continent's child — and it selects the battleground's own
+    // `WorldMapArea` row directly, `SetMap(-2, row.id)`. Both halves travel to the engine
+    // together; with only the pair, `GetMapInfo()` answers nil in there and the stock
+    // `Blizzard_BattlefieldMinimap.lua:83-86` returns on the fourth line of its update, which is
+    // a battle map and a world map that draw nothing at all.
     let top_zone = world.area().and_then(|aid| areas.0.top_zone(aid));
-    let player_zone = resolve_player_zone(&data, map.0, top_zone);
+    let player_sel = resolve_player_selection(&data, map.0, top_zone);
 
     // ── First world-enter: the ENGINE selects the player's zone, with no Lua in the loop.
     //
@@ -656,19 +806,20 @@ fn feed_world_map(
     // precondition. Per **VM**, not per process: a new login is a new session's first enter.
     {
         let memo = memo.get(&script);
-        if let Some((c, z)) = world_enter_selection(memo.map_synced, top_zone, player_zone) {
+        if let Some(sel) = world_enter_selection(memo.map_synced, top_zone, player_sel) {
             memo.map_synced = true;
-            script.sync_world_map_to_player_zone(c, z);
+            let (c, z) = sel.zone.unwrap_or((0, 0));
+            script.sync_world_map_to_player_zone(c, z, sel.direct);
         }
     }
 
-    // The player's UV on the DISPLAYED map. Off-map (wrong continent, outside the rect, or an
-    // instance map) resolves to None/(0,0) — the reference's hide-the-blip sentinel.
-    let (c, z) = script.world_map_selection();
+    // The player's UV on the DISPLAYED map. Off-map (wrong continent, another instance, outside
+    // the rect) resolves to None/(0,0) — the reference's hide-the-blip sentinel.
+    let selection = script.world_map_selection();
     // One projection law for every blip on the displayed map (the player now, the corpse below,
     // the battleground teammates in `ui_battlefield_positions`): [`project_on_displayed`].
     let project =
-        |pos_map: u32, px: f32, py: f32| project_on_displayed(&data, (c, z), pos_map, px, py);
+        |pos_map: u32, px: f32, py: f32| project_on_displayed(&data, selection, pos_map, px, py);
     let uv = project(map.0, wx, wy);
     // The corpse marker (decision 0308 §5): the query answer's DISPLAY position/map (a dungeon
     // corpse projects at its entrance — the server rewrote it). `zone_uv`'s outside-the-rect
@@ -691,9 +842,9 @@ fn feed_world_map(
         .get(&script)
         .landmarks
         .as_ref()
-        .is_some_and(|k| k.matches((c, z), map.0, states_gen, &explored, marker));
+        .is_some_and(|k| k.matches(selection, map.0, states_gen, &explored, marker));
     if !unchanged {
-        let level = MapLevel::of(c, z);
+        let level = MapLevel::of(selection);
         let mut landmarks = Vec::new();
         // The DBC rows first, in file order, each through the builder's gate chain — that order
         // IS the Lua landmark index (`0x4a6819`'s walk over `[0xc0e054]`).
@@ -734,7 +885,7 @@ fn feed_world_map(
             }
         }
         memo.get(&script).landmarks = Some(LandmarkKey {
-            selection: (c, z),
+            selection,
             map: map.0,
             states: states_gen,
             explored: explored.clone(),
@@ -787,13 +938,18 @@ fn feed_world_map(
     };
 
     script.set_world_map_feed(
-        player_zone,
+        player_sel.zone,
         uv,
         player.facing(),
         corpse_uv,
         party_uv,
         raid_uv,
     );
+    // The orphan leg of the same resolver answer, beside the pair: `SetMapToCurrentZone` reads
+    // both back, and the stock battlefield minimap calls it itself on `PLAYER_ENTERING_WORLD`
+    // while it is shown — the call that lands a player zoning into a battleground on the
+    // battleground's own map.
+    script.set_world_map_player_direct_area(player_sel.direct);
 }
 
 /// **Alt+click the world map to go there** — the dev jump.
@@ -847,28 +1003,40 @@ fn dev_map_jump(
     else {
         return;
     };
-    let (c, z) = script.world_map_selection();
-    let Some(cont) = c
-        .checked_sub(1)
-        .and_then(|i| data.continents.get(i as usize))
-    else {
-        info!(
-            "map-jump: no exact click→world law at the world level — zoom into a continent first"
-        );
-        return;
-    };
-    let rect = match z.checked_sub(1) {
-        None => cont.rect,
-        Some(i) => match cont.zones.get(i as usize) {
-            Some(zone) => zone.rect,
+    let (c, z, direct) = script.world_map_selection();
+    // An instance map is a rect like any other — the same `0x4a7100` zone-mode inverse — so the
+    // jump works off a battleground map too; only the world sheet has no exact inverse.
+    let (rect, map_id) = match direct {
+        Some(id) => match data.direct.iter().find(|d| d.id == id) {
+            Some(d) => (d.rect, d.map_id),
             None => return,
         },
+        None => {
+            let Some(cont) = c
+                .checked_sub(1)
+                .and_then(|i| data.continents.get(i as usize))
+            else {
+                info!(
+                    "map-jump: no exact click→world law at the world level — zoom into a \
+                     continent first"
+                );
+                return;
+            };
+            let rect = match z.checked_sub(1) {
+                None => cont.rect,
+                Some(i) => match cont.zones.get(i as usize) {
+                    Some(zone) => zone.rect,
+                    None => return,
+                },
+            };
+            (rect, cont.map_id)
+        }
     };
     // `zone_world` lerps BOTH axes by its single `t` (the binary's own shape) — so it is called
     // once per axis, which is how the reference's own callers consume it.
     let (_, wy) = map_proj::zone_world(rect, u);
     let (wx, _) = map_proj::zone_world(rect, v);
-    let text = format!(".go xy {wx:.2} {wy:.2} {}", cont.map_id);
+    let text = format!(".go xy {wx:.2} {wy:.2} {map_id}");
     info!("map-jump: {text}");
     let _ = net.0.send(crate::net::ClientCommand::Chat {
         kind: crate::net::ChatKind::Say,
@@ -1065,13 +1233,21 @@ mod tests {
         assert!(!is_degenerate((1e-6, 0.0)));
     }
 
-    /// Our `(continent, zone)` pair, `0` = whole, onto the reference's levels.
+    /// The engine's three selection cells — our `(continent, zone)` pair with `0` = whole, plus
+    /// the direct-area id — onto the reference's levels.
     #[test]
     fn the_selection_pair_maps_onto_the_reference_levels() {
-        assert_eq!(MapLevel::of(0, 0), MapLevel::World);
-        assert_eq!(MapLevel::of(0, 3), MapLevel::World, "continent 0 wins");
-        assert_eq!(MapLevel::of(2, 0), MapLevel::Continent);
-        assert_eq!(MapLevel::of(2, 7), MapLevel::Zone);
+        assert_eq!(MapLevel::of((0, 0, None)), MapLevel::World);
+        assert_eq!(
+            MapLevel::of((0, 3, None)),
+            MapLevel::World,
+            "continent 0 wins"
+        );
+        assert_eq!(MapLevel::of((2, 0, None)), MapLevel::Continent);
+        assert_eq!(MapLevel::of((2, 7, None)), MapLevel::Zone);
+        // An instance map takes the ZONE arms of both gates it feeds — `0x4a79de`'s level flag
+        // and `0x4a8856`'s forced textureIndex 15 — even though it shares the world sheet's pair.
+        assert_eq!(MapLevel::of((0, 0, Some(443))), MapLevel::Zone);
     }
 
     /// The REAL `AreaPOI.dbc`, run through the whole gate chain the way the feed does — the
@@ -1208,7 +1384,9 @@ mod player_zone_tests {
         }
     }
 
-    /// Azeroth (map 0) with Elwynn at catalog index 9 (→ Lua zone 10), plus Kalimdor (map 1).
+    /// Azeroth (map 0) with Elwynn at catalog index 9 (→ Lua zone 10), plus Kalimdor (map 1) —
+    /// and one orphan, Warsong Gulch's real row (`WorldMapArea` 443 on map 489), which is in
+    /// neither continent's list because no continent record carries its map.
     fn data() -> WorldMapUiData {
         WorldMapUiData {
             continents: vec![
@@ -1231,6 +1409,18 @@ mod player_zone_tests {
                         .collect(),
                 },
             ],
+            direct: vec![DirectAreaEntry {
+                id: 443,
+                map_id: 489,
+                rect: rect(),
+                view: WorldMapZoneView {
+                    name: "Warsong Gulch".into(),
+                    area_id: 3277,
+                    map_file: "WarsongGulch".into(),
+                    loc_rect: (1.0, -1.0, 1.0, -1.0),
+                    overlays: Vec::new(),
+                },
+            }],
         }
     }
 
@@ -1243,27 +1433,92 @@ mod player_zone_tests {
     #[test]
     fn an_unresolved_zone_falls_back_to_the_continent_not_the_world() {
         let d = data();
+        let on_continent = |c, z| PlayerSelection {
+            zone: Some((c, z)),
+            direct: None,
+        };
 
         // Both halves resolve: Elwynn is continent 2, zone 10.
-        assert_eq!(resolve_player_zone(&d, 0, Some(12)), Some((2, 10)));
+        assert_eq!(
+            resolve_player_selection(&d, 0, Some(12)),
+            on_continent(2, 10)
+        );
 
         // The continent resolves, the zone does not — an area the catalog has no row for.
         assert_eq!(
-            resolve_player_zone(&d, 0, Some(4242)),
-            Some((2, 0)),
+            resolve_player_selection(&d, 0, Some(4242)),
+            on_continent(2, 0),
             "SetMap(continent, -1); GetCurrentMapZone reads that back as 0"
         );
 
         // The area feed has not answered yet — same leg, not the world view.
         assert_eq!(
-            resolve_player_zone(&d, 0, None),
-            Some((2, 0)),
+            resolve_player_selection(&d, 0, None),
+            on_continent(2, 0),
             "a zone we do not know YET is still this continent"
         );
 
-        // No continent match at all (an instance map) — the one leg that is genuinely None, and
-        // whose reference counterpart is the -2 orphan list we do not model.
-        assert_eq!(resolve_player_zone(&d, 389, Some(12)), None);
+        // No continent match and no orphan either (map 389 is Ragefire Chasm — a dungeon with no
+        // `WorldMapArea` row at all): both cells empty, which IS the reference's `SetMap(-1, -1)`.
+        assert_eq!(
+            resolve_player_selection(&d, 389, Some(12)),
+            PlayerSelection::default()
+        );
+    }
+
+    /// **The third leg — a battleground.** No continent record carries map 489, so `0x4a6650`'s
+    /// continent loop misses and only then does the orphan loop run, matching on the row's own
+    /// mapID and selecting `SetMap(-2, 443)` — the row's **ID**, not its place in the list.
+    /// Everything that draws the battle map hangs off that: `GetMapInfo()` answers nil without it,
+    /// and `Blizzard_BattlefieldMinimap.lua:83-86` returns before it draws a single tile.
+    #[test]
+    fn a_battleground_takes_the_orphan_leg_and_projects_on_its_own_rect() {
+        let d = data();
+
+        assert_eq!(
+            resolve_player_selection(&d, 489, Some(3277)),
+            PlayerSelection {
+                zone: None,
+                direct: Some(443),
+            },
+            "the orphan leg selects the WorldMapArea row id"
+        );
+        // The continent loop runs FIRST: a map that IS a continent's never reaches the orphan
+        // list, even were a row to shadow it.
+        assert_eq!(
+            resolve_player_selection(&d, 0, Some(12)).direct,
+            None,
+            "a continent match short-circuits before the orphan loop"
+        );
+
+        // The projection: the direct state goes through the selected row's OWN rect (the same
+        // tail the zone case uses), gated to that row's map. The fixture rect is [-1, 1] on both
+        // axes, so the origin is its centre.
+        let sel = (0, 0, Some(443));
+        assert_eq!(
+            project_on_displayed(&d, sel, 489, 0.0, 0.0),
+            Some((0.5, 0.5)),
+            "a body in the battleground lands on the battleground map"
+        );
+        assert_eq!(
+            project_on_displayed(&d, sel, 0, 0.0, 0.0),
+            None,
+            "`0x4a7437`: a body on another map is refused, which is the (0,0) hide sentinel"
+        );
+        assert_eq!(
+            project_on_displayed(&d, (0, 0, Some(9999)), 489, 0.0, 0.0),
+            None,
+            "an id no row carries resolves to nothing rather than indexing anything"
+        );
+        // And the direct cell WINS over the pair it shares its `(0, 0)` with — read the pair
+        // alone and an instance map projects as the world sheet.
+        assert_eq!(
+            project_on_displayed(&d, (0, 0, None), 489, 0.0, 0.0),
+            None,
+            "the world sheet has no continent for map 489 at all"
+        );
+        assert_eq!(MapLevel::of(sel), MapLevel::Zone);
+        assert_eq!(MapLevel::of((0, 0, None)), MapLevel::World);
     }
 
     /// **The engine selects the player's zone itself, on the first world-enter** — the side call
@@ -1279,25 +1534,206 @@ mod player_zone_tests {
     /// perfectly non-zero pair.
     #[test]
     fn the_engine_selects_the_players_zone_on_first_world_enter() {
+        let on_continent = |c, z| PlayerSelection {
+            zone: Some((c, z)),
+            direct: None,
+        };
         // Frame 1, no area yet: the reference cannot be here at all (`0x67e510` bails before
         // `0x494780` on a zero zone id), so neither are we — syncing now would take the
         // continent leg and, since the engine never re-syncs, strand us there.
-        assert_eq!(world_enter_selection(false, None, Some((2, 0))), None);
+        assert_eq!(world_enter_selection(false, None, on_continent(2, 0)), None);
 
         // The area answers: sync, once, to the player's own zone.
         assert_eq!(
-            world_enter_selection(false, Some(12), Some((2, 10))),
-            Some((2, 10))
+            world_enter_selection(false, Some(12), on_continent(2, 10)),
+            Some(on_continent(2, 10))
         );
 
         // And never again. A later zone change — even cross-continent — leaves the selection
         // alone: the guard is `old == 0`, and only the world-session teardown `0x491180`
         // re-zeroes `[0xb4e314]`.
-        assert_eq!(world_enter_selection(true, Some(40), Some((2, 22))), None);
+        assert_eq!(
+            world_enter_selection(true, Some(40), on_continent(2, 22)),
+            None
+        );
 
         // An unresolvable player still counts as synced rather than re-arming the gate every
         // frame: EVERY exit of `0x4a6650` writes the selection, and its two failure legs write
         // `SetMap(-1, -1)` — which `GetCurrentMapContinent` reads back to Lua as `0`.
-        assert_eq!(world_enter_selection(false, Some(12), None), Some((0, 0)));
+        assert_eq!(
+            world_enter_selection(false, Some(12), PlayerSelection::default()),
+            Some(PlayerSelection::default())
+        );
+
+        // Logging STRAIGHT INTO a battleground: the once-per-session sync carries the direct cell
+        // too. Dropping it here would strand that whole session on the world sheet, because
+        // nothing re-arms the gate.
+        let bg = PlayerSelection {
+            zone: None,
+            direct: Some(443),
+        };
+        assert_eq!(world_enter_selection(false, Some(3277), bg), Some(bg));
+    }
+}
+
+#[cfg(test)]
+mod direct_area_tests {
+    use super::*;
+
+    /// The real catalog off the player's own chain, or a skip.
+    fn real_catalog() -> Option<(Vec<WorldMapContinentView>, WorldMapUiData)> {
+        let data = benilla_formats::wow_data_or_skip!(None);
+        let mut chain = benilla_formats::open_chain(&data).expect("chain");
+        let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+        let maps = benilla_assets::MapCatalogRes(
+            benilla_formats::load_map_catalog(&mut chain).expect("Map"),
+        );
+        Some(build_catalog(&mut chain, &areas, &maps).expect("the real catalog"))
+    }
+
+    /// **The whole population of the direct-area state in 1.12.1**, off the shipped
+    /// `WorldMapArea.dbc` (51 rows): the three battlegrounds, in the file order `0x4a5d00`'s fill
+    /// pass appends in — Alterac Valley, Warsong Gulch, Arathi Basin — and nothing else. The
+    /// complement rule is what produces them: `areaID != 0` (so not a continent row) and a mapID
+    /// no continent record carries (so not a zone either). Skips without client data.
+    #[test]
+    fn the_real_dbc_carries_exactly_the_three_battleground_orphans() {
+        let Some((views, data)) = real_catalog() else {
+            return;
+        };
+
+        assert_eq!(
+            data.direct
+                .iter()
+                .map(|d| (d.id, d.map_id, d.view.map_file.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (401, 30, "AlteracValley"),
+                (443, 489, "WarsongGulch"),
+                (461, 529, "ArathiBasin"),
+            ],
+            "file order, no sort — the reference's fill pass appends as it walks"
+        );
+
+        // They are in NEITHER continent list: that is the whole reason a third state exists.
+        for d in &data.direct {
+            assert!(
+                !views
+                    .iter()
+                    .any(|c| c.zones.iter().any(|z| z.map_file == d.view.map_file)),
+                "{} is no continent's child",
+                d.view.map_file
+            );
+        }
+        assert!(
+            data.continents
+                .iter()
+                .all(|c| c.map_id == 0 || c.map_id == 1),
+            "and the continents are still only Azeroth and Kalimdor"
+        );
+
+        // Alterac Valley is the only battleground with overlay art (3 rows keyed on WMA 401);
+        // the other two have none, so a fully explored character still sees bare detail tiles.
+        let overlays = |folder: &str| {
+            data.direct
+                .iter()
+                .find(|d| d.view.map_file == folder)
+                .map(|d| d.view.overlays.len())
+        };
+        assert_eq!(overlays("AlteracValley"), Some(3));
+        assert_eq!(overlays("WarsongGulch"), Some(0));
+        assert_eq!(overlays("ArathiBasin"), Some(0));
+    }
+
+    /// **The bug, end to end, on the real data**: a body standing in Warsong Gulch (map 489)
+    /// resolves to the direct area, the engine selects it with no Lua in the loop, and
+    /// `GetMapInfo()` answers `"WarsongGulch"` — the art-folder identifier the stock
+    /// `Blizzard_BattlefieldMinimap.lua:83-86` needs before it will draw a single tile, and the
+    /// name that closes `Interface\WorldMap\WarsongGulch\WarsongGulch1..12` (all twelve ship).
+    /// The continent reads back `-1` (`-2 + 1`) and the zone `0`.
+    ///
+    /// The player's own blip comes with it: the rect centre projects to the middle of the map.
+    /// Skips without client data.
+    #[test]
+    fn a_body_in_warsong_gulch_lands_on_the_warsong_gulch_map() {
+        let Some((views, data)) = real_catalog() else {
+            return;
+        };
+
+        // The resolver: map 489 is no continent's, so the orphan loop answers with the row id.
+        let player = resolve_player_selection(&data, 489, Some(3277));
+        assert_eq!(
+            player,
+            PlayerSelection {
+                zone: None,
+                direct: Some(443),
+            }
+        );
+
+        let mut script = UiScript::new().expect("a bare engine");
+        script.set_world_map_catalog(views);
+        script.set_world_map_direct_areas(
+            data.direct
+                .iter()
+                .map(|d| (d.id, d.view.clone()))
+                .collect::<Vec<_>>(),
+        );
+        // The engine-side first-world-enter sync — `0x4947ac` into the same resolver, no Lua.
+        let (c, z) = player.zone.unwrap_or((0, 0));
+        script.sync_world_map_to_player_zone(c, z, player.direct);
+
+        assert_eq!(
+            script
+                .eval::<(String, i64, i64)>(
+                    "return GetMapInfo(), GetCurrentMapContinent(), GetCurrentMapZone()"
+                )
+                .expect("the getters answer"),
+            ("WarsongGulch".into(), -1, 0)
+        );
+
+        // The blip. The WSG row's rect centre in world coords → the middle of the map art; a body
+        // on Azeroth is refused outright (the reference's `(0, 0)` hide sentinel).
+        let wsg = data
+            .direct
+            .iter()
+            .find(|d| d.id == 443)
+            .expect("the Warsong Gulch row");
+        let (wx, wy) = (
+            (wsg.rect.top + wsg.rect.bottom) / 2.0,
+            (wsg.rect.left + wsg.rect.right) / 2.0,
+        );
+        let selection = script.world_map_selection();
+        assert_eq!(selection, (0, 0, Some(443)));
+        let uv = project_on_displayed(&data, selection, 489, wx, wy).expect("inside the rect");
+        assert!(
+            (uv.0 - 0.5).abs() < 1e-5 && (uv.1 - 0.5).abs() < 1e-5,
+            "the rect centre is the middle of the battle map, got {uv:?}"
+        );
+        assert_eq!(project_on_displayed(&data, selection, 0, wx, wy), None);
+
+        // THE REFRESH TRAP: a world-state push or an exploration update re-selects, and a
+        // re-selection built from the continent/zone pair alone would silently drop the battle
+        // map for the world view (the reference re-passes `direct != -1 ? direct : zone` at all
+        // five of its in-place refresh sites).
+        script.set_world_map_explored(vec![u32::MAX; 64]);
+        script.set_world_map_player_direct_area(player.direct);
+        script
+            .run("SetMapToCurrentZone()")
+            .expect("the OnShow verb");
+        assert_eq!(
+            script
+                .eval::<(String, i64)>("return GetMapInfo(), GetCurrentMapContinent()")
+                .expect("the getters answer"),
+            ("WarsongGulch".into(), -1),
+            "the instance selection survives every refresh path"
+        );
+
+        // And a continent selection clears it — `0x4a67a0`'s other legs all store `-1` there.
+        script.run("SetMapZoom(1)").expect("SetMapZoom");
+        assert_eq!(
+            script.world_map_selection(),
+            (1, 0, None),
+            "selecting a continent clears the direct cell"
+        );
     }
 }

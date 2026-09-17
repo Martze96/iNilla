@@ -815,6 +815,16 @@ fn parse_server_body(
                 seconds,
             }
         }
+        // One body, two tables — the opcode picks, exactly as `0x6e9950`'s `cmp edi,0x267` does.
+        opcode::SMSG_SET_FLAT_SPELL_MODIFIER | opcode::SMSG_SET_PCT_SPELL_MODIFIER => {
+            let (mask_bit, op, value) = spells::read_set_spell_modifier(&mut r)?;
+            ServerPacket::SpellModifier {
+                flat: opcode == opcode::SMSG_SET_FLAT_SPELL_MODIFIER,
+                mask_bit,
+                op,
+                value,
+            }
+        }
         opcode::SMSG_COOLDOWN_EVENT => {
             let (spell_id, caster) = spellbook::read_cooldown_event(&mut r)?;
             ServerPacket::CooldownEvent { spell_id, caster }

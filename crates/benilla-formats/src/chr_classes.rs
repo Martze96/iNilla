@@ -1,8 +1,10 @@
-//! `ChrClasses.dbc` — the per-class client table, and the two columns anything here reads off it.
+//! `ChrClasses.dbc` — the per-class client table, and the three columns anything here reads off
+//! it.
 //!
-//! One file, one parse. Both columns are answers the *engine* gives Lua about a class, and both
-//! are read by address off the same class-indexed record table at `ds:0xc0def4`, bounded by the
-//! max id at `ds:0xc0def8` (store `0xc0deec`, loader `0x542360`, filename `0x85838c`).
+//! One file, one parse. Two of the three are answers the *engine* gives Lua about a class and the
+//! third is the talent spell-modifier gate's right-hand side; all three are read by address off
+//! the same class-indexed record table at `ds:0xc0def4`, bounded by the max id at `ds:0xc0def8`
+//! (store `0xc0deec`, loader `0x542360`, filename `0x85838c`).
 //!
 //! ## Field 4 — the pet name token
 //!
@@ -56,6 +58,22 @@
 //! requires `(InventoryType == 28 RELIC) == hasRelicSlot`, so **INVSLOT 17 takes a relic for those
 //! three classes and a ranged weapon for everyone else** — one slot, two meanings. 1.12 has no
 //! *separate* relic slot, which is the one true fragment inside the old belief.
+//!
+//! ## Field 15 — the class's spell family
+//!
+//! `GetSpellModifiers 0x6e6b30`'s second gate: a talent modifier applies to a spell only when that
+//! spell's own `SpellFamilyName` (`Spell.dbc` column 160) equals the LOCAL PLAYER's class family,
+//! which the client caches in the global `[0xcecaac]`. That global has exactly one
+//! non-zeroing writer, `0x6e6ca0` (sole caller `0x5debcc`, the local-player create-finalise): it
+//! takes `UNIT_FIELD_BYTES_0` byte 1 — the class, the same walk both sections above make — and
+//! stores `ChrClasses[class] + 0x3c`, i.e. **field 15** (wow-re
+//! `system/spell/scratch/spellmod-table-law.md` §8).
+//!
+//! Anchored on the shipped 5875 file, which is also a could-have-failed control on the column: the
+//! nine rows read Warrior 4, Paladin 10, Hunter 9, Rogue 8, Priest 6, Shaman 11, Mage 3, Warlock 5,
+//! Druid 7 — the vmangos `SpellFamilyNames` values exactly, in an order no neighbouring column
+//! could reproduce (field 14 is a name-flags word reading 8323199 on every row, field 16 is the
+//! relic flag above).
 
 use std::collections::HashMap;
 
@@ -79,6 +97,10 @@ const PET_NAME_TOKEN_FIELD: usize = 0x10 / 4;
 /// The relic-slot column — byte `0x40` in `UnitHasRelicSlot`'s read, i.e. field 16.
 const RELIC_SLOT_FIELD: usize = 0x40 / 4;
 
+/// The class spell-family column — byte `0x3c` in `0x6e6ca0`'s read, i.e. field 15. See the module
+/// header for the walk and the shipped-file anchor.
+const SPELL_FAMILY_FIELD: usize = 0x3c / 4;
+
 /// The literal the client pushes when the player object does not resolve (`0x846a40`). Also the
 /// value nine of the ten class rows carry, which is why an unloaded table degrades invisibly.
 pub const PET_NAME_TOKEN_FALLBACK: &str = "PET";
@@ -88,6 +110,7 @@ pub const PET_NAME_TOKEN_FALLBACK: &str = "PET";
 struct ChrClass {
     pet_name_token: Option<String>,
     has_relic_slot: bool,
+    spell_family: u32,
 }
 
 /// `ChrClasses.dbc` → class id ⇒ the columns we read.
@@ -112,6 +135,17 @@ impl ChrClasses {
     /// ordinary ranged wielder rather than inventing a relic slot for one.
     pub fn has_relic_slot(&self, class: u32) -> bool {
         self.0.get(&class).is_some_and(|c| c.has_relic_slot)
+    }
+
+    /// The class's spell family — the value the reference caches in `[0xcecaac]` and compares
+    /// every spell's `SpellFamilyName` against before any talent modifier may apply.
+    ///
+    /// A class with no row answers `0`, which is the reference's own degraded state: `0x6e7150`
+    /// zeroes the global at world-enter (`6e7317`, `esi = 0`) and it stays 0 until the local
+    /// player resolves — and `GetSpellModifiers`' first conjunct (`SpellFamilyName != 0`) exists
+    /// precisely so nothing matches during that window.
+    pub fn spell_family(&self, class: u32) -> u32 {
+        self.0.get(&class).map_or(0, |c| c.spell_family)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -148,6 +182,7 @@ pub fn load_chr_classes(chain: &mut Chain) -> Result<ChrClasses> {
             ChrClass {
                 pet_name_token: str_at(&rs, r, PET_NAME_TOKEN_FIELD),
                 has_relic_slot: u32_at(r, RELIC_SLOT_FIELD).is_some_and(|v| v != 0),
+                spell_family: u32_at(r, SPELL_FAMILY_FIELD).unwrap_or(0),
             },
         );
     }
@@ -204,5 +239,31 @@ mod tests {
         // No row, and no invented slot — the reference's nil leg.
         assert!(!t.has_relic_slot(6));
         assert!(!t.has_relic_slot(0));
+    }
+
+    /// Field 15, the spell-family gate's right-hand side. The whole column is asserted because
+    /// that is what makes it a column pin rather than a coincidence: nine distinct values in nine
+    /// rows, each matching the vmangos `SpellFamilyNames` enum, is a shape no neighbour has
+    /// (field 14 is 8323199 on every row, field 16 is the three-row relic flag).
+    #[test]
+    fn every_class_row_carries_its_vmangos_spell_family() {
+        let Some(mut chain) = chain() else { return };
+        let t = load_chr_classes(&mut chain).expect("load ChrClasses.dbc");
+        for (class, family, who) in [
+            (1u32, 4u32, "Warrior"),
+            (2, 10, "Paladin"),
+            (3, 9, "Hunter"),
+            (4, 8, "Rogue"),
+            (5, 6, "Priest"),
+            (7, 11, "Shaman"),
+            (8, 3, "Mage"),
+            (9, 5, "Warlock"),
+            (11, 7, "Druid"),
+        ] {
+            assert_eq!(t.spell_family(class), family, "{who}");
+        }
+        // No row: the reference's zeroed global, which conjunct 1 of the gate refuses.
+        assert_eq!(t.spell_family(6), 0);
+        assert_eq!(t.spell_family(0), 0);
     }
 }

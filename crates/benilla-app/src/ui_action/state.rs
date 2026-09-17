@@ -395,13 +395,15 @@ pub(super) fn feed_action_state(
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
     // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
     // ground targeting — plus the macro→spell binding the MACRO arm resolves through
-    // (decision 0983), which rides here for the same ceiling reason.
+    // (decision 0983) and the talent spell-modifier tables that leg 12's cost reads through,
+    // both of which ride here for the same ceiling reason.
     cast_state: (
         Res<crate::ui_cast::PendingCast>,
         Res<crate::ui_cast::QueuedMeleeSpell>,
         Res<crate::ui_cast::ActiveChannel>,
         Res<super::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
+        Res<crate::spell_mods::SpellModifiers>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -434,7 +436,7 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound, spell_mods) = &cast_state;
     let me = self_q.iter().next();
     // The bags, walked ONCE for the frame: every reagent, totem and item-count question below
     // reads this table. It used to be one whole walk per question — per reagent per spell slot,
@@ -531,6 +533,7 @@ pub(super) fn feed_action_state(
                         reputations: &reputations,
                         cooldowns: &cooldowns,
                         carried: &carried,
+                        spell_mods,
                     };
                     let (u, oom) =
                         usable::spell_usable(button.action, d, sp, &ctx, &items, &commands);
@@ -596,6 +599,7 @@ pub(super) fn feed_action_state(
                         reputations: &reputations,
                         cooldowns: &cooldowns,
                         carried: &carried,
+                        spell_mods,
                     };
                     let (u, oom) = usable::item_usable(
                         button.action,
@@ -842,6 +846,7 @@ mod tests {
         app.insert_resource(actions)
             .insert_resource(bound)
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<crate::ui_cast::PendingCast>()
@@ -946,6 +951,7 @@ mod tests {
                     radii: Default::default(),
                 })
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_script::UiClock>()
                 .init_resource::<AutoRepeatActive>()
                 .init_resource::<crate::ui_cast::PendingCast>()

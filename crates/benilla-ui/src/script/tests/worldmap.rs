@@ -108,6 +108,176 @@ fn push_catalog(s: &mut UiScript) {
     ]);
 }
 
+/// The **orphan list** — `0x4a5d00`'s third array, and in 5875 its entire population: the three
+/// battlegrounds, with the real row ids, map ids, area ids and art folders, in `WorldMapArea.dbc`
+/// **file order** (the fill pass appends with no sort). Alterac Valley carries one of its three
+/// real `WorldMapOverlay` rows over its real AreaBit 954 — the only battleground art the
+/// explored-bit gate has anything to say about (WSG and AB key zero overlay rows).
+fn push_direct_areas(s: &mut UiScript) {
+    let row = |name: &str, area_id: u32, folder: &str, overlays: Vec<WorldMapOverlayView>| {
+        WorldMapZoneView {
+            name: name.into(),
+            area_id,
+            map_file: folder.into(),
+            // A synthetic rect: nothing engine-side projects through it (the app owns every
+            // projection), it is carried because the row is the row.
+            loc_rect: (1500.0, 500.0, 1600.0, 600.0),
+            overlays,
+        }
+    };
+    s.set_world_map_direct_areas(vec![
+        (
+            401,
+            row(
+                "Alterac Valley",
+                2597,
+                "AlteracValley",
+                vec![WorldMapOverlayView {
+                    texture: "Interface\\WorldMap\\AlteracValley\\DUNBALDAR".into(),
+                    width: 128,
+                    height: 128,
+                    offset_x: 300,
+                    offset_y: 200,
+                    explore_bits: vec![954],
+                    hit_rect: (200, 300, 328, 428),
+                    area_name: Some("Dun Baldar".into()),
+                }],
+            ),
+        ),
+        (443, row("Warsong Gulch", 3277, "WarsongGulch", Vec::new())),
+        (461, row("Arathi Basin", 3358, "ArathiBasin", Vec::new())),
+    ]);
+}
+
+/// **The direct-area selection** — the third state, and the whole of what a battleground map is
+/// (wow-re `system/ui/scratch/worldmap-direct-area-selection.md`). Inside Warsong Gulch the
+/// reference selects `(continent = -2, direct = WorldMapArea 443)`, and `GetMapInfo()` answers the
+/// art folder that `Blizzard_BattlefieldMinimap.lua:83-86` needs before it will draw anything at
+/// all; a client that models the selection as `(continent, zone)` answers nil there and draws an
+/// empty battle map.
+#[test]
+fn a_direct_area_is_the_third_selection_state() {
+    let mut s = script();
+    push_catalog(&mut s);
+    push_direct_areas(&mut s);
+
+    // The player is in Warsong Gulch: `0x4a6650`'s continent loop misses (map 489 is no
+    // continent's) and only then does the orphan loop match, selecting the row's own id.
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_player_direct_area(Some(443));
+    s.run("SetMapToCurrentZone()").unwrap();
+
+    assert_eq!(
+        s.eval::<(String, i64, i64)>(
+            "return GetMapInfo(), GetCurrentMapContinent(), GetCurrentMapZone()"
+        )
+        .unwrap(),
+        ("WarsongGulch".into(), -1, 0),
+        "the ART FOLDER (not the localized \"Warsong Gulch\"), continent -2 + 1, zone -1 + 1"
+    );
+    assert_eq!(
+        s.eval::<(i64, i64)>("local n, h, hpot = GetMapInfo() return h, hpot")
+            .unwrap(),
+        (0, 0),
+        "slots 2/3 are 0 on every instance map: WorldMapContinent.dbc ships only mapIDs 0 and 1"
+    );
+    assert!(
+        s.eval::<bool>("local t = { GetMapZones(GetCurrentMapContinent()) } return t[1] == nil")
+            .unwrap(),
+        "GetMapZones(-1) takes the unsigned-bound exit — the dropdown that could write a bogus \
+         row id has no entries to fire from"
+    );
+
+    // Hover and click are refused. Both matter: there is no `.zmp` bitmap for a battleground
+    // (`0x4a6ec0`/`0x4a7620`/`0x4a7540` each test `-2` explicitly), and the world sheet's
+    // continent walk must not run just because the direct state shares its `continent == 0` cell.
+    assert!(s
+        .eval::<Option<String>>("return UpdateMapHighlight(0.5, 0.5)")
+        .unwrap()
+        .is_none());
+    s.run("ProcessMapClick(0.72, 0.63)").unwrap(); // EK land, were this the world sheet
+    assert_eq!(
+        s.eval::<(String, i64)>("return GetMapInfo(), GetCurrentMapContinent()")
+            .unwrap(),
+        ("WarsongGulch".into(), -1),
+        "a click cannot drill off an instance map"
+    );
+
+    // ── THE REFRESH TRAP. All five of the reference's in-place refresh sites re-pass
+    // `direct != -1 ? direct : zone` (`0x48f9f6`, `0x4a6460`, `0x6d93d8`, `0x6d9a17`, `0x6dac72`);
+    // one that re-passed the zone alone would drop the instance map back to the world view on the
+    // next world-state push or exploration update — silently, and only inside a battleground.
+    s.set_world_map_explored(vec![u32::MAX; 64]);
+    s.set_world_map_landmarks(Vec::new());
+    s.run("SetMapToCurrentZone()").unwrap();
+    s.sync_world_map_to_player_zone(0, 0, Some(443));
+    assert_eq!(
+        s.eval::<(String, i64)>("return GetMapInfo(), GetCurrentMapContinent()")
+            .unwrap(),
+        ("WarsongGulch".into(), -1),
+        "a refresh re-selects the DIRECT cell, never the (0, 0) pair beside it"
+    );
+
+    // Selecting a continent or a zone CLEARS the direct cell: `0x4a67a0`'s other legs all fall
+    // into `0x4a67ea mov [0x845074],-1`, and only `ecx == -2` jumps past it.
+    s.run("SetMapZoom(2, 1)").unwrap();
+    assert_eq!(
+        s.eval::<(String, i64, i64)>(
+            "return GetMapInfo(), GetCurrentMapContinent(), GetCurrentMapZone()"
+        )
+        .unwrap(),
+        ("Elwynn".into(), 2, 1),
+        "the instance map does not shadow later navigation"
+    );
+
+    // And the stock zoom-out button's own path off a battleground map: its `else` arm fires
+    // because `GetCurrentMapZone()` is 0 there, and `SetMapZoom(0)` is the world view.
+    s.run("SetMapToCurrentZone()").unwrap();
+    s.run("SetMapZoom(0)").unwrap();
+    assert_eq!(
+        s.eval::<(Option<String>, i64)>("return GetMapInfo(), GetCurrentMapContinent()")
+            .unwrap(),
+        (None, 0),
+        "zooming out of an instance map lands on the world sheet"
+    );
+}
+
+/// An instance map's overlays are **admitted**, keyed by the direct area, under exactly the zone's
+/// explored-bit gate (`0x4a67a0`'s overlay half, `0x4a6b10 jl 0x4a6b3d`; wow-re
+/// `worldmap-overlay-reveal-gate.md` §2) — no free reveal for a battleground. On 5875 data that
+/// means Alterac Valley's three rows and nothing at all for the other two.
+#[test]
+fn an_instance_map_reveals_its_overlays_under_the_zone_gate() {
+    let mut s = script();
+    push_catalog(&mut s);
+    push_direct_areas(&mut s);
+
+    s.set_world_map_player_direct_area(Some(401));
+    s.run("SetMapToCurrentZone()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return GetNumMapOverlays()").unwrap(),
+        0,
+        "nothing explored — the gate applies exactly as on a zone map"
+    );
+
+    // AreaBit 954 = word 29, bit 26.
+    let mut explored = vec![0u32; 64];
+    explored[29] = 1 << 26;
+    s.set_world_map_explored(explored);
+    assert_eq!(s.eval::<i64>("return GetNumMapOverlays()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return GetMapOverlayInfo(1)").unwrap(),
+        "Interface\\WorldMap\\AlteracValley\\DUNBALDAR"
+    );
+
+    // Warsong Gulch keys zero `WorldMapOverlay` rows — a fully explored character still sees bare
+    // detail tiles there.
+    s.set_world_map_player_direct_area(Some(443));
+    s.run("SetMapToCurrentZone()").unwrap();
+    s.set_world_map_explored(vec![u32::MAX; 64]);
+    assert_eq!(s.eval::<i64>("return GetNumMapOverlays()").unwrap(), 0);
+}
+
 /// The navigation surface: lists come from the catalog, SetMapZoom's selection reads back
 /// synchronously in the same Lua breath (the reference's dropdown-click contract), zone/continent
 /// arguments clamp, and GetMapInfo names the displayed art folder (nil at the world level — the
@@ -240,7 +410,7 @@ fn the_engine_can_select_a_zone_with_no_lua_call() {
         (0, 0)
     );
 
-    s.sync_world_map_to_player_zone(1, 2);
+    s.sync_world_map_to_player_zone(1, 2, None);
 
     assert_eq!(
         s.eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
@@ -259,7 +429,7 @@ fn the_engine_can_select_a_zone_with_no_lua_call() {
 
     // It clamps through the same tail as the Lua verbs — an out-of-range pair cannot corrupt
     // the selection (`0x4a67a0` range-checks the zone against the continent's child count).
-    s.sync_world_map_to_player_zone(99, 99);
+    s.sync_world_map_to_player_zone(99, 99, None);
     let (c, _) = s
         .eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
         .unwrap();

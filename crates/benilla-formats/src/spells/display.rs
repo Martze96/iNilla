@@ -61,6 +61,26 @@ pub struct SpellDisplay {
     /// search's **hand restriction** (main-hand-only / off-hand-only), which is where
     /// `0x5f0c50`'s slot mask comes from (decision 1903).
     pub attributes_ex3: u32,
+    /// **`SpellFamilyName`** (column 160, `SpellRec+0x280`) — which class's talent tree may modify
+    /// this spell. `0` on 18243 of the 22357 shipped rows (creature and world spells); the rest
+    /// carry a `SpellFamilyNames` value, which for a player spell is its own class's.
+    ///
+    /// The first two of `GetSpellModifiers 0x6e6b30`'s three conjunct gates read it and nothing
+    /// else: `!= 0` (`6e6b38`), then `== [0xcecaac]`, the local player's own class family
+    /// (`6e6b46` — [`crate::ChrClasses::spell_family`]). A spell that fails either takes no
+    /// modifier at all, which is how a mage's talent stays off a warrior's ability and off every
+    /// item/creature spell in the file. wow-re `system/spell/scratch/spellmod-table-law.md` §5.1.
+    pub spell_family: u32,
+    /// **`SpellFamilyFlags`** (columns 161/162, `SpellRec+0x284`/`+0x288`) — the 64-bit bit-set
+    /// naming which of its family's modifier rows this spell subscribes to, low dword first.
+    ///
+    /// `GetSpellModifiers` walks **all 64 bits** with no early break and SUMS one cell per set bit
+    /// out of each table (`6e6b72`–`6e6ba6`), so a multi-bit spell accumulates several — and the
+    /// high dword is genuinely live rather than unused width: measured on the shipped 5875 file,
+    /// 1794 rows set exactly one bit, **322 set more than one**, and the highest bit index in the
+    /// whole table is **35**. Frostbolt 116 sets 5/19/20/30, Cleanse 4987 sets 12 **and 33** (it
+    /// needs both dwords), Cure Poison 526 sets 35 alone.
+    pub spell_family_flags: u64,
     /// **`PreventionType`** (column 165, `SpellRec+0x294`) — which crowd-control flag refuses this
     /// spell **locally**, before any packet: `1` = silence, `2` = pacify, `0` = neither. The
     /// client's CC validator `0x6094f0` (called from `TryCast 0x6e4b60`, bailing at `0x6e4f42`)
@@ -337,6 +357,8 @@ impl Default for SpellDisplay {
             attributes_ex2: 0,
             modal_next_spell: 0,
             attributes_ex3: 0,
+            spell_family: 0,
+            spell_family_flags: 0,
             prevention_type: 0,
             passive: false,
             cast_ui: 0,

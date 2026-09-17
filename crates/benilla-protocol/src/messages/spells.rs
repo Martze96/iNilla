@@ -24,8 +24,8 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    capacity_hint, read_cstring, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
-    Vector3d,
+    capacity_hint, read_cstring, read_i32_le, read_packed_guid, read_u16_le, read_u32_le,
+    read_u64_le, read_u8, Vector3d,
 };
 
 /// `SMSG_CAST_RESULT`'s verdict: `u32 spellId, u8 status` — status `0` (`SPELL_RESULT_STATUS_OKAY`)
@@ -315,6 +315,39 @@ pub(super) fn read_channel_update(r: &mut impl Read) -> io::Result<u32> {
     read_u32_le(r)
 }
 
+/// Read `SMSG_SET_FLAT_SPELL_MODIFIER` / `SMSG_SET_PCT_SPELL_MODIFIER` → `(mask_bit, op, value)`.
+///
+/// **Exactly 6 bytes, and the first byte is the one that is easy to get backwards.** The single
+/// handler `Spell_C::HandleSetSpellModifier 0x6e9950` reads `u8` (`6e9963`), `u8` (`6e996e`), `i32`
+/// (`6e9979`) — the widths are the stream accessors' own (`0x418cb0` advances the cursor by 1,
+/// `0x418e30` by 4) — and then stores at `imul eax,eax,0x1d; add eax,ecx`, i.e.
+/// **`index = field1 * 29 + field2`**. The reader `GetSpellModifiers 0x6e6b30` strength-reduces
+/// the same index to `4*op + 0x74*i` over a loop counter `i` bounded by `cmp eax,0x40`, which
+/// forces `field1 = i` (the `SpellFamilyFlags` **bit index**, 0..63) and `field2 = op` (the
+/// SpellModOp, 0..28) uniquely — and only that assignment fills the 64×29 table exactly
+/// (`29*63 + 28 == 1855`). The transposed reading addresses 47% of the array and would make the
+/// writer and the reader touch systematically disjoint cells, dropping every modifier silently.
+/// wow-re `system/spell/scratch/spellmod-table-law.md` §1/§3 — which was written to correct
+/// exactly that inversion in a note that had carried it, `verified`, for months.
+///
+/// **vmangos's writer says the same thing from the other end**, which is worth having because the
+/// client-side roles were published inverted once already: `Player::SendSpellMod`
+/// (`Objects/Player.cpp:17815`) loops `for (int eff = 0; eff < 64; ++eff)` over the modifier's
+/// 64-bit `mask` and, for each set bit, writes `uint8(eff)`, `uint8(mod->op)`, `int32(val)` — one
+/// packet per set bit, `val` the SUM of every matching modifier, i.e. absolute. `MAX_SPELLMOD`
+/// there is **29** (`Spells/SpellDefines.h`), the stride.
+///
+/// Both bytes are `movzx`-ed (unsigned); the value's signedness is fixed three independent ways by
+/// the reader (`sets dl` on the pct sum, `fild dword`, and a signed magic-divide). Neither byte is
+/// bounds-checked by the reference — that is the consumer's job, and
+/// `benilla::spell_mods::SpellModifiers` does it; this decode owns the shape only.
+pub(super) fn read_set_spell_modifier(r: &mut impl Read) -> io::Result<(u8, u8, i32)> {
+    let mask_bit = read_u8(r)?;
+    let op = read_u8(r)?;
+    let value = read_i32_le(r)?;
+    Ok((mask_bit, op, value))
+}
+
 /// Read `SMSG_UPDATE_AURA_DURATION` → `(slot, remaining_ms)` (vmangos
 /// `SpellAuraHolder::UpdateAuraDuration`, `SpellAuras.cpp:7511-7523`): a `u8` `UNIT_FIELD_AURA` slot
 /// index and a `u32` of milliseconds left. **Self-only** — it goes to the aura's target, never to
@@ -515,6 +548,37 @@ mod tests {
         assert!(
             r.is_empty(),
             "the body is exactly 5 bytes — slot is a byte, not a dword"
+        );
+    }
+
+    /// The spell-modifier body, byte for byte — and the field ORDER, which is the whole trap.
+    #[test]
+    fn set_spell_modifier_body_golden() {
+        // mask_bit 35 (0x23) · op 14 (0x0e, SPELLMOD_COST) · value -30 (0xFFFF_FFE2 LE).
+        let body = [0x23, 0x0E, 0xE2, 0xFF, 0xFF, 0xFF];
+        let mut r = &body[..];
+        assert_eq!(read_set_spell_modifier(&mut r).unwrap(), (35, 14, -30));
+        assert!(
+            r.is_empty(),
+            "the body is exactly 6 bytes — two bytes and a dword, never three dwords"
+        );
+
+        // The two bytes are NOT interchangeable, and this body is chosen so that a swap is
+        // detectable rather than plausible: 35 is a legal mask bit (0..=63) and an ILLEGAL op
+        // (0..=28), so a decode that read them the other way round would hand the consumer an op
+        // of 35 — off the end of the table's 29-wide axis.
+        let (mask_bit, op, _) = read_set_spell_modifier(&mut &body[..]).unwrap();
+        assert!(
+            mask_bit >= 29,
+            "field 1 would be an out-of-range op if swapped"
+        );
+        assert!(op < 29, "field 2 is a legal op as read");
+
+        // Both bytes are unsigned (`movzx`) and the value is signed: 0xFF in field 1 is bit 255,
+        // not -1, and it is the consumer that must refuse it.
+        assert_eq!(
+            read_set_spell_modifier(&mut &[0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00][..]).unwrap(),
+            (255, 255, 1)
         );
     }
 }

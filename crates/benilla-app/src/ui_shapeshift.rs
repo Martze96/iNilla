@@ -240,6 +240,7 @@ fn feed_shapeshift_bar(
     items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
+    spell_mods: Res<crate::spell_mods::SpellModifiers>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -302,6 +303,7 @@ fn feed_shapeshift_bar(
                         reputations: &reputations,
                         cooldowns: &cooldowns,
                         carried: &carried,
+                        spell_mods: &spell_mods,
                     };
                     usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
                 });

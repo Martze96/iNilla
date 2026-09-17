@@ -362,6 +362,23 @@ pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 /// chain `CharProc` consumes once and zeroes (decision 0955). Body in [`super::spells`].
 pub const SMSG_SPELL_UPDATE_CHAIN_TARGETS: u16 = 0x0330; // 816
 
+/// The **talent spell-modifier** pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 614/615) — the only
+/// feed for every talent that cheapens a spell, shortens its cast or cooldown, extends its range
+/// or radius, or lengthens its duration. Body in [`super::spells::read_set_spell_modifier`];
+/// decision-level law in wow-re `system/spell/scratch/spellmod-table-law.md`.
+///
+/// **One handler, two tables.** Both opcodes register to `Spell_C::HandleSetSpellModifier
+/// 0x6e9950` (`0x6e7245`/`0x6e7255`), which reads the same 6-byte body either way and forks on the
+/// opcode alone (`6e9989: cmp edi,0x267`): `0x266` stores into the FLAT table `0xcead60`, `0x267`
+/// into the PCT table `0xcecb30`, each `i32[64][29]`. The store is a plain `mov`, so the server
+/// sends the **absolute** value of one cell, never a delta (vmangos `Player::SendSpellMod` sends
+/// one packet per set mask bit carrying that pair's total).
+///
+/// That is why the two share a variant here rather than taking one each: the wire shape is
+/// identical and the opcode IS the discriminant, exactly as the reference treats it.
+pub const SMSG_SET_FLAT_SPELL_MODIFIER: u16 = 0x0266; // 614
+pub const SMSG_SET_PCT_SPELL_MODIFIER: u16 = 0x0267; // 615
+
 // The cooldown wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 308/176/309/478/481; the client
 // handlers are byte-verified in wow-re `wave-handlers.md` — 0x6e9460/0x6e95d0/0x6e9670/0x6e9730;
 // decision 0137 phase 4). Bodies in [`super::spells`].

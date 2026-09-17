@@ -1550,3 +1550,77 @@ fn real_channel_bar_name_law() {
         "only the two Blood Siphons suppress the bar"
     );
 }
+
+/// The talent spell-modifier gate's two columns — `SpellFamilyName` 160 and the `SpellFamilyFlags`
+/// pair 161/162 — against the shipped 5875 `Spell.dbc`.
+///
+/// Three things are asserted, and each would catch a different slip. The **family histogram** is
+/// the column pin: the eleven nonzero values are exactly the vmangos `SpellFamilyNames` set, and
+/// their counts are the shipped file's own (a one-column slip lands on 159/163, neither of which
+/// looks like this). The **popcount census** is what makes the reader's 64-iteration walk
+/// load-bearing rather than defensive — 322 rows set more than one bit, and the highest index in
+/// the whole table is 35, so the HIGH dword is live. The **three worked spells** pin the join
+/// direction: 4987 sets 12 and 33, which a low-dword-only read or a swapped pair both get wrong.
+///
+/// Numbers from wow-re `system/spell/scratch/spellmod-table-law.md` (Provenance), re-measured here
+/// off the file this catalog actually loads. Skips without client data.
+#[test]
+fn real_spell_family_columns_carry_the_modifier_gate() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    let mut families: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    let mut popcounts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    let mut max_bit = 0u32;
+    for (_, d) in cat.iter() {
+        *families.entry(d.spell_family).or_default() += 1;
+        *popcounts
+            .entry(d.spell_family_flags.count_ones())
+            .or_default() += 1;
+        if d.spell_family_flags != 0 {
+            max_bit = max_bit.max(63 - d.spell_family_flags.leading_zeros());
+        }
+    }
+    assert_eq!(
+        families,
+        [
+            (0, 18243),
+            (1, 47),
+            (3, 563),
+            (4, 350),
+            (5, 466),
+            (6, 493),
+            (7, 450),
+            (8, 316),
+            (9, 393),
+            (10, 362),
+            (11, 500),
+            (13, 174),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<u32, usize>>(),
+        "SpellFamilyName histogram — the vmangos SpellFamilyNames set, and only it"
+    );
+    assert_eq!(
+        popcounts.values().skip(1).sum::<usize>() - popcounts[&1],
+        322,
+        "rows setting MORE than one family bit — the reader's sum is live"
+    );
+    assert_eq!(max_bit, 35, "the highest family bit index in the file");
+
+    // The three worked examples. Frostbolt spans one dword, Cleanse spans BOTH, Cure Poison lives
+    // entirely in the high one.
+    for (id, family, bits) in [
+        (116u32, 3u32, &[5u32, 19, 20, 30][..]),
+        (4987, 10, &[12, 33]),
+        (526, 11, &[35]),
+    ] {
+        let d = cat.get(id).unwrap_or_else(|| panic!("spell {id}"));
+        assert_eq!(d.spell_family, family, "{id} {:?} family", d.name);
+        let set: Vec<u32> = (0..64)
+            .filter(|b| d.spell_family_flags >> b & 1 == 1)
+            .collect();
+        assert_eq!(set, bits, "{id} {:?} family bits", d.name);
+    }
+}

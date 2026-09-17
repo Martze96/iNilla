@@ -17,6 +17,15 @@
 //! verified rules (WorldMapArea file order for continents, case-insensitive display-name sort
 //! for zones; wow-re Q1(d)/Q3(b) verdicts, 2026-07-07).
 //!
+//! …and a **third** selection state beside that pair: the **direct area**, the map of an
+//! instance — a battleground, a dungeon — which is no continent's child and so falls out of both
+//! lists (wow-re `system/ui/scratch/worldmap-direct-area-selection.md`). The reference does not
+//! encode it inside `(continent, zone)`: it carries THREE `.data` cells, and `continent == -2`
+//! with a `WorldMapArea` row **ID** in the third one IS that state ([`WorldMapState::direct_area`]).
+//! Inside Warsong Gulch a client without it answers `GetMapInfo() == nil`, and the stock
+//! `Blizzard_BattlefieldMinimap.lua:83-86` returns on the fourth line of its update — an empty
+//! battle map and an empty world map, which is the bug this models away.
+//!
 //! Continent-level hover/click resolve through the pushed **zone grid** — the 128×128 area
 //! bitmap (`Interface\WorldMap\<Continent>.zmp`, remapped app-side to 1-based zone indices; the
 //! source + cell law are wow-re-verified, `0x4a6ec0` / the Q1 §5 verdict 2026-07-07). The cell
@@ -178,6 +187,14 @@ fn area_grid_cell(loc: (f32, f32, f32, f32), u: f32, v: f32) -> Option<usize> {
 /// bitmap, a zone/city is just a different rect window (wow-re 15b2a8ea, FUN_004a6ec0 §1c). This
 /// is what lets a click on a city's footprint from its neighbouring zone map drill into the city.
 fn grid_area(state: &WorldMapState, u: f32, v: f32) -> Option<u16> {
+    // The direct-area state has no bitmap and is refused before the cell law runs: `0x4a6ec0`
+    // opens `cmp esi,-2; je 0x4a70ed` (wow-re `worldmap-direct-area-selection.md` §6) — the chain
+    // ships exactly three `.zmp` files and none of them is a battleground's. Explicit rather than
+    // left to `c == 0` below, because "the world sheet" and "an instance map" are different
+    // states that happen to share that cell.
+    if state.direct_area.is_some() {
+        return None;
+    }
     let (c, z) = state.selection;
     if c == 0 {
         return None;
@@ -215,12 +232,37 @@ pub struct WorldMapState {
     /// the world level, where `GetMapInfo` returns nil and the reference Lua falls back to
     /// `"World"`).
     pub continents: Vec<WorldMapContinentView>,
-    /// The displayed map: `(continent, zone)`, `(0, 0)` = the world sheet.
+    /// The **orphan list** — the third array the reference's catalog builder fills (`0x4a5d00`'s
+    /// count/fill passes `0x4a6130`/`0x4a61c9`): every `WorldMapArea` row with `areaID != 0`
+    /// whose mapID matches **no** continent record, as `(row ID, the row)`, in DBC **file order,
+    /// unsorted** — the three battlegrounds in 5875. Keyed by id, never indexed: nothing outside
+    /// [`direct_row`]'s lookup reads a position here, because the selection stores the row's own
+    /// ID rather than a place in this list.
+    pub direct_areas: Vec<(u32, WorldMapZoneView)>,
+    /// The displayed map: `(continent, zone)`, `(0, 0)` = the world sheet. **Not the whole
+    /// selection on its own** — [`Self::direct_area`] overrides it.
     pub selection: (u32, u32),
+    /// The **direct-area selection**: the `WorldMapArea` row **ID** of an instance map, or `None`
+    /// at every continent/zone/world selection.
+    ///
+    /// The reference's selection is THREE `.data` cells, not two (wow-re
+    /// `worldmap-direct-area-selection.md` §1): `[0x84506c]` continent, `[0x845070]` zone,
+    /// `[0x845074]` direct. `continent == -2` IS this state, and the third cell then holds the
+    /// row's own id — **not** an index into [`Self::direct_areas`], which is only ever a lookup
+    /// table. The setter `0x4a67a0` keeps the two exclusive (`0x4a67c1` stores the id only on the
+    /// `ecx == -2` leg and jumps past `0x4a67ea`'s `= -1`; every other leg reaches it), so
+    /// `direct_area.is_some()` ⇒ `selection == (0, 0)` — enforced in [`store_selection`], the one
+    /// writer.
+    pub direct_area: Option<u32>,
     /// Where `SetMapToCurrentZone` lands — the player's current `(continent, zone)` resolved by
-    /// the app (AreaTable parent walk × the catalog). `None` = unresolvable (instance, loading) →
-    /// the world sheet.
+    /// the app (AreaTable parent walk × the catalog). `None` = no continent matched → either the
+    /// orphan leg below, or the world sheet.
     pub player_zone: Option<(u32, u32)>,
+    /// The orphan half of that same answer: the `WorldMapArea` row ID whose mapID is the player's
+    /// own map, or `None`. `0x4a6650` runs its continent loop FIRST and reaches the orphan loop
+    /// only on a miss (`0x4a66c3`), so at most one of the two is ever set — and inside a
+    /// battleground it is this one.
+    pub player_direct_area: Option<u32>,
     /// `GetPlayerMapPosition("player")` for the CURRENT selection — projected app-side each frame
     /// (`map_proj`), `None`/(0,0) = off this map (the reference hides the blip).
     pub player_uv: Option<(f32, f32)>,
@@ -355,6 +397,11 @@ fn continent_hover(cont: &WorldMapContinentView, zone: &WorldMapZoneView) -> Opt
 /// name-only tail is reachable from there (`0x4a812e`). World level: the continent highlight is
 /// not built, so the tail.
 fn hover(wm: &WorldMapState, x: f32, y: f32) -> Hover {
+    // An instance map resolves no area under the cursor: the lookup INSIDE `UpdateMapHighlight`
+    // (`0x4a7620`) opens `cmp esi,-2; je 0x4a76d7` → `xor eax,eax`, so no highlight and no name.
+    if wm.direct_area.is_some() {
+        return Hover::Miss;
+    }
     let (c, z) = wm.selection;
     let Some(cont) = c.checked_sub(1).and_then(|i| wm.continents.get(i as usize)) else {
         return Hover::Miss;
@@ -377,8 +424,28 @@ fn hover(wm: &WorldMapState, x: f32, y: f32) -> Hover {
         .unwrap_or(Hover::Miss)
 }
 
-/// The current selection's zone view, if a zone map is displayed.
+/// The selected direct area's row, resolved by **id** through the orphan list — the reference's
+/// `[0xc0d5bc]` id-index lookup (`0x4a6cf0`'s `0x4a6d24` leg), which bound-checks on every read
+/// rather than trusting the stored cell. An id no row carries reads back as `None`, which is the
+/// binary's own NULL → `lua_pushnil`.
+fn direct_row(state: &WorldMapState) -> Option<&WorldMapZoneView> {
+    let id = state.direct_area?;
+    state
+        .direct_areas
+        .iter()
+        .find(|(row_id, _)| *row_id == id)
+        .map(|(_, row)| row)
+}
+
+/// The displayed map's `WorldMapArea` row, if one is displayed: the selected zone, or — in the
+/// direct-area state — the instance map's own row. `0x4a6cf0` resolves both through the same id
+/// lookup, and `0x4a67a0`'s overlay half admits the `-2` state with the displayed key
+/// `= [0x845074]` (wow-re `worldmap-overlay-reveal-gate.md` §2), so a battleground's overlays
+/// reveal under the explored-bit gate exactly as a zone's do — no free reveal.
 fn current_zone(state: &WorldMapState) -> Option<&WorldMapZoneView> {
+    if state.direct_area.is_some() {
+        return direct_row(state);
+    }
     let (c, z) = state.selection;
     if c == 0 || z == 0 {
         return None;
@@ -415,6 +482,25 @@ impl super::UiScript {
         model
             .pending_events
             .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
+    }
+
+    /// Push the **orphan list** — the instance maps, keyed by `WorldMapArea` row id (see
+    /// [`WorldMapState::direct_areas`]). Pushed beside the continent catalog at the same edge and
+    /// for the same reason; the reference fills both containers in one walk (`0x4a5d00`).
+    pub fn set_world_map_direct_areas(&mut self, direct_areas: Vec<(u32, WorldMapZoneView)>) {
+        let mut model = self.model_mut();
+        model.worldmap.direct_areas = direct_areas;
+        model
+            .pending_events
+            .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
+    }
+
+    /// Push the resolver's **orphan leg** for the player — the `WorldMapArea` row id whose map is
+    /// the player's own, or `None` (see [`WorldMapState::player_direct_area`]). The continent/zone
+    /// leg rides [`Self::set_world_map_feed`]'s `player_zone`; `0x4a6650` computes both in one
+    /// pass and reaches this one only when that one missed.
+    pub fn set_world_map_player_direct_area(&mut self, direct_area: Option<u32>) {
+        self.model_mut().worldmap.player_direct_area = direct_area;
     }
 
     /// Push the discovery bitset (the app calls this when `PLAYER_EXPLORED_ZONES` changes —
@@ -463,10 +549,15 @@ impl super::UiScript {
         model.worldmap.raid_uv = raid_uv;
     }
 
-    /// The engine-owned selection `(continent, zone)` — the app reads it each frame to project
-    /// the feed for the displayed map.
-    pub fn world_map_selection(&self) -> (u32, u32) {
-        self.model_ref().worldmap.selection
+    /// The engine-owned selection — the app reads it each frame to project the feed for the
+    /// displayed map. **All three of the reference's cells**, in its own order: the continent and
+    /// zone pair (`0` = whole), then the direct-area row id
+    /// ([`WorldMapState::direct_area`]) which overrides both when it is `Some`. A consumer that
+    /// reads only the pair sees an instance map as the world sheet — which is precisely the bug
+    /// that left the battle map empty — so the third cell travels with them.
+    pub fn world_map_selection(&self) -> (u32, u32, Option<u32>) {
+        let wm = &self.model_ref().worldmap;
+        (wm.selection.0, wm.selection.1, wm.direct_area)
     }
 
     /// Move the selection **from the engine**, with no Lua in the loop — the reference's
@@ -479,9 +570,19 @@ impl super::UiScript {
     /// level `GetPlayerMapPosition` answers a world-SHEET uv (`0x4a7360` step 2), which every
     /// addon that assumes a zone uv silently mis-scales. See [`crate::script::worldmap`]'s caller
     /// in `ui_world_map::feed_world_map` for the gate.
-    pub fn sync_world_map_to_player_zone(&mut self, continent: u32, zone: u32) {
+    ///
+    /// It takes the resolver's whole answer — including the orphan leg — because `0x4947ac` calls
+    /// `0x4a6650`, the same resolver `SetMapToCurrentZone` does: a player logging straight into a
+    /// battleground is on the battleground's own map before any Lua runs, exactly as one logging
+    /// into Elwynn is on Elwynn's.
+    pub fn sync_world_map_to_player_zone(
+        &mut self,
+        continent: u32,
+        zone: u32,
+        direct_area: Option<u32>,
+    ) {
         let mut model = self.model_mut();
-        select(&mut model, i64::from(continent), i64::from(zone));
+        select_resolved(&mut model, continent, zone, direct_area);
     }
 
     /// The **normalized position within the map art** at UI-space `(x, y)`, or `None` when the
@@ -515,8 +616,22 @@ impl super::UiScript {
     }
 }
 
-/// Clamp + store a selection and queue the repaint event. The shared tail of
-/// `SetMapZoom`/`SetMapToCurrentZone`/`ProcessMapClick`.
+/// **The one writer of the three selection cells** — `0x4a67a0`, whose whole job is that the
+/// continent/zone pair and the direct-area id can never both be live: the setter's valid-continent
+/// leg and its `-1` leg both fall into `0x4a67ea mov [0x845074],eax` (`= -1`), and only `ecx == -2`
+/// jumps past it after storing the id (`0x4a67c1`), having already forced the zone cell to `-1`.
+/// Every selection verb in this module goes through here, so neither half can be moved alone.
+fn store_selection(model: &mut Model, selection: (u32, u32), direct_area: Option<u32>) {
+    model.worldmap.selection = selection;
+    model.worldmap.direct_area = direct_area;
+    model
+        .pending_events
+        .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
+}
+
+/// Clamp + store a continent/zone selection and queue the repaint event. The shared tail of
+/// `SetMapZoom`/`SetMapToCurrentZone`/`ProcessMapClick` — and it **clears the direct area**, which
+/// is the setter invariant above.
 fn select(model: &mut Model, continent: i64, zone: i64) {
     let c = continent.clamp(0, model.worldmap.continents.len() as i64) as u32;
     let z = if c == 0 {
@@ -525,10 +640,30 @@ fn select(model: &mut Model, continent: i64, zone: i64) {
         let n = model.worldmap.continents[c as usize - 1].zones.len() as i64;
         zone.clamp(0, n) as u32
     };
-    model.worldmap.selection = (c, z);
-    model
-        .pending_events
-        .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
+    store_selection(model, (c, z), None);
+}
+
+/// Select an instance map directly — `0x4a67a0` reached with `ecx == -2`: the zone cell goes to
+/// `-1` (our `0`) and the raw `WorldMapArea` row id lands in `[0x845074]` **verbatim and
+/// unchecked**. We keep it unchecked for the same reason the reference can: every consumer
+/// bound-checks on read ([`direct_row`]), so an id no row carries degrades to the nil map name
+/// instead of corrupting the selection.
+fn select_direct(model: &mut Model, wma_id: u32) {
+    store_selection(model, (0, 0), Some(wma_id));
+}
+
+/// Apply the resolver `0x4a6650`'s answer — the shared tail of `SetMapToCurrentZone` (`0x4a7e20`
+/// is literally `call 0x4a6650`) and of the engine's own first-world-enter sync (`0x4947ac`, the
+/// same function: there is no second resolver).
+///
+/// The orphan leg wins when it is set, and it is set only when no continent matched — the
+/// reference reaches `0x4a66c3` exclusively through the continent loop's miss, so the two answers
+/// are mutually exclusive by construction upstream and the order here is belt-and-braces.
+fn select_resolved(model: &mut Model, continent: u32, zone: u32, direct_area: Option<u32>) {
+    match direct_area {
+        Some(id) => select_direct(model, id),
+        None => select(model, i64::from(continent), i64::from(zone)),
+    }
 }
 
 /// Register the world-map globals.
@@ -551,6 +686,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetMapZones(continent) → name1, name2, … (that continent's zone list; index = zone number).
+    // A NEGATIVE continent answers empty — `0x4a7d10`'s `dec edi; cmp edi,[0xb6e664]; jae` is an
+    // unsigned bound, so `GetCurrentMapContinent()`'s `-1` on an instance map takes the empty
+    // exit. That emptiness is load-bearing: it is what leaves `WorldMapZoneButton_OnClick` with
+    // no button to fire, and so what stops a `SetMapZoom(-1, id)` from writing a bogus row id
+    // into the direct cell (wow-re §5.4).
     g.set(
         "GetMapZones",
         lua.create_function(|lua, c: i64| {
@@ -570,12 +710,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetCurrentMapContinent() / GetCurrentMapZone() — the selection halves (0 = world / whole
-    // continent). The reference reads them right after SetMapZoom in the same click.
+    // continent). The reference reads them right after SetMapZoom in the same click. Each is its
+    // cell `+ 1` and nothing else (`0x4a7ed0`, `0x4a7f00`: a straight-line fild/pushnumber), so
+    // the direct-area state answers **-1** (from the `-2` sentinel) and **0** (the zone cell it
+    // forces to `-1`). The `-1` is a value no stock path tests for, and benignly: it leaves
+    // `WorldMapFrame.lua:59`'s zoom-out button enabled, and the zone dropdown it would feed is
+    // empty because `GetMapZones(-1)` takes the unsigned-bound exit below.
     g.set(
         "GetCurrentMapContinent",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.worldmap.selection.0))
+            Ok(match model.worldmap.direct_area {
+                Some(_) => -1i64,
+                None => i64::from(model.worldmap.selection.0),
+            })
         })?,
     )?;
     g.set(
@@ -596,28 +744,41 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetMapToCurrentZone() — the OnShow verb: jump to the player's zone (app-resolved feed).
+    // SetMapToCurrentZone() — the OnShow verb: jump to the player's own map (app-resolved feed).
+    // `0x4a7e20` is `call 0x4a6650; xor eax,eax; ret`, so this is the resolver's whole answer,
+    // orphan leg included — which is what puts a player standing in Warsong Gulch on the Warsong
+    // Gulch map. The stock battlefield minimap calls it itself on PLAYER_ENTERING_WORLD.
     g.set(
         "SetMapToCurrentZone",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let (c, z) = model.worldmap.player_zone.unwrap_or((0, 0));
-            select(&mut model, i64::from(c), i64::from(z));
+            let direct = model.worldmap.player_direct_area;
+            select_resolved(&mut model, c, z, direct);
             Ok(())
         })?,
     )?;
 
     // GetMapInfo() → mapFileName (the Interface\WorldMap\<name>\ folder). World level → nil —
     // the reference Lua's own `"World"` fallback exists because the client returned nil there
-    // (INFERRED, wow-re Q3 pending).
+    // (wow-re `worldmap-direct-area-selection.md` §5.1/§5.3).
+    //
+    // The name is `WorldMapArea` field[3], the **art-folder identifier** — "WarsongGulch", never
+    // the localized "Warsong Gulch": `0x4a6cf0` reads `[row+0xc]` with no locale multiplier, in
+    // deliberate contrast to `0x4a8740`'s `[rec + 4*[0xc0e080] + 0x2c]` AreaTable read. That is
+    // why FrameXML interpolates it straight into `Interface\WorldMap\<name>\<name>1..12`.
     g.set(
         "GetMapInfo",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let wm = &model.worldmap;
-            let file = match wm.selection {
-                (0, _) => None,
-                (c, z) => wm.continents.get(c as usize - 1).map(|cont| match z {
+            let file = match (wm.direct_area, wm.selection) {
+                // The direct-area state — an instance map, resolved by id through the orphan
+                // list. `0x4a6cf0`'s `jl 0x4a6d24` sends BOTH negative continents here and the
+                // `-1` world level answers nil only because its third cell is `-1` too.
+                (Some(_), _) => direct_row(wm).map(|row| row.map_file.clone()),
+                (None, (0, _)) => None,
+                (None, (c, z)) => wm.continents.get(c as usize - 1).map(|cont| match z {
                     0 => cont.map_file.clone(),
                     z => cont
                         .zones
@@ -626,11 +787,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         .unwrap_or_else(|| cont.map_file.clone()),
                 }),
             };
-            // THREE values, always. `0x4a7e30` has one `ret` and not a single conditional jump —
-            // there is no miss branch at all, the emptiness lives in two helpers — so the
-            // world-level answer is `nil, 0, 0` rather than one nil. (`arity_conf = exact`;
-            // decision 1845.) The two zeros are the map's texture dimensions, which no caller
-            // reads on the world level.
+            // THREE values, always: `0x4a7e30` pushes all three unconditionally and returns
+            // `mov eax,3` from its single `ret`, so the world-level answer is `nil, 0, 0` rather
+            // than one nil. (Its four conditional jumps all sit inside slot 3's power-of-two
+            // round and none gates a push — wow-re §10 corrects the "no conditional jump at all"
+            // absolute this comment used to carry, without touching the conclusion.
+            // `arity_conf = exact`; decision 1845.)
+            //
+            // The two zeros are the map art's texture dimensions, which no caller reads: both
+            // consumers bind slot 2 to a `textureHeight` local they never read again. They are
+            // **0 on every instance map** in the reference too — `0x4a6d50` scans
+            // `WorldMapContinent.dbc` for the row's mapID and that table ships only mapIDs
+            // {0, 1}, so the scan exhausts (§5.2).
             let file = match file {
                 Some(f) => Value::String(lua.create_string(&f)?),
                 None => Value::Nil,
@@ -696,6 +864,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ProcessMapClick",
         lua.create_function(|lua, (x, y): (f32, f32)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // An instance map swallows the click: the drill INSIDE `ProcessMapClick`
+            // (`0x4a7540`) opens `cmp esi,-2; je 0x4a760d`, a bare epilogue. Ahead of the world
+            // arm below, because the direct state shares its `continent == 0` cell and must not
+            // fall into the world sheet's continent walk.
+            if model.worldmap.direct_area.is_some() {
+                return Ok(());
+            }
             if model.worldmap.selection.0 == 0 {
                 let hit = model.worldmap.continents.iter().position(|cont| {
                     let (u0, v0, u1, v1) = cont.world_rect;
@@ -793,9 +968,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetNumMapOverlays() — how many of the displayed zone's overlays are REVEALED by the
+    // GetNumMapOverlays() — how many of the displayed map's overlays are REVEALED by the
     // explored bitset (the client's C side filters the same way; the reference Lua draws every
-    // returned overlay). 0 at world/continent level.
+    // returned overlay). 0 at world/continent level; an instance map is admitted under the same
+    // gate as a zone (see [`current_zone`]) — which on 5875 data means Alterac Valley's three
+    // rows and nothing for the other two battlegrounds.
     g.set(
         "GetNumMapOverlays",
         lua.create_function(|lua, ()| {

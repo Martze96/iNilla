@@ -53,8 +53,8 @@ use quests::{
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
     clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, removed_spell,
-    spell_book, spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go,
-    spell_start, superceded_spell,
+    set_spell_modifier, spell_book, spell_chain_targets, spell_cooldowns, spell_delayed,
+    spell_failed_other, spell_go, spell_start, superceded_spell,
 };
 
 /// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
@@ -144,6 +144,7 @@ pub(crate) fn apply_net_updates(
         mut ui_error_texts,
         mut queued_melee,
         mut aura_durations,
+        mut spell_mods,
     } = actions;
     let AnimWriters {
         mut server_sounds,
@@ -1649,6 +1650,12 @@ pub(crate) fn apply_net_updates(
                 &mut aura_durations,
                 real_clock.elapsed_secs_f64(),
             ),
+            SessionEvent::SpellModifier {
+                flat,
+                mask_bit,
+                op,
+                value,
+            } => set_spell_modifier(flat, mask_bit, op, value, &mut spell_mods),
             SessionEvent::PlaySpellVisual { unit, kit_id } => {
                 anim::play_spell_visual(unit, kit_id, &index, play_seq, &mut kit_pushes)
             }

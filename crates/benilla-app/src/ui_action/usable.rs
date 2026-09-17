@@ -29,6 +29,7 @@ use benilla_formats::{
 use crate::cooldowns::Cooldowns;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Reputations};
+use crate::spell_mods::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
 
 use super::Spells;
@@ -49,6 +50,8 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) factions: Option<&'a Factions>,
     pub(crate) reputations: &'a Reputations,
     pub(crate) cooldowns: &'a Cooldowns,
+    /// The talent spell-modifier tables — leg 12's cost goes through them ([`power_cost`]).
+    pub(crate) spell_mods: &'a SpellModifiers,
     /// Every carried entry's count, walked ONCE by the caller for the frame
     /// ([`crate::ui_items::carried_counts`]) — leg 3 reads reagents and totems off it instead
     /// of walking the bags per reagent per slot.
@@ -450,7 +453,7 @@ pub(crate) fn spell_usable(
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`–`0x6e3feb`): the power gate — the SOLE notEnoughMana writer (B2).
-    if !can_afford(d, ctx.store) {
+    if !can_afford(d, ctx.store, ctx.spell_mods) {
         return (false, true);
     }
     (true, false)
@@ -461,12 +464,17 @@ pub(crate) fn spell_usable(
 /// `CalculatePowerCost` shape, clamped at 0 on the way out; every nonzero row is a creature
 /// spell, so the clamp choice is dormant for players), and `ManaCostPercentage` of the pool
 /// 0948 chose per type (base mana for mana spells — the vmangos basis — max pool otherwise,
-/// health included for negative types). One law, every consumer: the usable walk's leg 12, the
-/// press-path power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's
-/// own caller set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The
-/// reference's per-school unit mods and spell-mods (talent cost cuts) are not modeled — 0948's
-/// standing gap, now stated once here.
-pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
+/// health included for negative types) — and then the talent cost cut, `SPELLMOD_COST` (op 14),
+/// which `0x6e31b0` applies inside itself at `6e32e3` through the integer applier `0x6e6af0`
+/// ([`crate::spell_mods`]). One law, every consumer: the usable walk's leg 12, the press-path
+/// power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's own caller
+/// set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The reference's
+/// per-school unit mods are still not modeled — what remains of 0948's standing gap.
+///
+/// **The modifier is why this one is behavioural and not only cosmetic**: the press-path gate
+/// refuses a cast it judges unaffordable and sends **no packet at all** (`0x609657`'s failure
+/// block), so an unmodified cost makes benilla refuse casts a talented character can afford.
+pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> u32 {
     let power_type = d.power_type as i32;
     let base = if d.mana_cost_pct == 0 {
         0
@@ -484,7 +492,11 @@ pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
     let cost = i64::from(d.mana_cost)
         + level_delta * i64::from(d.mana_cost_per_level)
         + i64::from(base) * i64::from(d.mana_cost_pct) / 100;
-    u32::try_from(cost).unwrap_or(0)
+    // The talent cut, on the data terms and before the 0-clamp on the way out. The relative order
+    // of the two is dormant for players — every nonzero `manaCostPerlevel` row is a creature spell
+    // (above), so nothing reaches the modifier negative.
+    let cost = cost.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    u32::try_from(mods.apply(d, OP_COST, cost)).unwrap_or(0)
 }
 
 /// Whether the caster can afford `d`'s power cost — the shared availability-vs-cost compare
@@ -492,14 +504,14 @@ pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
 /// (`0x6094f0` @ `0x60962c`, decision 0948): raw `UNIT_FIELD_POWER[type]` — ANY negative
 /// PowerType reads `UNIT_FIELD_HEALTH` instead (the ref's `jl` at `0x609631`; Bloodrage's −2) —
 /// signed-compared against [`power_cost`]'s number.
-pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
+pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> bool {
     let power_type = d.power_type as i32;
     let avail = if power_type < 0 {
         store.0.unit_health().unwrap_or(0)
     } else {
         store.0.unit_power(power_type as u8).unwrap_or(0)
     };
-    avail >= power_cost(d, store)
+    avail >= power_cost(d, store, mods)
 }
 
 #[cfg(test)]
@@ -716,6 +728,7 @@ mod tests {
         cooldowns: &'a Cooldowns,
         reputations: &'a Reputations,
         carried: &'a std::collections::HashMap<u32, u32>,
+        spell_mods: &'a SpellModifiers,
     ) -> UsableCtx<'a> {
         UsableCtx {
             store,
@@ -724,6 +737,7 @@ mod tests {
             reputations,
             cooldowns,
             carried,
+            spell_mods,
         }
     }
 
@@ -735,14 +749,62 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let carried = crate::ui_items::carried_counts(&store.0, &items);
+        let spell_mods = SpellModifiers::default();
         spell_usable(
             1,
             d,
             &spells,
-            &ctx(store, &cooldowns, &reputations, &carried),
+            &ctx(store, &cooldowns, &reputations, &carried, &spell_mods),
             &items,
             &commands,
         )
+    }
+
+    /// **The behavioural half of the spell-modifier system, and the reason op 14 is the first op
+    /// wired** (wow-re `spellmod-table-law.md` §9): the press-path gate compares the caster's
+    /// power against [`power_cost`] and, when short, refuses locally and sends **no**
+    /// `CMSG_CAST_SPELL` at all (`0x609657`'s fall-through failure block). With the tables unread,
+    /// a talent-discounted spell the server would happily accept is refused by the client.
+    ///
+    /// So: a mage with 80 mana and a 100-mana spell cannot cast it; one `SMSG_SET_PCT_SPELL_MODIFIER`
+    /// for that spell's `(family bit, op 14)` cell flips both the number and the verdict.
+    #[test]
+    fn a_talent_cost_cut_reaches_the_cost_and_the_press_path_gate() {
+        // Family 3 (mage), family bit 5 — the shape a real talent's `SpellFamilyMask` names.
+        let d = SpellDisplay {
+            spell_family: 3,
+            spell_family_flags: 1 << 5,
+            mana_cost: 100,
+            ..Default::default()
+        };
+        let store = ObjectStore(ObjectFields::from_pairs(&[(23, 80)]));
+
+        let mut mods = SpellModifiers::default();
+        mods.set_class_family(3);
+        assert_eq!(
+            power_cost(&d, &store, &mods),
+            100,
+            "no packet yet — the flat DBC cost"
+        );
+        assert!(
+            !can_afford(&d, &store, &mods),
+            "80 mana does not buy a 100 mana spell"
+        );
+
+        // The server's cell for (bit 5, op 14): −30%.
+        mods.set(false, 5, OP_COST, -30);
+        assert_eq!(power_cost(&d, &store, &mods), 70);
+        assert!(
+            can_afford(&d, &store, &mods),
+            "the talent brings it inside the pool, so TryCast must send the cast"
+        );
+
+        // A warrior's copy of the same spell id takes nothing — the family gate, from this side.
+        let other_class = SpellDisplay {
+            spell_family: 4,
+            ..d
+        };
+        assert_eq!(power_cost(&other_class, &store, &mods), 100);
     }
 
     /// Each modeled gate trips alone, and only the power leg raises notEnoughMana (B2).
@@ -880,6 +942,7 @@ mod tests {
                 reputations: &reputations,
                 cooldowns: &cooldowns,
                 carried: &carried,
+                spell_mods: &SpellModifiers::default(),
             };
             assert_eq!(
                 spell_usable(5308, &execute, &spells, &ctx, &items, &commands),

@@ -915,6 +915,19 @@ pub enum SessionEvent {
         slot: u32,
         seconds: u32,
     },
+    /// One cell of a talent spell-modifier table, absolutely (`SMSG_SET_FLAT_SPELL_MODIFIER` /
+    /// `SMSG_SET_PCT_SPELL_MODIFIER`): `flat` picks the table, `mask_bit` is the spell's
+    /// `SpellFamilyFlags` **bit index** (the row) and `op` the SpellModOp (the column). Neither
+    /// byte is bounded on the wire — the consumer (`benilla::spell_mods`) refuses an out-of-range
+    /// pair rather than reproducing the reference's own overrun. `value` is **absolute**, not a
+    /// delta; the wire shape and the `bit * 29 + op` index law are on
+    /// [`crate::messages::ServerPacket::SpellModifier`].
+    SpellModifier {
+        flat: bool,
+        mask_bit: u8,
+        op: u8,
+        value: i32,
+    },
     /// Start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's parked timers now
     /// (`SMSG_COOLDOWN_EVENT`).
     CooldownEvent { spell_id: u32, caster: u64 },

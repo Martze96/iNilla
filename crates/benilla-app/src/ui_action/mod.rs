@@ -211,9 +211,10 @@ impl Spells {
     /// `wave-cooldown.md`/`moving-cast-gate.md`, byte-verified): `CastingTimeIndex` resolves the
     /// [`Self::cast_times`] row, `base + perLevel·(casterLevel − baseLevel)` floors to the
     /// row's minimum (row 1, the all-zero instant sentinel, resolves 0). The level term keys on
-    /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]); spellmod op `0xa`
-    /// (SPELLMOD_CASTING_TIME) is unmodeled — benilla has no spellmod system — a named
-    /// micro-divergence (a talent-shortened 0-second cast doesn't exist in the 1.12 data).
+    /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]). Spell-mod op `0xa`
+    /// (SPELLMOD_CASTING_TIME) is still unread here — the tables themselves are live
+    /// ([`crate::spell_mods`]), only this consumer is not wired to them, so a talent-shortened
+    /// cast still shows its untalented length.
     /// A missing row reads 0 (instant), like a failed catalog load everywhere else.
     pub(crate) fn cast_time_ms(
         &self,

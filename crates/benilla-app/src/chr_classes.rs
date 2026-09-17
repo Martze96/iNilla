@@ -1,14 +1,16 @@
 //! `ChrClasses.dbc`, loaded once and read by everything that asks the client a question about a
 //! class.
 //!
-//! Two consumers today and they are unrelated to each other — [`crate::ui_pet_book`] wants field
-//! 4's pet name token, `UnitHasRelicSlot` wants field 16's relic flag — which is exactly why the
-//! table does not live inside either of them. It used to live in the pet book, back when the pet
+//! Three consumers today and they are unrelated to each other — [`crate::ui_pet_book`] wants field
+//! 4's pet name token, `UnitHasRelicSlot` wants field 16's relic flag, and
+//! [`crate::spell_mods`] wants field 15's class spell-family — which is exactly why the
+//! table does not live inside any of them. It used to live in the pet book, back when the pet
 //! token was the only column anyone read.
 //!
-//! The resource is **absent**, not empty, when the load fails. Both readers then fall to the
-//! reference's own degraded answer (`"PET"` for the token, no relic slot for any class), so a
-//! missing table costs a warlock the word "Demon" and a paladin their relic branches rather than
+//! The resource is **absent**, not empty, when the load fails. Every reader then falls to the
+//! reference's own degraded answer (`"PET"` for the token, no relic slot for any class, family 0
+//! — which the modifier gate's first conjunct refuses), so a missing table costs a warlock the
+//! word "Demon", a paladin their relic branches and everyone their talent modifiers rather than
 //! taking the client down.
 
 use bevy::prelude::*;
@@ -39,8 +41,9 @@ fn load_chr_classes(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
         Ok(table) => commands.insert_resource(ChrClassTable(table)),
         Err(e) => warn!(
             "chr_classes: ChrClasses.dbc failed to load — every pet book tab reads the client's \
-             own \"PET\" fallback, so a warlock's says Pet rather than Demon, and no class reads \
-             as having a relic slot: {e:#}"
+             own \"PET\" fallback, so a warlock's says Pet rather than Demon, no class reads \
+             as having a relic slot, and no talent spell modifier can apply (the gate has no \
+             class family to match): {e:#}"
         ),
     }
 }

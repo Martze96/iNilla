@@ -45,8 +45,9 @@ fn range_row(spells: Option<&Spells>, spell_id: u32) -> Option<&SpellRange> {
 /// radius: per-effect `radius + casterLevel × perLevel` over **EffectRadiusIndex[0] and [1]
 /// only** (slot 2 is never read by the client), the max with candidate 1 winning ties/NaN,
 /// clamped to 20.0 (`0x4820f0`'s `[0x804478]` literal — `min`, NaN → 20). `0.0` = no radius
-/// rows; the reticle then draws at its literal default size. Class-6 spell modifiers are
-/// unmodelled (the 0792 residual, same as the range gate).
+/// rows; the reticle then draws at its literal default size. Spell-mod op 6 (SPELLMOD_RADIUS) is
+/// not read here — the tables are live ([`crate::spell_mods`]), this consumer is not wired to
+/// them (the 0792 residual, same as the range gate).
 pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: u32) -> f32 {
     let Some(spells) = spells else { return 0.0 };
     let Some(d) = spells.catalog.get(spell_id) else {

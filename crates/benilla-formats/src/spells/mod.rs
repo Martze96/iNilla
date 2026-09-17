@@ -210,6 +210,14 @@ const COL_START_RECOVERY_TIME: usize = 158;
 /// `PreventionType` (`SpellRec+0x294`, `0x294/4 == 165`) — see [`SpellDisplay::prevention_type`]
 /// for the two-way pin that separates it from its `DmgClass` neighbour at 164.
 const COL_PREVENTION_TYPE: usize = 165;
+/// `SpellFamilyName` (`SpellRec+0x280`, `0x280/4 == 160`) / `SpellFamilyFlags` low+high
+/// (`+0x284`/`+0x288`, 161/162) — the talent spell-modifier gate and its row selector, read by
+/// `GetSpellModifiers 0x6e6b30` at `6e6b38`/`6e6b46` and `6e6b83` (wow-re
+/// `system/spell/scratch/spellmod-table-law.md` §5). See [`SpellDisplay::spell_family`] and
+/// [`SpellDisplay::spell_family_flags`]; the shipped-file anchors are in
+/// [`catalog_tests`].
+const COL_SPELL_FAMILY_NAME: usize = 160;
+const COL_SPELL_FAMILY_FLAGS_LOW: usize = 161;
 /// `Targets` (`SpellRec+0x34`, `0x34/4 == 13`) — the wire `TARGET_FLAG_*` seed mask the cast-arm
 /// loads into its targeting flag_word (`0x6e525a`, wow-re `wave-cast.md`, VERIFIED). Empirical
 /// pin against the binder's bit semantics: Resurrection 2006 = `0x8000` (corpse-ally bit 15),
@@ -817,6 +825,11 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                     u32_at(r, COL_EFFECT_MECHANIC_1 + i).unwrap_or(0)
                 }),
                 prevention_type: u32_at(r, COL_PREVENTION_TYPE).unwrap_or(0),
+                spell_family: u32_at(r, COL_SPELL_FAMILY_NAME).unwrap_or(0),
+                // Low dword first: bit `i >= 32` lives in column 162, which the reference reads as
+                // `[edi + 4*(i>>5) + 0x284]` — the same little-endian pair this join makes.
+                spell_family_flags: u64::from(u32_at(r, COL_SPELL_FAMILY_FLAGS_LOW).unwrap_or(0))
+                    | u64::from(u32_at(r, COL_SPELL_FAMILY_FLAGS_LOW + 1).unwrap_or(0)) << 32,
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
                 effects: [0, 1, 2].map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0)),

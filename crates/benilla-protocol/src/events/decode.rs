@@ -287,6 +287,17 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             slot,
             seconds,
         }],
+        ServerPacket::SpellModifier {
+            flat,
+            mask_bit,
+            op,
+            value,
+        } => vec![SessionEvent::SpellModifier {
+            flat,
+            mask_bit,
+            op,
+            value,
+        }],
         ServerPacket::CooldownEvent { spell_id, caster } => {
             vec![SessionEvent::CooldownEvent { spell_id, caster }]
         }
