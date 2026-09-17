@@ -1,5 +1,6 @@
-//! The meeting-stone queue's wire (decision 1963; wow-re `staticpopup-dialog-bindings.md` §8):
-//! the server's queue state and the leave request `CancelMeetingStoneRequest` sends.
+//! The meeting-stone queue's wire (decisions 1963/1974/2283; wow-re `staticpopup-dialog-bindings.md`
+//! §8 and `meeting-stone-status.md` §8/§9/§10): the server's queue state, the JOIN a right-click on
+//! the stone sends, and the leave request `CancelMeetingStoneRequest` sends.
 
 use std::io::{self, Read};
 
@@ -19,6 +20,15 @@ pub(super) fn read_meeting_stone_set_queue(r: &mut impl Read) -> io::Result<Meet
         area: read_u32_le(r)?,
         status: read_u8(r)?,
     })
+}
+
+/// Body of `CMSG 0x292` (VERIFIED, builder `0x4c9ff0`): one full little-endian `u64` — the guid of
+/// the `GAMEOBJECT_TYPE_MEETINGSTONE` (23) the player right-clicked, written by the 8-byte guid
+/// writer `0x418370` straight after `PutUInt32(0x292)`. Nothing else is in the packet: the area is
+/// the SERVER's to resolve from the stone's `gameobject_template.data[2]`, which is why the join
+/// names an object and the reply names an area.
+pub fn meeting_stone_join(go_guid: u64) -> Vec<u8> {
+    go_guid.to_le_bytes().to_vec()
 }
 
 /// Body of `CMSG 0x293` (VERIFIED, `0x4ca120`): empty.
@@ -50,4 +60,26 @@ pub(super) fn read_meeting_stone_member_added(r: &mut impl Read) -> io::Result<M
 /// Parse `0x2BB`'s code byte.
 pub(super) fn read_meeting_stone_join_failed(r: &mut impl Read) -> io::Result<MeetingStoneNotice> {
     Ok(MeetingStoneNotice::JoinFailed { code: read_u8(r)? })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The join body is the bare guid, little-endian, eight bytes and no more — `0x4c9ff0` writes
+    /// `PutUInt32(0x292)` into the header and then exactly one `0x418370` (the 8-byte guid writer).
+    #[test]
+    fn cmsg_meetingstone_join_body_golden() {
+        assert_eq!(
+            meeting_stone_join(0x1234_5678_9abc_def0),
+            vec![0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12],
+            "CMSG_MEETINGSTONE_JOIN body"
+        );
+    }
+
+    /// Both of the other two sends in this family are empty bodies.
+    #[test]
+    fn the_leave_body_is_empty() {
+        assert!(meeting_stone_leave().is_empty());
+    }
 }

@@ -458,6 +458,17 @@ impl ParticleEmitter {
         self.anchor
     }
 
+    /// The **emission clock's host** ([`EmitClock::Host`]) — the model instance whose live
+    /// `AnimationPlayer` names the sequence this emitter samples its rate/gate tracks against;
+    /// `None` for a pinned or effect clock. The read an instrument or a wiring test needs, because
+    /// the difference is invisible in every other observable: a hosted and a pinned emitter build,
+    /// pool, tick and draw identically, and differ only in *which* sequence's tracks they read —
+    /// which is the whole difference between a firearm's muzzle blast firing and never firing
+    /// (decision 2281).
+    pub fn emit_host(&self) -> Option<Entity> {
+        self.host
+    }
+
     /// Switch this emitter to [`OwnerLoss::Drain`] — **the effect is ending, so its already-emitted
     /// particles must finish rather than pop** (wow-re `ceffect-particle-drain.md` §4a).
     ///

@@ -6,6 +6,12 @@
 //! generated-texcoord environment stages (`envmapscan`), and the batches whose animated
 //! texture-transform / tint loop is not the same in every sequence slot, which the bake routes to
 //! a per-placement material (`uvslotscan`).
+//!
+//! `fxuvscan` is the intersection of the first two, asked of one corpus: the spell-effect models,
+//! whose animated texture transform decides — through their CLAMP-authored UVs — whether a
+//! consumer that runs none of it loses the batch's motion or its whole existence. It sized
+//! decision 2282, which built the consumer; it stays the way that question is asked of the lanes
+//! that still run none of it.
 
 use std::collections::BTreeMap;
 
@@ -728,7 +734,6 @@ pub fn uvslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         };
         scanned += 1;
         batches += subs.len() as u64;
-
         let mut lines: Vec<String> = Vec::new();
         // This model's own contribution, folded into the corpus tally once per channel below:
         // (shared, shared-and-live) batch counts, per-bucket batch counts, and the file sequence
@@ -882,6 +887,844 @@ pub fn uvslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                 println!("      … and {rest} more (top {TAIL_ROWS} shown)");
             }
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// fxuvscan — what the SPELL-EFFECT corpus's animated texture transforms render
+// for a consumer that runs none of them.
+// ---------------------------------------------------------------------------
+
+/// How many spells print per INVISIBLE model before the rest are counted.
+const FX_SPELL_ROWS: usize = 12;
+
+/// How many unreadable model paths print before the rest are counted.
+const FX_UNREAD_ROWS: usize = 20;
+
+/// How many time samples the animated sweep takes across each slot's loop — enough to bound a
+/// scroll that only crosses the sheet for part of its period (the reported box is the union, so
+/// it only ever over-states what the animation reaches, never under-states it).
+const FX_ANIM_SAMPLES: usize = 64;
+
+/// One texture's mip-0 channels, as the visibility question needs them.
+///
+/// Alpha decides it for the modes that read alpha — `Blend`/`AlphaTest`, and M2 mode 4 `Add`
+/// (`SRC_ALPHA/ONE`), which is most of the effect corpus. An `Opaque` batch paints whatever it
+/// covers and a `Mod`/`Mod2x` batch's equation reads no alpha at all (decision 0528), so neither
+/// is called from the sheet. The one mode that needs [`Self::rgb`] is **3, `NoAlphaAdd`**
+/// (`ONE/ONE`): it adds the texel's colour with the alpha channel untouched, so an alpha-0 border
+/// with non-zero RGB still puts light on the screen. `BloodSpurtSmall01`'s border column is
+/// exactly that shape — alpha 0, RGB up to 107 — so the distinction is not hypothetical.
+struct Sheet {
+    w: u32,
+    h: u32,
+    /// Row-major, one byte per texel.
+    alpha: Vec<u8>,
+    /// Row-major `max(r, g, b)` — what an `ONE/ONE` add would put on the screen.
+    rgb: Vec<u8>,
+}
+
+impl Sheet {
+    /// The inclusive texel index ranges one axis's UV span `[lo, hi]` reaches under the batch's own
+    /// address mode — clamped to the edge texel (`wrap == false`, the border-sampling case this
+    /// whole scan turns on) or folded back into `0..1`. A wrapping span of a full sheet or more
+    /// reaches every texel.
+    fn axis(lo: f32, hi: f32, n: u32, wrap: bool) -> Vec<(u32, u32)> {
+        let last = n.saturating_sub(1);
+        let texel = |t: f32| ((t * n as f32) as i64).clamp(0, i64::from(last)) as u32;
+        if !wrap {
+            return vec![(texel(lo.clamp(0.0, 1.0)), texel(hi.clamp(0.0, 1.0)))];
+        }
+        if hi - lo >= 1.0 {
+            return vec![(0, last)];
+        }
+        let a = lo - lo.floor();
+        let b = a + (hi - lo);
+        if b <= 1.0 {
+            vec![(texel(a), texel(b))]
+        } else {
+            vec![(texel(a), last), (0, texel(b - 1.0))]
+        }
+    }
+
+    /// The most this sheet can PAINT anywhere in the UV box `u × v` — the greatest alpha, or, when
+    /// `with_rgb` (a batch that may be `NoAlphaAdd`), the greater of alpha and `max(r, g, b)`.
+    /// `0` exactly when every texel the box reaches contributes nothing.
+    ///
+    /// The box is the batch's UV **bounding box**, which is a superset of the texels its triangles
+    /// actually cover, so a `0` here is conservative in the one direction that matters: it cannot
+    /// call a batch invisible that in fact paints.
+    fn paint(
+        &self,
+        u: (f32, f32),
+        v: (f32, f32),
+        wrap_x: bool,
+        wrap_y: bool,
+        with_rgb: bool,
+    ) -> u8 {
+        if self.w == 0 || self.h == 0 {
+            return 0;
+        }
+        let mut best = 0u8;
+        for &(x0, x1) in &Self::axis(u.0, u.1, self.w, wrap_x) {
+            for &(y0, y1) in &Self::axis(v.0, v.1, self.h, wrap_y) {
+                for y in y0..=y1 {
+                    let row = (y * self.w) as usize;
+                    for x in x0..=x1 {
+                        let i = row + x as usize;
+                        best = best.max(self.alpha[i]);
+                        if with_rgb {
+                            best = best.max(self.rgb[i]);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Decode one texture's mip-0 alpha channel, memoised by lowercased path. `None` for a path the
+/// chain has no BLP for, or one that will not decode — reported as `UNKNOWN`, never a silent pass.
+fn fx_sheet<'a>(
+    cache: &'a mut BTreeMap<String, Option<Sheet>>,
+    chain: &mut Chain,
+    path: &str,
+) -> Option<&'a Sheet> {
+    cache
+        .entry(path.to_ascii_lowercase())
+        .or_insert_with(|| {
+            benilla_formats::read_texture_rgba(chain, path)
+                .ok()
+                .map(|(w, h, rgba)| Sheet {
+                    w,
+                    h,
+                    alpha: rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect(),
+                    rgb: rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|p| p[0].max(p[1]).max(p[2]))
+                        .collect(),
+                })
+        })
+        .as_ref()
+}
+
+/// One effect model's place in the spell-visual chain: the `SpellVisualEffectName` rows that name
+/// it, and every spell that reaches it with the lifecycle stages it arrives through.
+#[derive(Default)]
+struct FxReach {
+    /// The table's own spelling of the path (`.mdx`), for display.
+    path: String,
+    effects: std::collections::BTreeSet<u32>,
+    /// spell id → (name, the stages that reach this model).
+    spells: BTreeMap<u32, (String, std::collections::BTreeSet<&'static str>)>,
+}
+
+/// Fold one `SpellVisualEffectName` id's model into the corpus, and — when `spell` is given — note
+/// that that spell reaches it through that lifecycle stage. An id with no row or an empty path
+/// (the table's absent-model convention) folds to nothing, which is the client's own no-op.
+fn fx_record(
+    out: &mut BTreeMap<String, FxReach>,
+    visuals: &benilla_formats::SpellVisualCatalog,
+    effect: u32,
+    spell: Option<(u32, &str, &'static str)>,
+) {
+    let Some(path) = visuals.effect_path(effect) else {
+        return;
+    };
+    // One shipped row spells its path with a LEADING separator
+    // (`\\spells\\HellFire_FirePuff_Caster_Base.mdx`, `SpellVisualEffectName` 1180). The chain has
+    // the model under the same name without it, so the key drops leading separators while the
+    // DISPLAY path keeps the table's own spelling — the quirk stays visible instead of being
+    // silently smoothed away.
+    let e = out
+        .entry(crate::model_key(path.trim_start_matches(['\\', '/'])))
+        .or_default();
+    if e.path.is_empty() {
+        e.path = path.to_string();
+    }
+    e.effects.insert(effect);
+    if let Some((id, name, stage)) = spell {
+        e.spells
+            .entry(id)
+            .or_insert_with(|| (name.to_string(), std::collections::BTreeSet::new()))
+            .1
+            .insert(stage);
+    }
+}
+
+/// Every model the spell-visual chain can reach, keyed by [`crate::model_key`] — walked from the
+/// **tables**, not from the spells, so a kit no shipped spell names is still swept (it is still
+/// content the lane can be asked to play); the spell join is the second pass over the same map.
+///
+/// The reachable set is every kit's ten effect slots (`VisualKit::effects` — the nine bone-attach
+/// slots plus the world/state plant), every `SpellVisual` row's missile model (field 7) and its
+/// dest-anchored model (field 12, the DynamicObject's own `.mdx`). The stage labels are the five
+/// lifecycle kit columns plus `missile` and `area`, the latter covering both dest-anchored columns
+/// (field 12's model and field 13's area kit) — one lane, one name.
+fn fx_corpus(
+    visuals: &benilla_formats::SpellVisualCatalog,
+    spells: &benilla_formats::SpellCatalog,
+) -> BTreeMap<String, FxReach> {
+    let mut out: BTreeMap<String, FxReach> = BTreeMap::new();
+    for kit_id in visuals.kit_ids() {
+        let Some(kit) = visuals.kit(kit_id) else {
+            continue;
+        };
+        for (_, effect) in kit.effects() {
+            fx_record(&mut out, visuals, effect, None);
+        }
+    }
+    for (_, st) in visuals.visuals() {
+        fx_record(&mut out, visuals, st.missile_model, None);
+        fx_record(&mut out, visuals, st.area_effect, None);
+    }
+    for (id, sp) in spells.iter() {
+        let Some(st) = visuals.stages(sp.visual).copied() else {
+            continue;
+        };
+        for (stage, kit_id) in [
+            ("precast", st.precast),
+            ("cast", st.cast),
+            ("impact", st.impact),
+            ("state", st.state),
+            ("channel", st.channel),
+            ("area", st.area_kit),
+        ] {
+            let Some(kit) = visuals.kit(kit_id) else {
+                continue;
+            };
+            for (_, effect) in kit.effects() {
+                fx_record(&mut out, visuals, effect, Some((id, &sp.name, stage)));
+            }
+        }
+        fx_record(
+            &mut out,
+            visuals,
+            st.missile_model,
+            Some((id, &sp.name, "missile")),
+        );
+        fx_record(
+            &mut out,
+            visuals,
+            st.area_effect,
+            Some((id, &sp.name, "area")),
+        );
+    }
+    out
+}
+
+/// What a consumer that runs NO texture-transform animation renders for one batch whose transform
+/// the bake DID key.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FxClass {
+    /// The transform moves, and frozen the batch samples no painted texel while the animation does:
+    /// the batch renders **nothing at all**. The `SwipeCaster` class.
+    Invisible,
+    /// The transform moves, and the batch paints nothing at any point of the loop — so the missing
+    /// UV animation is not what is wrong with it. Flagged, never counted as INVISIBLE.
+    Never,
+    /// The transform moves and the batch draws — statically, where the scroll is the motion.
+    Frozen,
+    /// The transform is keyed but never moves within its band: a constant NON-identity offset the
+    /// bake carries as a `period == 0` hold. A lane that seeds no offset draws the batch at the
+    /// identity instead — a static mis-registration, not a missing scroll.
+    Held,
+    /// No call from the sheet: a `Mod`/`Mod2x` batch (its blend equation reads no alpha) or a
+    /// texture the chain will not hand over. Flagged.
+    Unknown,
+}
+
+impl FxClass {
+    const ALL: [Self; 5] = [
+        Self::Invisible,
+        Self::Never,
+        Self::Frozen,
+        Self::Held,
+        Self::Unknown,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Invisible => "INVISIBLE",
+            Self::Never => "NEVER",
+            Self::Frozen => "FROZEN",
+            Self::Held => "HELD",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::Invisible => {
+                "frozen, the batch samples only transparent texels while the scroll reaches painted \
+                 ones — it renders NOTHING"
+            }
+            Self::Never => {
+                "nothing painted at any point of the loop — the missing scroll is not this batch's \
+                 problem (investigate)"
+            }
+            Self::Frozen => "it draws, statically: the scroll is the motion it loses",
+            Self::Held => {
+                "keyed to a constant non-identity offset — a lane that seeds none draws it \
+                 mis-registered, not still"
+            }
+            Self::Unknown => {
+                "no alpha lane to judge from (Mod/Mod2x), or the texture would not decode"
+            }
+        }
+    }
+}
+
+/// The batch's texture-transform state at `(slot, t)` — the triple [`benilla_formats::uv_transform`]
+/// composes, read the way the one lane that RUNS it reads it (`ui_models::UvPart::write_rows`): the
+/// per-slot set when the bake built one, else the single shared loop.
+fn fx_state(
+    sub: &benilla_formats::RenderSubmesh,
+    slot: usize,
+    t: f32,
+) -> ([f32; 2], [f32; 4], [f32; 2]) {
+    let trans = match (&sub.uv_seq, &sub.uv_anim) {
+        (Some(s), _) => s.seq(Some(slot)).map_or([0.0, 0.0], |l| l.sample(t)),
+        (None, Some(a)) => a.sample(t),
+        (None, None) => [0.0, 0.0],
+    };
+    let rot = sub
+        .uv_rot_seq
+        .as_ref()
+        .and_then(|r| r.seq(Some(slot)))
+        .map_or([0.0, 0.0, 0.0, 1.0], |l| l.sample(t));
+    let scale = sub
+        .uv_scale_seq
+        .as_ref()
+        .and_then(|r| r.seq(Some(slot)))
+        .map_or([1.0, 1.0], |l| l.sample(t));
+    (trans, rot, scale)
+}
+
+/// How many file sequence slots this batch's transform was baked across (1 when only the shared
+/// single-slot loop exists), and the longest loop period in slot `slot`.
+fn fx_slots(sub: &benilla_formats::RenderSubmesh) -> usize {
+    let n = |v: Option<usize>| v.unwrap_or(0);
+    n(sub.uv_seq.as_ref().map(|s| s.slots().len()))
+        .max(n(sub.uv_rot_seq.as_ref().map(|s| s.slots().len())))
+        .max(n(sub.uv_scale_seq.as_ref().map(|s| s.slots().len())))
+        .max(1)
+}
+
+/// The longest period any of the batch's three transform channels loops on in slot `slot`;
+/// `0.0` when every one of them is a constant hold there.
+fn fx_period(sub: &benilla_formats::RenderSubmesh, slot: usize) -> f32 {
+    let t = match (&sub.uv_seq, &sub.uv_anim) {
+        (Some(s), _) => s.seq(Some(slot)).map_or(0.0, |l| l.period),
+        (None, Some(a)) => a.period,
+        (None, None) => 0.0,
+    };
+    let r = sub
+        .uv_rot_seq
+        .as_ref()
+        .and_then(|s| s.seq(Some(slot)))
+        .map_or(0.0, |l| l.period);
+    let s = sub
+        .uv_scale_seq
+        .as_ref()
+        .and_then(|s| s.seq(Some(slot)))
+        .map_or(0.0, |l| l.period);
+    t.max(r).max(s)
+}
+
+/// The batch's UV bounding box carried through [`benilla_formats::uv_transform`] — all four
+/// corners, so a rotation or scale is bounded rather than assumed away.
+fn fx_box(
+    u: (f32, f32),
+    v: (f32, f32),
+    t: [f32; 2],
+    q: [f32; 4],
+    s: [f32; 2],
+) -> ((f32, f32), (f32, f32)) {
+    let mut out = ((f32::MAX, f32::MIN), (f32::MAX, f32::MIN));
+    for uv in [[u.0, v.0], [u.1, v.0], [u.0, v.1], [u.1, v.1]] {
+        let p = benilla_formats::uv_transform(uv, t, q, s);
+        out.0 .0 = out.0 .0.min(p[0]);
+        out.0 .1 = out.0 .1.max(p[0]);
+        out.1 .0 = out.1 .0.min(p[1]);
+        out.1 .1 = out.1 .1.max(p[1]);
+    }
+    out
+}
+
+/// One classified batch — the row the class listings and the spell join are both built from.
+struct FxHit {
+    /// The corpus key (lowercased `.m2`), so the reach map joins straight onto it.
+    key: String,
+    batch: usize,
+    /// The verdict under the seed the effect lane actually renders at (the identity).
+    class: FxClass,
+    /// The verdict under the track's first key — what the same batch becomes on a lane that hands
+    /// `model_material` the loop but never ticks it.
+    key_class: FxClass,
+}
+
+/// Sweep every model the SPELL-VISUAL CHAIN can reach and census the batches whose **texture
+/// transform animates** — then classify each by what a consumer that runs none of it renders. See
+/// the `Fxuvscan` command doc for the why.
+pub fn fxuvscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let visuals = benilla_formats::load_spell_visual_catalog(chain)?;
+    let spells = benilla_formats::load_spell_catalog(chain)?;
+    let corpus = fx_corpus(&visuals, &spells);
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+
+    let mut sheets: BTreeMap<String, Option<Sheet>> = BTreeMap::new();
+    let (mut listed, mut read, mut missing, mut batches) = (0u32, 0u32, 0u32, 0u64);
+    let (mut anim_models, mut anim_batches) = (0u32, 0u32);
+    let mut per_class: BTreeMap<FxClass, u32> = BTreeMap::new();
+    let mut per_key_class: BTreeMap<FxClass, u32> = BTreeMap::new();
+    let mut hits: Vec<FxHit> = Vec::new();
+    // Every model the chain names that the archives do not carry, or will not parse — listed,
+    // never a silent hole in the sweep.
+    let mut unread: Vec<String> = Vec::new();
+    // How many batches the two frozen states disagree about (see the classification below): the
+    // number that says whether "what does a no-UV-animation consumer render" has one answer here
+    // or two.
+    let mut seed_disagrees = 0u32;
+    // Of the batches that DO draw frozen, how many draw at UVs the loop never opens at.
+    let mut misregistered = 0u32;
+
+    for (key, reach) in &corpus {
+        if pfx.as_deref().is_some_and(|p| !key.starts_with(p)) {
+            continue;
+        }
+        listed += 1;
+        let Ok(bytes) = chain.read_file(key) else {
+            missing += 1;
+            unread.push(format!("{} (not in the chain)", reach.path));
+            continue;
+        };
+        read += 1;
+        let dir = key.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            missing += 1;
+            unread.push(format!("{} (will not parse)", reach.path));
+            continue;
+        };
+        batches += subs.len() as u64;
+        // Does this model author M2 blend mode **3** (`NoAlphaAdd`, `ONE/ONE`) anywhere? The bake
+        // folds modes 3 and 4 into one `Blend` + `additive` pair, and no `RenderSubmesh` carries the
+        // source material back (the billboard split means batches are not even 1:1 with skin
+        // batches), so the question is asked of the model's MATERIAL TABLE — the same raw read
+        // `blendscan` does (count/ofs at `0x84`, 4-byte `{u16 flags, u16 blend}`). A model with no
+        // mode-3 material has alpha-gated additives and the alpha test is exact; one that has any
+        // gets the stricter alpha-or-RGB test on its additive batches, which can only make
+        // INVISIBLE harder to claim.
+        let no_alpha_add = {
+            let at = |o: usize| -> Option<u32> {
+                Some(u32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?))
+            };
+            match (at(0x84), at(0x88)) {
+                (Some(n), Some(ofs)) => (0..n as usize).any(|i| {
+                    let o = ofs as usize + i * 4;
+                    bytes
+                        .get(o + 2..o + 4)
+                        .is_some_and(|b| u16::from_le_bytes([b[0], b[1]]) == 3)
+                }),
+                _ => false,
+            }
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        for (bi, sub) in subs.iter().enumerate() {
+            // The UI lane's own "does this batch's transform animate" test, verbatim: any of the
+            // three channels baked to something.
+            let animated = sub.uv_anim.is_some()
+                || sub.uv_seq.is_some()
+                || sub.uv_rot_seq.is_some()
+                || sub.uv_scale_seq.is_some();
+            if !animated || sub.uvs.is_empty() {
+                continue;
+            }
+            anim_batches += 1;
+
+            let ext = |axis: usize| {
+                sub.uvs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
+                    (lo.min(t[axis]), hi.max(t[axis]))
+                })
+            };
+            let (au, av) = (ext(0), ext(1));
+            let slots = fx_slots(sub);
+            let moves = (0..slots).any(|s| fx_period(sub, s) > 0.0);
+
+            // THE TWO FROZEN STATES, because our codebase has two seeding conventions and they
+            // are not the same picture:
+            //
+            // - **identity** — the offset an effect part actually renders at. Its material is
+            //   built by `model_render::batch::Materials::entity_variants`, whose `play_uv` is
+            //   `false`, so `model_material` is handed no loop and seeds `sun_scale.zw = (0, 0)`:
+            //   the batch draws its AUTHORED UVs, untransformed. This is the primary verdict.
+            // - **first key** — `uv_anim.sample(0.0)`, what the same builder seeds when a lane
+            //   DOES hand it the loop (the doodad and off-world lanes). Reported beside it,
+            //   because a fix that wires the loop in without ticking it lands the batch here.
+            //
+            // Rotation and scale are at the identity in both: the translation seed is the only
+            // transform channel a shared material carries at all (the affine pair is the UI
+            // lane's per-pane table row, decision 2019).
+            let seed = sub.uv_anim.as_ref().map_or([0.0, 0.0], |a| a.sample(0.0));
+            let (fu, fv) = fx_box(au, av, [0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0]);
+            let (ku, kv) = fx_box(au, av, seed, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0]);
+
+            // ANIMATED REACH. The union over every slot and a uniform sweep of its loop — an
+            // over-approximation by construction, so "nothing painted here either" is a claim the
+            // geometry cannot contradict.
+            let mut ru = (f32::MAX, f32::MIN);
+            let mut rv = (f32::MAX, f32::MIN);
+            for slot in 0..slots {
+                let period = fx_period(sub, slot);
+                for i in 0..FX_ANIM_SAMPLES {
+                    let t = period * i as f32 / (FX_ANIM_SAMPLES - 1) as f32;
+                    let (tr, q, sc) = fx_state(sub, slot, t);
+                    let (bu, bv) = fx_box(au, av, tr, q, sc);
+                    ru = (ru.0.min(bu.0), ru.1.max(bu.1));
+                    rv = (rv.0.min(bv.0), rv.1.max(bv.1));
+                }
+            }
+
+            let tex = sub.texture.as_deref();
+            let sheet = tex.and_then(|p| fx_sheet(&mut sheets, chain, p));
+            let reads_alpha = matches!(
+                sub.blend,
+                benilla_formats::ModelBlend::Blend | benilla_formats::ModelBlend::AlphaTest
+            );
+            let opaque = sub.blend == benilla_formats::ModelBlend::Opaque;
+            let with_rgb = sub.additive && no_alpha_add;
+            let (frozen_a, key_a, anim_a, dims) = match sheet {
+                Some(s) => (
+                    s.paint(fu, fv, sub.wrap_x, sub.wrap_y, with_rgb),
+                    s.paint(ku, kv, sub.wrap_x, sub.wrap_y, with_rgb),
+                    s.paint(ru, rv, sub.wrap_x, sub.wrap_y, with_rgb),
+                    format!("{}x{}", s.w, s.h),
+                ),
+                None => (0, 0, 0, "—".to_string()),
+            };
+            // One rule, run twice — once per frozen state, so the two verdicts cannot drift apart.
+            let verdict = |painted: u8| {
+                if !moves {
+                    FxClass::Held
+                } else if opaque {
+                    FxClass::Frozen
+                } else if !reads_alpha || sheet.is_none() {
+                    FxClass::Unknown
+                } else if painted > 0 {
+                    FxClass::Frozen
+                } else if anim_a > 0 {
+                    FxClass::Invisible
+                } else {
+                    FxClass::Never
+                }
+            };
+            let class = verdict(frozen_a);
+            let key_class = verdict(key_a);
+            if class != key_class {
+                seed_disagrees += 1;
+            }
+            // A batch that draws today but at a picture the loop never opens at: the identity is
+            // not the seed, so what is on screen is neither the animation nor its first frame.
+            if class == FxClass::Frozen && (seed[0] != 0.0 || seed[1] != 0.0) {
+                misregistered += 1;
+            }
+            *per_class.entry(class).or_default() += 1;
+            *per_key_class.entry(key_class).or_default() += 1;
+            hits.push(FxHit {
+                key: key.clone(),
+                batch: bi,
+                class,
+                key_class,
+            });
+
+            let chans = |sub: &benilla_formats::RenderSubmesh| {
+                let n = |on: bool, s: &'static str| if on { s } else { "—" };
+                format!(
+                    "{}{}{}",
+                    n(sub.uv_anim.is_some() || sub.uv_seq.is_some(), "T"),
+                    n(sub.uv_rot_seq.is_some(), "R"),
+                    n(sub.uv_scale_seq.is_some(), "S"),
+                )
+            };
+            // The per-axis reasoning, read off the TEXELS rather than off the span: a CLAMP axis
+            // whose frozen span runs past an edge samples that edge's texel for every bit of it
+            // past the edge, so a span like `[+0.951..+1.950]` over a 16-texel sheet is not
+            // "mostly outside" — it is column 15, alone, for its whole length. That collapse is the
+            // whole mechanism, so the line names it.
+            let axis = |wrap: bool, a: (f32, f32), f: (f32, f32), n: u32| {
+                let (texels, verdict) = match n {
+                    0 => ("—".to_string(), "no sheet"),
+                    n => {
+                        let r = Sheet::axis(f.0, f.1, n, wrap);
+                        let edge_only = !wrap
+                            && r.len() == 1
+                            && r[0].0 == r[0].1
+                            && (r[0].0 == 0 || r[0].0 == n - 1)
+                            && (f.0 < 0.0 || f.1 > 1.0);
+                        (
+                            r.iter()
+                                .map(|&(x, y)| format!("{x}..{y}"))
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            if wrap {
+                                "wraps"
+                            } else if f.1 <= 0.0 || f.0 >= 1.0 {
+                                "WHOLLY OUTSIDE 0..1 — the border texel, alone"
+                            } else if edge_only {
+                                "CLAMPED TO ONE BORDER TEXEL for its whole length"
+                            } else {
+                                "reaches the sheet"
+                            },
+                        )
+                    }
+                };
+                format!(
+                    "{:<6} authored [{:+.3}..{:+.3}]  frozen [{:+.3}..{:+.3}] -> texels {:<7} {}",
+                    if wrap { "REPEAT" } else { "CLAMP" },
+                    a.0,
+                    a.1,
+                    f.0,
+                    f.1,
+                    texels,
+                    verdict,
+                )
+            };
+            let (tw, th) = sheet.map_or((0, 0), |s| (s.w, s.h));
+            lines.push(format!(
+                "  batch {bi:>3}  {:?}{}  {} verts  chans {}  {} slot(s)  tex {} {dims}{}",
+                sub.blend,
+                if sub.additive { " additive" } else { "" },
+                sub.positions.len(),
+                chans(sub),
+                slots,
+                tex.unwrap_or("NONE"),
+                if with_rgb {
+                    "  [model authors NoAlphaAdd — judged on alpha OR rgb]"
+                } else {
+                    ""
+                },
+            ));
+            lines.push(format!("      u  {}", axis(sub.wrap_x, au, fu, tw)));
+            lines.push(format!("      v  {}", axis(sub.wrap_y, av, fv, th)));
+            lines.push(format!(
+                "      frozen@identity   alpha max {frozen_a:>3}/255  => {}   \
+                 [a lane built with `play_uv = false`: the AUTHORED UVs, untransformed]",
+                class.label(),
+            ));
+            lines.push(format!(
+                "      frozen@first-key  alpha max {key_a:>3}/255  => {}   \
+                 seed [{:+.4},{:+.4}] u[{:+.3}..{:+.3}] v[{:+.3}..{:+.3}]",
+                key_class.label(),
+                seed[0],
+                seed[1],
+                ku.0,
+                ku.1,
+                kv.0,
+                kv.1,
+            ));
+            lines.push(format!(
+                "      animated          alpha max {anim_a:>3}/255        \
+                 u[{:+.3}..{:+.3}] v[{:+.3}..{:+.3}] over {} sample(s) x {slots} slot(s)",
+                ru.0, ru.1, rv.0, rv.1, FX_ANIM_SAMPLES,
+            ));
+        }
+        if !lines.is_empty() {
+            anim_models += 1;
+            println!(
+                "{}  effect {}  ({} spell(s) reach it)",
+                reach.path,
+                reach
+                    .effects
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("·"),
+                reach.spells.len(),
+            );
+            for l in &lines {
+                println!("{l}");
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "=== summary ===  {listed} model(s) swept of the {} the spell-visual chain reaches, {read} \
+         read ({missing} unreadable), {batches} render batch(es)",
+        corpus.len()
+    );
+    println!(
+        "  {anim_models} model(s) / {anim_batches} batch(es) carry a keyed TEXTURE TRANSFORM — \
+         the channel the spell-effect lane runs since 2282 and the unit lane still does not"
+    );
+    println!("    {:<10} {:>8} {:>9}", "", "identity", "first-key");
+    for c in FxClass::ALL {
+        println!(
+            "    {:<10} {:>8} {:>9}  — {}",
+            c.label(),
+            per_class.get(&c).copied().unwrap_or(0),
+            per_key_class.get(&c).copied().unwrap_or(0),
+            c.blurb(),
+        );
+    }
+    println!(
+        "  of the {} batch(es) FROZEN@identity, {misregistered} are frozen at UVs the loop never \
+         opens at (a non-zero first key), so what draws is neither the animation nor its opening \
+         frame — a static mis-registration on top of the missing motion",
+        per_class.get(&FxClass::Frozen).copied().unwrap_or(0),
+    );
+    println!(
+        "  the two columns are the two frozen states a non-running lane can be in: `identity` \
+         is a material built with `play_uv = false` (the AUTHORED UVs — what the spell-effect \
+         lane drew before 2282, and what the unit lane still draws), `first-key` what the same \
+         batch becomes on a lane that seeds `uv_anim.sample(0.0)` and never ticks it. \
+         {seed_disagrees} batch(es) are classified differently by the two — read the per-batch \
+         lines for which."
+    );
+    if !unread.is_empty() {
+        println!();
+        // Every one of these on the shipped 1.12 chain is a DEAD TABLE ROW, not a hole in the
+        // sweep: `SpellVisualEffectName` still carries the Warcraft-III-era `Particles\*.mdl`
+        // names the 1.12 archives never shipped. The extension split says so at a glance.
+        let mdl = unread
+            .iter()
+            .filter(|u| u.to_ascii_lowercase().contains(".mdl "))
+            .count();
+        println!(
+            "--- unreadable ---  {} model(s) the chain names but could not be swept ({mdl} `.mdl` \
+             + {} `.mdx`, every one absent from the archives — dead table rows, not a gap)",
+            unread.len(),
+            unread.len() - mdl,
+        );
+        for u in unread.iter().take(FX_UNREAD_ROWS) {
+            println!("  {u}");
+        }
+        if let Some(rest) = unread.len().checked_sub(FX_UNREAD_ROWS).filter(|n| *n > 0) {
+            println!("  … and {rest} more (top {FX_UNREAD_ROWS} shown)");
+        }
+    }
+
+    // Every model carrying a batch of class `c` under `pick`'s seed, with the spells that reach it.
+    let listing = |title: &str, note: &str, pick: fn(&FxHit) -> FxClass, c: FxClass| {
+        let rows: Vec<&FxHit> = hits.iter().filter(|h| pick(h) == c).collect();
+        if rows.is_empty() {
+            return;
+        }
+        println!();
+        println!("--- {title} ---  {} batch(es){note}", rows.len());
+        let mut models: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for h in &rows {
+            models.entry(h.key.as_str()).or_default().push(h.batch);
+        }
+        for (key, bs) in &models {
+            let Some(reach) = corpus.get(*key) else {
+                continue;
+            };
+            println!(
+                "  {}  batch(es) {}",
+                reach.path,
+                bs.iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if reach.spells.is_empty() {
+                println!("      (no shipped spell reaches it — kit-table content only)");
+                continue;
+            }
+            for (id, (name, stages)) in reach.spells.iter().take(FX_SPELL_ROWS) {
+                println!(
+                    "      spell {id:<6} {name:<34} {}",
+                    stages.iter().copied().collect::<Vec<_>>().join(","),
+                );
+            }
+            if let Some(rest) = reach
+                .spells
+                .len()
+                .checked_sub(FX_SPELL_ROWS)
+                .filter(|n| *n > 0)
+            {
+                println!("      … and {rest} more spell(s) (top {FX_SPELL_ROWS} shown)");
+            }
+        }
+    };
+    for c in [FxClass::Invisible, FxClass::Never, FxClass::Unknown] {
+        listing(
+            c.label(),
+            "  (frozen@identity — what the effect lane renders today)",
+            |h| h.class,
+            c,
+        );
+    }
+    // The batches the first-key seed alone condemns: they draw today, and would stop drawing on a
+    // lane that seeds the loop's opening value without running it. Named, because that is exactly
+    // the shape of a half-finished fix.
+    let key_only: Vec<&FxHit> = hits
+        .iter()
+        .filter(|h| h.key_class == FxClass::Invisible && h.class != FxClass::Invisible)
+        .collect();
+    if !key_only.is_empty() {
+        println!();
+        println!(
+            "--- INVISIBLE under the FIRST-KEY seed only ---  {} batch(es)\n    (these draw today \
+             and would go dark on a lane that seeds `uv_anim.sample(0.0)` without ticking it)",
+            key_only.len()
+        );
+        let mut models: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for h in &key_only {
+            models.entry(h.key.as_str()).or_default().push(h.batch);
+        }
+        for (key, bs) in &models {
+            println!(
+                "  {}  batch(es) {}",
+                corpus.get(*key).map_or(*key, |r| r.path.as_str()),
+                bs.iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+    }
+
+    // The deliverable: the distinct spells that reach an INVISIBLE batch at all, named in full —
+    // the set a player can cast and see nothing for. `+` marks a spell that is only reached under
+    // the first-key seed, never under the one the lane renders at today.
+    let mut reached: BTreeMap<u32, (String, std::collections::BTreeSet<&'static str>, bool)> =
+        BTreeMap::new();
+    for h in hits
+        .iter()
+        .filter(|h| h.class == FxClass::Invisible || h.key_class == FxClass::Invisible)
+    {
+        let Some(reach) = corpus.get(&h.key) else {
+            continue;
+        };
+        let today = h.class == FxClass::Invisible;
+        for (id, (name, stages)) in &reach.spells {
+            let e = reached
+                .entry(*id)
+                .or_insert_with(|| (name.clone(), std::collections::BTreeSet::new(), false));
+            e.1.extend(stages.iter().copied());
+            e.2 |= today;
+        }
+    }
+    let today = reached.values().filter(|v| v.2).count();
+    println!();
+    println!(
+        "=== spells reaching an INVISIBLE batch ===  {today} spell(s) today, {} counting the \
+         first-key seed's extra batches (marked `+`)",
+        reached.len()
+    );
+    for (id, (name, stages, today)) in &reached {
+        println!(
+            "  {} {id:<6} {name:<40} {}",
+            if *today { " " } else { "+" },
+            stages.iter().copied().collect::<Vec<_>>().join(","),
+        );
     }
     Ok(())
 }

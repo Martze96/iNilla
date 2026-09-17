@@ -37,10 +37,14 @@
 //! shield's pulse comes from), and run their **material
 //! animation**: each part's colour-alpha × transparency-weight loops sample per instance on the
 //! attach clock (a [`MatAnim`](benilla_world::doodad_anim::MatAnim) that owns the part's render-alpha
-//! tag — Battle Shout's staggered crescent pulses), and an animated M2Color RGB ticks a
+//! tag — Battle Shout's staggered crescent pulses), an animated M2Color RGB ticks a
 //! **per-instance material clone**'s tint uniform ([`FxTintAnims`] — the white-hot flash cooling
 //! to red; per instance because one cast = one phase, unlike the doodad lane's shared-clock
-//! loops in [`benilla_world::doodad_anim::TintAnimMaterials`]).
+//! loops in [`benilla_world::doodad_anim::TintAnimMaterials`]), and a **texture transform** scrolls
+//! that same clone's UVs off the instance's own clip — translation, rotation and scale, through
+//! [`register_fx_uv`](benilla_world::doodad_anim::register_fx_uv)'s effect lane (decision 2282;
+//! the druid's claw trail is nothing but that scroll, so until it landed the trail did not draw
+//! at all).
 //!
 //! Effect instances **fire their model's event track** ([`fire_fx_anim_events`], decision 0304):
 //! the playing clip's `$SND`-family keyframes emit the same [`AnimSoundEvent`] stream creatures
@@ -49,10 +53,12 @@
 //! WATCHER — the `UNIT_FIELD_LEVEL` edge that spawns the pillar — lives with its lootable-edge
 //! sibling in `creature_anim::spell_visual::arm_level_up_fx`, the SpellKitFx writers' home.)
 //!
-//! Approximations, named: the UV-scroll channel still doesn't run here (0130's scope was placed
-//! doodads); the span-based self-termination stands in for the client's model-event completion
-//! callback; and the kit sound keeps playing unconditionally where the client gates it on
-//! no-visual-attached.
+//! Approximations, named: a ground-anchored effect's flat quad parts carry no UV offset — their
+//! draw identity rides a `GroundFxDecal` record rather than a `WowModelMaterial` (0733), and no
+//! transform-animating effect model authors one, so the population is empty (`benilla-extract
+//! fxuvscan` is where that stays measured rather than remembered); the span-based
+//! self-termination stands in for the client's model-event completion callback; and the kit sound
+//! keeps playing unconditionally where the client gates it on no-visual-attached.
 
 mod lifecycle;
 
@@ -160,32 +166,85 @@ pub(crate) fn tick_fx_tint(
     });
 }
 
-/// Resolve one part's material for a NEW effect instance: the shared handle, unless the part's
-/// M2Color RGB animates — then a per-instance clone seeded at the loop's first key and registered
-/// for the per-frame tint tick ([`FxTintAnims`]).
+/// The material side of an effect attach, in one parameter: the store a part's clone is made
+/// from, and the three places that clone can be registered for per-instance animation — the tint
+/// loop ([`FxTintAnims`], decision 0271), the UV scroll ([`UvAnimMaterials`]' effect lane,
+/// decision 2282) and the delta table both scrolls write their rows into. They always travel
+/// together, and a caller that threaded some of them silently dropped a channel.
+pub(crate) struct FxMaterials<'a> {
+    pub(crate) store: &'a mut Assets<WowModelMaterial>,
+    pub(crate) tint: &'a mut FxTintAnims,
+    pub(crate) uv: &'a mut benilla_world::doodad_anim::UvAnimMaterials,
+    pub(crate) table: &'a mut benilla_world::mat_anim_table::MatAnimTable,
+}
+
+/// This part's four baked texture-transform channels, in the shape the engine's effect lane takes
+/// them (`FxUvLoops::any` is the "does it animate at all" test — a scale-only transform and a
+/// dead-slot-0 translation each answer `None` to the obvious channel).
+fn part_uv_loops(part: &EntityPart) -> benilla_world::doodad_anim::FxUvLoops {
+    benilla_world::doodad_anim::FxUvLoops {
+        seqs: part.uv_seq.clone(),
+        single: part.uv_anim.clone(),
+        rot: part.uv_rot_seq.clone(),
+        scale: part.uv_scale_seq.clone(),
+    }
+}
+
+/// Resolve one part's material for a NEW effect instance. The shared handle, unless a channel has
+/// to run **per instance** — an animated M2Color RGB (decision 0271) or a texture transform
+/// (decision 2282) — and then a clone of it, seeded at each live loop's first key and registered
+/// for the per-frame ticks. `host` is the instance root, whose `AnimationPlayer` the UV lane reads
+/// its clip off (the sequence source `MatAnim::following_host` takes beside it).
 fn fx_part_material(
     part: &EntityPart,
     now: f32,
-    wow_materials: &mut Assets<WowModelMaterial>,
-    tint_reg: &mut FxTintAnims,
+    host: Entity,
+    mats: &mut FxMaterials,
 ) -> Handle<WowModelMaterial> {
-    let Some(anim) = &part.rgb_anim else {
+    let loops = part_uv_loops(part);
+    if part.rgb_anim.is_none() && !loops.any() {
         return part.material.clone();
-    };
+    }
     // The shared steady may still be parked (`model_render::lazy`): this copy is made before
     // anything binds it.
-    benilla_world::model_render::lazy::realize(wow_materials, part.material.id());
-    let Some(mut mat) = wow_materials.get(part.material.id()).cloned() else {
+    benilla_world::model_render::lazy::realize(mats.store, part.material.id());
+    let Some(mut mat) = mats.store.get(part.material.id()).cloned() else {
         return part.material.clone(); // shared material not built yet — parts were checked ready
     };
-    let t0 = anim.sample(0.0);
-    mat.extension.tint = Vec4::new(t0[0], t0[1], t0[2], 1.0);
-    // The clone must leave the shared mat-anim table (decision 1381): its tint is ticked per
-    // INSTANCE right here (the whole point of the clone), and a carried world slot would add the
-    // shared delta on top — a double animation the old asset-mutating lane could never produce.
+    if let Some(anim) = &part.rgb_anim {
+        let t0 = anim.sample(0.0);
+        mat.extension.tint = Vec4::new(t0[0], t0[1], t0[2], 1.0);
+    }
+    // The clone must leave the shared mat-anim table (decision 1381): its channels are ticked per
+    // INSTANCE, and a carried world slot would add the shared delta on top — a double animation
+    // the old asset-mutating lane could never produce. `register_fx_uv` below hands it rows of
+    // its own.
     mat.extension.anim_slots = Vec4::ZERO;
-    let handle = wow_materials.add(mat);
-    tint_reg.0.insert(handle.id(), (anim.clone(), now));
+    if loops.any() {
+        // **Seed the clone at the loop's own t = 0**, not at the entity lane's flat zero
+        // (`entity_variants` builds every effect batch with `play_uv = false`, so the shared
+        // steady this was cloned from carries no offset at all). The delta table is measured from
+        // whatever `sun_scale.zw` holds at registration (1381), so seeding here is what makes the
+        // registration's own opening row land on the scroll's first frame.
+        let t0 = loops.open_offset();
+        mat.extension.sun_scale.z = t0[0];
+        mat.extension.sun_scale.w = t0[1];
+    }
+    let handle = mats.store.add(mat);
+    if let Some(anim) = &part.rgb_anim {
+        mats.tint.0.insert(handle.id(), (anim.clone(), now));
+    }
+    if loops.any() {
+        benilla_world::doodad_anim::register_fx_uv(
+            mats.uv,
+            mats.table,
+            mats.store,
+            handle.id(),
+            loops,
+            host,
+            now,
+        );
+    }
     handle
 }
 
@@ -236,8 +295,7 @@ pub(crate) fn attach_effect_visuals(
     ground_anchor: bool,
     host: EffectHost,
     stage: Option<FxStage>,
-    wow_materials: &mut Assets<WowModelMaterial>,
-    tint_reg: &mut FxTintAnims,
+    mats: &mut FxMaterials,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
     palettes: &mut benilla_world::rig_palette::RigPalettes,
     preferred_anim: Option<u16>,
@@ -272,7 +330,7 @@ pub(crate) fn attach_effect_visuals(
             if is_ground_decal(p) {
                 p.material.clone()
             } else {
-                fx_part_material(p, now, wow_materials, tint_reg)
+                fx_part_material(p, now, root, mats)
             }
         })
         .collect();
@@ -418,8 +476,8 @@ pub(crate) fn attach_effect_visuals(
         };
         // The material's packed fog byte, handed over raw — the lane owns what it maps to.
         // `7` (Scene) is the no-material fallback the packer's own default agrees with.
-        benilla_world::model_render::lazy::realize(wow_materials, part.material.id());
-        let (texture, fog_bits) = match wow_materials.get(part.material.id()) {
+        benilla_world::model_render::lazy::realize(mats.store, part.material.id());
+        let (texture, fog_bits) = match mats.store.get(part.material.id()) {
             Some(mat) => (
                 mat.base.base_color_texture.clone(),
                 (mat.extension.clutter_fade.z as u32 >> 4) & 7,
@@ -933,6 +991,8 @@ pub(super) fn attach_spell_fx(
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
@@ -1082,8 +1142,12 @@ pub(super) fn attach_spell_fx(
                 EffectHost { parent: Some(unit) },
                 // A kit effect IS a `CEffect`: it runs the stage's animation lifecycle.
                 Some(inst.stage),
-                &mut wow_materials,
-                &mut tint_reg,
+                &mut FxMaterials {
+                    store: &mut wow_materials,
+                    tint: &mut tint_reg,
+                    uv: &mut uv_reg,
+                    table: &mut anim_table,
+                },
                 &ibps,
                 &mut palettes,
                 None, // an attach-point kit effect opens on its model's own `Stand`
@@ -1216,6 +1280,8 @@ mod tests {
             .init_asset::<SkinnedMeshInverseBindposes>()
             .init_resource::<SpellFx>()
             .init_resource::<FxTintAnims>()
+            .init_resource::<benilla_world::doodad_anim::UvAnimMaterials>()
+            .init_resource::<benilla_world::mat_anim_table::MatAnimTable>()
             .init_resource::<benilla_world::rig_palette::RigPalettes>()
             .add_systems(Update, attach_spell_fx);
         let roots: Vec<Entity> = persistent
@@ -1441,6 +1507,8 @@ mod tests {
         .init_resource::<Time>()
         .init_resource::<SpellFx>()
         .init_resource::<FxTintAnims>()
+        .init_resource::<benilla_world::doodad_anim::UvAnimMaterials>()
+        .init_resource::<benilla_world::mat_anim_table::MatAnimTable>()
         .init_resource::<benilla_world::rig_palette::RigPalettes>()
         .add_systems(Update, attach_spell_fx);
 

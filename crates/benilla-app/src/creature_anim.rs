@@ -1263,6 +1263,26 @@ impl Plugin for CreatureAnimPlugin {
                     // entity-visuals chain so the arrow appears/vanishes the frame the keyframe
                     // lands, not one behind.
                     drive_nock_latch,
+                    // …and, off the same two keys, the RANGED PROP's own clip (decision 2281):
+                    // the bow's limbs bend on `$BWP`, and on `$BWR` a gun fires the muzzle blast
+                    // its BowRelease(161) sequence carries. Beside the latch because the reference
+                    // arms both from one handler each, and ahead of the entity-visuals chain so the
+                    // prop's pose is this frame's before the rider lane reads it.
+                    crate::ranged_flex::flex_ranged_props
+                        // The per-sequence material samplers (`SeqHosts`) ask an anim host which
+                        // slot it is playing; a prop that armed 161 this frame must be answering
+                        // for 161, not for last frame's Stand. The chain's own `.before(
+                        // EntityVisualsSet)` does not reach them — they hang off `ModelVisSet`.
+                        .before(benilla_world::model_render::ModelVisSet),
+                    // …and the un-nock's reset (`0x60f59d`), which the reference reaches from the
+                    // SAME `$BWR` it just armed on. It must run AFTER the arm, or its skip-while-
+                    // releasing guard has nothing to read and a gun's blast is cancelled on the
+                    // frame it starts — the chain gives it that order by construction.
+                    crate::ranged_flex::reset_ranged_props_on_unnock
+                        // Same edge as the arm above, and for the same reason: this writes the
+                        // prop's player too, and the per-sequence material samplers must answer
+                        // for the clip it leaves armed.
+                        .before(benilla_world::model_render::ModelVisSet),
                     // …and the `$BTH` puff off the same scan: another SpellKitFx writer, so it
                     // belongs ahead of the entity-visuals chain like its `arm_*_fx` siblings.
                     fire_breath,
@@ -1390,6 +1410,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWP",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();
@@ -1401,6 +1422,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWR",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();
@@ -1415,6 +1437,7 @@ mod nock_latch_tests {
             entity: bare,
             ident: *b"$BWP",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();

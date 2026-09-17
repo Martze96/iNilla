@@ -49,10 +49,11 @@
 //! `welds_billboard` displays whose 0841/0854 joint rig is camera-replaced per frame and so is not
 //! a bind-pose rigid frame.
 
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 
 use crate::rig_anim::RigPose;
-use crate::rig_palette::{rebase_origin, RigPalettes};
+use crate::rig_palette::{rebase_origin, RigPalettes, RigSkin};
 
 /// An attached model whose palette slot is placed from a bone of `host`'s rig, in `host`'s own rig
 /// frame (decision 1609). Lives on the attached model's root, beside the [`crate::rig_palette::RigSkin`]
@@ -79,13 +80,28 @@ pub struct RigRider {
 /// alone — they hold the last frame written, which is what a torn-down joint gets in the entity
 /// lane too. [`RigPalettes::write_rider`] is idempotent, so a standing unit's riders cost one
 /// compare each and never reach the upload.
+///
+/// **A rider that carries a pose of its OWN is posed, not repeated** (decision 2281). 1609's
+/// "every row is the placement" collapse is a consequence of bind pose, and the ranged weapon prop
+/// does not rest at bind pose: the reference re-arms `[CGUnit+0xd24]`'s own M2 instance to
+/// BowPull(160) at `$BWP` and to BowRelease(161) / Stand(0) at `$BWR`, so its bones move. Such a
+/// rider's row `b` is `F × own.model[b] × ibp[b]` — the same placement `F`, composed with the
+/// prop's own model-space pose, every factor still rig-sized, so the precision property this whole
+/// lane exists for is untouched. The population is one prop per unit holding a DRAWN animated
+/// ranged weapon (46 of the 571 shipped weapon models author 160/161), which is why the posed arm
+/// re-writes unconditionally where the rigid arm compares first.
 pub(crate) fn write_rig_riders(
-    riders: Query<&RigRider>,
+    riders: Query<(Entity, &RigRider)>,
     poses: Query<&RigPose>,
+    skins: Query<&RigSkin>,
     frames: Query<&GlobalTransform>,
+    ibps: Res<Assets<SkinnedMeshInverseBindposes>>,
+    // The posed arm's row scratch, reused across frames and riders — a posed prop is re-derived
+    // every frame and a fresh `Vec` per rider per frame is pure churn.
+    mut scratch: Local<Vec<GlobalTransform>>,
     mut palettes: ResMut<RigPalettes>,
 ) {
-    for rider in &riders {
+    for (entity, rider) in &riders {
         let Ok(pose) = poses.get(rider.host) else {
             continue;
         };
@@ -106,11 +122,24 @@ pub(crate) fn write_rig_riders(
         let origin = rebase_origin(root_g.translation());
         let mut basis = root_g.affine();
         basis.translation -= bevy::math::Vec3A::from(origin);
-        palettes.write_rider(
-            rider.slot,
-            basis * *bone * bevy::math::Affine3A::from_translation(rider.local),
-            origin,
-        );
+        let frame = basis * *bone * bevy::math::Affine3A::from_translation(rider.local);
+        // The prop's OWN pose, when it has one: compose each of its model-space bone frames onto
+        // the placement and let the ordinary world write lay the rows down. `write_rig_worlds`
+        // takes it from there — same `frame × ibp` row math, same origin word, same dirty push.
+        let posed = poses
+            .get(entity)
+            .ok()
+            .filter(|own| !own.model.is_empty())
+            .zip(skins.get(entity).ok())
+            .and_then(|(own, skin)| Some((own, skin, ibps.get(&skin.ibp)?)));
+        match posed {
+            Some((own, skin, ibp)) => {
+                scratch.clear();
+                scratch.extend(own.model.iter().map(|m| GlobalTransform::from(frame * *m)));
+                palettes.write_rig_worlds(skin, &scratch, ibp, origin);
+            }
+            None => palettes.write_rider(rider.slot, frame, origin),
+        }
     }
 }
 
@@ -118,7 +147,7 @@ pub(crate) fn write_rig_riders(
 mod tests {
     use super::*;
     use crate::rig_palette::RigSkin;
-    use bevy::math::{Affine3A, DVec3};
+    use bevy::math::{Affine3A, DVec3, Mat4};
 
     /// **The rig's frame is `joints_root`'s, not the host entity's** — the one distinction that
     /// separates a helm sitting on a head from one sitting a saddle's height below it.
@@ -133,6 +162,8 @@ mod tests {
     fn a_rider_composes_through_the_rigs_own_frame_not_the_units() {
         let mut app = App::new();
         app.init_resource::<RigPalettes>();
+        // The posed arm's asset lookup (decision 2281); `AssetPlugin` provides it in the app.
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
         // The seat: a yard and a half up and turned 90° — a mount's saddle, exaggerated so a
         // composition through the wrong frame cannot land near the right answer by luck.
         const SEAT: Vec3 = Vec3::new(1.0, 1.5, -2.0);
@@ -197,6 +228,86 @@ mod tests {
         assert!(
             placed.distance(Vec3::from(wrong.translation)) > 1.0,
             "the two frames must be far apart, or this test proves nothing"
+        );
+    }
+
+    /// **A rider that poses writes DIFFERENT rows** (decision 2281) — the property that makes the
+    /// gun's bolt recoil and the bow's limbs bend without giving either the absolute-frame ULP
+    /// staircase 1609 removed.
+    ///
+    /// The subject is the flexing prop's shape: two bones, the second displaced by its own pose,
+    /// hanging off a host bone. Bind-pose riders repeat one frame into every row, so the test that
+    /// this lane has really changed is that row 1 is **not** row 0 — and that row 1 lands where the
+    /// composition `F × model[1]` says, in the host's frame with the host's origin word.
+    #[test]
+    fn a_posed_rider_composes_each_bone_instead_of_repeating_the_placement() {
+        let mut app = App::new();
+        app.init_resource::<RigPalettes>();
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        // The host: a unit standing off the origin, its own rig frame at its feet.
+        const AT: Vec3 = Vec3::new(-9451.0, 42.0, 61.0);
+        let unit = app
+            .world_mut()
+            .spawn(GlobalTransform::from(Transform::from_translation(AT)))
+            .id();
+        let mut host_pose =
+            crate::testing::test_rig_pose(unit, &[Vec3::ZERO, Vec3::new(0.0, 1.4, 0.0)]);
+        host_pose.compose();
+        app.world_mut().entity_mut(unit).insert(host_pose);
+
+        // Identity inverse bindposes, so a row reduces to `F × model[b]` and the arithmetic in the
+        // assertion is the mechanism rather than a second implementation of it.
+        let ibp = app
+            .world_mut()
+            .resource_mut::<Assets<SkinnedMeshInverseBindposes>>()
+            .add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY; 2]));
+        let skin = {
+            let mut palettes = app.world_mut().resource_mut::<RigPalettes>();
+            RigSkin::allocate_bones(&mut palettes, 2, ibp).unwrap()
+        };
+        let slot = skin.slot;
+        // The prop's OWN pose: bone 1 a third of a yard down its length — stand-in for the muzzle
+        // bone a firearm's BowRelease swings.
+        const MUZZLE: Vec3 = Vec3::new(0.33, 0.0, 0.0);
+        let prop = app.world_mut().spawn_empty().id();
+        let mut prop_pose = crate::testing::test_rig_pose(prop, &[Vec3::ZERO, MUZZLE]);
+        prop_pose.compose();
+        app.world_mut().entity_mut(prop).insert((
+            skin,
+            prop_pose,
+            RigRider {
+                host: unit,
+                bone: 1,
+                local: Vec3::ZERO,
+                slot,
+            },
+        ));
+        app.add_systems(Update, write_rig_riders);
+        app.update();
+
+        let (origin, row0) = app
+            .world()
+            .resource::<RigPalettes>()
+            .row_placement(slot, 0)
+            .expect("written");
+        let (_, row1) = app
+            .world()
+            .resource::<RigPalettes>()
+            .row_placement(slot, 1)
+            .expect("written");
+        assert_eq!(origin, AT, "still measured from the HOST's frame (1609)");
+        assert!(
+            row1.distance(row0) > 0.3,
+            "row 1 must carry the prop's own pose, not a copy of row 0 ({row0:?} vs {row1:?})"
+        );
+        // Row 0 is the placement itself: the host bone 1.4 yd up, rig-relative.
+        assert!(
+            row0.abs_diff_eq(Vec3::new(0.0, 1.4, 0.0), 1.0e-4),
+            "row 0 is the attach frame: {row0:?}"
+        );
+        assert!(
+            row1.abs_diff_eq(Vec3::new(0.0, 1.4, 0.0) + MUZZLE, 1.0e-4),
+            "row 1 is that frame composed with the prop's bone: {row1:?}"
         );
     }
 

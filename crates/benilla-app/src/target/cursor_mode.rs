@@ -374,7 +374,7 @@ pub(crate) struct GoOverrides {
 /// (`0x5f6990`), alongside FISHINGNODE(17). It never calls `0x5f2f80`: no faction term, no
 /// `GAMEOBJECT_FLAGS`, no INTERACT_COND, no DYN_FLAGS. It is exactly
 /// `template.data[2] (areaID) != [0xb72038]` — see [`highlightable_flags`]'s `meeting_stone_queued`.
-const GO_TYPE_MEETINGSTONE: i32 = 23;
+pub(super) const GO_TYPE_MEETINGSTONE: i32 = 23;
 
 /// The client's GameObject **highlightable** predicate (decision 0243, wow-re cursor-system §4a,
 /// `0x5f2f80`) over its wire flags: whether the object shows an interact cursor / is clickable at all.
@@ -399,8 +399,10 @@ const GO_TYPE_MEETINGSTONE: i32 = 23;
 /// written only by the meeting-stone server-message handler `0x4ca230`, and read back by the Lua
 /// binding `IsInMeetingStoneQueue`. So a stone is highlightable **unless it is the stone you are
 /// already queued at**, and nothing else about it matters. The caller resolves the equality (as it
-/// does `channel_owned`); benilla has no queue yet, so it compares against 0 — which is the
-/// reference's own not-queued value, not a stand-in for one. Ignored for every other type.
+/// does `channel_owned`) against the live queue — [`crate::ui_dialog_verbs::MeetingStone::area`],
+/// benilla's `[0xb72038]` (decision 2283; it was a hardcoded `0` while no queue existed, which is
+/// the reference's own not-queued value and so was right for exactly as long as we never queued).
+/// Ignored for every other type.
 fn highlightable_flags(
     type_id: i32,
     flags: u32,
@@ -555,26 +557,19 @@ pub(crate) fn go_highlightable(
     )
 }
 
-/// The area the player is currently queued at through the meeting-stone system — the reference's
-/// `[0xb72038]`, which MEETINGSTONE(23)'s highlightable slot compares its `areaID` against.
-///
-/// **Zero until benilla carries the meeting-stone queue.** That is not a placeholder: `0xb72038` is
-/// zero-initialized (`0x4c9eec`) and written only by the queue's own server-message handler
-/// (`0x4ca230`), so 0 *is* the reference's not-queued value and every stone is correctly
-/// highlightable. When the queue lands, this becomes its live area and the predicate is already
-/// right.
-const MEETING_STONE_QUEUED_AREA: u32 = 0;
-
 /// MEETINGSTONE(23)'s highlightable override, resolved for one GameObject: the reference's
 /// `template.data[2] != [0xb72038]`, expressed as its negation so the caller passes the same shape
 /// of boolean as [`fishing_channel_owned`].
+///
+/// `queued_area` is benilla's `[0xb72038]` — [`crate::ui_dialog_verbs::MeetingStone::area`], stored
+/// unconditionally by every `SMSG 0x295` and `0` when we are not queued (decision 2283).
 ///
 /// A template that hasn't answered yet resolves `false` (⇒ highlightable), the same permissive
 /// default the highlight column takes — a stone isn't dead for the first frames of its query. Note a
 /// stone whose `data[2]` really is **0** is *not* highlightable when we are unqueued, which is the
 /// binary's own `0 != 0` and not an edge case worth smoothing away.
-pub(crate) fn meeting_stone_queued(area: Option<u32>) -> bool {
-    area.is_some_and(|a| a == MEETING_STONE_QUEUED_AREA)
+pub(crate) fn meeting_stone_queued(area: Option<u32>, queued_area: u32) -> bool {
+    area.is_some_and(|a| a == queued_area)
 }
 
 /// The FISHINGNODE highlightable override's input (`0x5f6710`): is the local player currently
@@ -812,6 +807,10 @@ pub(super) fn classify_cursor(
     // override reads it (the reference keeps the lit pouch on the corpse you are looting even
     // once you have drifted past the range gate).
     loot_latch: Res<crate::ui_loot::LootLatch>,
+    // `[0xb72038]` — the meeting-stone queue, MEETINGSTONE(23)'s own highlightable term
+    // (decision 2283). `Option` because a headless build mounts no UI dialog verbs; absent reads
+    // as the reference's zero-initialized global, i.e. not queued.
+    stone: Option<Res<crate::ui_dialog_verbs::MeetingStone>>,
 ) {
     // A **highlightable** GameObject shows its **data-driven** cursor (wow-re cursor-system §4): a
     // mailbox's Mail, a plaque's Inspect, a vein's Mine / herb's GatherHerbs / picked lock's PickLock
@@ -835,7 +834,10 @@ pub(super) fn classify_cursor(
         let tmpl = hovered_object.guid.and_then(|g| go_inputs.templates.get(g));
         let overrides = GoOverrides {
             channel_owned: fishing_channel_owned(Some(self_store), hovered_object.guid),
-            meeting_stone_queued: meeting_stone_queued(tmpl.and_then(|t| t.meeting_stone_area)),
+            meeting_stone_queued: meeting_stone_queued(
+                tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
+                stone.as_deref().map_or(0, |s| s.area),
+            ),
         };
         if !go_highlightable(store, reaction, overrides) {
             return None;
@@ -1469,12 +1471,17 @@ mod tests {
             );
         }
         // The caller's half: the resolved boolean is `data[2] == the queued area`, with an
-        // unanswered template reading as not-queued so a stone isn't dead while it queries. Our
-        // queued area is 0 — the reference's own not-queued value — so a stone whose data[2] is
-        // genuinely 0 is NOT highlightable, which is the binary's `0 != 0` and not a bug.
-        assert!(!meeting_stone_queued(None));
-        assert!(!meeting_stone_queued(Some(1519)));
-        assert!(meeting_stone_queued(Some(MEETING_STONE_QUEUED_AREA)));
+        // unanswered template reading as not-queued so a stone isn't dead while it queries. The
+        // right-hand side is the LIVE queue since 2283 — unqueued (`0`) leaves every stone
+        // highlightable, and queueing at one area silences exactly that area's stones.
+        assert!(!meeting_stone_queued(None, 0));
+        assert!(!meeting_stone_queued(Some(1519), 0));
+        assert!(meeting_stone_queued(Some(1519), 1519));
+        assert!(!meeting_stone_queued(Some(1519), 1517));
+        assert!(!meeting_stone_queued(None, 1519));
+        // The binary's own `0 != 0`: a `data[2] == 0` stone reads as the stone we are "queued at"
+        // while we are not queued at all.
+        assert!(meeting_stone_queued(Some(0), 0));
     }
 
     #[test]

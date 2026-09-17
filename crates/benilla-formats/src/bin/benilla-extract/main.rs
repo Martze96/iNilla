@@ -486,6 +486,43 @@ enum Command {
         /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every model the **spell-visual chain** can reach — every `SpellVisualEffectName`
+    /// path a kit's ten effect slots, a `SpellVisual` row's missile model or its dest-anchored
+    /// model names — and census the batches whose **texture transform animates**, then classify
+    /// each by what a consumer that runs NONE of it renders.
+    ///
+    /// Decision 0271 deferred this channel on the claim that "no effect model in the current
+    /// corpus needs it"; this is that claim, made countable — it is what 2282 read to size the
+    /// missing scroll, and it is how the same question is re-asked of the lanes that still run
+    /// none of it (the unit and GameObject batches, which `entity_variants` still builds with
+    /// `play_uv = false`). It asks the **bake**, not a transcription of it: a batch is in scope
+    /// exactly when `tex_anim` emitted a loop on any of the three channels, the same test the
+    /// lanes that DO run them use (`ui_models` 2019, `spell_fx` 2282).
+    ///
+    /// The classes are what a frozen batch draws, judged from the texture's own alpha through its
+    /// authored address mode — because a CLAMP-authored sheet's border is what a UV outside `0..1`
+    /// samples, and on this corpus that border is transparent:
+    ///
+    /// - **INVISIBLE** — frozen, every texel the batch reaches is transparent, while the scroll
+    ///   reaches painted ones: the batch renders **nothing at all**. `Spells\SwipeCaster.m2`
+    ///   (druid Swipe) is the class: two 51-vertex claw-trail strips whose UVs are authored at
+    ///   `u[+0.945..+1.944]` over a 16×16 CLAMP sheet, so frozen they sample column 15 alone —
+    ///   alpha 0 — and the whole of their visible existence is the `−0.97` U scroll.
+    /// - **FROZEN** — it draws, statically: the scroll is the motion it loses.
+    /// - **HELD** — keyed to a constant non-identity offset, so a lane that seeds none draws it
+    ///   mis-registered rather than still.
+    /// - **NEVER** / **UNKNOWN** — flagged, never counted as INVISIBLE: nothing painted at any
+    ///   point of the loop, or no alpha lane to judge from (`Mod`/`Mod2x`, an undecodable sheet).
+    ///
+    /// Each batch prints its per-axis reasoning (address mode, authored and frozen UV spans, the
+    /// texel indices those reach) so the call is checkable, and the report closes with the INVISIBLE
+    /// listing joined back through the chain: which spells reach it, and through which lifecycle
+    /// stage (`precast`/`cast`/`impact`/`state`/`channel`/`missile`/`area`).
+    Fxuvscan {
+        /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all reachable effect
+        /// models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and census the batches whose texture
     /// coordinates are **GENERATED, not authored** — the sphere-map environment stages
     /// (`texture_unit_lookup[texCoordSet] > 2`, the reference's gate at `0x70b8bd`). Such a batch
@@ -944,6 +981,7 @@ fn main() -> Result<()> {
         Command::Uvslotscan { prefix } => scan::uvslotscan(&mut chain, prefix.as_deref())?,
         Command::Seqclockscan { prefix } => scan::seqclockscan(&mut chain, prefix.as_deref())?,
         Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
+        Command::Fxuvscan { prefix } => scan::fxuvscan(&mut chain, prefix.as_deref())?,
         Command::Envmapscan { prefix } => scan::envmapscan(&mut chain, prefix.as_deref())?,
         Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,

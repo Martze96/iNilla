@@ -55,7 +55,7 @@ use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
 use super::equipment::{ItemDisplays, ItemModelKind};
-use super::spell_fx::{attach_effect_visuals, EffectHost, FxTintAnims};
+use super::spell_fx::{attach_effect_visuals, EffectHost, FxMaterials, FxTintAnims};
 use super::{DisplayModel, ModelHandle};
 
 /// The glow chain's data + the effect-model cache: the joined `ItemVisuals`/`ItemVisualEffects`
@@ -185,6 +185,8 @@ pub(super) fn attach_item_glows(
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     // One breadcrumb per session the first time a glow actually spawns — the machine-readable
@@ -306,8 +308,12 @@ pub(super) fn attach_item_glows(
                 // An `ItemVisuals` glow is armed by a different leg than `PlaySpellVisualKit`
                 // (0805) and carries no kit stage — the plain single-clip arm, as before.
                 None,
-                &mut wow_materials,
-                &mut tint_reg,
+                &mut FxMaterials {
+                    store: &mut wow_materials,
+                    tint: &mut tint_reg,
+                    uv: &mut uv_reg,
+                    table: &mut anim_table,
+                },
                 &ibps,
                 &mut palettes,
                 None, // the glow models author one looping sequence — the default pick

@@ -339,10 +339,21 @@ pub(super) fn act_on_right_click(
         // `CastLadder` (it would reach `Items`/`CastErrors` twice), so the lock chain's verdict
         // travels to `ui_action::drain::drain_go_openers` instead of becoming a packet here.
         ResMut<crate::ui_action::GoOpenerCasts>,
+        // The meeting stone's use slot (decision 2283), here for the same reason: its four
+        // refusals read the roster and the template cache, so the click hands the object to
+        // `ui_dialog_verbs::drain_meeting_stone_joins` rather than validating and sending here.
+        MessageWriter<crate::ui_dialog_verbs::MeetingStoneUse>,
     ),
 ) {
-    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail, mut item_text, mut openers) =
-        ui_feedback;
+    let (
+        mut ui_error_keys,
+        mut cast_errors,
+        mut loot_latch,
+        mut mail,
+        mut item_text,
+        mut openers,
+        mut stone_uses,
+    ) = ui_feedback;
     if clicks.read().last().is_none() {
         return;
     }
@@ -485,6 +496,36 @@ pub(super) fn act_on_right_click(
                             debug!("right-click text gameobject: read {guid:#x}");
                             item_text.open_pages(guid);
                         }
+                    }
+                    return;
+                }
+                // MEETINGSTONE (GO type 23): **not** the shared use-sender. `[0x80bf40+0x1c]`
+                // is `0x5f69d0`, this type's own validator — four client-side refusals and then
+                // `CMSG 0x292 {u64 goGuid}` from `0x4c9ff0` (decision 2283; wow-re's §5 round on
+                // that function). The shared sender `0x5f33e0` is **unreachable** from here: it
+                // has zero direct callers and 29 `.rdata` refs, every one at some vtable's
+                // `+0x1c`, and `0x80bf5c` is not among them — so a meeting stone cannot emit
+                // `CMSG_GAMEOBJ_USE` in the reference at all. Sending `0xB1` anyway is what left
+                // every meeting stone dead here: vmangos' `GameObject::Use` has an explicit
+                // type-23 arm that does nothing ("Should never be called for this type of
+                // object", `GameObject.cpp:1836`), so the packet was answered with silence.
+                //
+                // Four types override `+0x1c`, not one — 9 TEXT, 19 MAILBOX, 23 and 28 — which
+                // corrects the wow-re sentence this file used to rest on (`+0x1c` is `0x5f33e0`
+                // "for every type but MAILBOX"); the round landed that correction too.
+                //
+                // Unlike those two it is NOT a local open — it is a real send, and it therefore
+                // sits *below* the mounted gate above (a stone is lock-less, and only MAILBOX is
+                // exempted there) and behind the same `unable` range suppression every sending
+                // arm takes. The refusals themselves need the roster, the ask-once template and
+                // the wire, which this system cannot also hold, so the verdict travels as a
+                // message to `ui_dialog_verbs::drain_meeting_stone_joins` — the 2199 shape.
+                if go.is_some_and(|(s, _)| {
+                    s.0.gameobject_type_id() == cursor_mode::GO_TYPE_MEETINGSTONE
+                }) {
+                    if !cursor.unable {
+                        debug!("right-click meeting stone: {guid:#x}");
+                        stone_uses.write(crate::ui_dialog_verbs::MeetingStoneUse { go_guid: guid });
                     }
                     return;
                 }
@@ -2266,6 +2307,8 @@ mod tests {
 
     const F_HEALTH: u16 = 22;
     const F_MAXHEALTH: u16 = 28;
+    /// `GAMEOBJECT_TYPE_ID`, absolute field 21 — the store the GO arms fork on.
+    const GO_TYPE_FIELD: u16 = 21;
     const BOAR: u64 = 0xB0A2;
     const ME: u64 = 0x5E1F;
 
@@ -2300,6 +2343,7 @@ mod tests {
         world.init_resource::<crate::ui_mail::MailOpen>();
         world.init_resource::<crate::ui_item_text::ItemTextOpen>();
         world.init_resource::<crate::ui_action::GoOpenerCasts>();
+        world.init_resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>();
         world.spawn((SelfPlayer, Guid(ME)));
         let boar = world
             .spawn((Guid(BOAR), store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)])))
@@ -2346,5 +2390,89 @@ mod tests {
             Some(BOAR),
             "the release must act on the unit whose plate the press was over"
         );
+    }
+    /// **A meeting stone is JOINED, not USEd** (decision 2283). The GO type's own use slot
+    /// (`0x5f69d0`) replaces the shared `CMSG_GAMEOBJ_USE` sender, so the click must hand the
+    /// object to the join validator and put **no** `0xB1` on the wire — which is what left every
+    /// stone dead, since vmangos' `GameObject::Use` has an explicit do-nothing arm for type 23.
+    ///
+    /// The falsification is the assertion that matters: with the arm removed this test sees a
+    /// `GameObjUse` command and no `MeetingStoneUse` message.
+    #[test]
+    fn a_right_click_on_a_meeting_stone_joins_it_and_sends_no_gameobj_use() {
+        const STONE: u64 = 0x5701;
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let (mut world, _boar) = right_click_world();
+        world.insert_resource(NetCommands(tx));
+        let stone = world
+            .spawn((Guid(STONE), store(&[(GO_TYPE_FIELD, 23)])))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            object: HoveredObject {
+                target: Some(stone),
+                guid: Some(STONE),
+                distance: 5.0,
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Interact,
+                unable: false,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+
+        let uses: Vec<_> = world
+            .resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>()
+            .iter_current_update_messages()
+            .copied()
+            .collect();
+        assert_eq!(
+            uses,
+            vec![crate::ui_dialog_verbs::MeetingStoneUse { go_guid: STONE }],
+            "the stone must reach the join validator"
+        );
+        assert!(
+            !rx.try_iter()
+                .any(|c| matches!(c, ClientCommand::GameObjUse { .. })),
+            "a meeting stone must never send CMSG_GAMEOBJ_USE — the server drops it on the floor"
+        );
+    }
+
+    /// Out of interact range the click is suppressed with no toast and no packet, exactly as the
+    /// shared arms are (the reference auto-walks instead; `0x610300`, no packet).
+    #[test]
+    fn an_out_of_range_meeting_stone_click_sends_nothing() {
+        const STONE: u64 = 0x5702;
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let (mut world, _boar) = right_click_world();
+        world.insert_resource(NetCommands(tx));
+        let stone = world
+            .spawn((Guid(STONE), store(&[(GO_TYPE_FIELD, 23)])))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            object: HoveredObject {
+                target: Some(stone),
+                guid: Some(STONE),
+                distance: 50.0,
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Interact,
+                unable: true,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert!(world
+            .resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>()
+            .iter_current_update_messages()
+            .next()
+            .is_none());
+        assert!(rx.try_iter().next().is_none());
     }
 }

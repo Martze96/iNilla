@@ -21,6 +21,15 @@ pub(crate) struct AnimSoundEvent {
     pub(crate) ident: [u8; 4],
     /// The tag payload (a SoundEntries id for `$SND`/`$DSL`/`$DSO`; 0 otherwise).
     pub(crate) data: u32,
+    /// The `AnimationData.dbc` id of the **clip that fired the key**.
+    ///
+    /// This is the reference's `0x5fdb50` answer at the instant a handler runs: that helper reads
+    /// the model's currently-playing animation id, and a key fires from a clip the model is
+    /// playing, at that key's own time in it. Two dispatch arms branch on it — the `$BWR` weapon
+    /// family fork (`0x5fcfb0` bow {46,105,109} vs `0x5fcfd0` rifle {49,106,110}, decision 2281) —
+    /// and carrying it here is what lets them ask without re-deriving "what is this unit playing"
+    /// from a player whose one-shot overlays outrank its base clip in weight.
+    pub(crate) anim_id: u16,
     /// **Where the key fired** — the reference's own `placementMatrix · (boneMatrix[event.bone] ·
     /// event.position)`, resolved here at the fire and carried by value exactly as the M2 event
     /// kernel `0x719370` snapshots it into the deferred callback record that every dispatcher
@@ -361,6 +370,7 @@ pub(crate) fn scan_events(
                     entity,
                     ident: e.ident,
                     data: e.data,
+                    anim_id: clip.anim_id,
                     pos: Some(pos),
                 });
             }

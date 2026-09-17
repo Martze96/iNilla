@@ -1352,6 +1352,11 @@ pub(crate) enum ClientCommand {
     LeaveBattlefield {
         map_id: u32,
     },
+    /// A right-click on a `GAMEOBJECT_TYPE_MEETINGSTONE` that passed the type's four client-side
+    /// refusals — `CMSG 0x292`, `u64 goGuid` (decision 2283).
+    MeetingStoneJoin {
+        go_guid: u64,
+    },
     /// `CancelMeetingStoneRequest()` — `CMSG 0x293`, empty.
     MeetingStoneLeave,
     /// The enter-world meeting-stone status query — `CMSG 0x296`, empty (decision 1974).

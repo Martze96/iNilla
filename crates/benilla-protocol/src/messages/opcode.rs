@@ -1161,6 +1161,16 @@ pub const CMSG_AREA_SPIRIT_HEALER_QUEUE: u16 = 0x02E3; // 739
 /// healer with a positive time arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`
 /// (decision 1963).
 pub const SMSG_AREA_SPIRIT_HEALER_TIME: u16 = 0x02E4; // 740
+/// The meeting stone's JOIN — the packet a right-click on a `GAMEOBJECT_TYPE_MEETINGSTONE` (23)
+/// sends: `u64 gameObjectGuid`, built and sent by `0x4c9ff0` from the tail (`0x5f6af6`) of that
+/// type's own use-slot validator `0x5f69d0` = `[0x80bf40+0x1c]` (decision 2283, VERIFIED by
+/// wow-re's §5 round on that function). Twelve bytes on the wire, body exactly eight, no padding.
+///
+/// A meeting stone **cannot** send [`CMSG_GAMEOBJ_USE`]: the shared sender `0x5f33e0` has zero
+/// direct callers and is reachable only as some vtable's `+0x1c`, which type 23's is not. And
+/// vmangos would drop it anyway — `GameObject::Use` has an explicit do-nothing type-23 arm
+/// (`GameObject.cpp:1836`, "Should never be called for this type of object").
+pub const CMSG_MEETINGSTONE_JOIN: u16 = 0x0292; // 658
 /// `CancelMeetingStoneRequest()`'s packet (§8): EMPTY. Gated client-side on party leadership
 /// only; clears nothing — the server's `0x295` reply does (decision 1963). The emulators' name
 /// for this number does not line up with the client's block; the number is what is verified.

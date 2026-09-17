@@ -352,8 +352,9 @@ fn spawn_slot(
         if let Some([top, bottom]) = dm.string_anchors {
             commands.entity(root).insert(crate::bowstring::Bowstring {
                 owner: entity,
-                top: top.1,
-                bottom: bottom.1,
+                // Bone AND offset: the prop flexes, so the tips move (decision 2281).
+                top,
+                bottom,
             });
         }
     }
@@ -382,6 +383,23 @@ fn spawn_slot(
                 .insert(crate::fishing_line::FishingPoleTip { owner: entity, tip });
         }
     }
+    // **The RANGED PROP's own animation** (decision 2281) — benilla's `[CGUnit+0xd24]`. The
+    // reference keeps the equipped ranged weapon's M2 *instance* and re-arms its animation from the
+    // body's `$BWP`/`$BWR` keyframes: BowPull(160) on the pull, and on the release either Stand(0)
+    // (a bow's limbs relax) or **BowRelease(161)** — which on a firearm is the muzzle blast, seven
+    // particle emitters keyed to zero in Stand and to a 0.2 s burst in 161. See
+    // [`crate::ranged_flex`] for the byte law and the corpus measurement.
+    //
+    // So this one held model is NOT the lane's "rests at bind pose" case, and it earns the three
+    // things a resting attach model is denied: a pose buffer, a player, and bone ANCHORS for its
+    // emitters (bone 2 of every firearm is keyed +90° in 161 — that rotation is what aims the blast
+    // down the barrel). The gate is the asset: 46 of the 571 shipped weapon models author 160 or
+    // 161, all of them bows, crossbows and firearms, and nothing else in the corpus does.
+    let flexes = slot_idx == 2
+        && !dm.skeleton.joints.is_empty()
+        && dm.animations.as_ref().is_some_and(|a| {
+            a.owns(crate::ranged_flex::BOW_PULL) || a.owns(crate::ranged_flex::BOW_RELEASE)
+        });
     // **The item rig** (decisions 0841, withdrawn by 0847, RESTORED by 0854) — the one case an
     // attach model runs a joint palette. 0847 pulled it believing a spherical billboard swept the
     // spikes through the plate; that was wrong (0853: the spikes run ALONG their bone, worst vertex
@@ -454,7 +472,14 @@ fn spawn_slot(
             benilla_world::rig_palette::RigSkin::allocate_bones(
                 palettes,
                 dm.skeleton.joints.len() as u32,
-                Handle::default(),
+                // A resting rider needs no inverse bindposes — at bind pose every row collapses to
+                // the placement and 1609's write never consults them. A FLEXING prop's rows are
+                // `F × model[b] × ibp[b]`, so its slot carries the real handle.
+                if flexes {
+                    dm.inverse_bindposes.clone().unwrap_or_default()
+                } else {
+                    Handle::default()
+                },
             )
         })
         .flatten()
@@ -472,6 +497,34 @@ fn spawn_slot(
             slot
         }),
     };
+    // The flexing prop's own pose buffer and clock (see `flexes` above). The collapsed lane
+    // ([`benilla_world::rig_anim::RigPose`] — no joint entities; bone anchors are minted on demand
+    // by the emitter loop below), armed on the model-load bootstrap the reference gives every M2
+    // instance: animation id 0 through the model's own `playableAnimationLookup`. From there
+    // [`crate::ranged_flex`] re-arms it per keyframe.
+    //
+    // Its palette rows stay the RIDER lane's — `RigRider` is still on this root, and 2281 taught
+    // that lane to compose a pose rather than repeat one frame. That is deliberate: composing this
+    // prop from its own absolute `GlobalTransform` instead would hand the bow back the 0.98 mm
+    // one-ULP staircase 1609 exists to have removed (the attach point is a ~1 yd quantity summed
+    // onto a ~9500 yd one, recomputed every frame).
+    let mut prop_pose = (flexes && rider.is_some()).then(|| {
+        let anims = dm.animations.as_ref().expect("flexes ⇒ animations");
+        let mut player = AnimationPlayer::default();
+        if let Some(idle) = anims.idle_clip() {
+            let active = player.play(idle.node);
+            if idle.looping {
+                active.repeat();
+            }
+        }
+        commands.entity(root).insert((
+            player,
+            AnimationGraphHandle(anims.graph.clone()),
+            anims.clone(),
+            crate::ranged_flex::RangedProp { owner: entity },
+        ));
+        benilla_world::rig_anim::RigPose::new(root, &dm.skeleton)
+    });
     // The instance slot every part below carries in its `MeshTag`. The WEARER's only when the item
     // has no palette slot of its own — that is what puts a tinted body's colour on a boneless
     // helm (decision 0812). An item WITH a slot must carry its own, because the vertex stage
@@ -583,7 +636,14 @@ fn spawn_slot(
             // strength — the Hungering Cold's five glow cards blaze at 1.0 where the file says
             // 0.30 (decision 0836).
             if let Some(anim) = &part.alpha_anim {
-                child.insert(benilla_world::doodad_anim::MatAnim::resting(anim.clone()));
+                // `resting` is the attach model's pinned read — right for every held item but the
+                // one that plays sequences (decision 2281): a flexing prop's per-sequence alpha
+                // loops follow its own player, like a creature's do.
+                child.insert(if flexes {
+                    benilla_world::doodad_anim::MatAnim::following(anim.clone(), root)
+                } else {
+                    benilla_world::doodad_anim::MatAnim::resting(anim.clone())
+                });
             }
             effective.dress(&mut child, &set);
         }
@@ -698,6 +758,19 @@ fn spawn_slot(
         // frame is realized as a mesh-less billboard card the emitter OWNS-follows
         // (`BillboardCard::frame_following`). Nothing else in the chain is live: of the
         // 95 item models whose emitters ride a billboard bone, none animates its chain.
+        //
+        // …and ONE exception to *that*: a **flexing ranged prop** (decision 2281) does have a rig,
+        // so its emitter rides its BONE's anchor. The firearm muzzle bank hangs off bone 2, which
+        // BowRelease(161) keys a constant +90° about Y against Stand's 0° — on the root frame the
+        // blast sprays out of the receiver, on the bone it goes down the barrel. `bone_pivot`
+        // rebases the authored model-space origin into that bone's frame, exactly as the doodad and
+        // widget lanes do. A billboard chain still wins the fork above: it is camera-replaced, and
+        // no flexing model in the corpus has one.
+        let posed = prop_pose
+            .as_mut()
+            .filter(|_| em.billboard.is_none())
+            .and_then(|p| p.anchor_for(commands, root, em.def.bone))
+            .map(|anchor| (anchor, em.bone_pivot));
         let owner = match em.billboard {
             Some(benilla_assets::EmitterBillboard { kind, pivot, .. }) => {
                 let frame = commands
@@ -725,7 +798,7 @@ fn spawn_slot(
             em,
             spawn_tf,
             benilla_world::particles::EmitterFrames {
-                owner: Some(owner),
+                owner: Some(posed.unwrap_or(owner)),
                 // A held item is an attached model — the flame fans with the swing.
                 // The cloud anchors at the MODEL; the bone composes births only.
                 anchor: Some(root),
@@ -745,9 +818,16 @@ fn spawn_slot(
                 // batches already classify under (`BodyBakeCenter`).
                 light_node: Some(entity),
             },
-            // A held item spawns no rig; its emitters run the item model's own slot-0
-            // loop on the spawn clock (the torch burns always — the doodad law).
-            benilla_world::particles::EmitClock::Pinned,
+            // A held item spawns no rig; its emitters run the item model's own **loader-idle**
+            // slot on the spawn clock (the torch burns always — the doodad law). A flexing ranged
+            // prop does have a player, and its rate/gate tracks read the sequence it is actually
+            // on: the gun's blast is keyed to zero in Stand and to a 0.2 s burst in BowRelease,
+            // so a pinned clock would emit nothing on it for ever (decision 2281).
+            if flexes {
+                benilla_world::particles::EmitClock::Host(root)
+            } else {
+                benilla_world::particles::EmitClock::Pinned
+            },
         );
     }
     // The item's own M2 point light — **the held torch's glow** (decision 0016's law on the
@@ -779,6 +859,16 @@ fn spawn_slot(
             // residency, and its streamer the wearer's render alpha one line up.
             None,
         );
+    }
+    // Last, so every `anchor_for` above is already registered in it.
+    if let Some(pose) = prop_pose {
+        debug!(
+            "ranged flex: unit {entity} display {} → prop clock ({} bones, {} anchors)",
+            hs.display,
+            pose.locals.len(),
+            pose.anchors.len()
+        );
+        commands.entity(root).insert(pose);
     }
     debug!(
         "held attach: unit {entity} display {} → attach {} (bone {bone}, {} parts)",
@@ -821,6 +911,10 @@ mod tests {
             billboard: None,
             alpha_anim: None,
             rgb_anim: None,
+            uv_anim: None,
+            uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
             ground_quad: None,
         }
     }
@@ -1134,6 +1228,173 @@ mod tests {
         assert_eq!(rider.bone, 3, "composed from the wearer's attach bone");
         assert_eq!(rider.local, Vec3::ZERO, "…at the attachment point's offset");
         assert_eq!(a.joints, 0, "a rigid item builds no joint rig");
+    }
+
+    /// **The ranged prop gets a clock, and only the ranged prop** (decision 2281).
+    ///
+    /// Four things have to be true together or the gun's muzzle blast never fires, and each one
+    /// alone is a silent no-op: the prop root carries a [`crate::ranged_flex::RangedProp`] naming
+    /// its wearer (that is how a `$BWR` key finds it), a [`benilla_world::rig_anim::RigPose`] and a
+    /// player (so 161 can be armed and posed at all), its emitter is **hosted on that root** rather
+    /// than pinned to the loader idle (the blast's gate track is keyed only in 161 — a pinned
+    /// emitter reads Stand's flat zero for ever), and the emitter rides its BONE's anchor rather
+    /// than the model root (bone 2 is what aims it down the barrel).
+    ///
+    /// The control is the same display in the MAINHAND slot: nothing is ever passed to the
+    /// reference's `[+0xd24]` arms but the ranged weapon, so a melee item keeps the resting lane —
+    /// no player, no pose, a pinned clock.
+    #[test]
+    fn a_flexing_ranged_prop_gets_a_pose_a_clock_and_hosted_emitters() {
+        fn attach(slot_idx: usize, attach: u16) -> (App, Option<Entity>) {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+            app.init_resource::<Assets<bevy::image::Image>>();
+            let mut displays = ItemDisplays::icons_for_tests(
+                benilla_formats::ItemDisplayCatalog::from_displays(HashMap::new()),
+            );
+            let mut dm = empty_display();
+            let mut p = part(false);
+            p.skinned_mesh = Some(skinned_handle());
+            dm.parts = Some(vec![p]);
+            dm.skeleton = benilla_assets::ModelSkeleton {
+                joints: vec![
+                    benilla_assets::ModelJoint {
+                        parent: -1,
+                        local_translation: Vec3::ZERO,
+                        billboard: None,
+                        parent_arm: None,
+                    },
+                    // The muzzle bone the emitters hang off.
+                    benilla_assets::ModelJoint {
+                        parent: 0,
+                        local_translation: Vec3::X,
+                        billboard: None,
+                        parent_arm: None,
+                    },
+                ],
+                spine_bone: None,
+                head_bone: None,
+            };
+            dm.inverse_bindposes = Some(Handle::default());
+            // A firearm's animation shape: Stand + BowRelease, and no BowPull.
+            dm.animations = Some(benilla_assets::ModelAnimations {
+                graph: Handle::default(),
+                clips: Vec::new(),
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                // `owns(161)` — the gate, the reference's own `0x711960` question.
+                animation_lookup: {
+                    let mut v = vec![0xffffu16; 162];
+                    v[0] = 0;
+                    v[crate::ranged_flex::BOW_RELEASE as usize] = 1;
+                    v
+                },
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            });
+            let mut em = benilla_assets::ModelEmitter {
+                def: benilla_world::testing::plain_particle_def(),
+                texture: Some(Handle::default()),
+                bone_pivot: [0.0; 3],
+                billboard: None,
+                recursion: None,
+                geometry: None,
+                owner_reach: 0.0,
+                water_bound: (Vec3::ZERO, 0.0),
+                idle_seq: 0,
+            };
+            em.def.bone = 1;
+            dm.emitters = vec![em];
+            displays.models.insert((7, ItemModelKind::Weapon), dm);
+            app.insert_resource(displays);
+
+            let bones = BoneAttach {
+                points: HashMap::from([(attach, (3u16, Vec3::ZERO))]),
+                markers: HashMap::new(),
+            };
+            let mut items = HeldItems::default();
+            items.slots[slot_idx] = Some(HeldSlot {
+                display: 7,
+                kind: ItemModelKind::Weapon,
+                attach,
+                visual: NO_GLOW,
+            });
+            let wearer = app
+                .world_mut()
+                .spawn((items, bones, Transform::default()))
+                .id();
+            let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+            app.world_mut().entity_mut(wearer).insert(pose);
+            app.add_systems(Update, attach_held_items);
+            app.update();
+            (app, Some(wearer))
+        }
+
+        // The ranged slot (2), drawn in the right hand.
+        let (mut app, wearer) = attach(2, attach_id::HAND_RIGHT);
+        let wearer = wearer.unwrap();
+        let (prop, owner) = app
+            .world_mut()
+            .query::<(Entity, &crate::ranged_flex::RangedProp)>()
+            .iter(app.world())
+            .map(|(e, p)| (e, p.owner))
+            .next()
+            .expect("the ranged prop is marked");
+        assert_eq!(owner, wearer, "…and names its wearer, like `[+0xd24]` does");
+        assert!(
+            app.world().entity(prop).contains::<AnimationPlayer>()
+                && app
+                    .world()
+                    .entity(prop)
+                    .contains::<benilla_world::rig_anim::RigPose>(),
+            "a flexing prop carries a player and a pose of its own"
+        );
+        let hosts: Vec<Option<Entity>> = app
+            .world_mut()
+            .query::<&benilla_world::particles::ParticleEmitter>()
+            .iter(app.world())
+            .map(|e| e.emit_host())
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![Some(prop)],
+            "its emitter reads the sequence the PROP is playing"
+        );
+        // The emitter's owner frame is the muzzle bone's anchor, not the model root.
+        let anchors: Vec<(Entity, u16)> = app
+            .world_mut()
+            .query::<&benilla_world::rig_anim::RigAnchor>()
+            .iter(app.world())
+            .map(|a| (a.rig, a.bone))
+            .collect();
+        assert!(
+            anchors.contains(&(prop, 1)),
+            "the emitter minted the muzzle bone's anchor: {anchors:?}"
+        );
+
+        // The control: the SAME display in the mainhand keeps the resting lane.
+        let (mut app, _) = attach(0, attach_id::HAND_RIGHT);
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::ranged_flex::RangedProp>()
+                .iter(app.world())
+                .count(),
+            0,
+            "a melee item is never armed — the reference only ever re-anims the ranged prop"
+        );
+        let hosts: Vec<Option<Entity>> = app
+            .world_mut()
+            .query::<&benilla_world::particles::ParticleEmitter>()
+            .iter(app.world())
+            .map(|e| e.emit_host())
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![None],
+            "…and its emitter stays on the pinned clock"
+        );
     }
 
     /// **What a booth can see of an equipped item** (decision 0822, `#bugs` B118's paper-doll half).

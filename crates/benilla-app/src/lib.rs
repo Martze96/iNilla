@@ -102,6 +102,7 @@ mod preflight;
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod ranged_flex;
 mod realm_select;
 mod realmlist;
 mod run_mode;

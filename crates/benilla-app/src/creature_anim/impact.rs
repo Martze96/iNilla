@@ -318,6 +318,7 @@ mod tests {
             entity,
             ident,
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();

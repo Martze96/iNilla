@@ -22,10 +22,21 @@
 use std::path::{Path, PathBuf};
 
 /// The standing count. **2026-09-16, 164** — measured the day the instrument was built, against
-/// 1177's 141 five weeks earlier. **165 the same day (decision 2279):** `game_plugins.rs` carries
-/// the structural test for the VM's one-shot consumers, which has to name the identifier it
-/// scans for. A test about the wall, not a file that learned the VM exists.
-const CEILING: usize = 165;
+/// 1177's 141 five weeks earlier. It moved twice on that one day, for two different files, and
+/// both reasons are kept because each is a different kind of legitimate:
+///
+/// - **165 (decision 2279)** — `game_plugins.rs`, the structural test for the VM's one-shot
+///   consumers, which has to name the identifier it scans for. A test *about* the wall, not a file
+///   that learned the VM exists.
+/// - **166 (decision 2283)** — `capture/probe_stone.rs`, the meeting-stone live probe, joining the
+///   fifteen sibling probes that read the VM *on purpose*. A probe's whole value is that it asks
+///   the **stock** binding (`IsInMeetingStoneQueue()`, `MiniMapMeetingStoneFrame:IsShown()`)
+///   rather than our own mirror of it, so feeding it a model value would make it prove nothing.
+///
+/// The ratchet is for *production* feed code. Both numbers still went up, and both are written
+/// down — which is the whole point of it, and why two sessions raising it the same day collided
+/// here instead of quietly passing each other.
+const CEILING: usize = 166;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 8;

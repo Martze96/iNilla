@@ -7,10 +7,14 @@
 //!
 //! Benilla's transcription draws the two segments through Bevy's gizmo lines — the same
 //! immediate-mode screen-space-width primitive class as the client's GX lines. Named
-//! deviations (decision record): the string color/width are INFERRED (the callback emits a
-//! packed vertex color the round didn't decode — a dark cord is used); the bow prop is not yet
-//! animated (BowPull/BowRelease bend the limbs and carry the tips with them in the ref — our
-//! anchors ride the static prop frame, so the limbs stay straight while the middle draws).
+//! deviation (decision record): the string color/width are INFERRED (the callback emits a
+//! packed vertex color the round didn't decode — a dark cord is used).
+//!
+//! **The tips are POSED** (decision 2281). The bow prop animates — `$BWP` arms BowPull(160) on the
+//! prop's own model and `$BWR` returns it to Stand(0) — so the `$WTT`/`$WTB` markers ride limb
+//! bones that bend through the draw. Composing them through the prop's rigid root frame instead
+//! (which is all this file could do while the prop rested at bind pose) leaves the chord pinned to
+//! the un-bent limb tips while the mesh around it moves: the string would visibly leave the bow.
 
 use bevy::prelude::*;
 
@@ -28,15 +32,21 @@ const HAND_ARROW: u16 = 0x23;
 pub(crate) struct Bowstring {
     /// The unit wearing the bow — the HandArrow middle vertex and nock latch live on it.
     pub(crate) owner: Entity,
-    /// The `$WTT` top / `$WTB` bottom anchors, model-local Bevy space (the prop root's frame).
-    pub(crate) top: Vec3,
-    pub(crate) bottom: Vec3,
+    /// The `$WTT` top / `$WTB` bottom anchors as `(bone, model-local Bevy offset)` — the bone is
+    /// load-bearing on an animated prop (see the module note): the limb tips move with the draw.
+    pub(crate) top: (u16, Vec3),
+    pub(crate) bottom: (u16, Vec3),
 }
 
 /// Draw every visible bow's string (per frame, post-propagation so the prop/joint frames are
 /// this frame's). Two segments: tip → middle → tip.
 fn draw_bowstrings(
-    bows: Query<(&Bowstring, &GlobalTransform, &InheritedVisibility)>,
+    bows: Query<(
+        &Bowstring,
+        &GlobalTransform,
+        &InheritedVisibility,
+        Option<&benilla_world::rig_anim::RigPose>,
+    )>,
     owners: Query<(
         &BoneAttach,
         &benilla_world::rig_anim::RigPose,
@@ -47,12 +57,19 @@ fn draw_bowstrings(
 ) {
     // A dark waxed-cord tone; the ref's packed vertex color is not decoded (INFERRED, §G2).
     const STRING_COLOR: Color = Color::srgb(0.12, 0.10, 0.08);
-    for (bs, prop, vis) in &bows {
+    for (bs, prop, vis, flex) in &bows {
         if !vis.get() {
             continue;
         }
-        let top = prop.transform_point(bs.top);
-        let bottom = prop.transform_point(bs.bottom);
+        // The prop's own pose when it flexes (`joints_root` IS this entity, so its
+        // `GlobalTransform` is the frame `posed_point` wants); its rigid frame otherwise, which is
+        // the same answer for a bow standing at bind pose.
+        let tip = |(bone, offset): (u16, Vec3)| {
+            flex.and_then(|p| p.posed_point(prop, bone, offset))
+                .unwrap_or_else(|| prop.transform_point(offset))
+        };
+        let top = tip(bs.top);
+        let bottom = tip(bs.bottom);
         // The middle control point: the owner's HandArrow attach world position while the nock
         // latch holds (the drawn string follows the hand), else the relaxed straight chord.
         let middle = owners

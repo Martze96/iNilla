@@ -92,7 +92,7 @@ use crate::creature_anim::{
 use benilla_assets::m2_url;
 
 use super::equipment::ItemDisplays;
-use super::spell_fx::{attach_effect_visuals, ensure_model, EffectHost, SpellFx};
+use super::spell_fx::{attach_effect_visuals, ensure_model, EffectHost, FxMaterials, SpellFx};
 use super::{BoneAttach, DisplayModel, ModelHandle};
 
 /// The anim-event idents that release queued missiles — the dispatcher's drain arms (`0x5ffbd0`:
@@ -679,6 +679,8 @@ pub(super) fn attach_missile_models(
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
@@ -719,8 +721,12 @@ pub(super) fn attach_missile_models(
             // A projectile is the separate `CMissile` TU, not a `CEffect`: it has no kit stage and
             // no Birth/Hold/Decay lifecycle — it flies its one sequence and dies on arrival.
             None,
-            &mut wow_materials,
-            &mut tint_reg,
+            &mut FxMaterials {
+                store: &mut wow_materials,
+                tint: &mut tint_reg,
+                uv: &mut uv_reg,
+                table: &mut anim_table,
+            },
             &ibps,
             &mut palettes,
             Some(INFLIGHT_ANIM),
@@ -887,6 +893,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.05);
@@ -920,6 +927,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.016);
@@ -1006,6 +1014,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.016);
@@ -1086,6 +1095,7 @@ mod tests {
                 entity: caster,
                 ident: *b"$CSL",
                 data: 0,
+                anim_id: 0,
                 pos: None,
             });
             step(&mut app, 0.016);

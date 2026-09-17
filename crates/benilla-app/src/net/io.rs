@@ -1393,6 +1393,7 @@ fn writer_loop(
                         w.request_battlefield_score_data()
                     }
                     ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
+                    ClientCommand::MeetingStoneJoin { go_guid } => w.meeting_stone_join(go_guid),
                     ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
                     ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
                     ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),

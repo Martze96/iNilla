@@ -39,7 +39,7 @@ pub(crate) struct GoTemplate {
     /// The display name — the hover tooltip's gold first line (decision 0276's GO law).
     pub(crate) name: String,
     /// The vanilla **highlight** column, for the two types whose mouseover-eligibility slot reads
-    /// it instead of running a predicate (decision 1106): GENERIC(5)'s `data[1]` (`0x5f4830`,
+    /// it instead of running a predicate (decision 1110): GENERIC(5)'s `data[1]` (`0x5f4830`,
     /// decision 0762 — nonzero on 1387 of the 1870 shipped type-5 templates, which is why a road
     /// signpost hovers and the scenery beside it never does) and CAPTURE_POINT(29)'s `data[19]`
     /// (`0x5f6d80` — byte-for-byte the same shape, a different slot). `false` for every other type,
@@ -61,9 +61,10 @@ pub(crate) struct GoTemplate {
     /// and the fork are byte-verified, and the data is cross-checked against the reference client's
     /// own `gameobjectcache.wdb` — 1890 entries, zero disagreements with the server's.)
     pub(crate) floating_tooltip: bool,
-    /// MEETINGSTONE (type 23) only: the template's `data[2]` = **areaID**, the sole input of that
-    /// type's own `highlightable` slot (`0x5f6990` — decision 1106). `None` for every other type.
-    pub(crate) meeting_stone_area: Option<u32>,
+    /// MEETINGSTONE (type 23) only: the three template slots the stone's own strategy reads —
+    /// `data[0]`/`data[1]` = minLevel/maxLevel and `data[2]` = areaID (decisions 1110, 2283).
+    /// `None` for every other type.
+    pub(crate) meeting_stone: Option<MeetingStoneTemplate>,
     /// MO_TRANSPORT (type 15) path parameters — `Some` only for boats/zeppelins (decision 0438):
     /// the template's `data0..2` = (taxiPathId, moveSpeed, accelRate), the inputs the transport
     /// timetable is built from.
@@ -77,6 +78,23 @@ pub(crate) struct GoTemplate {
     /// (10) reads `data[9]`, every other type answers none (`0x5f5950`, wow-re
     /// quest-material-reward-spell-bindings.md §1).
     pub(crate) quest_material: Option<u32>,
+}
+
+/// A MEETINGSTONE (type 23) template's three slots, all of them read by the stone's own strategy
+/// through the per-type attribute table `0x621b00`: keys `0x33`/`0x34`/`0x35` → indices 0/1/2
+/// (vmangos `GameObjectInfo::meetingstone` = `minLevel, maxLevel, areaID`; decision 2283).
+///
+/// The **areaID** is the input of the type's own `highlightable` slot `0x5f6990`
+/// ([`crate::target::cursor_mode::meeting_stone_queued`]); the **level pair** is the input of the
+/// use-slot validator's level refusal (`ERR_MEETING_STONE_INVALID_LEVEL`).
+#[derive(Clone, Copy)]
+pub(crate) struct MeetingStoneTemplate {
+    /// `data[0]` — the lowest level the stone accepts.
+    pub(crate) min_level: u32,
+    /// `data[1]` — the highest level the stone accepts.
+    pub(crate) max_level: u32,
+    /// `data[2]` — the `AreaTable` id the stone queues for.
+    pub(crate) area: u32,
 }
 
 /// A MO_TRANSPORT template's path tuple (`gameobject_template.data0..2`, decision 0438).
@@ -131,7 +149,7 @@ impl GameObjectTemplates {
             .and_then(|slot| data.get(slot))
             .map(|&v| v.max(0) as u32)
             .unwrap_or(0);
-        // The highlight column, at the slot its type reads it from (decision 1106): GENERIC(5)
+        // The highlight column, at the slot its type reads it from (decision 1110): GENERIC(5)
         // `data[1]`, CAPTURE_POINT(29) `data[19]`. Both slots are resolved by the same
         // `0x621b00(type, semantic 0x12)` lookup in the reference; the two shipped answers are
         // inlined here for the same reason [`go_lock_slot`] inlines the lock's.
@@ -144,9 +162,14 @@ impl GameObjectTemplates {
         // the highlight column above and deliberately beside it — they are adjacent slots that
         // answer different questions, and reading them as one is the mistake 0766 made.
         let floating_tooltip = type_id == 5 && data[0] != 0;
-        // MEETINGSTONE (23): data[2] = areaID (vmangos `gameobject_template`), the one input of
-        // that type's own highlightable slot.
-        let meeting_stone_area = (type_id == 23).then(|| data[2].max(0) as u32);
+        // MEETINGSTONE (23): data[0..2] = minLevel, maxLevel, areaID (vmangos
+        // `gameobject_template`) — the area feeds that type's own highlightable slot, the level
+        // pair the use-slot validator's level refusal (decision 2283).
+        let meeting_stone = (type_id == 23).then(|| MeetingStoneTemplate {
+            min_level: data[0].max(0) as u32,
+            max_level: data[1].max(0) as u32,
+            area: data[2].max(0) as u32,
+        });
         // MO_TRANSPORT (15): data0..2 = taxiPathId / moveSpeed / accelRate (vmangos
         // `GameObjectInfo::moTransport`; decision 0438).
         let mo_transport = (type_id == 15).then(|| MoTransport {
@@ -171,7 +194,7 @@ impl GameObjectTemplates {
                 name,
                 highlight_column,
                 floating_tooltip,
-                meeting_stone_area,
+                meeting_stone,
                 mo_transport,
                 text_page,
                 quest_material,

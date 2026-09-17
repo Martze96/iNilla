@@ -173,7 +173,9 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
-pub use meeting_stone::{meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue};
+pub use meeting_stone::{
+    meeting_stone_join, meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue,
+};
 pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,

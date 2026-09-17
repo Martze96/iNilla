@@ -127,6 +127,23 @@ pub(super) struct EntityPart {
     /// the **first key** seeded as the material tint (pixel-identical to the old static bake);
     /// the effect lane clones + ticks the tint per instance. `None` for constant tints.
     pub(super) rgb_anim: Option<std::sync::Arc<benilla_formats::RgbAnim>>,
+    /// The part's **texture-transform (UV) loop** — the translation track that scrolls this
+    /// batch's stage UVs (decision 0130 phase 3, wow-re `m2-texanim-uv`). The **effect lane**
+    /// ([`super::spell_fx`]) samples it per instance on its own clip clock, through a material
+    /// clone (decision 2282); the unit/GameObject lane does not consume it yet. `None` for the
+    /// ~98.6% of batches with no texture transform, and for all WMO parts.
+    pub(super) uv_anim: Option<std::sync::Arc<benilla_formats::UvAnim>>,
+    /// The per-file-sequence-slot form of [`Self::uv_anim`], carried only where the slots
+    /// disagree (decision 1408) — an effect that advances `Stand` → `Hold` → `Decay` reads the
+    /// slot it is actually playing. `None` for every batch whose slots agree.
+    pub(super) uv_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+    /// The texture transform's **rotation** loop per file sequence slot (decision 2019) and its
+    /// scaling twin. Three effect models in the whole 1.12 corpus author them — Shield Wall's
+    /// halo turns *and* scales, Grounding Totem's glow is a scale-only transform — which is
+    /// precisely why the effect lane has to read them from the asset rather than from memory
+    /// (`benilla-extract fxuvscan`). `None` everywhere else.
+    pub(super) uv_rot_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
+    pub(super) uv_scale_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The part's flat **ground-plane quad** shape (detected at M2 load — see
     /// [`benilla_formats::GroundQuad`]). On a base-anchored spell effect the fx attach renders it
     /// as a projected surface decal ([`crate::ground_fx`]) instead of free geometry, so it drapes
@@ -537,6 +554,10 @@ pub(super) fn build_parts(
                         welded_billboard: sub.geometry.welded_billboard,
                         alpha_anim: sub.alpha_anim.clone(),
                         rgb_anim: sub.rgb_anim.clone(),
+                        uv_anim: sub.uv_anim.clone(),
+                        uv_seq: sub.uv_seq.clone(),
+                        uv_rot_seq: sub.uv_rot_seq.clone(),
+                        uv_scale_seq: sub.uv_scale_seq.clone(),
                         ground_quad: sub.ground_quad,
                     }
                 })
@@ -587,6 +608,10 @@ pub(super) fn build_parts(
                     welded_billboard: false, // …so nothing can be welded to one
                     alpha_anim: None,        // …nor colour/weight loops
                     rgb_anim: None,
+                    uv_anim: None, // …nor texture transforms (WMO has none)
+                    uv_seq: None,
+                    uv_rot_seq: None,
+                    uv_scale_seq: None,
                     ground_quad: None, // the fx decal lane is M2-only
                 })
                 .collect()

@@ -175,7 +175,19 @@ pub fn finalize_rig_worlds(
     // still needs this pass for two things — clearing `pose_dirty` (or the model pass re-composes
     // it every frame for ever) and, when it authors billboard/arm bones, the camera-dependent
     // anchor re-seat its cards and emitters ride. The palette write alone is skipped.
-    mut rigs: Query<(Entity, &mut RigPose, Option<&RigSkin>, Has<AnimParked>)>,
+    // `Has<RigRider>`: a rider owns its slot's rows from the OTHER end (decision 1609 — the
+    // placement is composed in the HOST's rig frame, never from this absolute one), and decision
+    // 2281 gave that lane a posed arm, so an animated ranged prop arrives here with both a pose
+    // and a skin and must still not have its rows written twice from two different frames.
+    // Everything else this pass does for it — clearing `pose_dirty`, re-seating the anchors its
+    // emitters ride — is exactly what it needs.
+    mut rigs: Query<(
+        Entity,
+        &mut RigPose,
+        Option<&RigSkin>,
+        Has<AnimParked>,
+        Has<crate::rig_rider::RigRider>,
+    )>,
     // B0001: the `Changed` filter reads `GlobalTransform` ticks, which conflicts with the
     // mutable frame query — a `ParamSet` sequences them (the refresh set is collected first).
     mut worlds_params: ParamSet<(
@@ -202,7 +214,7 @@ pub fn finalize_rig_worlds(
     let refresh: Vec<Entity> = {
         let roots_changed = worlds_params.p0();
         rigs.iter()
-            .filter(|(_, rig, _, parked)| {
+            .filter(|(_, rig, _, parked, _)| {
                 !parked
                     && (rig.pose_dirty
                         || roots_changed.contains(rig.joints_root)
@@ -308,10 +320,13 @@ pub fn finalize_rig_worlds(
             }
         };
     for &holder in &refresh {
-        let Ok((_, rig, skin, _)) = rigs.get_mut(holder) else {
+        let Ok((_, rig, skin, _, rider)) = rigs.get_mut(holder) else {
             continue;
         };
         let rig = rig.into_inner();
+        // A rider's rows are the rider lane's (see the query's note): hand `finalize` no skin so
+        // it does the anchors and nothing else.
+        let skin = skin.filter(|_| !rider);
         finalize(rig, skin, &mut globals, &mut cascade, false);
         rig.pose_dirty = false;
     }
@@ -319,12 +334,13 @@ pub fn finalize_rig_worlds(
     // re-finalize against the fresh seat. One level deep by construction (a seat anchor's
     // subtree holds no further seat anchors).
     if !cascade.is_empty() {
-        for (holder, rig, skin, _) in &mut rigs {
+        for (holder, rig, skin, _, rider) in &mut rigs {
             if !cascade.contains(&holder) {
                 continue;
             }
             let rig = rig.into_inner();
             let mut ignore = Vec::new();
+            let skin = skin.filter(|_| !rider);
             finalize(rig, skin, &mut globals, &mut ignore, true);
             rig.pose_dirty = false;
         }

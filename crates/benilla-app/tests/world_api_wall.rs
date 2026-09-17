@@ -437,7 +437,29 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// full-window float image that one camera wrote and the next read back — the seam 1603 built
 /// and 2215 measured — and it could not go the other way for 2206's reason: the UI camera cannot
 /// move into the engine.
-const CEILING: usize = 182;
+/// And 182 → 183: `doodad_anim::register_fx_uv`, a PUBLISH — put one spell-effect material clone
+/// on the per-instance UV-scroll lane (decision 2282). The clone is the GAME's: `entities::spell_fx`
+/// makes it because one cast is one phase (the same reason 0271's animated tint clones it), and
+/// nothing engine-side knows an effect instance exists. Everything after that is the engine's —
+/// which registry, which delta-table row, which of 1408's two baked loop spellings, and the
+/// instance-clock law that separates this lane from the shared one. Published as ONE verb rather
+/// than as its three pieces (`UvLoop`'s effect variant, `register_uv`, the row) precisely because
+/// this lane's recurring bug is a caller that takes some of the pieces and not the rest: 2038's
+/// marked-but-unregistered parts froze every waterfall in the game for three days, and a
+/// registration without a row, or a row without a registration, is that same shape. One verb
+/// cannot be half-taken. It is also why the three pieces went back to `pub(crate)` in the same
+/// commit, which is the rare crossing that *lowers* the surface it replaces.
+/// And 183 → 184: `doodad_anim::FxUvLoops`, the argument of the verb above. A texture transform is
+/// ONE authored record with four baked channels — 1408's two translation spellings plus 2019's
+/// per-slot rotation and scaling — and which of them a batch fills is not a thing the caller gets
+/// to reason about: a scale-only transform (`Spells\GroundingTotem_Impact.mdx`) and a
+/// dead-slot-0 translation both answer `None` to the channel you would check first. So the struct
+/// carries the record whole, and `any()`/`open_offset()` on it are the two questions the game
+/// asks — which keeps the "does this batch animate" predicate and the "what does it open on" seed
+/// in the engine, where the bake's rules live, instead of copied into the effect attach where they
+/// would drift. Four positional `Option`s would have been the alternative, and swapping two of
+/// them is a silent wrong-channel bug the compiler cannot see.
+const CEILING: usize = 184;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

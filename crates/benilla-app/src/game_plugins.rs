@@ -695,13 +695,60 @@ pub(crate) mod schedule_tests {
     ///
     /// Raising a ceiling is a claim that a new undeclared order is acceptable; make it with the
     /// reason, or declare the order instead (`.after`, a set, a `chain`).
-    const UPDATE_CEILING: usize = 16_437;
+    /// **16,538 (decision 2283), 660 systems** — `ui_dialog_verbs::drain_meeting_stone_joins`, the
+    /// meeting stone's use slot. +101, of which 91 are VM-only: it holds `NonSendMut<UiScript>` to
+    /// raise its refusal line, and the paragraph above is the reason that number is what it is —
+    /// every new feed or drain collides with every other VM holder by construction.
+    /// `UPDATE_OTHER_CEILING` below carries the ten that are actionable.
+    ///
+    /// **+4 (decision 2281)** — `ranged_flex`'s two systems, the `$BWP`/`$BWR` arm and the
+    /// un-nock's reset. Both write `AnimationPlayer` on the ranged weapon prop, so each joins the
+    /// accepted class its chain-mates already sit in: ambiguous against
+    /// `portrait::booth::drive_booth_turn` and `quest_markers::pose_markers` for exactly the
+    /// reason `driver::drive_animations` and `driver::grip::drive_hand_grip` are — four lanes
+    /// driving players on populations that never intersect (a held weapon, a booth model, a quest
+    /// marker), and the filter algebra cannot see the disjointness. Their *real* orders are
+    /// declared at the registration instead: against each other by the chain, and before the
+    /// per-sequence material samplers, which must answer for the clip armed this frame.
+    ///
+    /// **+6 (decision 2282), all the same shape:** `{tick_anim_materials, matanim_probe} ×
+    /// {attach_spell_fx, attach_missile_models, attach_item_glows}`, fighting over the two
+    /// mat-anim resources (`MatAnimTable`, `UvAnimMaterials`) alone — the three fx attaches now
+    /// register a per-instance UV clone where before they touched neither. Declared acceptable
+    /// rather than ordered,
+    /// because the order is immaterial *by construction* and an `.after` would assert a
+    /// dependency that does not exist: `register_fx_uv` writes the new entry's rows itself, at
+    /// attach, precisely so a tick that already ran this frame costs the instance nothing — and a
+    /// tick that runs after re-derives the same numbers from the same clock (sampling is
+    /// clock-indexed; the registration and the tick read one `AnimationPlayer`). The probe is a
+    /// one-shot diagnostic behind an env var, off in every ordinary run. The cost of declaring it
+    /// would be real: `tick_anim_materials` is engine-private, so the game would have to name a
+    /// new engine `SystemSet` — a `world_api_wall` crossing bought for no behavioural difference.
+    const UPDATE_CEILING: usize = 16_548;
     const UPDATE_SLACK: usize = 100;
     /// `PostUpdate`, 181 systems: `GlobalTransform` and the particle `EffectQuads` are most of it.
     const POST_UPDATE_CEILING: usize = 351;
     const POST_UPDATE_SLACK: usize = 20;
     /// The pairs in `Update` that are NOT explained by the VM or the audio layer.
-    const UPDATE_OTHER_CEILING: usize = 4_717;
+    ///
+    /// **4,727 (decision 2283)** — the ten `drain_meeting_stone_joins` adds, every one of them
+    /// against a sibling `.after(UiInput)` drain (`drain_queue_verbs`, `drain_latch_verbs`,
+    /// `drain_battlefield`, `drain_talent_wipe`, `drain_party`, `drain_tabard`, the two chat-input
+    /// drains, `idle_handler`, `movement_clears_afk`). What they share is the append-only
+    /// chat/error sink and the outbound command channel — never a fact one reads and another
+    /// writes — and each pair is two independent player verbs that a single click cannot both
+    /// fire. Raised rather than ordered because a declared order here would assert a relationship
+    /// between, say, leaving a meeting-stone queue and typing in chat that does not exist; the
+    /// pair it *would* have been worth ordering, against the click that writes its message, is
+    /// declared (`.after(TargetUpdate)`) and so is not in this list.
+    ///
+    /// **+4 (decision 2281)** — the same four pairs as above; all four are actionable-column, and
+    /// the reason they are raised rather than ordered is the one stated there.
+    ///
+    /// **+6 (decision 2282)** — all six of 2282's new pairs land here too (they fight over
+    /// ordinary resources, not the VM), so both ceilings move by the same six; the reason is at
+    /// [`UPDATE_CEILING`].
+    const UPDATE_OTHER_CEILING: usize = 4_737;
     const UPDATE_OTHER_SLACK: usize = 50;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

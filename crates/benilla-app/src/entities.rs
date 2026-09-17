@@ -1631,6 +1631,10 @@ mod display_mirror_tests {
             }),
             alpha_anim: None,
             rgb_anim: None,
+            uv_anim: None,
+            uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
             ground_quad: None,
         }
     }

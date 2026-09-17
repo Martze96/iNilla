@@ -614,6 +614,27 @@ fn net_entity_of(
     cur
 }
 
+/// The state the GameObject gates read beside the object's own store, bundled because this system
+/// sits at Bevy's 16-`SystemParam` ceiling: the ask-once template cache (GENERIC's eligibility is
+/// its `data[1]`, decision 0762; MEETINGSTONE's is its `data[2]`), the faction catalog behind the
+/// eligibility faction term (decision 0764), and the live meeting-stone queue — benilla's
+/// `[0xb72038]`, the other half of MEETINGSTONE(23)'s own highlightable predicate (decision 2283).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct GoGateInputs<'w> {
+    pub(crate) templates: Res<'w, crate::go_templates::GameObjectTemplates>,
+    pub(crate) factions: Option<Res<'w, super::ring::Factions>>,
+    /// `Option` because a headless/net-less build mounts no UI dialog verbs; absent reads as the
+    /// reference's zero-initialized `[0xb72038]`, i.e. not queued.
+    pub(crate) stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+}
+
+impl GoGateInputs<'_> {
+    /// `[0xb72038]` — the area we are queued at, `0` when we are not (or when there is no VM).
+    pub(crate) fn queued_area(&self) -> u32 {
+        self.stone.as_deref().map_or(0, |s| s.area)
+    }
+}
+
 pub(super) fn update_hovered_object(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -631,10 +652,9 @@ pub(super) fn update_hovered_object(
     child_of: Query<&ChildOf>,
     guids: Query<&Guid>,
     stores: Query<&ObjectStore>,
-    // GENERIC's eligibility is its template's `data[1]` (decision 0762) — the ask-once cache.
-    go_templates: Res<crate::go_templates::GameObjectTemplates>,
-    // The faction term of eligibility (decision 0764): the GO's own template reaction toward us.
-    factions: Option<Res<super::ring::Factions>>,
+    // The three state reads the GameObject gates need beside the object's own store, as one
+    // param (the 16-`SystemParam` ceiling) — see [`GoGateInputs`].
+    go_gate: GoGateInputs,
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     parts: PickParts,
     // The picker's own state, one bundled param ([`GoPickSet`] — the fn sits at Bevy's
@@ -773,7 +793,7 @@ pub(super) fn update_hovered_object(
                 // permissive default, so a fresh spawn isn't a dead zone for its first frames.
                 stores.get(net).map_or(1, |s| {
                     let reaction = crate::target::cursor_mode::go_reaction(
-                        factions.as_deref(),
+                        go_gate.factions.as_deref(),
                         s.0.gameobject_faction(),
                         self_store,
                     );
@@ -783,7 +803,10 @@ pub(super) fn update_hovered_object(
                             self_store, go_guid,
                         ),
                         meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                            go_guid.and_then(|g| go_templates.get(g)?.meeting_stone_area),
+                            go_guid
+                                .and_then(|g| go_gate.templates.get(g)?.meeting_stone)
+                                .map(|m| m.area),
+                            go_gate.queued_area(),
                         ),
                     };
                     u32::from(crate::target::cursor_mode::go_highlightable(
@@ -831,9 +854,9 @@ pub(super) fn update_hovered_object(
     // than the old behaviour (which tooltipped the portcullis itself) and documented rather than
     // silently accepted; closing it wants the single-pick arbitration, which is its own slice.
     if let Ok(store) = stores.get(net_entity) {
-        let tmpl = go_templates.get(guid.0);
+        let tmpl = go_gate.templates.get(guid.0);
         let reaction = crate::target::cursor_mode::go_reaction(
-            factions.as_deref(),
+            go_gate.factions.as_deref(),
             store.0.gameobject_faction(),
             self_store,
         );
@@ -849,7 +872,8 @@ pub(super) fn update_hovered_object(
                     Some(guid.0),
                 ),
                 meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    tmpl.and_then(|t| t.meeting_stone_area),
+                    tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
+                    go_gate.queued_area(),
                 ),
             },
         ) {

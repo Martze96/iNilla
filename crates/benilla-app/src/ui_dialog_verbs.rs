@@ -33,7 +33,9 @@
 //!   `CancelMeetingStoneRequest()` sends `0x293` unless in a party led by someone else
 //!   (`ERR_MEETING_STONE_NOT_LEADER`). The four display-only replies (`0x297/0x298/0x299/0x2BB`)
 //!   are chat lines with no state; the status-1 arm also triggers the Meeting Stones tutorial
-//!   (`crate::tutorial`, 1976).
+//!   (`crate::tutorial`, 1976). **JOINING** is the click's own leg (decision 2283): type 23's
+//!   use slot is its own validator, not the shared `CMSG_GAMEOBJ_USE` sender — four client-side
+//!   refusals ([`meeting_stone_join_refusal`]), then `CMSG 0x292 {u64 goGuid}`.
 
 use std::time::Instant;
 
@@ -537,6 +539,160 @@ fn meeting_stone_enter_world(
     let _ = commands.0.send(ClientCommand::MeetingStoneStatusQuery);
 }
 
+/// A right-click on a `GAMEOBJECT_TYPE_MEETINGSTONE` (23) that got past the shared gates — the
+/// GO click ladder's hand-off to this module (decision 2283).
+///
+/// It travels as a message for the same reason the GameObject opener's cast does (2199): the
+/// click system sits at Bevy's 16-`SystemParam` ceiling and cannot also hold the roster, the
+/// template cache and the wire. The reference has no such split — `0x5f69d0` is one function —
+/// so the *verdict* stays one function here too ([`meeting_stone_join_refusal`]); only the
+/// plumbing is two systems.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MeetingStoneUse {
+    pub(crate) go_guid: u64,
+}
+
+/// What MEETINGSTONE(23)'s own use slot `0x5f69d0` does with one click — its three outcomes, as
+/// the binary has them (decision 2283).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoneJoin {
+    /// `0x5f69f8` — no local player object: `false` with **no message and no packet**. Not a
+    /// refusal; the validator never starts.
+    Silent,
+    /// One of the four refusals: `push <id>; call 0x496720` then `xor al,al; ret`. Every one is a
+    /// catalog **kind 2** row, so it paints the error frame (`UI_ERROR_MESSAGE`), never a chat
+    /// line — and none carries a sound (type tag `0x44`, cue `"NONE"`).
+    Refuse(&'static str),
+    /// The tail `0x5f6af6`: `CMSG 0x292 {u64 goGuid}`, and nothing else at all.
+    Send,
+}
+
+/// The four client-side refusals inside MEETINGSTONE(23)'s own use slot (`0x5f69d0`, whose tail
+/// `0x5f6af6` is the sole caller of the `CMSG 0x292` builder `0x4c9ff0`) — **VERIFIED at the
+/// bytes** by wow-re's §5 round on that function (four cold workers plus the orchestrator's own
+/// derivation, arbitrated; `system/object-layer/scratch/meeting-stone-use-validator.md` §4).
+///
+/// Two gates run before any of them. `0x5f69f8`: no local player ⇒ [`StoneJoin::Silent`].
+/// `0x5f6a10 je 0x5f6a65`: **not in a group ⇒ both group refusals are skipped**, and a solo player
+/// drops straight to the level test.
+///
+/// | # | at | refusal | predicate | key |
+/// |---|---|---|---|---|
+/// | 1 | `0x5f6a2f` | in a group we do not lead | the leader guid `[0xbc75f8]` against the active player's, full 64-bit | `ERR_MEETING_STONE_MUST_BE_LEADER` (`0x1b1`) |
+/// | 2 | `0x5f6a4f` | the group is full | `0x4e86d0` is `GetNumPartyMembers` — the **other** members, 0..4 — and `cmp eax,4 / jb` refuses at ≥ 4 | `ERR_MEETING_STONE_GROUP_FULL` (`0x1ae`) |
+/// | 3 | `0x5f6ab4` | the wrong level for this stone | `data[0] <= level <= data[1]`, **both bounds inclusive and unsigned**, over the player's own `UNIT_FIELD_LEVEL` | `ERR_MEETING_STONE_INVALID_LEVEL` (`0x1b0`) |
+/// | 4 | `0x5f6ad3` | in a raid | `[0xb713e0] != 0` — the raid member **count** (`GetNumRaidMembers`) | `ERR_MEETING_STONE_NO_RAID_GROUP` (`0x1b2`) |
+///
+/// **Three of the four are refused a second time by the server** (vmangos
+/// `HandleMeetingStoneJoinOpcode` → `MEETINGSTONE_FAIL_PARTYLEADER` / `_FULL_GROUP` /
+/// `_RAID_GROUP`, which come back as `SMSG 0x2BB` and print the same three strings 1974 already
+/// built). That copy is not redundant — it is what makes the refusal instant. **The level term is
+/// the client's alone**: `HandleMeetingStoneJoinOpcode` reads `gInfo->meetingstone.areaID` and
+/// nothing else off the template, so a client that skips it queues a level-1 character for a
+/// sixty-level dungeon and the server agrees.
+///
+/// **An unanswered template REFUSES, and that is the reference's own arithmetic rather than a
+/// fail-closed choice of ours.** `0x5f8150` reads the cached template through `[GO+0x214]`, and an
+/// uncached object returns **0 for both bounds** — so every level ≥ 1 falls outside `0..=0` and
+/// takes the level refusal. The permissive "skip the term while the query is in flight" default
+/// the highlight column takes is *wrong* here, and the first cut of this had it. The same
+/// arithmetic makes a shipped `data[0] = data[1] = 0` refuse everyone; `0/60` is the open band.
+pub(crate) fn meeting_stone_join_refusal(
+    group: Option<&GroupState>,
+    self_guid: Option<u64>,
+    level: Option<u32>,
+    stone: Option<crate::go_templates::MeetingStoneTemplate>,
+) -> StoneJoin {
+    // `0x5f69f8` — the validator needs an active player before it asks anything.
+    let (Some(self_guid), Some(level)) = (self_guid, level) else {
+        return StoneJoin::Silent;
+    };
+    // `0x5f6a10` — no group at all skips past both group terms.
+    let in_group = group.is_some_and(|g| g.in_group);
+    if in_group {
+        if group.map(|g| g.leader) != Some(self_guid) {
+            return StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER");
+        }
+        if group.is_some_and(|g| g.members.len() >= MEETING_STONE_PARTY_CAP) {
+            return StoneJoin::Refuse("ERR_MEETING_STONE_GROUP_FULL");
+        }
+    }
+    // An uncached template reads `0/0` here, which refuses — see the doc above.
+    let (min_level, max_level) = stone.map_or((0, 0), |s| (s.min_level, s.max_level));
+    if level < min_level || level > max_level {
+        return StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL");
+    }
+    if in_group && group.is_some_and(|g| g.group_type == crate::ui_party::GROUPTYPE_RAID) {
+        return StoneJoin::Refuse("ERR_MEETING_STONE_NO_RAID_GROUP");
+    }
+    StoneJoin::Send
+}
+
+/// How many **other** party members make the stone's `GROUP_FULL` refusal fire — a party it could
+/// add nobody to.
+///
+/// **Four, not five, and the difference is a real trap.** A vanilla party holds five *including*
+/// the player, and vmangos refuses on exactly that: `Group::IsFull()` is
+/// `m_memberSlots.size() >= MAX_GROUP_SIZE (5)`, counting the leader
+/// (`Group/Group.h:49,232`) → `MEETINGSTONE_FAIL_FULL_GROUP`. But `SMSG_GROUP_LIST` never lists
+/// the recipient (0440), so [`GroupState::members`] is the other four and the comparison is
+/// against **4** with no `+ 1`. Adding one — the first cut of this did — refuses a legal
+/// four-person party the server would have queued, and the string says which reading is right:
+/// `ERR_MEETING_STONE_GROUP_FULL` is *"You are already in a full group"*, and a group of four is
+/// not full.
+const MEETING_STONE_PARTY_CAP: usize = 4;
+
+/// The join drain: MEETINGSTONE(23)'s use slot, with the click's guid.
+fn drain_meeting_stone_joins(
+    script: Option<NonSendMut<UiScript>>,
+    mut uses: MessageReader<MeetingStoneUse>,
+    group: Option<Res<GroupState>>,
+    self_guid: Res<SelfGuid>,
+    templates: Res<crate::go_templates::GameObjectTemplates>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    commands: Res<NetCommands>,
+    mut sink: crate::ui_action::MessageSink,
+) {
+    let Some(mut script) = script else {
+        uses.clear();
+        return;
+    };
+    let level = self_q.single().ok().and_then(|s| s.0.unit_level());
+    let mut lines = Vec::new();
+    for &MeetingStoneUse { go_guid } in uses.read() {
+        let stone = templates.get(go_guid).and_then(|t| t.meeting_stone);
+        let verdict = meeting_stone_join_refusal(group.as_deref(), self_guid.0, level, stone);
+        // The interact chain's last link for this type, on the same `use` tag the click's own
+        // lines carry (2283): a stone that goes nowhere is one of four refusals, the no-player
+        // silence, or a send the server ignored — and one trace now says which.
+        if benilla_assets::trace::enabled_for("use") {
+            benilla_assets::trace::line(
+                "use",
+                &match verdict {
+                    StoneJoin::Silent => format!("meeting stone {go_guid:#x}: no local player"),
+                    StoneJoin::Refuse(key) => {
+                        format!("meeting stone {go_guid:#x} refused: {key}")
+                    }
+                    StoneJoin::Send => {
+                        format!("SEND CMSG_MEETINGSTONE_JOIN guid={go_guid:#x}")
+                    }
+                },
+            );
+        }
+        match verdict {
+            StoneJoin::Silent => {}
+            StoneJoin::Refuse(key) => lines.extend(crate::ui_action::keyed_line(&script, key)),
+            StoneJoin::Send => {
+                debug!("meeting stone: join {go_guid:#x}");
+                let _ = commands.0.send(ClientCommand::MeetingStoneJoin { go_guid });
+            }
+        }
+    }
+    if !lines.is_empty() {
+        crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
+    }
+}
+
 /// The leave-world sweep's leg: the text dropped, the area kept.
 fn meeting_stone_leave_world(mut stone: ResMut<MeetingStone>) {
     stone.leave_world();
@@ -696,6 +852,7 @@ impl Plugin for UiDialogVerbsPlugin {
             .init_resource::<AreaSpiritHealer>()
             .init_resource::<BattlefieldQueue>()
             .init_resource::<MeetingStone>()
+            .add_message::<MeetingStoneUse>()
             .add_systems(
                 Update,
                 (
@@ -718,6 +875,16 @@ impl Plugin for UiDialogVerbsPlugin {
                     feed_meeting_stone.before(UiInput),
                     drain_latch_verbs.after(UiInput),
                     drain_queue_verbs.after(UiInput),
+                    // MEETINGSTONE(23)'s use slot (2283): the click resolved the object, this
+                    // runs the validator and sends. Ordered after the **target chain**, not just
+                    // after the input pass like its neighbours — `UiInput` sits *before*
+                    // `WorldStage::Input` and `TargetUpdate` after it, so "after UiInput" alone
+                    // says nothing about the writer and would let the join drift a frame. A
+                    // message survives that (two-frame lifetime) and 16 ms would not be visible,
+                    // but a click's own packet should not leave on an undefined frame.
+                    drain_meeting_stone_joins
+                        .after(UiInput)
+                        .after(crate::target::TargetUpdate),
                 ),
             )
             .add_systems(
@@ -744,6 +911,194 @@ fn cancel_gate_could_apply(attributes_ex: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `UNIT_FIELD_LEVEL`, absolute field 34.
+    const LEVEL_FIELD: u16 = 34;
+
+    /// The four client-side refusals of MEETINGSTONE(23)'s use slot (`0x5f69d0`, decision 2283),
+    /// in the reference's own order — and the pass that reaches `CMSG 0x292`.
+    #[test]
+    fn the_meeting_stone_join_refuses_in_the_references_order() {
+        use crate::go_templates::MeetingStoneTemplate;
+        const ME: u64 = 0x5e1f;
+        const MATE: u64 = 0xa11e;
+        // A stone anybody 15-60 may use — the shape most of 1.12's dungeon stones carry.
+        let stone = Some(MeetingStoneTemplate {
+            min_level: 15,
+            max_level: 60,
+            area: 1519,
+        });
+        let party = |leader: u64, others: usize, group_type: u8| GroupState {
+            in_group: true,
+            group_type,
+            leader,
+            members: (0..others)
+                .map(|i| benilla_protocol::messages::GroupMemberEntry {
+                    name: format!("Mate{i}"),
+                    guid: 0xb000 + i as u64,
+                    status: 1,
+                    flags: 0,
+                })
+                .collect(),
+            ..GroupState::default()
+        };
+
+        // Solo, in range of the level band: nothing refuses.
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(40), stone),
+            StoneJoin::Send
+        );
+        // Leading a party of FOUR (three others): still fine — a full party is five, and the
+        // stone's job is to find the fifth. This is the assertion the `+ 1` bug failed.
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&party(ME, 3, 0)), Some(ME), Some(40), stone),
+            StoneJoin::Send
+        );
+
+        // 1 — in a party someone else leads.
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&party(MATE, 1, 0)), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER")
+        );
+        // 2 — leading a FULL party: four others, five including us, which is what
+        // `Group::IsFull()` refuses server-side too.
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&party(ME, 4, 0)), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_GROUP_FULL")
+        );
+        // 3 — the level band, both ends, inclusive.
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(14), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL")
+        );
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(61), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL")
+        );
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(15), stone),
+            StoneJoin::Send
+        );
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(60), stone),
+            StoneJoin::Send
+        );
+        // 4 — a raid. Its leader is refused too, which is what puts it BELOW the leader term.
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&party(ME, 1, 1)), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_NO_RAID_GROUP")
+        );
+
+        // The order is observable where two terms hold at once: a raid we do not lead answers
+        // MUST_BE_LEADER, not NO_RAID_GROUP.
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&party(MATE, 4, 1)), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER")
+        );
+
+        // **An unanswered template refuses**, because `0x5f8150` reads `0/0` off an uncached
+        // object and every level >= 1 is outside `0..=0`. The permissive "skip the term while the
+        // query is in flight" default the highlight column takes is not this slot's — the first
+        // cut of this code had it, and the §5 round is what corrected it.
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(5), None),
+            StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL")
+        );
+        // The same arithmetic on a shipped `0/0` band; `0/60` is the open one.
+        let closed = Some(MeetingStoneTemplate {
+            min_level: 0,
+            max_level: 0,
+            area: 1519,
+        });
+        let open = Some(MeetingStoneTemplate {
+            min_level: 0,
+            max_level: 60,
+            area: 1519,
+        });
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(1), closed),
+            StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL")
+        );
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), Some(60), open),
+            StoneJoin::Send
+        );
+
+        // `0x5f69f8` — no active player: SILENT, and not one of the four refusals. Neither a
+        // missing guid nor a level the store has not streamed reaches a message or a packet.
+        assert_eq!(
+            meeting_stone_join_refusal(None, Some(ME), None, stone),
+            StoneJoin::Silent
+        );
+        assert_eq!(
+            meeting_stone_join_refusal(None, None, Some(40), stone),
+            StoneJoin::Silent
+        );
+    }
+
+    /// The join drain end to end: a clicked stone the player may use puts `CMSG 0x292` on the
+    /// wire with that object's guid, and a refused one puts **nothing** there.
+    #[test]
+    fn the_join_drain_sends_the_clicked_stone_and_refuses_silently_on_the_wire() {
+        use crate::go_templates::GameObjectTemplates;
+        // A real GameObject guid: `counter | (entry << 24) | (HIGH_GAMEOBJECT << 48)` — the
+        // template cache is keyed by the entry the guid carries, so a made-up number would
+        // silently miss and skip the level term.
+        const STONE_ENTRY: u32 = 0x5701;
+        const STONE: u64 = 0xF110 << 48 | (STONE_ENTRY as u64) << 24 | 0x22;
+        const ME: u64 = 0x5e1f;
+        const MATE: u64 = 0xa11e;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut templates = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        (data[0], data[1], data[2]) = (15, 60, 1519);
+        assert_eq!(benilla_protocol::guid::entry(STONE), Some(STONE_ENTRY));
+        templates.insert(STONE_ENTRY, 23, "Stonard Meeting Stone".into(), &data);
+        app.insert_resource(templates)
+            .insert_resource(NetCommands(tx))
+            .insert_resource(SelfGuid(Some(ME)))
+            .init_resource::<GroupState>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_message::<MeetingStoneUse>()
+            .add_systems(Update, drain_meeting_stone_joins);
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.world_mut().spawn((
+            SelfPlayer,
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                LEVEL_FIELD,
+                40,
+            )])),
+        ));
+
+        let joins = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::MeetingStoneJoin { go_guid } => Some(go_guid),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        app.world_mut()
+            .write_message(MeetingStoneUse { go_guid: STONE });
+        app.update();
+        assert_eq!(joins(&rx), vec![STONE], "the clicked stone's own guid");
+
+        // Now in a party led by someone else: the same click sends nothing at all.
+        app.world_mut().resource_mut::<GroupState>().in_group = true;
+        app.world_mut().resource_mut::<GroupState>().leader = MATE;
+        app.world_mut()
+            .write_message(MeetingStoneUse { go_guid: STONE });
+        app.update();
+        assert!(
+            joins(&rx).is_empty(),
+            "a refusal is a local line, never a packet"
+        );
+    }
 
     /// **The `/reload` re-query** — the meeting-stone half of 1290's class, and the reference's
     /// own behaviour rather than an invention of ours.

@@ -387,6 +387,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_BOOK").is_ok() {
                 app.add_plugins(crate::capture::ProbeBookPlugin);
             }
+            // The meeting-stone live probe: `WOW_PROBE_STONE=1` parks at a real stone, clicks it
+            // on the click's own route below and inside its level band, and reads the queue back
+            // out of the live VM — decision 2283's instrument, the end-to-end answer to "can a
+            // player get into the LFG queue" (see `capture::ProbeStonePlugin`).
+            if std::env::var("WOW_PROBE_STONE").is_ok() {
+                app.add_plugins(crate::capture::ProbeStonePlugin);
+            }
             // The chest live probe: `WOW_PROBE_CHEST=1` parks at a real chest spawn, opens it on the
             // click's own route and reports the self unit's base anim id before/during/after — B84's
             // instrument, the numeric answer to "does the player kneel at a chest" (decision 1471;

@@ -608,11 +608,19 @@ impl RigPalettes {
     /// why this returns the pair and [`Self::world_palette`] (a picker read, not a precision one)
     /// does not.
     pub fn rider_placement(&self, slot: u16) -> Option<(Vec3, Vec3)> {
+        self.row_placement(slot, 0)
+    }
+
+    /// The same pair for an arbitrary bone of a slot. A bind-pose rider repeats one frame across
+    /// every row, so row 0 answers for the model; a **posed** one (decision 2281 — the flexing
+    /// ranged prop) does not, and asking which bone is the only way to see that its rows differ at
+    /// all. `None` for an unallocated slot or a bone past its length.
+    pub fn row_placement(&self, slot: u16, bone: u32) -> Option<(Vec3, Vec3)> {
         let s = slot as usize;
-        if *self.slot_len.get(s)? == 0 {
+        if bone >= *self.slot_len.get(s)? {
             return None;
         }
-        let r = 3 * *self.table.get(s)? as usize;
+        let r = 3 * (*self.table.get(s)? + bone) as usize;
         let o = self.origins.get(s)?;
         Some((
             Vec3::new(o[0], o[1], o[2]),

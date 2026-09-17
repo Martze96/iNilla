@@ -12,7 +12,7 @@ use super::{FxViewRequest, FxViewState, FXVIEW_POS};
 use crate::creature_anim::FxStage;
 use crate::entities::display::{empty_shell, ModelHandle};
 use crate::entities::spell_fx::{
-    attach_effect_visuals, EffectHost, FxTintAnims, SpellFx, FALLBACK_SPAN,
+    attach_effect_visuals, EffectHost, FxMaterials, FxTintAnims, SpellFx, FALLBACK_SPAN,
 };
 
 /// The `fxview` unit lane's synthetic guid (`WOW_FX_DISPLAY`) — a high-word `0xF130` creature guid
@@ -38,6 +38,8 @@ pub(crate) fn drive_fx_view(
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     spatial: avian3d::prelude::SpatialQuery,
@@ -215,8 +217,12 @@ pub(crate) fn drive_fx_view(
             } else {
                 FxStage::OneShot
             }),
-            &mut wow_materials,
-            &mut tint_reg,
+            &mut FxMaterials {
+                store: &mut wow_materials,
+                tint: &mut tint_reg,
+                uv: &mut uv_reg,
+                table: &mut anim_table,
+            },
             &ibps,
             &mut palettes,
             None, // the fixture previews a kit effect on its model's own `Stand`
