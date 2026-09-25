@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn line_table_covers_every_shape() {
         let other = Some("Bob");
-        let me = Some("Sam");
+        let me = Some("Aldric");
         // (packet, name, is_self, expected)
         let cases: &[(LootRoll, Option<&str>, bool, &str)] = &[
             // The three votes (`Group.cpp:970-990`), which have _SELF forms.
@@ -665,7 +665,7 @@ mod tests {
                 announce(1, 57, roll_vote::NEED),
                 me,
                 true,
-                "Need Roll - 57 for {L} by Sam",
+                "Need Roll - 57 for {L} by Aldric",
             ),
             (
                 announce(1, 57, roll_vote::GREED),
@@ -677,7 +677,7 @@ mod tests {
                 announce(1, 57, roll_vote::GREED),
                 me,
                 true,
-                "Greed Roll - 57 for {L} by Sam",
+                "Greed Roll - 57 for {L} by Aldric",
             ),
         ];
         for (p, name, is_self, expect) in cases {
@@ -698,14 +698,14 @@ mod tests {
         for roll_type in [roll_vote::NEED, roll_vote::GREED] {
             let got = format_line(
                 &RollLine::Announce(announce(1, 57, roll_type)),
-                Some("Sam"),
+                Some("Aldric"),
                 true, // is_self
                 LINK,
                 true,
             )
             .expect("detail on emits the dice line");
             assert!(
-                got.ends_with("by Sam"),
+                got.ends_with("by Aldric"),
                 "our own roll must name us third-person: {got}"
             );
             assert!(
