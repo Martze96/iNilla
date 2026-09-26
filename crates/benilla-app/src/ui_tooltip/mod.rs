@@ -16,6 +16,8 @@ use crate::target::{
     go_is_nearest, ring_reaction, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
 use crate::ui_action::{PlayerActions, Spells};
+use crate::ui_script::UiFeed;
+use crate::ui_trainer::{TrainerFeed, TrainerTooltipSubjects};
 use crate::ui_unit::{enrich_unit, snapshot, UnitFeed};
 
 pub struct UiTooltipPlugin;
@@ -26,7 +28,12 @@ impl Plugin for UiTooltipPlugin {
             Update,
             (
                 drive_mouseover_tooltip.in_set(UnitFeed),
-                feed_spell_tooltips.in_set(UnitFeed),
+                // After the trainer feed, so a list that lands this frame is hoverable in its tick;
+                // outside `UnitFeed`, which the trainer feed follows, so it takes that set's gate.
+                feed_spell_tooltips
+                    .in_set(UiFeed)
+                    .after(TrainerFeed)
+                    .run_if(crate::ui_script::ingame_ui_up),
             ),
         );
     }
@@ -317,13 +324,21 @@ struct SpellFeedMemory {
     reagents: std::collections::BTreeMap<u32, (u32, bool)>,
 }
 
-/// Push a view for every spell the UI can hover (the book, the class's talent ranks, the auras)
-/// before it is hovered, as the reference reads them all locally; an ask for any other id too.
+/// The hoverable spell sources [`feed_spell_tooltips`] reads, one parameter under Bevy's 16.
+#[derive(bevy::ecs::system::SystemParam)]
+struct SpellTooltipSources<'w> {
+    spells: Option<Res<'w, Spells>>,
+    trainer_subjects: Option<Res<'w, TrainerTooltipSubjects>>,
+    talents: Option<Res<'w, crate::ui_talent::Talents>>,
+}
+
+/// Push a view for every spell the UI can hover (the book, the class's talent ranks, the open
+/// trainer's services, the auras) before it is hovered, as the reference reads them all locally;
+/// an ask for any other id too.
 fn feed_spell_tooltips(
     script: Option<NonSendMut<UiScript>>,
     actions: Option<Res<PlayerActions>>,
-    spells: Option<Res<Spells>>,
-    talents: Option<Res<crate::ui_talent::Talents>>,
+    spell_sources: SpellTooltipSources,
     auras: Option<Res<crate::ui_aura::PlayerAuraCache>>,
     selection: Res<crate::target::Selection>,
     stores: Query<&ObjectStore>,
@@ -343,6 +358,11 @@ fn feed_spell_tooltips(
     mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,
 ) {
     let (sub_classes, spell_mods) = &lookups;
+    let SpellTooltipSources {
+        spells,
+        trainer_subjects,
+        talents,
+    } = spell_sources;
     let Some(mut script) = script else {
         return;
     };
@@ -355,6 +375,16 @@ fn feed_spell_tooltips(
         wanted.extend(
             actions
                 .spells
+                .iter()
+                .copied()
+                .filter(|s| !memory.pushed.contains(s)),
+        );
+    }
+    // The open trainer's services, which the detail icon's `SetTrainerService` renders.
+    if let Some(trainer) = trainer_subjects.as_deref() {
+        wanted.extend(
+            trainer
+                .0
                 .iter()
                 .copied()
                 .filter(|s| !memory.pushed.contains(s)),

@@ -1,4 +1,5 @@
-//! Source readers shared by the crate's structural tests, which check this crate's own code.
+//! What the crate's structural tests share: source readers over its own code, and a check of
+//! the order its `Update` schedule builds.
 
 /// Every `.rs` file under `root`, recursively.
 pub(crate) fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -96,6 +97,62 @@ fn matching(text: &str, open: usize, lhs: u8, rhs: u8) -> Option<usize> {
         }
     }
     None
+}
+
+/// `a` runs before `b` in `app`'s built `Update`, by system identity: a `.after()` on a system
+/// missing from the schedule is silently nothing, and debug names may be off. The dependency graph
+/// is walked with the set hierarchy unfolded, so a set `a` sits in precedes what that set
+/// precedes, and a successor set brings its members.
+pub(crate) fn runs_before<MA, MB>(
+    app: &mut bevy::app::App,
+    a: impl bevy::ecs::system::IntoSystem<(), (), MA>,
+    b: impl bevy::ecs::system::IntoSystem<(), (), MB>,
+) -> bool {
+    use bevy::ecs::schedule::graph::Direction::{Incoming, Outgoing};
+    use bevy::ecs::schedule::NodeId;
+    use bevy::ecs::system::{IntoSystem, System};
+    use std::any::TypeId;
+    use std::collections::HashSet;
+
+    let a = System::type_id(&IntoSystem::into_system(a));
+    let b = System::type_id(&IntoSystem::into_system(b));
+    // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule inserts
+    // `Schedules`, which a resource scope refuses.
+    app.world_mut()
+        .schedule_scope(bevy::app::Update, |world, schedule| {
+            schedule
+                .initialize(world)
+                .expect("the Update schedule builds");
+            let key = |id: TypeId| -> NodeId {
+                schedule
+                    .systems()
+                    .expect("initialized")
+                    .find(|&(_, s)| System::type_id(&**s) == id)
+                    .map(|(k, _)| NodeId::System(k))
+                    .expect("the system is in Update")
+            };
+            let (a, b) = (key(a), key(b));
+            let dep = schedule.graph().dependency().graph();
+            let hier = schedule.graph().hierarchy().graph();
+            let (mut after, mut containers) = (HashSet::new(), HashSet::new());
+            let mut work = vec![(a, false)];
+            while let Some((n, is_after)) = work.pop() {
+                let fresh = if is_after {
+                    after.insert(n)
+                } else {
+                    containers.insert(n)
+                };
+                if !fresh {
+                    continue;
+                }
+                work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
+                work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
+                if is_after {
+                    work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
+                }
+            }
+            after.contains(&b)
+        })
 }
 
 #[cfg(test)]

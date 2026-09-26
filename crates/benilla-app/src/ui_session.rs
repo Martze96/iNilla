@@ -437,70 +437,22 @@ mod tests {
         );
     }
 
-    /// Checked in the built schedule graph, by system identity: a `.after()` on a system missing
-    /// from the schedule is silently nothing, and debug names may be off.
     #[test]
     fn the_interact_npc_writer_is_seated_between_the_net_apply_and_the_facing_chain() {
-        use bevy::ecs::schedule::graph::Direction::{Incoming, Outgoing};
-        use bevy::ecs::schedule::{NodeId, Schedule};
-        use bevy::ecs::system::{IntoSystem, System};
-        use std::any::TypeId;
-        use std::collections::HashSet;
-
-        /// `a` runs before `b`: the dependency graph walked with the set hierarchy unfolded, so a
-        /// set `a` sits in precedes what that set precedes, and a successor set brings its members.
-        fn runs_before(schedule: &Schedule, a: NodeId, b: NodeId) -> bool {
-            let dep = schedule.graph().dependency().graph();
-            let hier = schedule.graph().hierarchy().graph();
-            let (mut after, mut containers) = (HashSet::new(), HashSet::new());
-            let mut work = vec![(a, false)];
-            while let Some((n, is_after)) = work.pop() {
-                let fresh = if is_after {
-                    after.insert(n)
-                } else {
-                    containers.insert(n)
-                };
-                if !fresh {
-                    continue;
-                }
-                work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
-                work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
-                if is_after {
-                    work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
-                }
-            }
-            after.contains(&b)
-        }
-
-        let apply = System::type_id(&IntoSystem::into_system(crate::net::apply_net_updates));
-        let writer = System::type_id(&IntoSystem::into_system(feed_interact_npc));
-        let facing = System::type_id(&IntoSystem::into_system(crate::net::drive_display_facing));
-
+        use crate::test_support::runs_before;
         let mut app = App::new();
         app.add_plugins((crate::net::NetPlugin { connect: false }, UiSessionPlugin));
-        // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule inserts
-        // `Schedules`, which a resource scope refuses.
-        app.world_mut().schedule_scope(Update, |world, schedule| {
-            schedule
-                .initialize(world)
-                .expect("the Update schedule builds");
-            let key = |id: TypeId| -> NodeId {
-                schedule
-                    .systems()
-                    .expect("initialized")
-                    .find(|&(_, s)| System::type_id(&**s) == id)
-                    .map(|(k, _)| NodeId::System(k))
-                    .expect("the system is in Update")
-            };
-            let (apply, writer, facing) = (key(apply), key(writer), key(facing));
-            assert!(
-                runs_before(schedule, apply, writer),
-                "feed_interact_npc must run after apply_net_updates"
-            );
-            assert!(
-                runs_before(schedule, writer, facing),
-                "drive_display_facing must run after feed_interact_npc"
-            );
-        });
+        assert!(
+            runs_before(&mut app, crate::net::apply_net_updates, feed_interact_npc),
+            "feed_interact_npc must run after apply_net_updates"
+        );
+        assert!(
+            runs_before(
+                &mut app,
+                feed_interact_npc,
+                crate::net::drive_display_facing
+            ),
+            "drive_display_facing must run after feed_interact_npc"
+        );
     }
 }

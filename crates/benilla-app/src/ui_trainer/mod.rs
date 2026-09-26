@@ -11,7 +11,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{
     ScriptValue, TrainerAbilityReq, TrainerService, TrainerServiceCategory, TrainerSkillReq,
-    TrainerState, UiScript,
+    TrainerState, TrainerTooltip, UiScript,
 };
 
 use crate::entities::ItemDisplays;
@@ -99,6 +99,14 @@ impl TrainerOpen {
 #[derive(Resource, Default)]
 pub(crate) struct TrainerErrors(pub Vec<u32>);
 
+/// The spells the open trainer's services show as tooltips, which the spell-tooltip feed pushes.
+#[derive(Resource, Default)]
+pub(crate) struct TrainerTooltipSubjects(pub(crate) Vec<u32>);
+
+/// The trainer feed, which the spell-tooltip feed runs after.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TrainerFeed;
+
 mod net;
 mod reeval;
 
@@ -109,6 +117,7 @@ impl Plugin for UiTrainerPlugin {
         net::register(app);
         app.init_resource::<TrainerOpen>()
             .init_resource::<TrainerErrors>()
+            .init_resource::<TrainerTooltipSubjects>()
             .add_systems(
                 Update,
                 (
@@ -116,7 +125,10 @@ impl Plugin for UiTrainerPlugin {
                     close_npc_session_out_of_range::<TrainerOpen>.before(feed_trainer),
                     // The unit feeds also write the pet bar the re-evaluator reads; either order
                     // reads the same pet spellbook, but the schedule check wants one declared.
-                    feed_trainer.in_set(UiFeed).after(crate::ui_unit::UnitFeed),
+                    feed_trainer
+                        .in_set(UiFeed)
+                        .in_set(TrainerFeed)
+                        .after(crate::ui_unit::UnitFeed),
                     drain_trainer.after(UiInput),
                 ),
             );
@@ -264,7 +276,7 @@ fn snapshot(
 /// The re-evaluator's inputs and its descriptor triggers: the player's descriptor and its field
 /// edges (money, level, a skill slot), the pet bar, and the stores that resolve the pet.
 #[derive(SystemParam)]
-struct ReEvalInputs<'w, 's> {
+pub(crate) struct ReEvalInputs<'w, 's> {
     self_player: Query<'w, 's, (Entity, &'static ObjectStore), With<SelfPlayer>>,
     stores: Query<'w, 's, &'static ObjectStore>,
     index: Res<'w, GuidIndex>,
@@ -275,7 +287,7 @@ struct ReEvalInputs<'w, 's> {
 /// Push the current trainer into the VM and fire its events on a change. Another trainer while
 /// open is a close then an open: `ShowUIPanel` returns early on a visible frame.
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
-fn feed_trainer(
+pub(crate) fn feed_trainer(
     script: Option<NonSendMut<UiScript>>,
     // Writes the re-derived states, as `0x4d7d40` overwrites its own records.
     mut open: ResMut<TrainerOpen>,
@@ -289,6 +301,7 @@ fn feed_trainer(
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
     names: Res<NameCache>,
+    mut tooltip_subjects: ResMut<TrainerTooltipSubjects>,
     mut last: Local<crate::ui_script::VmMemo<Option<TrainerState>>>,
     mut last_trainer: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
@@ -416,6 +429,20 @@ fn feed_trainer(
                 .filter(|t| !t.is_empty())
         },
     );
+    // A spell subject's view must be in the store before the detail icon is hovered.
+    let mut fresh_tooltip_subjects: Vec<u32> = fresh
+        .iter()
+        .flat_map(|state| &state.services)
+        .filter_map(|service| match &service.tooltip {
+            TrainerTooltip::Spell { spell_id, .. } => Some(*spell_id),
+            TrainerTooltip::Item(_) => None,
+        })
+        .collect();
+    fresh_tooltip_subjects.sort_unstable();
+    fresh_tooltip_subjects.dedup();
+    if tooltip_subjects.0 != fresh_tooltip_subjects {
+        tooltip_subjects.0 = fresh_tooltip_subjects;
+    }
     // A name-only change re-fires `TRAINER_UPDATE`, so the title's `UnitName("npc")` repaints.
     // The name rides as arg1, which the 1.12 trainer events do not carry.
     let trainer_name = open
