@@ -81,9 +81,14 @@ pub struct MerchantState {
 }
 
 impl super::UiScript {
-    /// Push (or clear, with `None`) the open vendor.
+    /// Push (or clear, with `None`) the open vendor. Clearing it leaves repair mode, as the
+    /// merchant-close handler restores the Point base mode (`0x4fadf0`).
     pub fn set_merchant(&mut self, state: Option<MerchantState>) {
+        let closing = state.is_none();
         self.model_mut().merchant = state;
+        if closing {
+            self.model_mut().repair_mode = false;
+        }
     }
 
     /// Drain the `(row, quantity)` buys `BuyMerchantItem` queued, the row 1-based.
@@ -468,9 +473,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ShowRepairCursor",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .repair_mode = true;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `0x4fbcc0`: a targeting spell or a vendor without repair service leaves the
+            // cursor untouched. `ClearCursor(1,1)` returns any held item before mode 0x11 arms.
+            if model.spell_targeting || !model.merchant.as_ref().is_some_and(|m| m.can_repair) {
+                return Ok(());
+            }
+            crate::script::cursor::clear_cursor(&mut model);
+            model.repair_mode = true;
+            model.ui_cursor = None;
+            model.ui_cursor_dirty = true;
             Ok(())
         })?,
     )?;
@@ -542,7 +554,7 @@ fn arm_vendor_cursor(lua: &Lua, price_of: impl FnOnce(&MerchantState) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{ItemStatsHead, MerchantItem, MerchantState};
-    use crate::script::UiScript;
+    use crate::script::{ContainerSlot, ContainerState, UiScript};
 
     fn stock() -> MerchantState {
         MerchantState {
@@ -806,13 +818,74 @@ mod tests {
         s.run("RepairAllItems()").unwrap();
         assert!(s.take_repair_all());
         assert!(!s.take_repair_all(), "drained");
+        assert!(
+            s.take_sounds().is_empty(),
+            "the stock button's OnClick plays ITEM_REPAIR"
+        );
 
         assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
         s.run("ShowRepairCursor()").unwrap();
         assert!(s.repair_mode());
         assert!(s.eval::<bool>("return InRepairMode() == 1").unwrap());
+        assert_eq!(s.ui_cursor(), None, "repair clears a stale hover override");
         s.run("HideRepairCursor()").unwrap();
         assert!(!s.repair_mode());
+
+        s.run("ShowRepairCursor()").unwrap();
+        s.set_merchant(None);
+        assert!(
+            !s.repair_mode(),
+            "closing the merchant hides the repair cursor"
+        );
+    }
+
+    #[test]
+    fn show_repair_cursor_checks_targeting_and_vendor_then_returns_held_item() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = ContainerState {
+            num_slots: 1,
+            ..Default::default()
+        };
+        bag.slots.insert(
+            1,
+            ContainerSlot {
+                item_id: 117,
+                count: 1,
+                ..Default::default()
+            },
+        );
+        s.set_container(0, Some(bag));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.cursor_item().is_some());
+
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "no vendor cannot arm repair");
+        assert!(s.cursor_item().is_some(), "early return keeps held item");
+
+        s.set_merchant(Some(stock()));
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "non-repair vendor cannot arm repair");
+        assert!(s.cursor_item().is_some());
+
+        let mut vendor = stock();
+        vendor.can_repair = true;
+        s.set_merchant(Some(vendor));
+        s.set_spell_targeting(true);
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "targeting spell wins over repair");
+        assert!(s.cursor_item().is_some());
+
+        s.set_spell_targeting(false);
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(s.repair_mode());
+        assert!(
+            s.cursor_item().is_none(),
+            "ClearCursor returned the held item"
+        );
+        assert!(s
+            .eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return not locked")
+            .unwrap());
+        assert!(s.take_container_moves().is_empty());
     }
 
     #[test]

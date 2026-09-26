@@ -308,6 +308,27 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool 
         model.ui_cursor_dirty = true;
         return true;
     }
+    // Only a held item (`0x4f9c38`) or vendor row (`0x4f9c43`) takes the click first. Past them
+    // an empty slot does nothing (`0x4f9c4e`), an armed item-targeting spell binds the item
+    // (`0x4f9c54`) and repair mode repairs it (`0x4f9c7b`), any other payload staying held; the
+    // app's repair drain runs the arm's `ITEM_REPAIR` and send.
+    let placing = matches!(
+        model.cursor,
+        Some(CursorPayload::Item(_) | CursorPayload::Merchant(_))
+    );
+    if !placing && (model.item_pick_armed || model.repair_mode) {
+        let occupied = model
+            .containers
+            .get(&bag)
+            .and_then(|c| c.slots.get(&slot))
+            .is_some_and(|s| s.item_id != 0);
+        if occupied && model.item_pick_armed {
+            model.item_picks.push((bag, slot));
+        } else if occupied {
+            model.container_repairs.push((bag, slot));
+        }
+        return false;
+    }
     match model.cursor.take() {
         None => {
             let picked = model
@@ -602,7 +623,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UseContainerItem",
         lua.create_function(|lua, (bag, slot, _rest): (i64, u32, mlua::MultiValue)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.container_uses.push((bag, slot));
+            if model.repair_mode {
+                // The right-click clears the cursor first (`0x4fa198`), then repairs the item in
+                // the slot (`0x4fa1a6`, `0x4fa1da`): a held payload goes back, never placed.
+                cursor::clear_cursor(&mut model);
+                let occupied = model
+                    .containers
+                    .get(&bag)
+                    .and_then(|c| c.slots.get(&slot))
+                    .is_some_and(|s| s.item_id != 0);
+                if occupied {
+                    model.container_repairs.push((bag, slot));
+                }
+            } else {
+                model.container_uses.push((bag, slot));
+            }
             Ok(())
         })?,
     )?;
@@ -613,19 +648,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "PickupContainerItem",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // The reference tests a held payload first (`0x4f9c38`), then an armed item-targeting
-            // spell, which takes the item (`0x4f9c54`, `0x495d60`), then repair mode (`0x4f9c7b`),
-            // so poisoning at a repair vendor binds the poison.
-            if model.item_pick_armed && model.cursor.is_none() {
-                model.item_picks.push((bag, slot));
-                return Ok(false);
-            }
-            // Repair mode, until `HideRepairCursor`, queues a repair and picks nothing up. Unlike
-            // the reference, it does not first check for a held item.
-            if model.repair_mode {
-                model.container_repairs.push((bag, slot));
-                return Ok(false);
-            }
             Ok(pickup_container_item(&mut model, bag, slot))
         })?,
     )?;
@@ -641,9 +663,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .get(&bag)
                 .and_then(|c| c.slots.get(&slot))
                 .is_some();
-            // An armed spell suppresses it first (`0x4fa469`); the mode is sticky, so a Buy here
-            // would stamp out the cast cursor for good.
-            if occupied && !model.spell_targeting {
+            // An armed spell or repair cursor suppresses it first; each is sticky, so a Buy here
+            // would stamp out the active base cursor.
+            if occupied && !model.spell_targeting && !model.repair_mode {
                 model.ui_cursor = Some(UiCursorMode::Buy);
                 model.ui_cursor_dirty = true;
             }
@@ -712,7 +734,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{ContainerMove, ContainerSlot, ContainerState, PendingWrap, UiCursorMode};
-    use crate::script::UiScript;
+    use crate::script::{MerchantItem, MerchantState, UiScript};
 
     fn backpack() -> ContainerState {
         let mut slots = std::collections::HashMap::new();
@@ -1130,6 +1152,171 @@ mod tests {
         s.run("ClearCursor()").unwrap();
         assert!(s.cursor_item().is_none());
         assert!(s.take_container_moves().is_empty());
+    }
+
+    #[test]
+    fn repair_cursor_wins_over_a_sellable_bag_hover() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.set_merchant(Some(MerchantState {
+            can_repair: true,
+            ..Default::default()
+        }));
+
+        s.run("ShowContainerSellCursor(0, 1)").unwrap();
+        assert_eq!(s.ui_cursor(), Some(UiCursorMode::Buy));
+
+        s.run("ShowRepairCursor()").unwrap();
+        assert_eq!(
+            s.ui_cursor(),
+            None,
+            "repair replaces the existing Buy hover"
+        );
+        s.run("ShowContainerSellCursor(0, 1)").unwrap();
+        assert_eq!(
+            s.ui_cursor(),
+            None,
+            "a bag hover keeps the repair base cursor"
+        );
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert_eq!(
+            s.take_container_repairs(),
+            vec![(0, 1), (0, 1)],
+            "repair mode sticks across clicks"
+        );
+    }
+
+    #[test]
+    fn right_click_repairs_bag_item_instead_of_selling_it() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.set_merchant(Some(MerchantState {
+            can_repair: true,
+            ..Default::default()
+        }));
+        s.run("ShowRepairCursor() UseContainerItem(0, 1) UseContainerItem(0, 1)")
+            .unwrap();
+
+        assert_eq!(s.take_container_repairs(), vec![(0, 1), (0, 1)]);
+        assert!(s.take_container_uses().is_empty(), "no sell/use intent");
+    }
+
+    #[test]
+    fn right_click_in_repair_mode_puts_a_held_item_back_then_repairs() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.set_merchant(Some(MerchantState {
+            can_repair: true,
+            ..Default::default()
+        }));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.cursor_item().is_some());
+        // A held item and repair mode together, as after a cursor-mode change.
+        s.model_mut().repair_mode = true;
+
+        s.run("UseContainerItem(0, 4)").unwrap();
+        assert!(
+            s.cursor_payload().is_none(),
+            "the held item went back (`0x4fa198`)"
+        );
+        assert!(s.take_container_moves().is_empty(), "never placed");
+        assert_eq!(s.take_container_repairs(), vec![(0, 4)]);
+
+        s.model_mut().repair_mode = false;
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        s.model_mut().repair_mode = true;
+        s.run("UseContainerItem(0, 2)").unwrap();
+        assert!(
+            s.cursor_payload().is_none(),
+            "an empty slot still clears the cursor"
+        );
+        assert!(
+            s.take_container_repairs().is_empty(),
+            "and repairs nothing (`0x4fa1a6`)"
+        );
+    }
+
+    #[test]
+    fn held_vendor_row_buys_into_bag_before_repair_mode() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.set_merchant(Some(MerchantState {
+            items: vec![MerchantItem {
+                item_id: 159,
+                ..Default::default()
+            }],
+            can_repair: true,
+            ..Default::default()
+        }));
+        s.run("ShowRepairCursor() PickupMerchantItem(1)").unwrap();
+        assert!(
+            s.repair_mode(),
+            "vendor grab preserves the repair base mode"
+        );
+        assert!(s.cursor_payload().is_some());
+
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert_eq!(s.take_merchant_slot_buys(), vec![(0, 1, 159)]);
+        assert!(s.cursor_payload().is_none());
+        assert!(s.take_container_repairs().is_empty());
+        assert!(s.take_sounds().is_empty());
+
+        // The right-click clears the vendor row with no packet and repairs instead.
+        s.run("PickupMerchantItem(1) UseContainerItem(0, 1)")
+            .unwrap();
+        assert!(s.take_merchant_slot_buys().is_empty());
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(s.take_container_repairs(), vec![(0, 1)]);
+        assert!(s.take_container_uses().is_empty());
+    }
+
+    #[test]
+    fn held_item_places_before_repair_mode() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.cursor_item().is_some());
+        // A held item and repair base mode can coexist after a cursor-mode change.
+        s.model_mut().repair_mode = true;
+
+        s.run("PickupContainerItem(0, 2)").unwrap();
+        assert_eq!(
+            s.take_container_moves(),
+            vec![ContainerMove {
+                src_bag: 0,
+                src_slot: 1,
+                dst_bag: 0,
+                dst_slot: 2,
+                count: None,
+            }]
+        );
+        assert!(s.cursor_payload().is_none());
+        assert!(s.take_container_repairs().is_empty());
+        assert!(s.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn repair_mode_repairs_under_held_coins_and_keeps_them() {
+        use crate::script::cursor::{CursorMoney, CursorPayload};
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.model_mut().repair_mode = true;
+        let coins = CursorPayload::Money(CursorMoney { copper: 50 });
+        s.model_mut().cursor = Some(coins.clone());
+
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert_eq!(
+            s.take_container_repairs(),
+            vec![(0, 1)],
+            "coins pass both payload tests (`0x4f9c38`, `0x4f9c43`)"
+        );
+        assert_eq!(s.cursor_payload(), Some(coins), "and stay held");
+        s.run("PickupContainerItem(0, 2)").unwrap();
+        assert!(
+            s.take_container_repairs().is_empty(),
+            "an empty slot does nothing (`0x4f9c4e`)"
+        );
     }
 
     #[test]
