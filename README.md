@@ -1,4 +1,64 @@
 <div align="center">
+  <h1>iNilla</h1>
+  <p><b>benilla — the from-scratch World of Warcraft 1.12.1 client in Rust — on the iPhone iOS 17.0+</b></p>
+  <img src="ios/icons/AppIcon1024.png" width="120" alt="iNilla icon">
+</div>
+
+**iNilla** is an iOS build of [benilla](https://github.com/samwhosung/benilla), made to be
+sideloaded with **SideStore** (or AltStore / LiveContainer), with everything a phone needs around
+the unchanged game:
+
+- **Touch controls** that cost no screen space until a thumb lands — a floating movement stick,
+  jump with a ring of action slots around it (with real icons and cooldowns), switchable
+  **views** (Combat / Explore / Social / Minimal), a radial menu for every window, drag-to-look,
+  pinch-zoom, and the stock interface usable by finger (tap = click, long press = right click,
+  drag = move items, two fingers = scroll). A **layout editor** moves, resizes, rebinds and hides
+  every element.
+- **Controllers** — Backbone One, Xbox, DualSense, any MFi pad — in WoW Forever's layout: sticks
+  move and look, LB/RB cycle targets, the triggers switch the face buttons and d-pad between four
+  layers (32 bindings), a radial menu, a virtual cursor that opens by itself with loot, vendor and
+  quest windows. Fully remappable.
+- **A launcher**: server profiles (LAN or internet, with a realm-address override for NAT),
+  accounts with passwords in the iOS Keychain, one-tap login and account switching, auto-login.
+- **Game data, once**: copy your own `Data` folder in with Finder / the Files app, or download
+  it directly from a server with HTTP data hosting (resumable, SHA-256 verified). The companion
+  [iNilla server](https://github.com/Martze96/iNilla-server) is an optional helper repository (basically standard
+  vmangos bundled with a game-data HTTP endpoint) to easily get a server with data hosting running in Docker. The app contains no Blizzard files.
+- **A fast debug loop without a Mac**: a remote console in any browser on the same Wi-Fi (live
+  log, Lua, commands, screenshots, config files), session logs and crash reports in the Files app,
+  and a desktop build that rehearses the touch HUD and controller.
+
+<p align="center">
+  <img src="docs/images/touch-hud.jpg" width="49%" alt="iNilla Touch HUD">
+  <img src="docs/images/radial-menu.jpg" width="49%" alt="Radial Menu">
+</p>
+<p align="center">
+  <img src="docs/images/gesture-hub.jpg" width="49%" alt="Gesture Hub on Jump">
+  <img src="docs/images/settings.jpg" width="49%" alt="In-game Settings & Overlays">
+</p>
+
+Everything is built on Linux except the final link, which is a few minutes on a macOS runner —
+see [docs/IOS-BUILD.md](docs/IOS-BUILD.md).
+
+| read | for |
+|---|---|
+| [docs/INILLA.md](docs/INILLA.md) | what iNilla is made of, the controls, the settings |
+| [docs/IOS-BUILD.md](docs/IOS-BUILD.md) | building and installing the `.ipa` (SideStore, LiveContainer), CI and its minutes |
+| [docs/DATA.md](docs/DATA.md) | getting the game data onto the phone; the data host |
+| [docs/DEBUGGING.md](docs/DEBUGGING.md) | the remote console, logs, crash reports, the desktop rehearsal |
+| [docs/UPSTREAM.md](docs/UPSTREAM.md) | syncing benilla, and every upstream file iNilla touches |
+
+Servers: any 1.12.1 core benilla supports — **vmangos** (what benilla develops against) and
+**cMaNGOS** — with **Warden disabled** (benilla does not implement it). (Tip: use [iNilla server](https://github.com/Martze96/iNilla-server)
+if you want a ready-to-run vmangos instance that already serves game data to the app). Clients: English (enUS)
+1.12.1, build 5875. iNilla is an independent fan project, not affiliated with or endorsed by
+Blizzard Entertainment.
+
+---
+
+*Everything below is upstream benilla's README, unchanged.*
+
+<div align="center">
   <h1>benilla</h1>
   <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
   <p>
