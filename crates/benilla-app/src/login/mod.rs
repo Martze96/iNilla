@@ -142,7 +142,10 @@ impl LoginIntent {
 /// the parked IO thread, the abandon generation a Cancel bumps, and the realmlist it dials. A
 /// bundle keeps [`login_input`] under Bevy's sixteen-parameter ceiling.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct Attempt<'w> {
+/// iNilla: `pub(crate)` so the launcher's account picker submits through this same path
+/// (`crate::inilla::session`) — the realmlist read at submit time, the connecting dialog, and
+/// every failure surfaced exactly as for a typed login.
+pub(crate) struct Attempt<'w> {
     pub(super) intent: ResMut<'w, LoginIntent>,
     submit: Res<'w, LoginSubmit>,
     abandon: Res<'w, LoginAbandon>,
@@ -150,9 +153,14 @@ pub(super) struct Attempt<'w> {
 }
 
 impl Attempt<'_> {
+    /// iNilla: whether an attempt is already on the wire (the launcher must not stack a second).
+    pub(crate) fn in_flight(&self) -> bool {
+        self.intent.in_flight
+    }
+
     /// Send one login attempt to the parked IO thread, stamped with the abandon generation. The
     /// realmlist is read at submit time, so an attempt keeps the server it started with.
-    fn send(&mut self, user: &str, pass: &str, announced: bool) {
+    pub(crate) fn send(&mut self, user: &str, pass: &str, announced: bool) {
         self.intent.creds = Some((user.to_string(), pass.to_string()));
         self.intent.in_flight = true;
         self.intent.announced = announced;

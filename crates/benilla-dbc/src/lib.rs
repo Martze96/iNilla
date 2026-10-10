@@ -1,6 +1,9 @@
 //! A WDBC reader for WoW 1.12.1: a 20-byte header, `record_count × record_size` bytes of 4-byte
 //! fields, then a string block. The file has no column types; the caller supplies a [`Schema`].
 
+// iNilla: a localized client's DBC text, moved into the columns the readers name.
+pub mod localize;
+
 use std::io::{Cursor, Write};
 
 use benilla_bytes::{capped, ByteExt};

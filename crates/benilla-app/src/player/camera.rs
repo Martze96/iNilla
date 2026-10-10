@@ -154,12 +154,13 @@ impl Default for LookConfig {
 
 impl LookConfig {
     /// Radians of yaw per raw mouse unit, read by both the rotation and the click travel budget.
-    pub(super) fn yaw_rate(self) -> f32 {
+    /// iNilla: `pub(crate)` for the controller's look, which turns radians into mouse units.
+    pub(crate) fn yaw_rate(self) -> f32 {
         self.yaw_speed * LOOK_YAW_PER_SPEED * self.sensitivity
     }
 
     /// Radians of pitch per raw mouse unit: its own CVar and the law's divisor 600.
-    pub(super) fn pitch_rate(self) -> f32 {
+    pub(crate) fn pitch_rate(self) -> f32 {
         self.pitch_speed * LOOK_PITCH_PER_SPEED * self.sensitivity
     }
 }

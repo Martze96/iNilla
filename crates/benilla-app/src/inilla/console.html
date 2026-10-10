@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iNilla console</title>
+<style>
+  :root { --bg:#0e0e13; --panel:#16161d; --ink:#e6e6ea; --dim:#8a8a96; --gold:#d4af37; --red:#ff7b72; --yel:#f0c85a; --line:#2a2a33; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-system, system-ui, sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  header b { color:var(--gold); letter-spacing:.5px; }
+  header input { background:#0b0b10; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:5px 8px; width:220px; }
+  #status { color:var(--dim); font-size:12px; margin-left:auto; }
+  main { flex:1; display:flex; min-height:0; }
+  #logwrap { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #tools { display:flex; gap:8px; padding:6px 10px; border-bottom:1px solid var(--line); align-items:center; }
+  #log { flex:1; overflow:auto; padding:6px 10px; font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; word-break:break-word; }
+  #log .e { color:var(--red); } #log .w { color:var(--yel); } #log .k { color:var(--gold); } #log .r { color:#9fe39f; }
+  aside { width:340px; border-left:1px solid var(--line); overflow:auto; padding:10px; background:var(--panel); }
+  aside h3 { margin:14px 0 6px; font-size:12px; text-transform:uppercase; color:var(--dim); letter-spacing:1px; }
+  button { background:#22222c; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; }
+  button:hover { border-color:var(--gold); }
+  .row { display:flex; flex-wrap:wrap; gap:6px; }
+  pre { margin:0; font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; }
+  #prompt { display:flex; gap:8px; padding:8px 10px; border-top:1px solid var(--line); background:var(--panel); }
+  #prompt select, #prompt textarea { background:#0b0b10; color:var(--ink); border:1px solid var(--line); border-radius:6px; }
+  #prompt textarea { flex:1; height:54px; padding:6px 8px; font:13px ui-monospace, Menlo, monospace; resize:vertical; }
+  #files div { display:flex; justify-content:space-between; gap:6px; padding:2px 0; border-bottom:1px solid #1e1e26; }
+  #files a { color:var(--ink); text-decoration:none; } #files a:hover { color:var(--gold); }
+  #files .d { color:var(--gold); cursor:pointer; }
+  .small { color:var(--dim); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <b>INILLA</b><span class="small">remote console</span>
+  <input id="token" placeholder="token (from Settings → Debug)" autocomplete="off">
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <section id="logwrap">
+    <div id="tools">
+      <input id="filter" placeholder="filter the log" style="background:#0b0b10;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 8px;width:240px">
+      <label class="small"><input type="checkbox" id="follow" checked> follow</label>
+      <button id="clear">clear view</button>
+      <button id="save">save log</button>
+    </div>
+    <div id="log"></div>
+    <div id="prompt">
+      <select id="mode"><option value="lua">Lua</option><option value="chat">Chat / slash</option><option value="cmd">Command</option></select>
+      <textarea id="input" placeholder="return UnitName('player'), GetZoneText()   —   Ctrl/⌘+Enter to run"></textarea>
+      <button id="run">Run</button>
+    </div>
+  </section>
+  <aside>
+    <h3>State</h3><pre id="state">…</pre>
+    <h3>Quick actions</h3>
+    <div class="row">
+      <button data-lua="ReloadUI()">Reload UI</button>
+      <button data-op="screenshot">Screenshot</button>
+      <button data-cmd="JUMP">Jump</button>
+      <button data-cmd="TARGETNEARESTENEMY">Target enemy</button>
+      <button data-cmd="TOGGLEAUTORUN">Autorun</button>
+      <button data-cmd="SITORSTAND">Sit/stand</button>
+      <button data-cmd="TOGGLEGAMEMENU">Game menu</button>
+      <button data-chat="/who">/who</button>
+      <button data-lua="return GetFramerate()">FPS</button>
+      <button data-lua="return UnitName('target'), UnitHealth('target'), UnitHealthMax('target')">Target info</button>
+    </div>
+    <h3>Files <span class="small" id="cwd">benilla-config/</span></h3>
+    <div class="row" style="margin-bottom:6px"><button id="up">↑ up</button><button id="refresh">refresh</button><label class="small">upload <input type="file" id="upload"></label></div>
+    <div id="files"></div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+let token = q.get('token') || localStorage.getItem('inilla-token') || '';
+$('token').value = token;
+$('token').onchange = () => { token = $('token').value.trim(); localStorage.setItem('inilla-token', token); start(); };
+if (token) localStorage.setItem('inilla-token', token);
+const H = () => ({ 'Authorization': 'Bearer ' + token });
+
+let since = 0, lines = [], cwd = '', polling = false;
+function cls(l) { return /ERROR|panicked|FATAL/.test(l) ? 'e' : /WARN/.test(l) ? 'w' : /inilla:/.test(l) ? 'k' : ''; }
+function render() {
+  const f = $('filter').value.toLowerCase();
+  const log = $('log');
+  const shown = f ? lines.filter(l => l.toLowerCase().includes(f)) : lines;
+  log.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for (const l of shown.slice(-4000)) { const d = document.createElement('div'); d.className = cls(l); d.textContent = l; frag.appendChild(d); }
+  log.appendChild(frag);
+  if ($('follow').checked) log.scrollTop = log.scrollHeight;
+}
+function add(newLines, klass) {
+  for (const l of newLines) lines.push(l);
+  if (lines.length > 20000) lines = lines.slice(-15000);
+  const f = $('filter').value.toLowerCase();
+  const log = $('log');
+  for (const l of newLines) {
+    if (f && !l.toLowerCase().includes(f)) continue;
+    const d = document.createElement('div'); d.className = klass || cls(l); d.textContent = l; log.appendChild(d);
+  }
+  if ($('follow').checked) log.scrollTop = log.scrollHeight;
+}
+async function poll() {
+  if (polling) return; polling = true;
+  while (token) {
+    try {
+      const r = await fetch(`/api/log?since=${since}${since ? '&wait=1' : ''}`, { headers: H() });
+      if (r.status === 401) { $('status').textContent = 'wrong token'; break; }
+      const j = await r.json();
+      since = j.next; add(j.lines);
+      $('status').textContent = 'connected';
+    } catch (e) { $('status').textContent = 'reconnecting…'; await new Promise(r => setTimeout(r, 2000)); }
+  }
+  polling = false;
+}
+async function state() {
+  if (!token) return;
+  try { const r = await fetch('/api/state', { headers: H() }); if (r.ok) $('state').textContent = JSON.stringify(await r.json(), null, 1); } catch (e) {}
+}
+async function post(path, body, json) {
+  const r = await fetch(path, { method: 'POST', headers: Object.assign(H(), json ? { 'Content-Type': 'application/json' } : {}), body });
+  return r.json();
+}
+async function lua(chunk) {
+  add(['» ' + chunk], 'k');
+  const j = await post('/api/lua', chunk);
+  add([j.ok ? '← ' + JSON.stringify(j.values) : '✗ ' + j.error], j.ok ? 'r' : 'e');
+}
+async function run() {
+  const text = $('input').value.trim(); if (!text) return;
+  const mode = $('mode').value;
+  if (mode === 'lua') await lua(text);
+  else if (mode === 'chat') { await post('/api/cmd', JSON.stringify({ op: 'chat', text }), true); add(['» ' + text], 'k'); }
+  else { await post('/api/cmd', JSON.stringify({ op: 'press', cmd: text.toUpperCase() }), true); add(['» ' + text.toUpperCase()], 'k'); }
+}
+$('run').onclick = run;
+$('input').onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } };
+$('filter').oninput = render;
+$('clear').onclick = () => { lines = []; render(); };
+$('save').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain' })); a.download = 'inilla-log.txt'; a.click(); };
+document.querySelectorAll('[data-lua]').forEach(b => b.onclick = () => lua(b.dataset.lua));
+document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => post('/api/cmd', JSON.stringify({ op: 'press', cmd: b.dataset.cmd }), true));
+document.querySelectorAll('[data-chat]').forEach(b => b.onclick = () => post('/api/cmd', JSON.stringify({ op: 'chat', text: b.dataset.chat }), true));
+document.querySelectorAll('[data-op]').forEach(b => b.onclick = () => { post('/api/cmd', JSON.stringify({ op: b.dataset.op }), true); setTimeout(files, 1500); });
+
+async function files() {
+  if (!token) return;
+  $('cwd').textContent = 'benilla-config/' + cwd;
+  const r = await fetch('/api/files?path=' + encodeURIComponent(cwd), { headers: H() });
+  if (!r.ok) return;
+  const list = (await r.json()).sort((a, b) => (b.dir - a.dir) || (b.modified - a.modified));
+  const box = $('files'); box.innerHTML = '';
+  for (const f of list) {
+    const d = document.createElement('div');
+    const p = (cwd ? cwd + '/' : '') + f.name;
+    if (f.dir) { const s = document.createElement('span'); s.className = 'd'; s.textContent = '📁 ' + f.name; s.onclick = () => { cwd = p; files(); }; d.appendChild(s); }
+    else { const a = document.createElement('a'); a.textContent = f.name; a.href = '/api/file?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(token); d.appendChild(a); }
+    const m = document.createElement('span'); m.className = 'small'; m.textContent = f.dir ? '' : (f.size > 1e6 ? (f.size / 1e6).toFixed(1) + ' MB' : (f.size / 1e3).toFixed(1) + ' kB');
+    d.appendChild(m); box.appendChild(d);
+  }
+}
+$('up').onclick = () => { cwd = cwd.split('/').slice(0, -1).join('/'); files(); };
+$('refresh').onclick = files;
+$('upload').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const p = (cwd ? cwd + '/' : '') + f.name;
+  await fetch('/api/file?path=' + encodeURIComponent(p), { method: 'PUT', headers: H(), body: f });
+  add(['uploaded ' + p], 'k'); files();
+};
+function start() { since = 0; lines = []; render(); poll(); state(); files(); }
+setInterval(state, 2000);
+start();
+</script>
+</body>
+</html>

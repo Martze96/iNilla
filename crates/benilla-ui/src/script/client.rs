@@ -17,9 +17,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `GetLocale()` (glue `0x46ce40`, in-game `0x48d8b0`) returns one string, `enUS`, as benilla
     // is enUS-only. `IsMacClient()` (`0x48c980`) returns one nil, the PC build's answer, which
     // takes FrameXML's PC key-label arm.
+    // iNilla: the game data's language instead, once the app has told us it (`set_locale`).
     g.set(
         "GetLocale",
-        lua.create_function(|lua, ()| lua.create_string("enUS"))?,
+        lua.create_function(|lua, ()| lua.create_string(locale()))?,
     )?;
     g.set("IsMacClient", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
     // The PC build's other two platform answers: `IsWindowsClient()` (`0x48c960`) pushes the
@@ -183,6 +184,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // iNilla: `SetEuropeanNumbers(flag)` — one argument, nothing returned (`1.12-shapes.tsv`),
+    // and from then on the engine writes its reals with a comma (`crate::strings::decimal`). The
+    // German client's `Localization.lua` calls it from `LocalizeFrames` at `VARIABLES_LOADED`;
+    // without it that handler raises and stops there. Whether the reference reads the flag as
+    // `lua_toboolean` or as a number is not carved; here `nil`, `false` and `0` are off.
+    g.set(
+        "SetEuropeanNumbers",
+        lua.create_function(|lua, flag: mlua::Value| {
+            let on = match flag {
+                mlua::Value::Nil | mlua::Value::Boolean(false) => false,
+                mlua::Value::Integer(n) => n != 0,
+                mlua::Value::Number(n) => n != 0.0,
+                _ => true,
+            };
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .european_numbers = on;
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -241,6 +263,18 @@ impl super::UiScript {
     }
 }
 
+/// iNilla: the locale `GetLocale()` answers — the game data's language (`enUS` until told).
+static LOCALE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// iNilla: set the locale `GetLocale()` answers, once, before the interface loads.
+pub fn set_locale(locale: &str) {
+    let _ = LOCALE.set(locale.to_string());
+}
+
+fn locale() -> &'static str {
+    LOCALE.get().map_or("enUS", String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::script::UiScript;
@@ -276,6 +310,26 @@ mod tests {
             s.eval::<String>("return GetRealmName()").unwrap(),
             "Whitemane"
         );
+    }
+
+    /// iNilla: `SetEuropeanNumbers` — which the German `Localization.lua` calls — switches the
+    /// engine's reals to a comma, returns nothing, and leaves Lua's own `format` alone.
+    #[test]
+    fn set_european_numbers_switches_the_engines_decimal_separator() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(crate::strings::decimal(s.lua()), '.');
+        assert_eq!(s.arity("SetEuropeanNumbers(1)").unwrap(), 0);
+        assert_eq!(crate::strings::decimal(s.lua()), ',');
+        assert_eq!(
+            s.eval::<String>("return format(\"%.1f\", 2.5)").unwrap(),
+            "2.5"
+        );
+        s.eval::<()>("SetEuropeanNumbers(nil)").unwrap();
+        assert_eq!(crate::strings::decimal(s.lua()), '.');
+        s.eval::<()>("SetEuropeanNumbers(true)").unwrap();
+        assert_eq!(crate::strings::decimal(s.lua()), ',');
+        s.eval::<()>("SetEuropeanNumbers(0)").unwrap();
+        assert_eq!(crate::strings::decimal(s.lua()), '.');
     }
 
     #[test]

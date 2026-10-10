@@ -93,7 +93,25 @@ impl Chain {
                 Archive::open(path).with_context(|| format!("opening MPQ {}", path.display()))?,
             );
         }
-        Ok(Self { archives })
+        let chain = Self { archives };
+        chain.note_locale();
+        Ok(chain)
+    }
+
+    /// iNilla: which language this install's text is in, read once off `ChrRaces.dbc`'s race names
+    /// the way vmangos tells it (`World::DetectDBCLang`): the one locale column that is filled.
+    fn note_locale(&self) {
+        if DATA_LOCALE.get().is_some() {
+            return;
+        }
+        let Some(archive) = self.resolve(CHR_RACES) else {
+            return;
+        };
+        let Ok(bytes) = archive.read_file(CHR_RACES) else {
+            return;
+        };
+        let index = benilla_dbc::localize::data_locale(&bytes).unwrap_or(0);
+        let _ = DATA_LOCALE.set(index);
     }
 
     /// The highest-priority archive with an entry for `name`, a delete marker included, as a
@@ -116,9 +134,18 @@ impl Chain {
     /// Read a file by internal path (`/` or `\`) from its winning archive.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         let archive = self.archive_for(name)?;
-        archive
+        let bytes = archive
             .read_file(name)
-            .with_context(|| format!("reading {name} from {}", archive.path().display()))
+            .with_context(|| format!("reading {name} from {}", archive.path().display()))?;
+        // iNilla: a localized client's DBC text, moved into the columns every reader names.
+        // English, the language they were written for, is never touched.
+        let loc = DATA_LOCALE.get().copied().unwrap_or(0);
+        if loc != 0 && name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".dbc") {
+            if let Some(localized) = benilla_dbc::localize::localize(&bytes, loc) {
+                return Ok(localized);
+            }
+        }
+        Ok(bytes)
     }
 
     /// The archive `name` reads from, as a cheap handle: a caller holding the chain behind a lock
@@ -172,6 +199,23 @@ impl Chain {
         }
         Ok(out)
     }
+}
+
+/// iNilla: the file the install's language is read from.
+const CHR_RACES: &str = r"DBFilesClient\ChrRaces.dbc";
+
+/// iNilla: the index into [`benilla_dbc::localize::LOCALES`] of the first opened install's text.
+static DATA_LOCALE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// iNilla: the language of the game data this process opened (`enUS`, `deDE`, …), once a chain has
+/// been opened; `None` before.
+pub fn data_locale() -> Option<&'static str> {
+    DATA_LOCALE.get().map(|&i| {
+        benilla_dbc::localize::LOCALES
+            .get(i)
+            .copied()
+            .unwrap_or("enUS")
+    })
 }
 
 #[cfg(test)]

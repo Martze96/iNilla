@@ -276,8 +276,28 @@ pub fn plural(
     get(token).filter(|s| !s.is_empty())
 }
 
+/// iNilla: the separator the engine writes a real with — `,` once the interface has switched
+/// `SetEuropeanNumbers` on, as the German client's `Localization.lua` does at `VARIABLES_LOADED`
+/// ("Tempo 2,60" in its item tooltips), else `.`.
+pub fn decimal(lua: &mlua::Lua) -> char {
+    let european = lua
+        .app_data_ref::<crate::script::Model>()
+        .is_some_and(|m| m.european_numbers);
+    if european {
+        ','
+    } else {
+        '.'
+    }
+}
+
 /// Fill a reference template, by the rules in the module doc.
 pub fn fill(template: &str, args: &[Arg<'_>]) -> String {
+    fill_with(template, args, '.')
+}
+
+/// iNilla: [`fill`], with the `%f`/`%g` reals written with `decimal` as their separator (see
+/// [`decimal`]).
+pub fn fill_with(template: &str, args: &[Arg<'_>], decimal: char) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0;
@@ -309,8 +329,18 @@ pub fn fill(template: &str, args: &[Arg<'_>]) -> String {
                 match spec.conv {
                     's' | 'c' => a.as_s(&mut out),
                     'd' => a.as_d(&mut out),
-                    'f' => a.as_f(spec.precision, &mut out),
-                    _ => a.as_g(spec.precision, &mut out),
+                    conv => {
+                        let start = out.len();
+                        if conv == 'f' {
+                            a.as_f(spec.precision, &mut out);
+                        } else {
+                            a.as_g(spec.precision, &mut out);
+                        }
+                        if decimal != '.' && !matches!(a, Arg::S(_)) {
+                            let number = out.split_off(start);
+                            out.extend(number.chars().map(|c| if c == '.' { decimal } else { c }));
+                        }
+                    }
                 }
                 if spec.positional.is_none() {
                     next += 1;
@@ -473,6 +503,27 @@ mod tests {
         assert_eq!(fill("%f", &[Arg::F(1.5)]), "1.500000", "C's default is 6");
         assert_eq!(fill("Adds %g damage", &[Arg::F(7.0)]), "Adds 7 damage");
         assert_eq!(fill("Adds %g damage", &[Arg::F(7.5)]), "Adds 7.5 damage");
+    }
+
+    /// iNilla: `SetEuropeanNumbers` on writes the reals with a comma — and only the reals: a
+    /// string hole keeps its dots.
+    #[test]
+    fn european_numbers_write_the_reals_with_a_comma() {
+        let eu = |t: &str, args: &[Arg<'_>]| fill_with(t, args, ',');
+        assert_eq!(
+            eu("(%.1f Schaden pro Sekunde)", &[Arg::F(24.428_571)]),
+            "(24,4 Schaden pro Sekunde)"
+        );
+        assert_eq!(
+            eu("%.3g Min. Abklingzeit", &[Arg::F(100.0 / 60.0)]),
+            "1,67 Min. Abklingzeit"
+        );
+        assert_eq!(eu("%.3g", &[Arg::F(123_456.0)]), "1,23e+05");
+        assert_eq!(
+            eu("%s: %.1f", &[Arg::S("v1.12"), Arg::F(2.5)]),
+            "v1.12: 2,5"
+        );
+        assert_eq!(eu("%d.", &[Arg::D(3)]), "3.");
     }
 
     #[test]

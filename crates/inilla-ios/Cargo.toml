@@ -1,0 +1,25 @@
+[package]
+name = "inilla-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iNilla: the iOS app entry — a static library exporting `inilla_main`, which `ios/main.c` calls; build.rs stamps the git build id like the `benilla` shim"
+
+[lints]
+workspace = true
+
+[lib]
+# `staticlib` is what the iOS link consumes (`ios/package-ipa.sh`); building it needs no linker,
+# which is why the whole Rust build can run on Linux. `rlib` keeps `cargo check`/`test` working.
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+# The developer build: benilla's instruments (debug panel, perf HUD, inspector) compiled in.
+dev = ["benilla-app/dev"]
+
+[dependencies]
+benilla-app = { path = "../benilla-app", default-features = false }
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }

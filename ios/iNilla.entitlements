@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- A desktop-class renderer and ~5 GB of game archives: ask iOS for the larger memory
+	     budget. Free-account signers (SideStore/AltStore) drop entitlements the account cannot
+	     have; the app runs either way. -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<!-- Debuggable, like every development-signed app (SideStore re-signs with its own). -->
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>

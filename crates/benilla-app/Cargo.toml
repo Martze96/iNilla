@@ -12,19 +12,30 @@ workspace = true
 # `dev` compiles in the instruments; the player build (`scripts/gates.sh`) has no defaults.
 default = ["dev"]
 # The asset, format and world crates default `dev` on, so they come in without it, forwarded here.
-dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui"]
+# iNilla: `bevy_egui` is not optional here (the HUD draws on it in player builds), so `dev` does not
+# name `dep:bevy_egui`.
+dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev"]
 tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]
 anyhow.workspace = true
-# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x.
-arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
+# iNilla (the iOS build): the engine-free logic (touch/controller mapping, profiles, data) and the
+# OS glue (UIKit, GameController, Keychain) the `inilla` module wires into the app.
+inilla-core = { path = "../inilla-core" }
+inilla-platform = { path = "../inilla-platform" }
+# iNilla's game-data download (`inilla::data`): blocking HTTP on a worker thread, TLS through
+# rustls + webpki roots (pure Rust apart from ring, so the iOS build still needs no SDK).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# iNilla's remote console speaks JSON (`inilla::console`); already in the tree.
+serde_json = "1"
 bevy.workspace = true
 wgpu.workspace = true
-bevy_egui = { version = "0.39", optional = true }
+# iNilla: not optional — iNilla's HUD and screens draw on the same egui lane in player builds
+# (`inilla::setup_egui` adds the plugin when the dev panel has not).
+bevy_egui = "0.39"
 bytemuck = { version = "1", features = ["derive"] }
 # `f16` decode for the `WOW_BOOTH_DUMP` dump of the `Rgba16Float` booth targets.
 half = "2"
@@ -68,8 +79,9 @@ mint = "0.5"
 rand = "0.8"
 
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
-# which GNOME does not implement.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+# which GNOME does not implement. iNilla: iOS is `unix` and not macOS, but it has neither Wayland
+# nor X11 — its pasteboard is UIPasteboard through `inilla-platform`.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))'.dependencies]
 raw-window-handle = "0.6"
 smithay-clipboard = "0.7"
 
@@ -91,6 +103,17 @@ objc2-app-kit = { version = "0.2", features = [
     "NSEvent",
 ] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
+
+# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. iNilla: not
+# on iOS, where arboard has no backend (it would build its X11 one) — `inilla-platform::pasteboard` is.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+arboard = "3"
+
+# iNilla: the game's UIView behind Bevy's raw window handle (the safe-area insets), and winit's
+# iOS window extension (the landscape lock). The versions already in the tree via Bevy.
+[target.'cfg(target_os = "ios")'.dependencies]
+raw-window-handle = "0.6"
+winit = { version = "0.30", default-features = false }
 
 # The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
 # lost default device and drops the IO-cycle timestamp.

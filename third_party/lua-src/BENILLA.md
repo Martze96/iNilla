@@ -63,6 +63,12 @@ string-stripping scan of the 1.12 FrameXML (177 files), GlueXML, Blizzard's own 
 corpus finds zero sites of all three. No chunk of benilla's own Lua may use a construct the client's
 parser rejects.
 
+**iNilla (the iOS fork of benilla) adds one platform hunk**, inert on every other target:
+
+| file | hunk | why |
+|---|---|---|
+| `loslib.c` | `os_execute` answers "not supported" when compiling for iOS (`__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__` / `__ENVIRONMENT_IOS__`), as it already did for WASI | the iOS SDK marks `system()` unavailable, so the file does not compile for iOS at all; 1.12 never exposes `os` to FrameXML, so nothing observable changes |
+
 To verify the Lua sources against upstream at any time:
 
 ```sh

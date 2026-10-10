@@ -36,6 +36,21 @@ const fn client_os() -> u32 {
 }
 const LOCALE_EN_US: u32 = 0x656e_5553; // "enUS"
 
+/// iNilla: the locale the logon challenge reports — the game data's language. realmd stores it on
+/// the account and mangosd picks the text it sends by it (quests, items, creatures from its
+/// `locales_*` tables), so a German install gets the server's German too.
+static CLIENT_LOCALE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(LOCALE_EN_US);
+
+/// iNilla: report `locale` (`deDE`, four ASCII letters) at the next logon. Anything else is ignored.
+pub fn set_client_locale(locale: &str) {
+    if let Ok(b) = <[u8; 4]>::try_from(locale.as_bytes()) {
+        if b.iter().all(u8::is_ascii_alphabetic) {
+            CLIENT_LOCALE.store(u32::from_be_bytes(b), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// A non-success auth result byte, typed so the app can map it to its `AUTH_*` glue string; it
 /// survives [`crate::logon`]'s `anyhow` contexts via `downcast_ref`. vmangos answers an unknown
 /// account and a wrong password alike with 0x04 (`WOW_FAIL_UNKNOWN_ACCOUNT`, `AuthCodes.h`).
@@ -79,7 +94,11 @@ pub fn write_logon_challenge(
     body.extend_from_slice(&build.to_le_bytes());
     body.extend_from_slice(&PLATFORM_X86.to_le_bytes());
     body.extend_from_slice(&client_os().to_le_bytes());
-    body.extend_from_slice(&LOCALE_EN_US.to_le_bytes());
+    body.extend_from_slice(
+        &CLIENT_LOCALE
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes(),
+    );
     body.extend_from_slice(&0u32.to_le_bytes()); // utc_timezone_offset
     body.extend_from_slice(&Ipv4Addr::LOCALHOST.octets()); // client_ip_address (network order)
     body.push(account_name.len() as u8);

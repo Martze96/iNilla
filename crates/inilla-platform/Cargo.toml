@@ -1,0 +1,27 @@
+[package]
+name = "inilla-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iNilla: the iOS host glue (UIKit, GameController, Keychain, AVAudioSession) behind plain Rust calls, with desktop fallbacks"
+
+[lints]
+workspace = true
+
+[dependencies]
+inilla-core = { path = "../inilla-core" }
+libc = "0.2"
+crossbeam-channel = "0.5"
+
+# The objc2 0.6 family: the one cpal's CoreAudio backend already brings, so the iOS graph carries
+# no new copy of the runtime crate. Everything below is reached through `msg_send!` on classes
+# looked up by name, which keeps the framework crates (and their compile time) out of the graph.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSArray", "NSValue", "NSError", "NSObject", "NSProcessInfo", "NSDictionary", "NSEnumerator"] }
+block2 = "0.6"
+security-framework = { version = "3", default-features = false }
+
+# The desktop stand-in for the keychain (`keychain.rs`) is a TOML file.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+toml = "0.8"

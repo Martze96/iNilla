@@ -19,6 +19,7 @@ trait Pasteboard {
     fn name(&self) -> &'static str;
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Pasteboard for arboard::Clipboard {
     fn read_text(&mut self) -> Result<Option<String>, String> {
         // `ContentNotAvailable` is arboard's empty clipboard, not a failure.
@@ -46,7 +47,47 @@ impl Pasteboard for arboard::Clipboard {
 }
 
 /// The Wayland half; the gate must match `smithay-clipboard`'s target in `Cargo.toml`.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+/// iNilla: the iOS half — `UIPasteboard.generalPasteboard`, through `inilla-platform`. Store
+/// backed like NSPasteboard, so holding the handle is only for symmetry with the other backends.
+#[cfg(target_os = "ios")]
+struct UiPasteboard;
+
+#[cfg(target_os = "ios")]
+impl Pasteboard for UiPasteboard {
+    fn read_text(&mut self) -> Result<Option<String>, String> {
+        Ok(inilla_platform::pasteboard::get())
+    }
+
+    fn write_text(&mut self, text: &str) -> Result<(), String> {
+        if inilla_platform::pasteboard::set(text) {
+            Ok(())
+        } else {
+            Err("UIPasteboard is unavailable".into())
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "UIPasteboard"
+    }
+}
+
+/// The platform's own pasteboard, where there is no Wayland one.
+#[cfg(not(target_os = "ios"))]
+fn open_default() -> Result<Box<dyn Pasteboard>, String> {
+    arboard::Clipboard::new()
+        .map(|c| Box::new(c) as Box<dyn Pasteboard>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "ios")]
+fn open_default() -> Result<Box<dyn Pasteboard>, String> {
+    Ok(Box::new(UiPasteboard))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+))]
 mod wl {
     use super::Pasteboard;
 
@@ -77,7 +118,10 @@ mod wl {
 /// The primary window's `wl_display`, or `None` off Wayland, which selects [`arboard`]. Read from
 /// the window handle, not `WAYLAND_DISPLAY`, because `smithay-clipboard` needs winit's own
 /// connection.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+))]
 pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
     match handle?.get_display_handle() {
         raw_window_handle::RawDisplayHandle::Wayland(wl) => Some(wl.display.as_ptr()),
@@ -86,7 +130,10 @@ pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut 
 }
 
 /// Off the Wayland-capable platforms the backend is always [`arboard`].
-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+)))]
 pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
     None
 }
@@ -96,13 +143,19 @@ pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut
 /// # Safety
 /// `display` must be a live `wl_display` that outlives the returned backend; the window handle's
 /// `Arc` keeps the connection alive until app teardown drops the backend.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+))]
 fn open_wayland(display: *mut c_void) -> Box<dyn Pasteboard> {
     // SAFETY: `display` is winit's own live `wl_display`, per the doc comment.
     Box::new(unsafe { smithay_clipboard::Clipboard::new(display) })
 }
 
-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+)))]
 fn open_wayland(_display: *mut c_void) -> Box<dyn Pasteboard> {
     unreachable!("wayland_display() only yields Some on Wayland-capable platforms")
 }
@@ -139,8 +192,8 @@ impl HostClipboard {
         self.opened = true;
         self.backend = match wl_display {
             Some(display) => Some(open_wayland(display)),
-            None => match arboard::Clipboard::new() {
-                Ok(clipboard) => Some(Box::new(clipboard)),
+            None => match open_default() {
+                Ok(clipboard) => Some(clipboard),
                 Err(e) => {
                     warn!("clipboard: unavailable — {e}{}", session_note());
                     None

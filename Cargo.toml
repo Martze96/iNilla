@@ -71,3 +71,12 @@ incremental = true
 # Not for speed: under `incremental`, thin-local LTO leaves promoted `anon.*.llvm.*` symbols
 # unresolved and the link fails intermittently (rustc #86049).
 lto = "off"
+
+# iNilla: the iOS app. Release optimisation, built as a static library on Linux (no linker
+# involved) and linked on macOS (`ios/package-ipa.sh`). No LTO — the final link is Apple's and
+# sees an archive — and symbols stay in, so a crash report's backtrace names functions.
+[profile.ios]
+inherits = "release"
+debug = false
+strip = false
+incremental = false

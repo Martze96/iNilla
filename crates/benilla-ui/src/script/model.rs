@@ -965,6 +965,9 @@ pub(crate) struct Model {
     pub(crate) framerate: f64,
     /// `(shift, ctrl, alt)` for `Is*KeyDown`, pushed before the frame's mouse events.
     pub(crate) modifiers: (bool, bool, bool),
+    /// iNilla: `SetEuropeanNumbers` — the engine writes its reals with a comma
+    /// ([`crate::strings::decimal`]).
+    pub(crate) european_numbers: bool,
 }
 
 impl Model {
@@ -1422,6 +1425,7 @@ impl Model {
             summon_confirms: 0,
             framerate: 0.0,
             modifiers: (false, false, false),
+            european_numbers: false,
             money: 0,
             net_latency_ms: 0,
             player_xp: 0,

@@ -36,11 +36,14 @@ static int os_pushresult (lua_State *L, int i, const char *filename) {
 
 
 static int os_execute (lua_State *L) {
-#if !defined(__wasi__)
+/* iNilla: iOS has no system() (the SDK marks it unavailable); 1.12 never exposes `os` to
+   FrameXML anyway, so the iOS build answers like WASI. */
+#if !defined(__wasi__) && !defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) && !defined(__ENVIRONMENT_IOS__)
   lua_pushinteger(L, system(luaL_optstring(L, 1, NULL)));
   return 1;
 #else
-  luaL_error(L, "not supported on WASI");
+  luaL_error(L, "not supported on this platform");
+  return 0;
 #endif
 }
 

@@ -98,11 +98,15 @@ pub(crate) struct BindingsState {
 
 /// The physical input a latch waits on: a keyboard key by its code, not its name, so its release
 /// ends the latch whatever the layout names it by then.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Held {
+/// The physical input a latch waits on: a keyboard key by its code, not its name, so its release
+/// ends the latch whatever the layout names it by then.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Held {
     Key(KeyCode),
     Mouse(MouseButton),
     Wheel,
+    /// iNilla: a synthetic hold by its command name.
+    Synth(String),
 }
 
 impl BindingsState {
@@ -136,6 +140,61 @@ impl BindingsState {
         self.steering()
             && (self.just_pressed(Input::TurnOrAction)
                 || self.just_pressed(Input::CameraOrSelectOrMove))
+    }
+
+    // ── iNilla: the synthetic seam ── commands asserted by something that is not a key: the
+    // touch HUD, a controller, the remote console (`crate::inilla::synth`). Each is an ordinary
+    // latch/fire under [`Held::Synth`], so every consumer reads it through the same accessors
+    // above and cannot tell it from a key. The typing edge drops a synthetic Held like any other;
+    // the stuck-latch sweep never touches one (there is no physical key to read up); a VM swap
+    // clears it with the rest, and the owner re-asserts next frame.
+
+    /// Assert a held command for this frame. Idempotent: a command already latched
+    /// (synthetically or by a key) gains nothing.
+    pub(crate) fn synth_hold(
+        &mut self,
+        script: &mut Option<NonSendMut<UiScript>>,
+        command: &str,
+    ) {
+        let key = Held::Synth(command.to_owned());
+        if self.latched.iter().any(|(k, _)| *k == key) {
+            return;
+        }
+        press(self, script, command, key);
+    }
+
+    /// Drop this command's synthetic latch, if any.
+    pub(crate) fn synth_release(
+        &mut self,
+        script: &mut Option<NonSendMut<UiScript>>,
+        command: &str,
+    ) {
+        release(self, script, Held::Synth(command.to_owned()));
+    }
+
+    /// Drop every synthetic latch — world exit, the typing edge, the owner letting go.
+    pub(crate) fn synth_release_all(&mut self, script: &mut Option<NonSendMut<UiScript>>) {
+        let synths: Vec<Held> = self
+            .latched
+            .iter()
+            .filter_map(|(k, _)| match k {
+                Held::Synth(_) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        for k in synths {
+            release(self, script, k);
+        }
+    }
+
+    /// Fire a command once this frame with an analog `amount` (the wheel's notch
+    /// magnitude for the zoom; `1.0` is the reference's key step).
+    pub(crate) fn synth_fire(&mut self, input: Input, amount: f32) {
+        self.fired.push(input);
+        if !self.pressed(input) {
+            self.just.push(input);
+        }
+        self.amounts.push((input, amount));
     }
 }
 
@@ -394,7 +453,7 @@ fn latch_and_dispatch(
     // reference's `0x424790` wipe, so a key held across an alt-tab re-latches on its next repeat.
     state
         .down
-        .retain(|&kc| physically_down(Held::Key(kc), &keys, &buttons));
+        .retain(|&kc| physically_down(&Held::Key(kc), &keys, &buttons));
 
     // ── Keyboard ── press edges run their command, gated on ownership and the capture arm;
     // release edges unlatch and run the `runOnUp` up-half.
@@ -514,8 +573,8 @@ fn latch_and_dispatch(
     // here.
     let mut stuck: Vec<Held> = Vec::new();
     for (k, _) in &state.latched {
-        if !physically_down(*k, &keys, &buttons) && !stuck.contains(k) {
-            stuck.push(*k);
+        if !physically_down(k, &keys, &buttons) && !stuck.contains(k) {
+            stuck.push(k.clone());
         }
     }
     for k in stuck {
@@ -534,7 +593,7 @@ fn latch_and_dispatch(
 /// pressed-key reconcile must agree, so both ask here. `ENTER` is down while either physical
 /// key is, since [`chord::normalize_key`] folds `NUMPADENTER` into it.
 fn physically_down(
-    key: Held,
+    key: &Held,
     keys: &ButtonInput<KeyCode>,
     buttons: &ButtonInput<MouseButton>,
 ) -> bool {
@@ -542,16 +601,18 @@ fn physically_down(
         Held::Key(KeyCode::Enter) => {
             keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter)
         }
-        Held::Key(kc) => keys.pressed(kc),
-        Held::Mouse(b) => buttons.pressed(b),
+        Held::Key(kc) => keys.pressed(*kc),
+        Held::Mouse(b) => buttons.pressed(*b),
         // A notch is a press and a release in one frame; it is never "held".
         Held::Wheel => false,
+        // iNilla: synthetic holds are released by their owner, not by physical input.
+        Held::Synth(_) => true,
     }
 }
 
 /// One matching press: the command's body with `keystate = "down"`, and a latch on its input so
 /// the release can run the up-half.
-fn press(
+pub(crate) fn press(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
     command: &str,
@@ -567,7 +628,7 @@ fn press(
 
 /// A base key's release: drop its latch and run the command's `runOnUp` up-half, even while
 /// typing (the reference completes a pressed binding's release regardless of focus).
-fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>, key: Held) {
+pub(crate) fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>, key: Held) {
     let mut i = 0;
     while i < state.latched.len() {
         if state.latched[i].0 == key {

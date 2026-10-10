@@ -63,6 +63,8 @@ mod go_templates;
 #[cfg(feature = "dev")]
 mod hover_log;
 mod items;
+// iNilla: the iOS client around the game (touch, controllers, launcher, data, remote console).
+mod inilla;
 mod loading_screen;
 mod local_state;
 mod login;
@@ -197,6 +199,10 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla-worldview` shim.
 pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
+/// iNilla's pre-app boot: lay out the iOS container (state folder, game data, session log, a
+/// Documents import) before [`run`] builds the app. A no-op off iOS unless `$INILLA_CONTAINER`
+/// asks the desktop build to rehearse it.
+pub use inilla::boot::prepare as inilla_boot;
 // A crate on top of benilla reads objects and interacts through these, with no protocol dependency.
 pub use benilla_protocol::{messages::ObjectType, ObjectFields};
 pub use net::Objects;
@@ -415,7 +421,10 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     .add_plugins(game_plugins::GamePlugins {
         connect: !capturing,
         start: run_mode::start_state(),
-    });
+    })
+    // iNilla: touch controls, controllers, the launcher and the rest of the iOS client — after
+    // the game, whose resources it reads, and after the instruments, whose egui lane it shares.
+    .add_plugins(inilla::InillaPlugin);
 
     // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
     benilla_assets::register_asset_loaders(&mut app);

@@ -9,7 +9,7 @@ use mlua::{Lua, Table};
 
 use crate::script::tooltip::{append_line, duration_text, plural_template};
 use crate::script::{ItemTemplateView, Model};
-use crate::strings::{fill, Arg};
+use crate::strings::{fill, fill_with, Arg};
 
 use super::names::*;
 
@@ -109,9 +109,11 @@ pub(super) fn render_view(
     let add2 =
         |l: (String, [f32; 4]), r: (String, [f32; 4])| append_line(lua, this, l, Some(r), false);
     let get = |key: &str| crate::strings::global(lua, key);
+    // iNilla: the reals below take the interface's decimal separator (`SetEuropeanNumbers`).
+    let dec = crate::strings::decimal(lua);
     let keyed = |key: &str, args: &[Arg<'_>], color: [f32; 4], wrap: bool| -> mlua::Result<()> {
         match get(key) {
-            Some(t) => append_line(lua, this, (fill(&t, args), color), None, wrap),
+            Some(t) => append_line(lua, this, (fill_with(&t, args, dec), color), None, wrap),
             None => Ok(()),
         }
     };
@@ -300,11 +302,11 @@ pub(super) fn render_view(
             let speed = (first && v.class == 2).then(|| {
                 let word = get("SPEED").unwrap_or_default();
                 let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
-                format!("{word} {secs:.2}")
+                fill_with("%s %.2f", &[Arg::S(&word), Arg::F(secs)], dec)
             });
             // White in both cells, even for an unusable item (`0x52c4fa..0x52c516`).
             if let Some(t) = get(&key) {
-                let line = (fill(&t, &args), WHITE);
+                let line = (fill_with(&t, &args, dec), WHITE);
                 match speed {
                     Some(s) => add2(line, (s, WHITE))?,
                     None => add(line)?,

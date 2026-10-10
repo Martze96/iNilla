@@ -233,10 +233,12 @@ fn spawn_egui_camera(mut commands: Commands) {
 fn gate_egui_lane(
     debug: Res<DebugState>,
     inspect: Res<crate::ui_script::InspectMode>,
+    inilla: Option<Res<crate::inilla::EguiWanted>>,
     mut cams: Query<(&mut Camera, &mut EguiContextSettings), With<PrimaryEguiContext>>,
     mut over: ResMut<EguiPointerOver>,
 ) {
-    let open = debug.open || inspect.enabled;
+    // iNilla's HUD and screens share this lane: it stays up while they need it.
+    let open = debug.open || inspect.enabled || inilla.is_some_and(|k| k.0);
     for (mut cam, mut settings) in &mut cams {
         if cam.is_active != open {
             cam.is_active = open;

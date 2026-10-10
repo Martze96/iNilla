@@ -445,6 +445,9 @@ fn run(
             .map(|r| r.address.clone())
             // The fallback drops any auth `:port` from the realmlist for the world port.
             .unwrap_or_else(|| format!("{}:{}", host_port(&req.host, WORLD_PORT).0, WORLD_PORT));
+        // iNilla: the active server profile may name the host to dial instead (the realm list's
+        // address is often only right from one side of a NAT).
+        let world_addr = crate::inilla::world_address(world_addr);
 
         stage(LoginStage::Handshaking);
         // For the queue dialog to name; the roster that carries it comes after the queue.

@@ -240,7 +240,8 @@ function getglobal(name) return _G[name] end
 function setglobal(name, value) _G[name] = value end
 
 -- ── GetLocale: benilla ships/reads enUS data only (the 5875 MPQs + Spell.dbc enUS column) ──────
-function GetLocale() return "enUS" end
+-- iNilla: the client's own `GetLocale` (the game data's language) wins when it is registered.
+if not GetLocale then function GetLocale() return "enUS" end end
 
 -- ── NOT here: wipe / tostringall / strsplit / strjoin / strconcat / strtrim ────────────────────
 -- Six 2.0+ names benilla used to define. 1.12 has none of them (absent from
