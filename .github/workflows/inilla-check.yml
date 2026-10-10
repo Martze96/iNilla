@@ -1,0 +1,49 @@
+# iNilla's gate: fast, Linux-only (1× Actions minutes), on every push and PR.
+#
+# - the engine-free crates' tests (touch/controller mapping, profiles, data, HTTP) — seconds;
+# - the desktop build of the app type-checks (so the HUD, launcher and console compile);
+# - the iOS build type-checks, cross-compiled with the open-source Darwin headers — no Mac.
+#
+# The .ipa itself is inilla-ipa.yml (manual / tags), because it spends macOS minutes.
+name: inilla-check
+
+on:
+  push:
+    paths-ignore: ["**.md", "docs/**", "ios/icons/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: inilla-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup target add aarch64-apple-ios
+      - name: System packages
+        run: sudo apt-get update -q && sudo apt-get install -yq libasound2-dev libudev-dev clang lld llvm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: inilla-check
+          cache-targets: true
+      - name: Format (iNilla crates)
+        run: cargo fmt -p inilla-core -p inilla-platform -p inilla-ios -- --check
+      - name: Unit tests (engine-free)
+        run: cargo test -p inilla-core -p inilla-platform
+      - name: Desktop build type-checks
+        run: cargo check -p benilla-app --no-default-features
+      - name: iOS build type-checks (Linux cross, no SDK)
+        run: |
+          source ios/toolchain/linux-env.sh
+          cargo check --target aarch64-apple-ios -p inilla-ios

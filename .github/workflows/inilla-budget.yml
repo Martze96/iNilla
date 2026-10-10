@@ -1,0 +1,24 @@
+# iNilla: a weekly look at the private repository's Actions allowance. It FAILS at 60 % so that
+# GitHub's failed-run email says it is time to make the repository public (or slow down on .ipa
+# builds). Needs the BILLING_TOKEN secret; without it the run is a no-op notice.
+name: inilla-budget
+
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Actions minutes this month
+        env:
+          GH_TOKEN: ${{ secrets.BILLING_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          QUOTA: ${{ vars.INILLA_ACTIONS_QUOTA || '2000' }}
+          WARN_AT: ${{ vars.INILLA_BUDGET_WARN || '60' }}
+          FAIL_AT: ${{ vars.INILLA_BUDGET_WARN || '60' }}
+        run: ios/tools/actions-budget.sh

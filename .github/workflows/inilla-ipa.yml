@@ -1,0 +1,175 @@
+# iNilla.ipa — built where each step is cheapest.
+#
+#   staticlib  (Linux, 1× minutes)   the whole Rust build → libinilla_ios.a   (~20–40 min cold, cached after)
+#   package    (macOS, 10× minutes)  link + bundle + sign + zip → iNilla.ipa   (~3 min)
+#
+# Run it from the Actions tab (Run workflow) for a test build. A release is either an annotated tag
+# `v*` pushed from a checkout, or Run workflow with `release` and `notes` filled in (GitHub then
+# creates the tag). The .ipa is ad-hoc signed: SideStore, AltStore and LiveContainer re-sign it.
+name: inilla-ipa
+
+on:
+  workflow_dispatch:
+    inputs:
+      dev:
+        description: "Compile benilla's dev instruments in (debug panel, perf HUD)"
+        type: boolean
+        default: false
+      release:
+        description: "Publish as this release tag, e.g. v0.2.0 (empty: a test build)"
+        type: string
+        default: ""
+      notes:
+        description: "Release text in Markdown; the first line is the title"
+        type: string
+        default: ""
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: inilla-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+jobs:
+  budget:
+    # The repository is private: GitHub bills macOS minutes at 10×. This reports the month's use
+    # against the included quota (warning at 60 %) when a BILLING_TOKEN secret is set — see
+    # docs/IOS-BUILD.md. It never blocks the build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Actions minutes this month
+        env:
+          GH_TOKEN: ${{ secrets.BILLING_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          QUOTA: ${{ vars.INILLA_ACTIONS_QUOTA || '2000' }}
+          WARN_AT: ${{ vars.INILLA_BUDGET_WARN || '60' }}
+        run: ios/tools/actions-budget.sh
+
+  staticlib:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-ios
+      - name: System packages
+        run: sudo apt-get update -q && sudo apt-get install -yq clang lld llvm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: inilla-ios-${{ inputs.dev && 'dev' || 'player' }}
+          cache-targets: true
+          cache-on-failure: true
+      - name: Build libinilla_ios.a
+        env:
+          INILLA_FEATURES: ${{ inputs.dev && 'dev' || '' }}
+        run: ios/build-staticlib.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inilla-ios-staticlib
+          path: |
+            target/inilla-ios-out/libinilla_ios.a
+            target/inilla-ios-out/lib/
+            target/inilla-ios-out/native-libs.txt
+            target/inilla-ios-out/commit.txt
+          # Only the package job reads it; artifacts count against the plan's Actions storage.
+          retention-days: 1
+          compression-level: 6
+
+  package:
+    needs: staticlib
+    runs-on: macos-15
+    timeout-minutes: 30
+    # The tag release creates a GitHub Release; a new repository's token is read-only by default.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: inilla-ios-staticlib
+          path: target/inilla-ios-out
+      - name: Package iNilla.ipa
+        env:
+          INILLA_BUILD: ${{ github.run_number }}
+          INILLA_VERSION: ${{ (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || inputs.release || '0.1.0' }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          export INILLA_VERSION="${INILLA_VERSION#v}"
+          ios/package-ipa.sh
+          SHORT=$(cat target/inilla-ios-out/commit.txt)
+          if [[ "$GITHUB_REF" == refs/tags/v* || -n "$RELEASE" ]]; then NAME="iNilla-${INILLA_VERSION}.ipa"; else NAME="iNilla-${SHORT}.ipa"; fi
+          mv target/inilla-ios-out/iNilla.ipa "target/inilla-ios-out/${NAME}"
+          IPA="target/inilla-ios-out/${NAME}"
+          echo "IPA=${IPA}" >> "$GITHUB_ENV"
+          # The build facts, for the run summary and the release notes.
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          XCODE=$(xcodebuild -version | head -n 1)
+          {
+            echo "## Build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${SHORT}\` (CI build ${INILLA_BUILD}) |"
+            echo "| version | ${INILLA_VERSION} (${INILLA_BUILD}) |"
+            echo "| iOS | 17.0 or later, arm64 — linked against the iPhoneOS ${SDK} SDK (${XCODE}) |"
+            echo "| size | $(du -h "${IPA}" | cut -f1) |"
+            echo "| SHA-256 | \`$(shasum -a 256 "${IPA}" | cut -d' ' -f1)\` |"
+            echo "| signing | ad-hoc — SideStore, AltStore and LiveContainer re-sign it |"
+            echo ""
+            echo "## Install"
+            echo ""
+            echo "1. On the iPhone, download \`${NAME}\` (Safari, signed in to GitHub). From a run's artifacts it arrives as a zip: tap it in the Files app."
+            echo "2. **SideStore** → My Apps → ＋ → the \`.ipa\`, or **LiveContainer** → ＋ → the \`.ipa\` (keep it a private app)."
+            echo "3. First launch asks for the game data: your own 1.12.1 \`Data\` folder, copied in or downloaded from your iNilla server's data host — see docs/DATA.md."
+            echo ""
+            echo "Crash or black screen: Files → iNilla → benilla-config → Diagnostics holds the session log (docs/DEBUGGING.md)."
+          } > target/inilla-ios-out/build-notes.md
+          cat target/inilla-ios-out/build-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iNilla-ipa
+          path: ${{ env.IPA }}
+          retention-days: 14
+          compression-level: 0
+      - name: Release
+        # The release text is the annotated tag's message, or the `notes` input (first line the
+        # title); the build facts and install steps follow, then GitHub's generated changelog.
+        # Pre-release until a build is marked tested by hand.
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          NOTES_IN: ${{ inputs.notes }}
+        run: |
+          NOTES=target/inilla-ios-out/release-notes.md
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+            git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            SUBJECT=$(git tag -l --format='%(contents:subject)' "$TAG")
+            git tag -l --format='%(contents:body)' "$TAG" > "$NOTES"
+            WHERE=(--verify-tag)
+          else
+            TAG="$RELEASE"
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "release must look like v1.2.3, got: $TAG" >&2
+              exit 1
+            fi
+            SUBJECT=$(printf '%s\n' "$NOTES_IN" | head -n 1)
+            printf '%s\n' "$NOTES_IN" | tail -n +2 > "$NOTES"
+            WHERE=(--target "$GITHUB_SHA")
+          fi
+          { echo ""; cat target/inilla-ios-out/build-notes.md; } >> "$NOTES"
+          gh release create "$TAG" "$IPA" "${WHERE[@]}" --title "iNilla ${TAG}${SUBJECT:+ — $SUBJECT}" \
+            --notes-file "$NOTES" --generate-notes --prerelease
