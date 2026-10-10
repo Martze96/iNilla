@@ -162,6 +162,9 @@ jobs:
             WHERE=(--verify-tag)
           else
             TAG="$RELEASE"
+            if [[ "$TAG" =~ ^[0-9] ]]; then
+              TAG="v$TAG"
+            fi
             if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
               echo "release must look like v1.2.3, got: $TAG" >&2
               exit 1
