@@ -37,6 +37,17 @@ the unchanged game:
   <img src="docs/images/settings.jpg" width="49%" alt="In-game Settings & Overlays">
 </p>
 
+## Download & Install
+
+1. **Download the `.ipa`**: Grab the latest release package (`iNilla-*.ipa`) from [**Releases**](https://github.com/Martze96/iNilla/releases).
+2. **Sideload (iOS 17.0+)**:
+   - **SideStore / AltStore**: In SideStore/AltStore on your phone, go to **My Apps** → **＋** and select the `.ipa`. It will be signed with your Apple ID.
+   - **LiveContainer**: You can also run iNilla directly as a LiveContainer guest without consuming an app ID slot.
+3. **Game Data (One-Time Setup)**:
+   - On first launch, the app prompts for the 1.12.1 game files (the app contains no Blizzard files).
+   - **Easiest:** Download them over Wi-Fi from your [**iNilla server**](https://github.com/Martze96/iNilla-server) (automated, resumable, and SHA-256 verified).
+   - **Alternative:** Copy your existing `Data` folder directly into the app using Finder or the iOS Files app (see [docs/DATA.md](docs/DATA.md)).
+
 Everything is built on Linux except the final link, which is a few minutes on a macOS runner —
 see [docs/IOS-BUILD.md](docs/IOS-BUILD.md).
 
