@@ -3,28 +3,49 @@
 
 mod addon_argument_abi;
 mod addon_index_space;
+mod adopt;
+mod anchor_slots;
 mod anchors;
 mod backdrop;
 mod button;
+mod capture;
 mod channel;
+mod chat_bubble;
+mod clear_points;
+mod colour_args;
 mod common;
 mod cooldown;
 mod create_frame_template;
 mod cvar_bindings;
 mod dispatch_bench;
+mod drag_pin;
+mod drag_threshold;
+mod dying_target;
 mod end_to_end;
+mod engine_updates;
 mod events;
+mod flag_args;
 mod font_object;
 mod frame_api;
 mod generic_for;
+mod glue_surface;
 mod gm_ticket;
 mod handler_prof;
+mod hidden_defer;
 mod host_state;
+mod hover_publish;
+mod hover_walk;
+mod hyperlink;
 mod input;
+mod keep_rect;
 mod keyboard;
 mod layout_gate;
+mod layout_mode;
+mod layout_structure;
+mod line_spacing;
 mod measure;
 mod minimap;
+mod miss_tuples;
 mod model_clock;
 mod modelframe;
 mod movable;
@@ -32,12 +53,15 @@ mod name_targets;
 mod nameplate;
 mod numeric_shape_gate;
 mod object_model;
+mod one_or_nil_methods;
 mod reference_surface;
 mod region_map;
 mod regions;
 mod resize_bounds;
 mod scrollframe;
+mod set_font_args;
 mod setparent;
+mod shown_bit;
 mod simplehtml;
 mod size_changed;
 mod slider;
@@ -47,12 +71,16 @@ mod structure_queries;
 mod talent;
 mod taxi;
 mod texcoord_font;
+mod texture_art;
 mod tooltip;
 mod tooltip_item;
+mod tooltip_setter_flags;
 mod tooltip_spell;
 mod tooltip_unit;
 mod toplevel;
+mod update_walk;
 mod visibility;
+mod widget_args;
 mod widget_surface;
 mod worldframe;
 mod worldmap;
@@ -162,13 +190,13 @@ fn a_chosen_error_handler_hears_engine_caught_errors_and_none_leaves_the_host_ch
     s.set_screen_size(1024.0, 768.0);
     s.run(
         "local f = CreateFrame('Frame') \
-         f:RegisterEvent('ERROR_PROBE') \
+         f:RegisterEvent('PLAYER_ALIVE') \
          f:SetScript('OnEvent', function() error('boom from a handler') end)",
     )
     .unwrap();
 
     // With no handler set, as before FrameXML sets one, the dispatch adds nothing.
-    s.fire_event("ERROR_PROBE", vec![]);
+    s.fire_event("PLAYER_ALIVE", vec![]);
     s.dispatch_script_errors_to_handler();
     let errors = s.take_errors();
     assert_eq!(
@@ -180,7 +208,7 @@ fn a_chosen_error_handler_hears_engine_caught_errors_and_none_leaves_the_host_ch
     // A chosen handler gets the message, and the host channel still records it.
     s.run("caught = {} seterrorhandler(function(msg) table.insert(caught, msg) end)")
         .unwrap();
-    s.fire_event("ERROR_PROBE", vec![]);
+    s.fire_event("PLAYER_ALIVE", vec![]);
     s.dispatch_script_errors_to_handler();
     assert!(
         s.eval::<String>("return caught[1]")
@@ -221,6 +249,51 @@ fn a_widget_handler_error_reaches_the_chosen_error_handler() {
     assert!(caught.contains("slide boom"), "OnValueChanged: {caught}");
 }
 
+/// 1.12 calls the error handler with the one value the failed call raised (`0x703b40`: the
+/// handler pushed, inserted below the message, `lua_call` 1 argument): the bare Lua message, no
+/// `runtime error: ` word and no traceback, which only benilla's own log carries.
+#[test]
+fn the_error_handler_receives_the_bare_lua_message() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "caught = {} seterrorhandler(function(m) table.insert(caught, m) end) \
+         local f = CreateFrame('Frame') \
+         f:RegisterEvent('PLAYER_ALIVE') \
+         f:SetScript('OnEvent', function() this:NoSuchMethod() end) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() local t = nil; t.x = 1 end) \
+         b:Click() \
+         local c = CreateFrame('Button') \
+         c:SetScript('OnClick', function() SetPortraitTexture() end) \
+         c:Click()",
+    )
+    .unwrap();
+    s.fire_event("PLAYER_ALIVE", vec![]);
+    s.dispatch_script_errors_to_handler();
+    let caught: Vec<String> = s.eval("return caught").unwrap();
+    assert!(caught.len() >= 3, "{caught:?}");
+    for m in &caught {
+        assert!(
+            !m.contains("runtime error") && !m.contains("stack traceback") && !m.contains('\n'),
+            "bare message, one line: {m:?}"
+        );
+    }
+    for want in [
+        "attempt to call method `NoSuchMethod' (a nil value)",
+        ":1: attempt to index local `t' (a nil value)",
+    ] {
+        assert!(
+            caught
+                .iter()
+                .any(|m| m.starts_with("[string \"") && m.ends_with(want)),
+            "{want}: {caught:?}"
+        );
+    }
+    // The host log keeps the decorated text.
+    assert!(s.take_errors().iter().any(|e| e.contains("runtime error")));
+}
+
 /// `fire_global` carries `UPDATE_FACTION` from the faction-header verbs.
 #[test]
 fn a_self_unregistering_listener_does_not_rob_its_successor_on_the_internal_dispatch() {
@@ -245,11 +318,11 @@ fn an_error_handler_that_errors_does_not_recurse() {
     s.run(
         "seterrorhandler(function() error('the handler is broken too') end) \
          local f = CreateFrame('Frame') \
-         f:RegisterEvent('ERROR_PROBE') \
+         f:RegisterEvent('PLAYER_ALIVE') \
          f:SetScript('OnEvent', function() error('original fault') end)",
     )
     .unwrap();
-    s.fire_event("ERROR_PROBE", vec![]);
+    s.fire_event("PLAYER_ALIVE", vec![]);
     s.dispatch_script_errors_to_handler();
     let errors = s.take_errors();
     assert!(

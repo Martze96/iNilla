@@ -238,18 +238,7 @@ fn feed_death(
     let memo = feed.vm.get(&script);
     let prev = memo.last.filter(|&(g, ..)| g == guid);
     memo.last = Some((guid, dead, ghost));
-    match (prev, dead, ghost) {
-        (Some((_, false, false)) | None, true, false) => {
-            script.fire_event("PLAYER_DEAD", vec![]);
-        }
-        (Some((_, true, false)), d, g) if g || !d => {
-            script.fire_event("PLAYER_ALIVE", vec![]);
-        }
-        (Some((_, _, true)), false, false) => {
-            script.fire_event("PLAYER_UNGHOST", vec![]);
-        }
-        _ => {}
-    }
+    fire_vm_edges(&mut script, prev.map(|(_, d, g)| (d, g)), dead, ghost);
 
     // ── The offer and confirm announcements ──
     if let Some(name) = offer_announcement(memo, &death_net, store.0.is_dead_or_ghost(), |offer| {
@@ -450,7 +439,9 @@ fn drain_death(
     mut death_net: ResMut<DeathNet>,
     net: Res<NetCommands>,
     targeting: crate::spell::cast_target::CastTargeting,
-    mut ladder: crate::spell::CastLadder,
+    // The soulstone's item leg cancels the cast in flight first, so the ladder and the cancel
+    // share the cast state through one set.
+    mut cast: ParamSet<(crate::spell::CastLadder, crate::spell::SelfCancel)>,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The soulstone's item leg is an item use (`0x5d8d00`), so it carries the bind gate.
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -484,7 +475,8 @@ fn drain_death(
             // again; nothing is cleared here, the server zeroes `PLAYER_SELF_RES_SPELL`.
             DeathAction::UseSoulstone => {
                 let store = targeting.self_store.single().ok().map(|s| s.0.clone());
-                match store.as_ref().and_then(|store| {
+                let res = store.as_ref().and_then(|store| {
+                    let ladder = cast.p0();
                     resolve_self_res(
                         store,
                         &ladder.objects,
@@ -492,9 +484,13 @@ fn drain_death(
                         ladder.spells.as_deref(),
                         &ladder.commands,
                     )
-                }) {
+                });
+                match res {
                     Some(SelfRes::Spell { .. }) => net.0.send(ClientCommand::SelfRes),
-                    // An ordinary item use, `0x5d8d00`, like every bag click.
+                    // The item leg cancels the cast before the use (`0x48ae6b` into `0x6e4940`,
+                    // cl=1, dl=1, reason `0x1c`), then runs an ordinary item use, `0x5d8d00`
+                    // (called at `0x48ae7d`), like every bag click: a locked stone is refused at
+                    // its first gate (`0x5d8d32`), after the cancel.
                     Some(SelfRes::Item {
                         bag_index,
                         slot,
@@ -502,31 +498,44 @@ fn drain_death(
                         entry,
                         ..
                     }) => {
-                        let t = ladder
-                            .items
-                            .template(entry, guid, &ladder.commands)
-                            .cloned();
-                        let it = crate::ui_items::ItemUse {
-                            guid: Some(guid),
-                            start_quest: t.as_ref().map_or(0, |t| t.start_quest),
-                            bag_index,
-                            slot,
-                            entry,
-                            spell_index: t.as_ref().and_then(|t| t.use_spell_index()).unwrap_or(0),
-                            use_spell: t.as_ref().and_then(|t| t.use_spell).map(|u| u.spell_id),
-                            on_object: None,
-                            is_charter: false,
-                        };
-                        crate::ui_items::send_item_use(
-                            it,
-                            &targeting.context(),
-                            &mut ladder,
-                            &mut script,
-                            &mut gate,
-                            false,
-                            &mut ui_errors,
-                        );
-                        Ok(())
+                        cast.p1().abort_cast();
+                        // The abort's `cl` flag disarms the trade-skill repeat on every branch
+                        // (`0x6e4abc`-`0x6e4ac2` into `0x4fd790`).
+                        script.trade_skill_disarm();
+                        if crate::ui_items::item_use_refused(&script, Some(guid)) {
+                            debug!("death: soulstone {guid:#x} is locked — refused");
+                            Ok(())
+                        } else {
+                            let mut ladder = cast.p0();
+                            let t = ladder
+                                .items
+                                .template(entry, guid, &ladder.commands)
+                                .cloned();
+                            let it = crate::ui_items::ItemUse {
+                                guid: Some(guid),
+                                start_quest: t.as_ref().map_or(0, |t| t.start_quest),
+                                bag_index,
+                                slot,
+                                entry,
+                                spell_index: t
+                                    .as_ref()
+                                    .and_then(|t| t.use_spell_index())
+                                    .unwrap_or(0),
+                                use_spell: t.as_ref().and_then(|t| t.use_spell).map(|u| u.spell_id),
+                                on_object: None,
+                                is_charter: false,
+                            };
+                            crate::ui_items::send_item_use(
+                                it,
+                                &targeting.context(),
+                                &mut ladder,
+                                &mut script,
+                                &mut gate,
+                                false,
+                                &mut ui_errors,
+                            );
+                            Ok(())
+                        }
                     }
                     // Nothing to spend: the reference returns silently.
                     None => Ok(()),
@@ -640,6 +649,317 @@ mod tests {
         );
     }
 
+    const STONE: u64 = 0x4000_0000_0000_5232;
+    const SELF_RES: u32 = 20707;
+    const FIREBALL: u32 = 133;
+
+    /// A dead player (health 0 of 100) with a soulstone in backpack slot 1, as a quest-starter so
+    /// its use sends with no cast ladder to satisfy, and a VM.
+    fn soulstone_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        const STONE_ENTRY: u32 = 5232;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let world = app.world_mut();
+        world.spawn((
+            SelfPlayer,
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 0),
+                (28, 100),
+                (532, STONE as u32),
+                (533, (STONE >> 32) as u32),
+            ])),
+        ));
+        crate::items::test_spawn_item(
+            world,
+            STONE,
+            benilla_protocol::ObjectFields::from_pairs(&[(3, STONE_ENTRY)]),
+            false,
+        );
+        world.resource_mut::<crate::items::Items>().insert_template(
+            STONE_ENTRY,
+            Some(benilla_protocol::messages::ItemInfo {
+                spells: vec![benilla_protocol::messages::ItemSpellEntry {
+                    index: 0,
+                    spell_id: SELF_RES,
+                    trigger: 0,
+                    charges: -1,
+                    cooldown_ms: -1,
+                    category: 0,
+                    category_cooldown_ms: -1,
+                }],
+                start_quest: 42,
+                ..crate::items::test_template("Minor Soulstone")
+            }),
+        );
+        let display = benilla_formats::SpellDisplay {
+            effects: [SPELL_EFFECT_SELF_RESURRECT, 0, 0],
+            ..Default::default()
+        };
+        world.insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays([(SELF_RES, display)].into()),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        world.insert_non_send_resource(UiScript::new().unwrap());
+        (app, rx)
+    }
+
+    fn press_soulstone(app: &mut App) {
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("UseSoulstone()")
+            .unwrap();
+        app.world_mut().run_system_once(drain_death).unwrap();
+    }
+
+    /// `UseSoulstone`'s item leg is `CGItem::Use` (`0x48ae7d`), whose first gate refuses a
+    /// locked item (`0x5d8d32`): the stone's use goes out only once the lock lifts.
+    #[test]
+    fn a_locked_soulstone_is_not_used() {
+        let (mut app, rx) = soulstone_app();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .lock_item(STONE);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+        assert_eq!(rx.try_iter().count(), 0, "a locked stone is not used");
+        assert!(app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .take_ui_errors()
+            .is_empty());
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .unlock_item(STONE);
+        press_soulstone(&mut app);
+        assert!(
+            rx.try_iter().count() > 0,
+            "unlocked, the stone's use goes out"
+        );
+    }
+
+    /// Arm a three-craft Create All repeat in the VM, with an `UPDATE_TRADESKILL_RECAST` counter.
+    fn arm_repeat(app: &mut App) {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script
+            .run(
+                "RECASTS = 0 local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UPDATE_TRADESKILL_RECAST') \
+                 f:SetScript('OnEvent', function() RECASTS = RECASTS + 1 end) \
+                 DoTradeSkill(2, 3)",
+            )
+            .unwrap();
+        assert_eq!(script.trade_skill_repeat(), (2963, 3));
+    }
+
+    /// The item leg cancels first (`0x48ae6b` into `0x6e4940`, cl=1, dl=1): the cast in flight
+    /// ships `CMSG_CANCEL_CAST` ahead of the use (`0x6e4970`, then `0x48ae7d`), the bar's event is
+    /// FAILED where a move's cancel arms STOP, and a running trade-skill repeat ends (`0x4fd790`).
+    #[test]
+    fn the_soulstone_cancels_the_cast_in_flight_before_its_use() {
+        let (mut app, rx) = soulstone_app();
+        let world = app.world_mut();
+        world.resource_mut::<crate::spell::PendingCast>().arm(
+            FIREBALL,
+            std::time::Instant::now(),
+            true,
+        );
+        arm_repeat(&mut app);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent.first(),
+                Some(ClientCommand::CancelCast { spell_id: FIREBALL })
+            ),
+            "the cancel leads the use: {sent:?}"
+        );
+        assert!(sent.len() > 1, "and the use follows it: {sent:?}");
+        let world = app.world();
+        assert!(!world
+            .resource::<crate::spell::PendingCast>()
+            .in_flight(std::time::Instant::now()));
+        let feed = &world.resource::<crate::ui_cast::CastBarFeed>().0;
+        assert!(
+            matches!(
+                feed[..],
+                [
+                    crate::ui_cast::CastBarEdge::Failed,
+                    crate::ui_cast::CastBarEdge::Interrupted
+                ]
+            ),
+            "SPELLCAST_FAILED (cl=1, reason 0x1c), then the echo's interrupt"
+        );
+        let script = world.non_send_resource::<UiScript>();
+        assert_eq!(
+            script.trade_skill_repeat(),
+            (0, 3),
+            "the armed spell disarms (`mov [0xbde05c],0`) and the count stays"
+        );
+        assert_eq!(
+            script.eval::<i64>("return RECASTS").unwrap(),
+            2,
+            "arming signalled UPDATE_TRADESKILL_RECAST, and so did the disarm (`0x4fd7a3`)"
+        );
+    }
+
+    /// A pending targeting spell is dropped in place of a cast (`0x6e4955`): no
+    /// `CMSG_CANCEL_CAST`, the cursor down, and the use still goes out.
+    #[test]
+    fn the_soulstone_drops_a_pending_targeting_spell() {
+        let (mut app, rx) = soulstone_app();
+        app.world_mut()
+            .resource_mut::<crate::spell::targeting::SpellTargeting>()
+            .enter(FIREBALL, crate::spell::CastCommit::Spell, 0x0040);
+        arm_repeat(&mut app);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+
+        let targeting = app
+            .world()
+            .resource::<crate::spell::targeting::SpellTargeting>();
+        assert!(!targeting.active(), "the targeting cursor is gone");
+        assert_eq!(targeting.aborts(), 1, "and counted as an abort");
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, ClientCommand::CancelCast { .. })),
+            "a targeting spell was never sent, so nothing cancels on the wire: {sent:?}"
+        );
+        assert!(!sent.is_empty(), "the use goes out");
+        let feed = &app.world().resource::<crate::ui_cast::CastBarFeed>().0;
+        assert!(
+            matches!(feed[..], [crate::ui_cast::CastBarEdge::Failed]),
+            "the event gate follows the targeting branch too (`0x6e4a04`-`0x6e4a1e`)"
+        );
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .trade_skill_repeat(),
+            (0, 3),
+            "and the disarm flag acts on this branch"
+        );
+    }
+
+    /// With nothing to cancel the abort still disarms the repeat: `0x6e4abc` tests only `cl`.
+    #[test]
+    fn the_soulstone_disarms_the_repeat_with_nothing_to_cancel() {
+        let (mut app, rx) = soulstone_app();
+        arm_repeat(&mut app);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .trade_skill_repeat(),
+            (0, 3)
+        );
+        assert!(app
+            .world()
+            .resource::<crate::ui_cast::CastBarFeed>()
+            .0
+            .is_empty());
+    }
+
+    /// The soulstone's use is `CGItem::Use` (`0x48ae7d`): without control it meets the control gate
+    /// (`0x5d8eaa`) and ends with `ERR_CLIENT_LOCKED_OUT`, the cancel having run first.
+    #[test]
+    fn the_soulstone_use_meets_the_control_gate() {
+        let (mut app, rx) = soulstone_app();
+        // Not a quest-starter, whose arm runs ahead of the gates.
+        app.world_mut()
+            .resource_mut::<crate::items::Items>()
+            .insert_template(
+                5232,
+                Some(benilla_protocol::messages::ItemInfo {
+                    spells: vec![benilla_protocol::messages::ItemSpellEntry {
+                        index: 0,
+                        spell_id: SELF_RES,
+                        trigger: 0,
+                        charges: -1,
+                        cooldown_ms: -1,
+                        category: 0,
+                        category_cooldown_ms: -1,
+                    }],
+                    use_spell: Some(benilla_protocol::messages::ItemUseSpell {
+                        spell_id: SELF_RES,
+                        cooldown_ms: -1,
+                        category: 0,
+                        category_cooldown_ms: -1,
+                    }),
+                    ..crate::items::test_template("Minor Soulstone")
+                }),
+            );
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        app.world_mut()
+            .resource_mut::<crate::spell::PendingCast>()
+            .arm(FIREBALL, std::time::Instant::now(), true);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::CancelCast { .. }]),
+            "only the cancel goes out: {sent:?}"
+        );
+        let keys: Vec<_> = app
+            .world()
+            .resource::<crate::ui_action::UiErrorKeys>()
+            .0
+            .iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(keys, vec!["ERR_CLIENT_LOCKED_OUT"]);
+    }
+
+    /// The cancel runs before the item use's own gates, so a locked stone still cancels
+    /// (`0x48ae6b` precedes `0x5d8d32`).
+    #[test]
+    fn a_locked_soulstone_still_cancels_first() {
+        let (mut app, rx) = soulstone_app();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .lock_item(STONE);
+        app.world_mut()
+            .resource_mut::<crate::spell::PendingCast>()
+            .arm(FIREBALL, std::time::Instant::now(), true);
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::CancelCast { spell_id: FIREBALL }]),
+            "only the cancel goes out: {sent:?}"
+        );
+    }
+
     /// A `/reload` must not restart the release window; a relog must clear it.
     #[test]
     fn the_session_edge_clears_the_world_scoped_death_memory_and_nothing_else_does() {
@@ -679,6 +999,64 @@ mod tests {
             feed.died_at.is_none(),
             "the release window is the dead session's, and re-arms at the next login"
         );
+    }
+}
+
+/// The body's VM events between the last `(dead, ghost)` seen, if any, and this one.
+fn fire_vm_edges(script: &mut UiScript, prev: Option<(bool, bool)>, dead: bool, ghost: bool) {
+    match (prev, dead, ghost) {
+        (Some((false, false)) | None, true, false) => {
+            script.fire_event("PLAYER_DEAD", vec![]);
+        }
+        (Some((true, false)), d, g) if g || !d => {
+            // The health edge out of 0 (`0x6047f0`) unlocks every item (`0x5fefae`), then fires
+            // `PLAYER_ALIVE` (`0x5fefb8`).
+            script.unlock_all_items();
+            script.fire_event("PLAYER_ALIVE", vec![]);
+        }
+        (Some((_, true)), false, false) => {
+            script.fire_event("PLAYER_UNGHOST", vec![]);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use benilla_ui::script::UiScript;
+
+    /// The revive edge unlocks every item, its one `ITEM_LOCK_CHANGED` ahead of `PLAYER_ALIVE`
+    /// (`0x5fefae`, `0x5fefb8`); the ghost's own revive, no health edge, unlocks nothing.
+    #[test]
+    fn the_revive_edge_unlocks_every_item_before_player_alive() {
+        const ITEM: u64 = 0x4000_0000_0000_0042;
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "SEEN = {} local f = CreateFrame('Frame') \
+             f:RegisterEvent('ITEM_LOCK_CHANGED') f:RegisterEvent('PLAYER_ALIVE') \
+             f:RegisterEvent('PLAYER_UNGHOST') \
+             f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
+        )
+        .unwrap();
+        let seen = |s: &UiScript| {
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        s.lock_item(ITEM);
+        let _ = seen(&s);
+        super::fire_vm_edges(&mut s, Some((true, false)), true, true);
+        assert_eq!(
+            seen(&s),
+            ["ITEM_LOCK_CHANGED", "PLAYER_ALIVE"],
+            "the release"
+        );
+        assert!(!s.item_locked(ITEM));
+        s.lock_item(ITEM);
+        let _ = seen(&s);
+        super::fire_vm_edges(&mut s, Some((true, true)), false, false);
+        assert_eq!(seen(&s), ["PLAYER_UNGHOST"], "the corpse run's end");
+        assert!(s.item_locked(ITEM));
     }
 }
 

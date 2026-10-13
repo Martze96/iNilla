@@ -187,13 +187,17 @@ pub fn read_chain_or_loose(
 }
 
 /// Map a normalized `interface\addons\…` path onto a file under the addon root, matching each
-/// component case-insensitively as the Windows reference does; a dot-component is refused, so a
-/// path cannot escape the root.
+/// component case-insensitively as the Windows reference does; a dot-component, or one the host
+/// reads as more than a plain name (a Windows `C:`), is refused, so a path cannot escape the root.
 pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
     let rel = candidate.strip_prefix("interface\\addons\\")?;
     let mut at = root.to_path_buf();
     for comp in rel.split('\\') {
-        if comp.is_empty() || comp.starts_with('.') {
+        let plain = matches!(
+            Path::new(comp).components().collect::<Vec<_>>()[..],
+            [std::path::Component::Normal(_)]
+        );
+        if !plain || comp.starts_with('.') {
             return None;
         }
         let direct = at.join(comp);
@@ -356,15 +360,6 @@ impl WorldAssets {
             .map(|(sw, sh, src)| images.add(sprite_image(w, h, resample(src, *sw, *sh, w, h))));
         self.resampled_sprites.insert(key, made.clone());
         made
-    }
-
-    /// A UI sprite repeating on both axes, for a frame `Backdrop`'s tiled pieces (`0x77f0c0`).
-    pub fn sprite_texture_tiled(
-        &mut self,
-        path: &str,
-        images: &mut Assets<Image>,
-    ) -> Option<Handle<Image>> {
-        self.sprite_texture_wrapped(path, (true, true), images)
     }
 
     /// A UI sprite repeating on the axes `wrap` names ([`sprite_image_wrapped`]).

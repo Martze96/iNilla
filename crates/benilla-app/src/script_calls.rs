@@ -61,8 +61,8 @@ pub(crate) fn apply_script_calls(
                     appliers.p7().attack_target();
                 }
             }
-            ScriptCall::UseContainerItem { bag, slot } => {
-                appliers.p5().use_container_item(script, bag, slot);
+            ScriptCall::UseContainerItem(call) => {
+                appliers.p5().use_container_item(script, call);
             }
             ScriptCall::UseInventoryItem(id) => appliers.p5().use_inventory_item(script, id),
             ScriptCall::CastPetSpell { spell_id, on_self } => {
@@ -834,5 +834,465 @@ mod tests {
             .resource::<crate::ui_action::CastErrors>()
             .0
             .is_empty());
+    }
+
+    const POTION: u64 = 0x4000_0000_0000_0f07;
+    const POTION_ENTRY: u32 = 929;
+
+    /// Backpack slot 1 holds `POTION`, of a template `t` makes, and bar slot 1 names its entry;
+    /// the VM's backpack shows the slot as the container feed pushes it.
+    fn with_potion(f: &mut Frame, t: benilla_protocol::messages::ItemInfo) {
+        let world = f.app.world_mut();
+        let me = world.resource::<GuidIndex>().0[&ME];
+        world
+            .entity_mut(me)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 100),
+                (28, 100),
+                (46, 0x8),
+                (532, POTION as u32),
+                (533, (POTION >> 32) as u32),
+            ])));
+        crate::items::test_spawn_item(
+            world,
+            POTION,
+            benilla_protocol::ObjectFields::from_pairs(&[(3, POTION_ENTRY)]),
+            false,
+        );
+        let item_class = Some(t.class);
+        world
+            .resource_mut::<crate::items::Items>()
+            .insert_template(POTION_ENTRY, Some(t));
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .buttons
+            .insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: POTION_ENTRY,
+                    kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                },
+            );
+        world.non_send_resource_mut::<UiScript>().set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(
+                    1,
+                    benilla_ui::script::ContainerSlot {
+                        item_id: POTION_ENTRY,
+                        item_class,
+                        count: 1,
+                        guid: POTION,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+        );
+        let _ = f.rx.try_iter().count();
+    }
+
+    /// The bar's item use tests its copy's lock inside the call (`0x4e607b` → `0x5d8d32`): a
+    /// pickup after it in the frame does not stop it, and one before it does, though the cursor
+    /// let the item go again before the frame applied the press.
+    #[test]
+    fn a_bar_item_use_reads_the_lock_as_its_call_found_it() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                start_quest: 42,
+                ..crate::items::test_template("Questing Potion")
+            },
+        );
+        run(&mut f, "UseAction(1) PickupContainerItem(0, 1)");
+        assert!(
+            f.rx.try_iter().count() > 0,
+            "the use goes out; the pickup came after its call"
+        );
+        run(
+            &mut f,
+            "ClearCursor() PickupContainerItem(0, 1) UseAction(1) ClearCursor()",
+        );
+        assert_eq!(
+            f.rx.try_iter().count(),
+            0,
+            "the copy was locked when the use was called"
+        );
+    }
+
+    /// The bar's equip arm (`0x4e602a` → `0x5e1840` → `0x5e1480`) loads a projectile with
+    /// `CMSG_SET_AMMO`, by its class (`0x5e16ff`, `0x5e1704`), and the arm's `ClearCursor(1,1)`
+    /// unlocks it, signalling `ITEM_LOCK_CHANGED` though nothing held it (`0x5e1763`).
+    #[test]
+    fn a_bar_projectile_loads_by_class_and_signals_its_unlock() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                class: 6,
+                inventory_type: 24,
+                ..crate::items::test_template("Rough Arrow")
+            },
+        );
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                "SIGNALS = 0 local f = CreateFrame('Frame') f:RegisterEvent('ITEM_LOCK_CHANGED') \
+                 f:SetScript('OnEvent', function() SIGNALS = SIGNALS + 1 end)",
+            )
+            .unwrap();
+        run(&mut f, "UseAction(1)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                ClientCommand::SetAmmo {
+                    entry: POTION_ENTRY
+                }
+            )),
+            "{sent:?}"
+        );
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert_eq!(script.eval::<i64>("return SIGNALS").unwrap(), 1);
+        assert!(!script.item_locked(POTION));
+    }
+
+    /// The bar's item use reaches `CGItem::Use` (`0x4e607b`), which refuses a locked copy first
+    /// (`0x5d8d32`): nothing goes out until the lock lifts.
+    #[test]
+    fn a_bar_item_use_skips_a_locked_copy() {
+        let mut f = frame(false);
+        {
+            let world = f.app.world_mut();
+            let me = world.resource::<GuidIndex>().0[&ME];
+            world
+                .entity_mut(me)
+                .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x19),
+                    (22, 100),
+                    (28, 100),
+                    (46, 0x8),
+                    (532, POTION as u32),
+                    (533, (POTION >> 32) as u32),
+                ])));
+            crate::items::test_spawn_item(
+                world,
+                POTION,
+                benilla_protocol::ObjectFields::from_pairs(&[(3, POTION_ENTRY)]),
+                false,
+            );
+            world.resource_mut::<crate::items::Items>().insert_template(
+                POTION_ENTRY,
+                Some(benilla_protocol::messages::ItemInfo {
+                    start_quest: 42,
+                    ..crate::items::test_template("Questing Potion")
+                }),
+            );
+            world
+                .resource_mut::<crate::ui_action::PlayerActions>()
+                .buttons
+                .insert(
+                    0,
+                    ActionButton {
+                        slot: 0,
+                        action: POTION_ENTRY,
+                        kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                    },
+                );
+            world.non_send_resource_mut::<UiScript>().lock_item(POTION);
+        }
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1)");
+        assert_eq!(f.rx.try_iter().count(), 0, "a locked copy is not used");
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .unlock_item(POTION);
+        run(&mut f, "UseAction(1)");
+        assert!(f.rx.try_iter().count() > 0, "unlocked, the use goes out");
+    }
+    const HELD: u64 = 0x4000_0000_0000_0001;
+    const HELD_ENTRY: u32 = 7001;
+    const HELM: u64 = 0x4000_0000_0000_0002;
+    const HELM_ENTRY: u32 = 7002;
+
+    /// Backpack slot 1 holds an ordinary item, slot 2 a helm of `bonding`, and bar slot 1 names
+    /// the helm's entry; the VM's backpack shows both as the container feed pushes them.
+    fn with_bar_helm(f: &mut Frame, bonding: u32) {
+        let world = f.app.world_mut();
+        let me = world.resource::<GuidIndex>().0[&ME];
+        // Backpack slots 1 and 2 are the fields at 532 and 534.
+        world
+            .entity_mut(me)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 100),
+                (28, 100),
+                (46, 0x8),
+                (532, HELD as u32),
+                (533, (HELD >> 32) as u32),
+                (534, HELM as u32),
+                (535, (HELM >> 32) as u32),
+            ])));
+        for (guid, entry) in [(HELD, HELD_ENTRY), (HELM, HELM_ENTRY)] {
+            crate::items::test_spawn_item(
+                world,
+                guid,
+                benilla_protocol::ObjectFields::from_pairs(&[(3, entry)]),
+                false,
+            );
+        }
+        let mut items = world.resource_mut::<crate::items::Items>();
+        items.insert_template(HELD_ENTRY, Some(crate::items::test_template("Held Thing")));
+        items.insert_template(
+            HELM_ENTRY,
+            Some(benilla_protocol::messages::ItemInfo {
+                inventory_type: 1,
+                bonding,
+                ..crate::items::test_template("A Helm")
+            }),
+        );
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .buttons
+            .insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: HELM_ENTRY,
+                    kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                },
+            );
+        let slot = |guid, entry, equip: Vec<u8>, bonding| benilla_ui::script::ContainerSlot {
+            guid,
+            item_id: entry,
+            count: 1,
+            bonding,
+            equip_slots: equip,
+            ..Default::default()
+        };
+        let mut slots = std::collections::HashMap::new();
+        slots.insert(1, slot(HELD, HELD_ENTRY, vec![], 0));
+        slots.insert(2, slot(HELM, HELM_ENTRY, vec![1], bonding));
+        world.non_send_resource_mut::<UiScript>().set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                name: Some("Backpack".into()),
+                num_slots: 16,
+                slots,
+            }),
+        );
+    }
+
+    /// The bar's equip runs `0x5e1840` (`0x4e602a`): `SetCursorItem`'s inner clear drops and
+    /// unlocks a held item (`0x494bb6`), the bar's item takes the cursor and `AutoEquipCursorItem`
+    /// sends it, so a key press leaves the cursor empty and the held item free.
+    #[test]
+    fn a_bar_equip_drops_the_held_item_and_unlocks_it() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        // Hold the first item, then press the bar key (`checkCursor` 0).
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(
+            script.cursor_item().is_none(),
+            "the held item was dropped and the bar's item sent off the cursor"
+        );
+        assert!(!script.item_locked(HELD), "the drop unlocked the held item");
+        assert!(!script.item_locked(HELM), "the bar's pick takes no lock");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 24
+                }
+            )),
+            "and the helm is equipped from backpack slot 2: {sent:?}"
+        );
+        // The set's pickup and the send's put-down both landed inside the call, so the pair is
+        // played here, the held item's own put-down being the cursor diff's.
+        let sounds: Vec<_> = f
+            .app
+            .world_mut()
+            .resource_mut::<Messages<crate::sound::AutoEquipSound>>()
+            .drain()
+            .collect();
+        assert_eq!(sounds.len(), 1, "one pair, for the helm");
+    }
+
+    /// A bind-on-equip helm from the bar asks first (`0x5e16c6`) and stays on the cursor
+    /// (`0x5e16ce`), not locked, since `SetCursorItem` takes no lock; the held item went back.
+    #[test]
+    fn a_bar_equip_of_a_bind_on_equip_item_holds_it_under_the_question() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 2);
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELM));
+        assert!(!script.item_locked(HELM));
+        assert!(!script.item_locked(HELD), "the held item went back");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(sent.is_empty(), "the question sends nothing: {sent:?}");
+        assert_eq!(
+            f.app
+                .world()
+                .resource::<crate::ui_bind_confirm::PendingEquips>()
+                .live(),
+            1,
+            "and files its record"
+        );
+        assert!(
+            f.app
+                .world_mut()
+                .resource_mut::<Messages<crate::sound::AutoEquipSound>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a held item plays no pair; the cursor diff plays its pickup"
+        );
+    }
+    /// `SetCursorItem` refuses without control of the character (`0x494b8d`, `[0xb4b3e4]` clear
+    /// and no `UNIT_FLAG_TAXI_FLIGHT`) before its clear and its set: the bar's equip puts nothing
+    /// on the cursor and, with it empty, `AutoEquipCursorItem` has nothing to send.
+    #[test]
+    fn a_bar_equip_without_control_does_nothing() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        run(&mut f, "UseAction(1, 0)");
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(script.cursor_item().is_none());
+    }
+
+    /// The refused set does not stop `0x5e1840`: `AutoEquipCursorItem` runs on the cursor as it
+    /// stood (`0x5e18c9` falls through to `0x5e18d5`), so a held item is the one sent, the bar's
+    /// never touched.
+    #[test]
+    fn a_refused_bar_set_still_auto_equips_what_is_held() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 23
+                }]
+            ),
+            "the held item from backpack slot 1 goes, not the helm: {sent:?}"
+        );
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(script.cursor_item().is_none());
+    }
+
+    /// A taxi passenger has no control but passes the gate (`0x494ba6`-`0x494ba9`).
+    #[test]
+    fn a_bar_equip_on_a_taxi_passes_the_control_gate() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        {
+            let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+            script.set_player_control(false);
+            script.set_on_taxi(true);
+        }
+        run(&mut f, "UseAction(1, 0)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 24
+                }]
+            ),
+            "{sent:?}"
+        );
+    }
+
+    /// `0x5e1840` refuses an item in the trade window with its line (`0x4bfd20`, `0x5e18a5`) and
+    /// ends before the set: the bar sends nothing and the held item stays.
+    #[test]
+    fn a_bar_equip_of_an_item_in_the_trade_window_is_refused() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        run(
+            &mut f,
+            "PickupContainerItem(0, 2) ClickTradeButton(1) ClearCursor() PickupContainerItem(0, 1)",
+        );
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1, 0)");
+
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+        assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELD));
+        assert_eq!(script.take_ui_errors(), vec!["ERR_EQUIP_TRADE_ITEM"]);
+    }
+
+    /// The bar's item use reaches `CGItem::Use` (`0x4e607b`), whose control gate (`0x5d8eaa`) ends
+    /// it with `ERR_CLIENT_LOCKED_OUT` unless the item's on-use spell is one that passes.
+    #[test]
+    fn a_bar_item_use_meets_the_control_gate() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                use_spell: Some(benilla_protocol::messages::ItemUseSpell {
+                    spell_id: 4321,
+                    cooldown_ms: -1,
+                    category: 0,
+                    category_cooldown_ms: -1,
+                }),
+                ..crate::items::test_template("A Trinket")
+            },
+        );
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1)");
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let keys = |f: &Frame| -> Vec<&'static str> {
+            f.app
+                .world()
+                .resource::<crate::ui_action::UiErrorKeys>()
+                .0
+                .iter()
+                .map(|e| e.key)
+                .collect()
+        };
+        assert_eq!(keys(&f), vec!["ERR_CLIENT_LOCKED_OUT"]);
+
+        // The spell is one the app fed as passing: the gate lets the use on to the cast.
+        f.app
+            .world_mut()
+            .resource_mut::<crate::ui_action::UiErrorKeys>()
+            .0
+            .clear();
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_control_bypass([4321].into());
+        run(&mut f, "UseAction(1)");
+        assert!(keys(&f).is_empty(), "{:?}", keys(&f));
     }
 }

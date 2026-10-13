@@ -7,9 +7,9 @@ use mlua::{Lua, MultiValue, Value};
 use super::Model;
 
 /// The 1.12.1 client's build identity, as the strings in its binary spell it.
-const VERSION: &str = "1.12.1";
-const BUILD: &str = "5875";
-const BUILD_DATE: &str = "Sep 19 2006";
+pub(super) const VERSION: &str = "1.12.1";
+pub(super) const BUILD: &str = "5875";
+pub(super) const BUILD_DATE: &str = "Sep 19 2006";
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -54,17 +54,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Three setters whose state has no reader here, so each takes its argument as the reference
-    // does, never raising, and stores nothing; all return zero values.
+    // `SetLayoutMode([mode])` (`0x488540`): a number or numeric string (`0x6f34d0`) truncates
+    // (`0x40a2b0`, [`super::binding_abi::ftol`]) into the UI root's `+0xcf8`, anything else
+    // stores 1 (`0x488573`); never raises, returns zero values. The press handler reads it
+    // (`0x766301`).
+    g.set(
+        "SetLayoutMode",
+        lua.create_function(|lua, v: Value| {
+            let mode = lua.coerce_number(v)?.map_or(1, super::binding_abi::ftol);
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .layout_mode = mode;
+            Ok(())
+        })?,
+    )?;
+
+    // Two setters whose state has no reader here, so each takes its argument as the reference
+    // does, never raising, and stores nothing; both return zero values.
     // - `SetEuropeanNumbers(flag)` (`0x48dec0`): `GetBoolOrDefault(1, true)` into `[0xcf4d24]`,
     //   which turns on `FontString:SetText`'s digit-group pass (`0x771daa` into `0x771c50`).
     //   benilla's `SetText` has no such pass.
-    // - `SetLayoutMode(mode)` (`0x488540`): a number truncates into the UI root's `+0xcf8`, anything
-    //   else stores 1; read by the root's mouse handler (`0x766301`) for a frame-dragging mode
-    //   benilla does not build.
     // - `SetConsoleKey(key)` (`0x488640`): a one-character or named key becomes the console's
     //   toggle key (`0x63cb00`), a non-string the default `0x30e`. benilla has no console screen.
-    for name in ["SetEuropeanNumbers", "SetLayoutMode", "SetConsoleKey"] {
+    for name in ["SetEuropeanNumbers", "SetConsoleKey"] {
         g.set(
             name,
             lua.create_function(|_, _: MultiValue| Ok(MultiValue::new()))?,
@@ -133,9 +145,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .set_mode(mlua::ChunkMode::Text)
                 .exec()
             {
+                let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::Model>()
                     .expect("model")
-                    .record_script_error(super::stdlib::lua_message(&e));
+                    .record_script_error(bare.clone(), bare);
             }
             Ok(())
         })?,
@@ -271,7 +284,7 @@ pub fn set_locale(locale: &str) {
     let _ = LOCALE.set(locale.to_string());
 }
 
-fn locale() -> &'static str {
+pub(super) fn locale() -> &'static str {
     LOCALE.get().map_or("enUS", String::as_str)
 }
 
@@ -414,9 +427,10 @@ mod tests {
         );
     }
 
-    /// The three setters never raise, whatever they are handed, and return zero values.
+    /// The two stateless setters and `SetLayoutMode` never raise, whatever they are handed, and
+    /// return zero values.
     #[test]
-    fn the_stateless_setters_take_any_argument() {
+    fn the_setters_take_any_argument() {
         let s = UiScript::new().unwrap();
         for name in ["SetEuropeanNumbers", "SetLayoutMode", "SetConsoleKey"] {
             for arg in ["", "nil", "1", "\"x\"", "{}", "\"ESCAPE\""] {

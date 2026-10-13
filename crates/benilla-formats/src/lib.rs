@@ -25,8 +25,9 @@ pub use install::{
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges,
-    EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem, VisibleGeosets,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, ChrRaceRow, CompositePlan,
+    DialRanges, EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, NameGenRow, StartOutfitItem,
+    VisibleGeosets,
 };
 mod camera_shakes;
 mod cinematics;
@@ -66,8 +67,8 @@ mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
 pub use factions::{
-    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo,
-    FactionTemplate, Reaction,
+    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionGroupRow,
+    FactionInfo, FactionTemplate, Reaction,
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
@@ -307,7 +308,10 @@ pub use server_messages::{load_server_messages_catalog, ServerMessagesCatalog};
 mod game_tips;
 pub use game_tips::{load_game_tips, GameTipsCatalog};
 mod text_filter_lists;
-pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPattern};
+pub use text_filter_lists::{
+    load_chat_profanity, load_names_profanity, load_names_reserved, load_spam_messages,
+    FilterPattern,
+};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 

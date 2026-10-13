@@ -222,8 +222,8 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
     let mut script = world
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("a boot VM is live at the character screen");
-    // `false`: at the character screen there is no active player.
-    super::shutdown_ui_state(&mut script, identity.as_ref(), false);
+    // At the character screen there is no active player and no world to sweep.
+    super::shutdown_ui_state(&mut script, identity.as_ref());
 
     assert_eq!(
         std::fs::read_to_string(&saved).ok().as_deref(),
@@ -254,6 +254,12 @@ fn the_login_arms_the_world_latch_and_the_logout_spends_it() {
         "the character screen is not a world — nothing has armed the latch yet"
     );
 
+    // A load with no player of ours (a login the server then refuses) arms nothing (`0x490166`).
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(!world.resource::<super::LeavingWorldArmed>().is_armed());
+    super::end_ui_session(&mut world);
+
+    world.spawn(crate::net::SelfPlayer);
     log_in_as(&mut world, "Onehunter", 1);
     assert!(
         world.resource::<super::LeavingWorldArmed>().is_armed(),
@@ -314,17 +320,19 @@ fn the_realm_cvars_are_read_only_to_lua_only_in_the_world() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The reference's one guard in the shutdown tail: `0x490bd0` tests the active player's GUID pair
-/// (`0x490bee call 0x468550`, `0x490bf3 or eax,edx`) and with none jumps (`0x490bf5 je 0x490c25`)
-/// past only the `PLAYER_LEAVING_WORLD` fire, `0x490c20 call 0x490a80`; in-world roots fire both.
+/// The shutdown tail's one guard: `0x490bd0` tests the active player's GUID pair (`0x490bee call
+/// 0x468550`, `0x490bf3 or eax,edx`) and with none jumps (`0x490bf5 je 0x490c25`) past only the
+/// sweep, `0x490c20 call 0x490a80`, whose `0x490b4d` fires `PLAYER_LEAVING_WORLD`, while
+/// `PLAYER_LOGOUT` fires either way. Ours: a root with no world latch armed.
 #[test]
-fn a_quit_from_the_character_screen_fires_logout_without_leaving_world() {
+fn a_shutdown_with_no_world_fires_logout_without_leaving_world() {
+    use crate::ui_script::SweepApp;
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_probe("quitsplit");
     let mut world = booted_world();
-    let mut script = world
+    let script = world
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("a boot VM is live at the character screen");
 
@@ -345,27 +353,47 @@ fn a_quit_from_the_character_screen_fires_logout_without_leaving_world() {
             "#,
         )
         .expect("the probe frame registers");
+    let mut app = App::new();
+    app.init_world_leave_sweep();
+    app.insert_non_send_resource(script);
+    // A root's order: the sweep, then the tail.
+    let root = |app: &mut App| {
+        super::run_leave_world_sweep(app.world_mut());
+        let mut script = app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        super::shutdown_ui_state(&mut script, None);
+    };
+    let seen = |app: &App, global: &str| {
+        app.world()
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<i64>(&format!("return {global}"))
+            .unwrap()
+    };
 
-    super::shutdown_ui_state(&mut script, None, false);
+    root(&mut app);
     assert_eq!(
-        script.eval::<i64>("return SeenLeaving").unwrap(),
+        seen(&app, "SeenLeaving"),
         0,
-        "the glue-screen quit fired PLAYER_LEAVING_WORLD — the reference's 0x490bf5 skips it"
+        "a shutdown with no world fired PLAYER_LEAVING_WORLD — the reference's 0x490bf5 skips it"
     );
     assert_eq!(
-        script.eval::<i64>("return SeenLogout").unwrap(),
+        seen(&app, "SeenLogout"),
         1,
         "…and it must still fire PLAYER_LOGOUT, which is the whole of the taken side"
     );
 
-    super::shutdown_ui_state(&mut script, None, true);
+    app.world_mut()
+        .resource_mut::<super::LeavingWorldArmed>()
+        .arm();
+    root(&mut app);
     assert_eq!(
-        script.eval::<i64>("return SeenLeaving").unwrap(),
+        seen(&app, "SeenLeaving"),
         1,
         "an in-world root must fire PLAYER_LEAVING_WORLD — the control for the assertion above"
     );
     assert_eq!(
-        script.eval::<i64>("return SeenLogout").unwrap(),
+        seen(&app, "SeenLogout"),
         2,
         "…and PLAYER_LOGOUT on every root, guarded or not"
     );
@@ -413,6 +441,209 @@ fn logging_out_leaves_no_in_game_frames_behind() {
 }
 
 // ───────────────────────────────── ReloadUI ─────────────────────────────────
+
+/// The sweep's four legs that change a lock or the cursor, in a bare world with the sessions they
+/// read, a mailbox, an auctioneer and a vendor open; the reload runs them in the dying VM.
+fn sweep_lock_legs(world: &mut World) {
+    use crate::ui_script::SweepLeg;
+    super::sweep::install_world_leave_sweep(world, |s| {
+        s.add_systems((
+            crate::ui_loot::close_loot_on_leave_world.in_set(SweepLeg::Loot),
+            crate::ui_merchant::close_merchant_on_leave_world.in_set(SweepLeg::Merchant),
+            crate::ui_mail::close_mail_on_leave_world.in_set(SweepLeg::Mail),
+            crate::ui_auction::close_auction_on_leave_world.in_set(SweepLeg::Auction),
+        ));
+    });
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    world.insert_resource(crate::net::NetCommands(tx));
+    world.init_resource::<crate::net::GuidIndex>();
+    world.init_resource::<crate::ui_loot::LootLatch>();
+    world.init_resource::<Messages<crate::target::DeselectGuid>>();
+    world.init_resource::<crate::ui_mail::MailOpen>();
+    world.init_resource::<crate::ui_auction::AuctionOpen>();
+    world.init_resource::<crate::ui_merchant::MerchantOpen>();
+    world.init_resource::<crate::items::Items>();
+    world.init_resource::<Messages<crate::sound::LootPickupSound>>();
+    // Our own player: the reload's guard (`0x490bee`) passes only with one.
+    world.spawn(crate::net::SelfPlayer);
+}
+
+/// Arm the world latch as our own create does, so the next reload sweeps.
+fn arm_world(world: &mut World) {
+    world.resource_mut::<super::LeavingWorldArmed>().arm();
+}
+
+/// The item lock is the item object's (`item+0x314`), which a `/reload` keeps, save what the
+/// reload's sweep unlocks at its legs: the looted clam (`0x490ab2`), the mail attachment
+/// (`0x490b1b`) and the auction sell item (`0x490b25`). A trade offer stays locked, its table
+/// zeroed with no unlock (`0x4909b5`), and the cursor, engine state, keeps a held item and an
+/// armed wrap with their locks. A new world entry builds its objects afresh and starts with none.
+#[test]
+fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
+    const CLAM: u64 = 0x4000_0000_0000_0c1a;
+    const MAILED: u64 = 0x4000_0000_0000_0a11;
+    const AUCTIONED: u64 = 0x4000_0000_0000_0a5c;
+    const TRADED: u64 = 0x4000_0000_0000_0a7d;
+    const HELD: u64 = 0x4000_0000_0000_0a4e;
+    const PAPER: u64 = 0x4000_0000_0000_0a9a;
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("item-locks");
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_items::locks::HeldItemLocks>();
+    sweep_lock_legs(&mut world);
+    let locked = |world: &World, guid: u64| {
+        world
+            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .expect("in-world VM")
+            .item_locked(guid)
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    {
+        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        s.lock_item(CLAM); // the open-item send's lock (`0x5edcd9`)
+                           // A letter's attachment, an auction's sell item and a trade offer, each holding its
+                           // pickup's lock, then an item held on the cursor and a wrap armed.
+        let slot = |guid: u64| benilla_ui::script::ContainerSlot {
+            item_id: 117,
+            count: 1,
+            guid,
+            ..Default::default()
+        };
+        s.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([
+                    (1, slot(MAILED)),
+                    (2, slot(AUCTIONED)),
+                    (3, slot(TRADED)),
+                    (4, slot(HELD)),
+                    (5, slot(PAPER)),
+                ]),
+                ..Default::default()
+            }),
+        );
+        s.run("PickupContainerItem(0, 1) ClickSendMailItemButton()")
+            .unwrap();
+        s.run("PickupContainerItem(0, 2) ClickAuctionSellItemButton()")
+            .unwrap();
+        s.set_trade(Some(Default::default()));
+        s.run("PickupContainerItem(0, 3) ClickTradeButton(1)")
+            .unwrap();
+        s.run("PickupContainerItem(0, 4)").unwrap();
+    }
+    let mut loot = crate::ui_loot::LootState::default();
+    loot.open(CLAM, 1, 0, Vec::new());
+    world.insert_resource(loot);
+    // The clam's own object, `OBJECT_FIELD_TYPE` object and item, which the close looks up
+    // (`0x48f29e`) before its unlock.
+    crate::items::test_spawn_item(
+        &mut world,
+        CLAM,
+        benilla_protocol::messages::ObjectFields::from_pairs(&[(2, 0x3)]),
+        false,
+    );
+    world.resource_mut::<crate::ui_mail::MailOpen>().mailbox = Some(0xF110_0000_0000_0B0C);
+    world
+        .resource_mut::<crate::ui_auction::AuctionOpen>()
+        .open(0xF130_0000_0000_0A0C, 1);
+    arm_world(&mut world);
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    assert!(!locked(&world, CLAM), "the sweep's loot close unlocks it");
+    assert!(!locked(&world, MAILED), "the sweep's mail reset unlocks it");
+    assert!(locked(&world, TRADED), "nothing unlocks a trade offer");
+    assert!(
+        !locked(&world, AUCTIONED),
+        "the sweep's auction close unlocks it (`0x4cd5f0` → `0x4cd640`)"
+    );
+    {
+        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        assert_eq!(
+            s.cursor_item().map(|i| i.guid),
+            Some(HELD),
+            "no clear on the reload's path touches a held item"
+        );
+        assert!(s.item_locked(HELD), "and its pickup's lock stays");
+    }
+    assert!(locked(&world, TRADED));
+    // An armed wrap is engine state too (`[0xc4d778]`): it stays armed, its paper locked.
+    {
+        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        s.run("ClearCursor()").unwrap();
+        // The bag as the container feed re-pushes it into the new VM.
+        s.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(
+                    5,
+                    benilla_ui::script::ContainerSlot {
+                        item_id: 117,
+                        count: 1,
+                        guid: PAPER,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+        );
+        s.arm_gift_wrap(0, 5);
+    }
+    arm_world(&mut world);
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    {
+        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        assert_eq!(s.gift_wrap_armed().map(|w| w.guid), Some(PAPER));
+        assert!(s.item_locked(PAPER), "the armed paper stays locked");
+        assert!(
+            !s.item_locked(HELD),
+            "the clear before it unlocked the held item"
+        );
+    }
+    // A held vendor row, mode 5, goes with the sweep's merchant close (`0x4fadf0`, `0x4fae4a`).
+    {
+        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        s.run("ClearCursor()").unwrap();
+        s.set_merchant(Some(benilla_ui::script::MerchantState {
+            items: vec![benilla_ui::script::MerchantItem {
+                name: Some("Refreshing Spring Water".into()),
+                price: 25,
+                quantity: 5,
+                num_available: -1,
+                item_id: 159,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert!(matches!(
+            s.cursor_payload(),
+            Some(benilla_ui::script::CursorPayload::Merchant(_))
+        ));
+    }
+    world
+        .resource_mut::<crate::ui_merchant::MerchantOpen>()
+        .open(0xF130_0000_0000_0E1D, Vec::new());
+    arm_world(&mut world);
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    assert!(world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .cursor_payload()
+        .is_none());
+
+    super::end_ui_session(&mut world);
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        !locked(&world, TRADED),
+        "a new world entry inherits no lock"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
 
 /// `ReloadUI()` is the reference's teardown and rebuild pair (`0x495664`/`0x495669`): the logout
 /// and login edges, run without leaving the world.
@@ -537,6 +768,105 @@ fn saved_variables_round_trip_through_a_reload() {
         mark, 41,
         "the reload wrote the table down and the rebuild restored it OVER the file-scope default"
     );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The quest log's fold mask (`[0xbb748c]`) and selection (`[0xbb7480]`) and the tradeskill
+/// repeat (`0xbde05c`, `0xbde060`) are C globals no UI init resets: they fold out of the dying VM
+/// and seat in the rebuilt one before its load, so a `/reload` keeps a collapsed header folded,
+/// its selected quest selected and a batch armed; the session's end drops them.
+#[test]
+fn a_reload_keeps_the_quest_folds_and_the_repeat() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("folds");
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_quest_log::QuestLog>();
+    world.init_resource::<crate::ui_tradeskill::TradeSkillRepeatCarry>();
+    log_in_as(&mut world, "Onehunter", 1);
+
+    let rows = || benilla_ui::script::QuestLogState {
+        entries: vec![
+            benilla_ui::script::QuestLogEntryView {
+                title: "Elwynn Forest".into(),
+                is_header: true,
+                ..Default::default()
+            },
+            benilla_ui::script::QuestLogEntryView {
+                quest_id: 7,
+                title: "Wolves Across the Border".into(),
+                ..Default::default()
+            },
+        ],
+        num_quests: 1,
+        hidden_quest_ids: Vec::new(),
+    };
+    let visible = |world: &mut World| {
+        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        script.set_quest_log(rows());
+        script
+            .eval::<u32>("return (GetNumQuestLogEntries())")
+            .expect("count")
+    };
+    assert_eq!(visible(&mut world), 2);
+    {
+        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        // A selection, so the stock `QuestLog_Update` does not re-select the folded header, which
+        // would open it (`QuestLogFrame.lua:294`, `:323`).
+        script
+            .run("SelectQuestLogEntry(2) CollapseQuestHeader(1)")
+            .expect("fold");
+        script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script.run("DoTradeSkill(2, 3)").expect("arm the batch");
+    }
+    assert_eq!(visible(&mut world), 1);
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    assert_eq!(visible(&mut world), 1, "the reload unfolded the header");
+    assert_eq!(
+        world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<u32>("return GetQuestLogSelection()")
+            .expect("selection"),
+        2,
+        "the reload dropped the selection, which the stock update would re-pick and unfold"
+    );
+    assert_eq!(
+        world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .trade_skill_repeat(),
+        (0, 3),
+        "the world-enter init disarms the spell and keeps the count (`0x4fc76b`)"
+    );
+
+    world.insert_resource(State::new(crate::char_select::ClientState::CharSelect));
+    super::end_ui_session(&mut world);
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(visible(&mut world), 2, "a new session starts unfolded");
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1022,8 +1352,8 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
 // A `/reload` never leaves `InWorld`, so only a saver in the shutdown tail sees every root.
 
 /// A window the player has placed, made as a drag makes one: `SetUserPlaced` refuses a frame that
-/// is neither movable nor resizable. Parentless, so it anchors to the screen root (the file's `-`
-/// target). Both flags: the cache applies position only to a movable frame, size to a resizable.
+/// is neither movable nor resizable. Both flags: the cache writes `X:`/`Y:` only for a movable
+/// frame and `W:`/`H:` only for a resizable one.
 fn place_a_window(world: &mut World) {
     world
         .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
@@ -1045,12 +1375,7 @@ fn layout_cache(character: &str) -> Option<String> {
 
 /// What a saved window's row has to say for the player to get it back.
 fn assert_probe_row(text: &str) {
-    for want in [
-        "Frame: LayoutProbe",
-        "W: 413",
-        "H: 147",
-        "Point: BOTTOMLEFT - BOTTOMLEFT 61 29",
-    ] {
+    for want in ["Frame: LayoutProbe", "X: 61", "W: 413", "H: 147"] {
         assert!(
             text.contains(want),
             "the saved row is missing `{want}`:\n{text}"
@@ -1128,6 +1453,51 @@ fn each_character_gets_its_own_layout_cache() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A file of benilla's earlier anchor form seats the window through the loader, and the next save
+/// writes it back in the reference's rect form, so a player's windows survive the change.
+#[test]
+fn an_anchor_form_file_is_restored_and_rewritten_as_the_rect() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("layout-anchor-form");
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_layout::LayoutFile>();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    let path = crate::local_state::layout_character_path("Realm", "Onehunter")
+        .expect("a layout path in the hermetic state folder");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "Frame: LayoutProbe\nW: 413\nH: 147\nPoint: BOTTOMLEFT - BOTTOMLEFT 61 29\n",
+    )
+    .unwrap();
+    author_a_window(&mut world);
+    world
+        .run_system_once(crate::ui_layout::load_layout)
+        .expect("the layout loader ran");
+    let (w, h, left, _) = window_geometry(&world);
+    assert_eq!(
+        (w, h, left),
+        (413.0, 147.0, 61.0),
+        "seated from the anchor form"
+    );
+
+    super::end_ui_session(&mut world);
+    let text = layout_cache("Onehunter").expect("the logout wrote the layout cache");
+    assert_probe_row(&text);
+    assert!(
+        !text.contains("Point:"),
+        "rewritten in the rect form:\n{text}"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The probe window as FrameXML authors it, the fresh tree a relog meets: not user-placed, with the
 /// authored `movable`/`resizable` pair the cache's apply reads off the live frame.
 fn author_a_window(world: &mut World) {
@@ -1143,14 +1513,14 @@ fn author_a_window(world: &mut World) {
         .expect("author the probe window");
 }
 
-/// The probe window's live geometry, as the player sees it.
-fn window_geometry(world: &World) -> (f32, f32, String, f32, f32) {
+/// The probe window's live geometry, as the player sees it: its size, left and top.
+fn window_geometry(world: &World) -> (f32, f32, f32, f32) {
     world
         .get_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("a VM")
-        .eval::<(f32, f32, String, f32, f32)>(
-            "local p, _, _, x, y = LayoutProbe:GetPoint(1) \
-             return LayoutProbe:GetWidth(), LayoutProbe:GetHeight(), p, x, y",
+        .eval::<(f32, f32, f32, f32)>(
+            "return LayoutProbe:GetWidth(), LayoutProbe:GetHeight(), \
+             LayoutProbe:GetLeft(), LayoutProbe:GetTop()",
         )
         .expect("read the probe window back")
 }

@@ -16,7 +16,7 @@ use super::names::*;
 /// What a source knows beyond the template: an item object's fields, or a block source's name and
 /// roll. A template source passes `None`.
 #[derive(Default)]
-pub(super) struct ItemInstance {
+pub(in crate::script) struct ItemInstance {
     /// The name with its random suffix joined, which the reference composes in the builder
     /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's.
     pub name: Option<String>,
@@ -46,6 +46,14 @@ pub(super) struct ItemInstance {
     /// A timed item's remaining lifetime in ms, from `SMSG_ITEM_TIME_UPDATE`, not
     /// `ITEM_FIELD_DURATION`: the client displays from the packet (`Objects/Item.cpp:1093`).
     pub duration_ms: Option<u64>,
+    /// The source holds a live item object (the guid arguments of `0x52b650`): the LOCKED gate
+    /// reads its UNLOCKED flag (`0x52bdb3`..`0x52bdc4`). A block source, a template source and an
+    /// inspected unit's item have none.
+    pub object: bool,
+    /// The block's lock id (`[this+0x430]`, set by the trade target's setter, `0x534563`), 0 for
+    /// none or no block. With no lock row from the template it names one (`0x52bd78`..`0x52bda9`),
+    /// and a nonzero one draws LOCKED even without an object (`0x52bdd2`).
+    pub block_lock_id: u32,
 }
 
 /// The set block's blank gold line, the reference's literal `0x854b2c`: a space and a newline. An
@@ -67,16 +75,23 @@ pub(super) struct BuilderFlags {
     pub name_only: bool,
 }
 
-/// Render one item into the tooltip in `0x52b650`'s order. Not built: ITEM_COOLDOWN_TIME,
-/// ITEM_WRAPPED_BY and the `LOCKED_WITH_*` line under LOCKED.
-pub(super) fn render_view(
+/// Render one item into the tooltip in `0x52b650`'s order, and answer the builder's return value
+/// (`[ebp-0x38]`): whether a line that changes while the tooltip stays up was written, the
+/// LOCKED line, the temporary enchant's countdown (`0x52ca82`) or the item's own expiry
+/// (`0x52ce0d`). The
+/// setters push it as 1 or nil; the stock buttons arm `updateTooltip` from it. The LOCKED line
+/// sets it on every lock path (`0x52bfa6`, after `0x52be58`, whether or not a `LOCKED_WITH_*`
+/// sub-line follows), as ITEM_COOLDOWN_TIME does (`0x52e140`). Not built: ITEM_COOLDOWN_TIME,
+/// ITEM_WRAPPED_BY and the `LOCKED_WITH_*` sub-line.
+pub(super) fn render_view_flagged(
     lua: &Lua,
     this: &Table,
     v: &ItemTemplateView,
     flags: BuilderFlags,
     // `None`: a template source, with no item object and no instance block.
     inst: Option<&ItemInstance>,
-) -> mlua::Result<()> {
+) -> mlua::Result<bool> {
+    let mut live = false;
     let (req, known_spell, taught_known, set_view, equipped) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let knows = |id: u32| model.spellbook.slots.iter().any(|s| s.spell_id == id);
@@ -181,9 +196,17 @@ pub(super) fn render_view(
         if v.start_quest != 0 {
             keyed("ITEM_STARTS_QUEST", &[], WHITE, false)?;
         }
-        // LOCKED, red, until the instance carries UNLOCKED `0x4`.
-        if v.lock_id != 0 && inst.is_none_or(|i| i.flags & 0x4 == 0) {
+        // LOCKED, red (`0x52bdde`..`0x52be58`), for a lock row the template or the block names
+        // (`0x52bd57`..`0x52bda9`) and a source that passes the gate (`0x52bdb3`..`0x52bdd8`): an
+        // item object lacking UNLOCKED `0x4`, or a block with a lock id of its own. A template
+        // source has neither, so it draws no LOCKED. Every lock path then sets the builder's
+        // return value (`0x52bfa6`).
+        let block_lock = inst.map_or(0, |i| i.block_lock_id);
+        let has_row = v.lock_id != 0 || block_lock != 0;
+        let passes = block_lock != 0 || inst.is_some_and(|i| i.object && i.flags & 0x4 == 0);
+        if has_row && passes {
             keyed("LOCKED", &[], RED, false)?;
+            live = true;
         }
     }
     // The slot | type line, or for a bag the CONTAINER_SLOTS line in its seat. The type cell is
@@ -412,7 +435,10 @@ pub(super) fn render_view(
                 // A missing template skips the slot, not falling back to the bare name: the
                 // reference formats an empty string, which `AddLine` drops.
                 Some(ms) => match enchant_time_left(&e.name, ms, &get) {
-                    Some(t) => t,
+                    Some(t) => {
+                        live = true;
+                        t
+                    }
                     None => continue,
                 },
                 None => e.name.clone(),
@@ -452,6 +478,7 @@ pub(super) fn render_view(
         let ms = u32::try_from(ms).unwrap_or(u32::MAX);
         if let Some(line) = duration_text(ms, "ITEM_DURATION", true, &get) {
             add((line, WHITE))?;
+            live = true;
         }
     }
     if v.allowable_class > 0
@@ -607,7 +634,7 @@ pub(super) fn render_view(
     // p4's early return (`0x52e147..0x52e14c`): compact falls through to `0x52e14e`, lays out and
     // returns, so nothing from `0x52e170` on runs: flavor text, creator, open or read line, money.
     if flags.name_only {
-        return Ok(());
+        return Ok(live);
     }
     if !v.description.is_empty() {
         addw((format!("\"{}\"", v.description), GOLD))?;
@@ -615,7 +642,7 @@ pub(super) fn render_view(
     // The reference gates the rest on an item object (`0x52e1c7`, `0x52e2e0`). Here only a template
     // source (`None`) stops, so a link, loot, mail or auction hover, which has an instance but no
     // object, still reaches READABLE.
-    let Some(inst) = inst else { return Ok(()) };
+    let Some(inst) = inst else { return Ok(live) };
     // The creator line (`0x52e1b1..0x52e2db`), white `0xc0cf60`: ITEM_WRITTEN_BY for a letter, else
     // ITEM_CREATED_BY, green by its own `|cff00ff00`. A wrapped instance (`0x8`, gate `0x52b7b0`)
     // takes ITEM_WRAPPED_BY off `ITEM_FIELD_GIFTCREATOR` in the reference; that is not built, so a
@@ -642,7 +669,18 @@ pub(super) fn render_view(
     } else if v.page_text != 0 || inst.has_text {
         keyed("ITEM_READABLE", &[], GREEN, false)?;
     }
-    Ok(())
+    Ok(live)
+}
+
+/// [`render_view_flagged`] for a caller that does not answer the flag.
+pub(super) fn render_view(
+    lua: &Lua,
+    this: &Table,
+    v: &ItemTemplateView,
+    flags: BuilderFlags,
+    inst: Option<&ItemInstance>,
+) -> mlua::Result<()> {
+    render_view_flagged(lua, this, v, flags, inst).map(|_| ())
 }
 
 /// A temporary enchant's name with its countdown (`0x52fa50`): `ITEM_ENCHANT_TIME_LEFT_<unit>`, its
@@ -723,6 +761,50 @@ mod tests {
         // The app drops an expired timer, but zero must not panic; it takes the plural arm,
         // `GetPluralIndex`'s rule.
         assert_eq!(t(0).as_deref(), Some("<Rockbiter :: 0 S>"));
+    }
+
+    /// The builder's return value is true when it wrote a line that changes while shown: the item's
+    /// expiry (`0x52ce0d`) or a temporary enchant's countdown (`0x52ca82`), and not for a
+    /// permanent enchant or a source with neither.
+    #[test]
+    fn the_builder_flag_is_true_for_an_expiry_or_an_enchant_countdown() {
+        let s = crate::script::UiScript::new().unwrap();
+        s.run(
+            r#"
+            ITEM_DURATION_HOURS = "[DURATION %d h]"
+            ITEM_ENCHANT_TIME_LEFT_MIN = "<%s :: %d M>"
+            CreateFrame("GameTooltip", "TT")
+        "#,
+        )
+        .unwrap();
+        let tt: Table = s.lua().globals().get("TT").unwrap();
+        let v = ItemTemplateView {
+            name: "Sword".into(),
+            ..Default::default()
+        };
+        let flagged = |inst: Option<&ItemInstance>| {
+            render_view_flagged(s.lua(), &tt, &v, BuilderFlags::default(), inst).unwrap()
+        };
+        let enchant = |slot, remaining_ms| crate::script::EnchantView {
+            slot,
+            name: "Rockbiter".into(),
+            remaining_ms,
+            ..Default::default()
+        };
+        assert!(!flagged(None));
+        assert!(!flagged(Some(&ItemInstance::default())));
+        assert!(flagged(Some(&ItemInstance {
+            duration_ms: Some(3_600_000),
+            ..Default::default()
+        })));
+        assert!(flagged(Some(&ItemInstance {
+            enchants: vec![enchant(1, Some(300_000))],
+            ..Default::default()
+        })));
+        assert!(!flagged(Some(&ItemInstance {
+            enchants: vec![enchant(0, None)],
+            ..Default::default()
+        })));
     }
 
     #[test]

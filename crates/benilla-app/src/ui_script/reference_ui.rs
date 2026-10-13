@@ -47,9 +47,29 @@ pub(super) fn core() -> Option<Addon> {
 /// order, as the runner builds its paths (`0x6edbe5`, `0x6edcf4`, `0x6edd0c`) and dispatches each
 /// in turn (`0x6edd51`).
 pub(super) fn core_from(toc: &str) -> Addon {
-    let dir = TOC.rsplit_once('\\').map_or("", |(d, _)| d);
-    addon(
-        Toc::parse(toc)
+    toc_addon(NAME, TOC, toc)
+}
+
+/// The glue screens' table of contents, which the glue builder (`0x46a7b0`) hands to the same
+/// `.toc` runner (`0x6edb90`) at `0x46a9b3`, once per glue build.
+pub(super) const GLUE_TOC: &str = r"Interface\GlueXML\GlueXML.toc";
+
+/// The name the stock glue files load under, as [`NAME`] is the in-game core's.
+pub(super) const GLUE_NAME: &str = "GlueXML";
+
+/// The glue screens' interface: the chain's own [`GLUE_TOC`] as an [`Addon`] over the chain, or
+/// `None` when the chain has no such file.
+pub(super) fn glue() -> Option<Addon> {
+    read(GLUE_TOC).map(|bytes| toc_addon(GLUE_NAME, GLUE_TOC, &benilla_ui::source::decode(&bytes)))
+}
+
+/// The interface `toc_text` lists, the `.toc` at chain path `toc_path`: its rows under the toc's
+/// own directory, in its order.
+fn toc_addon(name: &str, toc_path: &str, toc_text: &str) -> Addon {
+    let dir = toc_path.rsplit_once('\\').map_or("", |(d, _)| d);
+    named_addon(
+        name,
+        Toc::parse(toc_text)
             .files
             .iter()
             .map(|f| format!("{dir}\\{f}"))
@@ -58,9 +78,15 @@ pub(super) fn core_from(toc: &str) -> Addon {
 }
 
 /// The stock interface as an [`Addon`] over the chain; `files` are full chain paths.
+#[cfg(test)]
 pub(super) fn addon(files: Vec<String>) -> Addon {
+    named_addon(NAME, files)
+}
+
+/// [`addon`] under `name`.
+fn named_addon(name: &str, files: Vec<String>) -> Addon {
     Addon::new(
-        NAME.to_string(),
+        name.to_string(),
         Toc {
             directives: Vec::new(),
             files,
@@ -76,6 +102,9 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if let Some(overlaid) = fixture::read(req) {
         return overlaid;
     }
+    if let Some(bytes) = read_loose(req) {
+        return Some(bytes);
+    }
     let chain = chain()?;
     match chain.read(req) {
         Ok(bytes) => Some(bytes),
@@ -84,6 +113,53 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
             None
         }
     }
+}
+
+/// A bare file name off the install's own folders, read-only: Storm's open tries the install
+/// directory (its base path `0xc52418`) and its `Data\` before the archives, which is where the
+/// login screen's agreements (`<SimpleHTML file="eula.html">`) are found, loose in `Data\`. The
+/// lookup ignores case, as the reference's file system does, so `credits.html` finds
+/// `Data/Credits.html` on a case-sensitive one. Only a bare name looks on disk; every chain path
+/// keeps reading the archives alone.
+fn read_loose(req: &str) -> Option<Vec<u8>> {
+    if req.is_empty() || req.contains(['\\', '/']) || req.contains("..") {
+        return None;
+    }
+    static INDEX: OnceLock<std::collections::HashMap<String, std::path::PathBuf>> = OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        benilla_formats::wow_data()
+            .map(|data| {
+                let install = data.parent().map(std::path::Path::to_path_buf);
+                let dirs: Vec<std::path::PathBuf> =
+                    install.into_iter().chain(std::iter::once(data)).collect();
+                loose_index(&dirs)
+            })
+            .unwrap_or_default()
+    });
+    std::fs::read(index.get(&req.to_ascii_lowercase())?).ok()
+}
+
+/// The files directly in `dirs` by lowercased name, read once; an earlier directory wins a name
+/// two share.
+fn loose_index(
+    dirs: &[std::path::PathBuf],
+) -> std::collections::HashMap<String, std::path::PathBuf> {
+    let mut index = std::collections::HashMap::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                index.entry(name.to_ascii_lowercase()).or_insert(path);
+            }
+        }
+    }
+    index
 }
 
 /// The player's patch chain, opened once per process and shared by every VM. Process-local, not
@@ -162,6 +238,23 @@ fn is_word(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use benilla_ui::script::UiScript;
+
+    /// A bare name finds its loose file whatever the case on disk, the install root ahead of
+    /// `Data`.
+    #[test]
+    fn the_loose_index_ignores_case_and_prefers_the_install_root() {
+        let tmp = std::env::temp_dir().join(format!("benilla-loose-{}", std::process::id()));
+        let data = tmp.join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("Credits.html"), b"data").unwrap();
+        std::fs::write(data.join("eula.html"), b"data").unwrap();
+        std::fs::write(tmp.join("EULA.html"), b"root").unwrap();
+        let index = super::loose_index(&[tmp.clone(), data.clone()]);
+        let read = |name: &str| std::fs::read(&index[name]).unwrap();
+        assert_eq!(read("credits.html"), b"data");
+        assert_eq!(read("eula.html"), b"root");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// Every `RegisterForSave`'d UI global defaults to the value the reference's own
     /// `UIOptionsFrame_Init` assigns, the FrameXML half of the rule `cvars::REGISTERED` holds for
@@ -2010,10 +2103,12 @@ mod tests {
                     // rustfmt splits a long chain at its dots, so the three shapes are matched
                     // with the whitespace before each `.` removed.
                     let text = glue_chains(&text);
-                    // The engine's deferred lane, `pending_events.push((name, args))`, fires too.
-                    const CALLS: [&str; 3] = [
+                    // A verb's `model.raise(name, args)` and the host queue,
+                    // `pending_events.push((name, args))`, fire too.
+                    const CALLS: [&str; 4] = [
                         concat!("fire_event", "("),
                         concat!("fire_event_into", "("),
+                        concat!("model.raise", "("),
                         concat!("pending_events.push", "(("),
                     ];
                     let mut fires_indirectly = false;

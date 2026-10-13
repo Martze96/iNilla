@@ -14,6 +14,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// The synthetic header key for factions the player moved to the inactive bucket.
 const KEY_INACTIVE: i64 = -1;
@@ -270,7 +271,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // isCollapsed, isWatched; eleven wide on every path, a miss included.
     g.set(
         "GetFactionInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(row) = index
                 .checked_sub(1)
@@ -397,12 +398,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsFactionInactive / SetFactionInactive / SetFactionActive (`0x4d69b0`, `0x4d6a00`): the flip
-    // is local first too, and moves the row under "Inactive", so the tree regroups here
-    // (`0x4d69b0` calls `0x4d5c40`); the folds survive, as only a server rebuild resets them.
+    // IsFactionInactive / SetFactionInactive / SetFactionActive (`0x4d69b0`, `0x4d6a00` →
+    // `0x4d60f0`): the flip is local first too, and moves the row under "Inactive", so the tree
+    // regroups here and `0x4d5c40` fires `UPDATE_FACTION` (`0x4d617b`, fire site `0x4d5dab`), which
+    // the pane repaints on; the folds survive, as only a server rebuild resets them.
     g.set(
         "IsFactionInactive",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(binding_abi::flag(
                 entry_at(&model, index).is_some_and(|e| e.inactive),
@@ -425,6 +427,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 model.reputation_sends.push(send);
                 let groups = build_groups(&model.reputation.entries);
                 model.reputation_groups = groups;
+                drop(model);
+                super::event::fire_global(lua, "UPDATE_FACTION", &[]);
                 Ok(())
             })?,
         )?;
@@ -710,6 +714,37 @@ mod tests {
         // Unfolding it reveals exactly the re-parented row.
         s.run("ExpandFactionHeader(8)").unwrap();
         assert_eq!(names(&s).last().unwrap(), "Argent Dawn");
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+    }
+
+    /// The flip moves the row, and the pane repaints on `UPDATE_FACTION` alone: both verbs raise
+    /// it after the regroup (`0x4d60f0` → `0x4d5c40`), so a listener already sees the moved row.
+    #[test]
+    fn the_inactive_verbs_raise_update_faction_after_the_regroup() {
+        let s = seated();
+        s.run(
+            r#"log = {}
+            local f = CreateFrame("Frame") f:RegisterEvent("UPDATE_FACTION")
+            f:SetScript("OnEvent", function()
+                local n = GetNumFactions()
+                tinsert(log, (GetFactionInfo(n)))
+            end)
+            SetFactionInactive(3)"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<Vec<String>>("return log").unwrap(),
+            ["Inactive"],
+            "heard once, and already regrouped: Stormwind sits under the new last header"
+        );
+        // Unfold Inactive (9 rows: its child is index 9), then bring Stormwind back.
+        s.run("ExpandFactionHeader(8) log = {}").unwrap();
+        s.run("SetFactionActive(9)").unwrap();
+        assert_eq!(
+            s.eval::<Vec<String>>("return log").unwrap(),
+            ["Bloodsail Buccaneers"],
+            "heard once more, and the emptied Inactive header is gone"
+        );
         assert!(s.errors().is_empty(), "{:#?}", s.errors());
     }
 

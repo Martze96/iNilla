@@ -187,6 +187,7 @@ pub(crate) struct ActionPress<'w, 's> {
     ui_errors: ResMut<'w, UiErrorKeys>,
     ladder: CastLadder<'w, 's>,
     gate: crate::ui_bind_confirm::BindGate<'w>,
+    equip_sound: MessageWriter<'w, crate::sound::AutoEquipSound>,
 }
 
 /// What a `UseAction` press leaves to another applier.
@@ -213,6 +214,7 @@ pub(crate) fn use_action(
         ui_errors,
         ladder,
         gate,
+        equip_sound,
     } = p;
     let selection = &targeting.selection;
     let action = press.action;
@@ -239,7 +241,7 @@ pub(crate) fn use_action(
                     "ui_action: cast {} re-pressed — targeting toggles off",
                     b.action
                 );
-                ladder.ground.clear();
+                ladder.ground.cancel();
                 return UseOutcome::Done;
             }
             // A live `ActiveIconID` spell re-pressed cancels its aura (`0x4e55f0`, cancel
@@ -304,22 +306,54 @@ pub(crate) fn use_action(
                 // No quest guard: the bar tests only `InventoryType` (`0x4e5fdd`), unlike
                 // the bag click (`StartQuest`, `0x4fa3c4`), so a quest-starter equips.
                 debug!("ui_action: item action {action} auto-equip (wire {bag_index}/{slot0})");
-                // The shared auto-equip sender, so a BoE asks before binding, as from a bag.
-                crate::ui_items::send_auto_equip(
-                    script,
-                    gate,
-                    &ladder.objects,
-                    &ladder.items,
-                    &ladder.commands,
-                    bag_index,
-                    slot0,
-                    Some(guid),
-                    false,
-                );
+                // `0x4e602a` runs `0x5e1840`: the bar's item takes the cursor, its inner clear
+                // dropping and unlocking a held item, and goes out through `AutoEquipCursorItem`,
+                // which asks first for a bind-on-equip item and keeps it held. Nothing locks it,
+                // and a projectile's clear unlocks (`0x5e1763`).
+                match script.auto_equip_guid(guid, false) {
+                    // The item sent is the cursor's: the bar's own, or with no control (the set
+                    // refused) whatever was held (`0x5e18c9`).
+                    benilla_ui::script::AutoEquip::Sent { bag, slot, guid } => {
+                        if let Some((bag_index, wire_slot)) = crate::ui_items::wire_pos(bag, slot) {
+                            crate::ui_items::send_auto_equip(
+                                script,
+                                &ladder.objects,
+                                &ladder.items,
+                                &ladder.commands,
+                                bag_index,
+                                wire_slot,
+                                Some(guid),
+                            );
+                            // The set and the send's clear both land inside the call
+                            // (`0x494c4a`, `0x49520a`), so the pair plays here.
+                            if let Some(display_id) = ladder
+                                .objects
+                                .object(guid)
+                                .and_then(|o| o.object_entry())
+                                .and_then(|entry| {
+                                    ladder.items.template(entry, guid, &ladder.commands)
+                                })
+                                .map(|t| t.display_info_id)
+                            {
+                                equip_sound.write(crate::sound::AutoEquipSound { display_id });
+                            }
+                        }
+                    }
+                    benilla_ui::script::AutoEquip::Asked { bag, slot, guid } => gate.defer_equip(
+                        script,
+                        crate::ui_bind_confirm::PendingEquip::AutoEquip { bag, slot, guid },
+                    ),
+                    benilla_ui::script::AutoEquip::Back | benilla_ui::script::AutoEquip::None => {}
+                }
             } else {
                 // The shared `CGItem::Use` fork (called at `0x4e607b`): a quest-starter offers
                 // its quest, and the use runs the whole cast ladder. The wire's third byte is
-                // the spell block ordinal, not a flag.
+                // the spell block ordinal, not a flag. A copy locked when the call was made is
+                // refused first.
+                if press.item_was_locked(guid) {
+                    debug!("ui_action: item action {action} on a locked item — refused");
+                    return UseOutcome::Done;
+                }
                 let spell_index = template.use_spell_index().unwrap_or(0);
                 debug!(
                     "ui_action: item action {action} use (wire {bag_index}/{slot0}, spell #{spell_index})"

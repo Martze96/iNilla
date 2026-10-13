@@ -12,6 +12,7 @@ use mlua::{Lua, MultiValue, Value, Variadic};
 use super::binding_abi::{self, number_arg};
 use super::item_stats::item_link;
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// One reagent a recipe consumes (`GetCraftReagentInfo`); name and icon are `None` until the item
 /// template answer lands.
@@ -124,15 +125,14 @@ fn collate(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 impl super::UiScript {
-    /// Push the open craft window's snapshot, or clear it with `None`. A push sorts the rows and
+    /// Push the open craft window's snapshot, or mark it closed with `None`, which keeps the
+    /// list and selection as the reference's close does (`0x4f5fe0`). A push sorts the rows and
     /// keeps the selection on its spell id, clearing it when that recipe is gone.
     pub fn set_craft(&mut self, state: Option<CraftState>) {
         let mut model = self.model_mut();
+        model.craft_open = state.is_some();
         match state {
-            None => {
-                model.craft_selection = 0;
-                model.craft = None;
-            }
+            None => {}
             Some(mut s) => {
                 let craft_type = s.craft_type;
                 s.recipes.sort_by(|a, b| recipe_order(a, b, craft_type));
@@ -157,6 +157,12 @@ impl super::UiScript {
     /// Whether `CloseCraft` was called since the last drain; the close sends no packet.
     pub fn take_craft_close(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().craft_close)
+    }
+
+    /// Whether the VM holds the window open: `CloseCraft` closes it in the verb, so a feed that
+    /// finds it closed owes no `CRAFT_CLOSE` of its own.
+    pub fn craft_open(&self) -> bool {
+        self.model_ref().craft_open
     }
 }
 
@@ -272,14 +278,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetCraftInfo(index) → craftName, craftSubSpellName, craftType, numAvailable, isExpanded,
-    // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); one nil past the end.
+    // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); a miss pushes the seven too.
     // `isExpanded` is always nil; Beast Training's cost and level answer 0, not built.
     g.set(
         "GetCraftInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(r) = recipe(&model, index) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // `0x4f70a4`: nil, nil, nil, 0, nil, 0, 0.
+                return Ok(binding_abi::tuple(&[
+                    None,
+                    None,
+                    None,
+                    Some(0),
+                    None,
+                    Some(0),
+                    Some(0),
+                ]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&r.name)?),
@@ -296,7 +311,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetCraftIcon(index) → the icon path, nil while in flight or past the end.
     g.set(
         "GetCraftIcon",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             opt_str(lua, recipe(&model, index).and_then(|r| r.icon.as_ref()))
         })?,
@@ -306,7 +321,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // painting (`Blizzard_CraftUI.lua:312`).
     g.set(
         "GetCraftDescription",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             opt_str(
                 lua,
@@ -318,21 +333,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetCraftNumReagents(index) → the reagent count, 0 past the end or when closed.
     g.set(
         "GetCraftNumReagents",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(recipe(&model, index).map_or(0, |r| r.reagents.len()) as i64)
         })?,
     )?;
 
-    // GetCraftReagentInfo(index, reagentIndex) → name, icon, need, have; one nil past the end.
+    // GetCraftReagentInfo(index, reagentIndex) → name, icon, need, have; a miss is four nils
+    // (`0x4f759b`).
     g.set(
         "GetCraftReagentInfo",
-        lua.create_function(|lua, (index, reagent_index): (usize, usize)| {
+        lua.create_function(|lua, (Idx(index), Idx(reagent_index)): (Idx, Idx)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(reagent) = recipe(&model, index)
                 .and_then(|r| reagent_index.checked_sub(1).and_then(|n| r.reagents.get(n)))
             else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(binding_abi::tuple(&[None; 4]));
             };
             Ok(MultiValue::from_vec(vec![
                 opt_str(lua, reagent.name.as_ref())?,
@@ -404,12 +420,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CloseCraft(): no packet; the flag tells the app to clear its state.
+    // CloseCraft() (`0x4f6c00` → `0x4f5fe0`): no packet. It zeroes the open marker alone
+    // (`[0xbdcfb8]`), so `GetNumCrafts` (`0x4f6e70`) still answers the held list, and signals
+    // `CRAFT_CLOSE` unconditionally (`0x4f5fef`); the flag tells the app to clear its state.
     g.set(
         "CloseCraft",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.craft_close = true;
+            super::tick::verb(lua, |model| {
+                model.craft_close = true;
+                model.craft_open = false;
+                model.raise("CRAFT_CLOSE", Vec::new());
+            });
             Ok(())
         })?,
     )?;
@@ -661,20 +682,31 @@ mod tests {
         assert_eq!(s.arity("GetCraftSpellFocus(1)").unwrap(), 0);
     }
 
+    /// `0x4f5fe0` zeroes only the open marker (`[0xbdcfb8]`) and signals `CRAFT_CLOSE` before
+    /// the verb returns; `GetNumCrafts` (`0x4f6e70`, `[0xbdcfc8]`) and the selection still answer
+    /// the held list, through the app's close too.
     #[test]
-    fn close_and_clear_reset_the_window() {
+    fn a_close_keeps_the_list() {
         let mut s = UiScript::new().unwrap();
         s.set_craft(Some(state()));
         s.run("SelectCraft(1)").unwrap();
+        let held = s.eval::<i64>("return GetNumCrafts()").unwrap();
+        assert!(held > 0);
 
         assert!(!s.take_craft_close());
+        crate::script::tick::heard::listen(&s, &["CRAFT_CLOSE"], Some("GetNumCrafts()"));
         s.run("CloseCraft()").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            [format!("CRAFT_CLOSE {held}")]
+        );
+        assert!(!s.craft_open());
         assert!(s.take_craft_close());
         assert!(!s.take_craft_close(), "drained");
 
         s.set_craft(None);
-        assert_eq!(s.eval::<i64>("return GetNumCrafts()").unwrap(), 0);
-        assert_eq!(s.eval::<i64>("return GetCraftSelectionIndex()").unwrap(), 0);
+        assert_eq!(s.eval::<i64>("return GetNumCrafts()").unwrap(), held);
+        assert_eq!(s.eval::<i64>("return GetCraftSelectionIndex()").unwrap(), 1);
     }
 
     /// The expected order is an emulated run of `0x4f6920` over the shipped `Spell.dbc` values.

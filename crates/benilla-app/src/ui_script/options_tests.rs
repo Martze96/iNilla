@@ -114,6 +114,46 @@ fn controls_is_the_default_category_and_the_title_reads_it() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The page body is the ScrollFrame's scroll child, which its HIGHLIGHT callback draws at the
+/// ScrollFrame's level (`0x787220`); the bar's trough sits at that level too, so the body and the
+/// bar, a level up, both draw over it.
+#[test]
+fn the_page_body_and_its_bar_draw_over_the_bar_trough() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.resolve();
+    s.tick(0.05);
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return BenillaOptionsFrameContainerScrollBarTrough:IsVisible() == 1")
+            .unwrap(),
+        "the Controls page scrolls, so its trough shows"
+    );
+    let quads = s.extract();
+    let zs = |pick: &dyn Fn(&str) -> bool| -> Vec<u128> {
+        quads
+            .iter()
+            .filter(|q| s.quad_owner_name(q.target).is_some_and(|n| pick(&n)))
+            .map(|q| q.z)
+            .collect()
+    };
+    let trough = zs(&|n| n == "BenillaOptionsFrameContainerScrollBarTrough");
+    let body = zs(&|n| n.starts_with("BenillaOptionsFrameContainerBody"));
+    let bar =
+        zs(&|n| n.starts_with("BenillaOptionsFrameContainerScrollBar") && !n.ends_with("Trough"));
+    let top = *trough.iter().max().expect("the trough draws");
+    assert!(!body.is_empty() && !bar.is_empty());
+    assert!(
+        body.iter().all(|&z| z > top),
+        "the body draws over the trough"
+    );
+    assert!(
+        bar.iter().all(|&z| z > top),
+        "the bar draws over the trough"
+    );
+}
+
 /// The selection survives a close and reopen: the OnShow re-applies the last category.
 #[test]
 fn clicking_a_row_moves_the_selection_and_the_page_title() {
@@ -311,7 +351,7 @@ fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
     let ground = quads
         .iter()
         .position(|q| match &q.content {
-            QuadContent::Backdrop { path, .. } => path.contains("UI-DialogBox-Background"),
+            QuadContent::Texture { path: Some(p), .. } => p.contains("UI-DialogBox-Background"),
             _ => false,
         })
         .expect("the window still wears the 1.14 dialog ground");
@@ -1907,16 +1947,23 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
             "{f} stays away while the page fits"
         );
     }
-    let page_h: f32 = s
-        .eval("return BenillaOptionsFrameContainerScroll:GetHeight()")
+    // The page rect in the window's units, from its edges: the scroll is sized by its anchors,
+    // so its `GetWidth`/`GetHeight` answer the span before the window's scale divides it.
+    let (page_w, page_h): (f32, f32) = s
+        .eval(
+            "local sf = BenillaOptionsFrameContainerScroll \
+             return sf:GetRight() - sf:GetLeft(), sf:GetTop() - sf:GetBottom()",
+        )
+        .unwrap();
+    let (body_w, body_h): (f32, f32) = s
+        .eval(
+            "return BenillaOptionsFrameContainerBody:GetWidth(), \
+             BenillaOptionsFrameContainerBody:GetHeight()",
+        )
         .unwrap();
     assert!(
-        (s.eval::<f32>("return BenillaOptionsFrameContainerBody:GetHeight()")
-            .unwrap()
-            - page_h)
-            .abs()
-            < 0.5,
-        "the body is the page rect when nothing overflows"
+        (body_w - page_w).abs() < 0.5 && (body_h - page_h).abs() < 0.5,
+        "the body is the page rect when nothing overflows: {body_w}x{body_h} vs {page_w}x{page_h}"
     );
 
     s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
@@ -2114,7 +2161,8 @@ fn hover_label(s: &mut UiScript, frame: &str) {
 
 /// Scroll `frame` into the page's rect: past the fold a row is clipped and cannot be hovered.
 fn scroll_into_view(s: &mut UiScript, frame: &str) {
-    s.resolve();
+    // The page's fit and the range it marks land in the walk.
+    settle(s);
     s.run(&format!(
         "local sf = BenillaOptionsFrameContainerScroll \
          local range = sf:GetVerticalScrollRange() \
@@ -2721,6 +2769,7 @@ fn the_action_bars_page_locks_the_real_bar() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);

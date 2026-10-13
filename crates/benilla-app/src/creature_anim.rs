@@ -290,6 +290,11 @@ impl AttackSeam<'_, '_> {
     /// `CMSG_SET_SELECTION` 0 (`0x493a2a`), which this does not.
     pub(crate) fn close_loot_on(&mut self, outgoing: u64) {
         if self.loot.source() == Some(outgoing) {
+            // `dl` clear (`0x493970`): a disenchant window with rows left is swept, not closed.
+            if self.loot.disenchant_holds() {
+                self.loot.owe_sweep();
+                return;
+            }
             debug!("target: the selection teardown closes the loot on {outgoing:#x}");
             crate::ui_loot::close_interaction(
                 &mut self.loot,
@@ -349,6 +354,12 @@ pub(crate) struct CastEvent {
     pub(crate) entity: Entity,
     pub(crate) spell_id: u32,
     pub(crate) kind: CastEventKind,
+    /// `SMSG_SPELL_GO`'s cast flags, 0 on every other edge: the tradeskill repeat's hook skips a
+    /// GO with `0x41` set (`0x6e81de`, vmangos `Spell.h:54`).
+    pub(crate) cast_flags: u16,
+    /// `SMSG_SPELL_GO`'s first guid is an item, not the caster: the tradeskill repeat's hook runs
+    /// only when that guid is the player (`0x6e81d3`-`0x6e81dc`).
+    pub(crate) item_cast: bool,
     /// `PlaySeq` stamp, carried to the kit's `EmoteAnim`.
     pub(crate) seq: u64,
 }

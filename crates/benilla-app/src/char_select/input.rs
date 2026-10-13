@@ -195,9 +195,10 @@ mod tests {
                 .init_resource::<super::super::addons::AddonsPanel>()
                 .init_resource::<crate::login::LoginIntent>()
                 .init_resource::<crate::glue::dialog::GlueDialog>()
-                .insert_resource(CharPick(pick_tx))
-                .insert_resource(RealmChoice(realm_tx))
+                .insert_resource(CharPick(pick_tx.into()))
+                .insert_resource(RealmChoice(realm_tx.into()))
                 .add_message::<GlueSound>()
+                .add_message::<crate::login::GlueLogin>()
                 .add_message::<bevy::input::mouse::MouseWheel>()
                 .add_systems(PreUpdate, take_input);
             if list_first {
@@ -227,10 +228,20 @@ mod tests {
                 "screen first"
             };
             assert!(
+                !app.world().resource::<Realms>().shown,
+                "{order}: the list's Cancel ran"
+            );
+            assert!(
                 realm_rx
                     .try_iter()
-                    .any(|r| matches!(r, RealmRequest::Abandon)),
-                "{order}: the list's Cancel ran"
+                    .all(|r| matches!(r, RealmRequest::Refresh)),
+                "{order}: and over character select it closes nothing"
+            );
+            assert!(
+                app.world()
+                    .resource::<bevy::ecs::message::Messages<crate::login::GlueLogin>>()
+                    .is_empty(),
+                "{order}: nor ends the login"
             );
             assert_eq!(
                 *app.world().resource::<State<ClientState>>().get(),

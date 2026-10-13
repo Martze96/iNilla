@@ -8,6 +8,7 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// Slots per side, six traded and the non-traded enchant slot: vmangos `TRADE_SLOT_COUNT`
 /// (`TradeData.h`), kept equal to the protocol crate's, which this crate does not depend on.
@@ -22,9 +23,20 @@ pub struct TradeSlotItem {
     pub name: Option<String>,
     pub texture: Option<String>,
     pub count: u32,
-    /// `None` while the template is in flight; only the target side's info returns it
-    /// (`TradeFrame.lua:84`).
+    /// `None` while the template is in flight. `GetTradePlayerItemInfo` and
+    /// `GetTradeTargetItemInfo` report it only when `inventory_type` is nonzero (`0x4c059c`,
+    /// `0x4c0241`), else -1.
     pub quality: Option<u32>,
+    /// The template's InventoryType; 0 while the template is in flight and for an item that cannot
+    /// be equipped.
+    pub inventory_type: u32,
+    /// The wire's `lock_id`: the trade target's tooltip draws LOCKED off it (`0x534563`,
+    /// `0x52bdd2`). 0 for none; the player's side ignores it.
+    pub lock_id: u32,
+    /// The player's own side only: the placed item's `ITEM_FIELD_FLAGS`. Its presence means the
+    /// slot holds a live item object, which the tooltip builder's LOCKED gate reads (`0x5342ed`);
+    /// the partner's side has none.
+    pub object_flags: Option<u32>,
     /// The name of the enchant being applied to slot 7, which stock shows in green
     /// (`TradeFrame.lua:62`); the app always sends `None`.
     pub enchantment: Option<String>,
@@ -56,6 +68,71 @@ impl super::UiScript {
     /// Push (or clear, with `None`) the open trade window's snapshot.
     pub fn set_trade(&mut self, state: Option<TradeState>) {
         self.model_mut().trade = state;
+    }
+
+    /// Our column as the VM holds it, `ClickTradeButton`'s writes included: what the slots'
+    /// `TRADE_PLAYER_ITEM_CHANGED` handlers last read. `None` with no trade open.
+    pub fn trade_player_slots(&self) -> Option<[Option<TradeSlotItem>; TRADE_SLOTS]> {
+        self.model_ref()
+            .trade
+            .as_ref()
+            .map(|t| t.player.slots.clone())
+    }
+
+    /// `UnlockTradeItems` (`0x4bfcf0`), which the `CANCELED`, `COMPLETE` and `CLOSE_WINDOW` status
+    /// arms run before the window closes (`0x4bf837`, `0x4bf859`, `0x4bf87e`): every item our
+    /// slots held unlocks, one `ITEM_LOCK_CHANGED` each (`0x4bfd03`), fired now. A local
+    /// `CloseTrade` (`0x4bfdc0`) never runs it; the server's `CANCELED` does.
+    pub fn unlock_trade_items(&mut self) {
+        let offered = std::mem::take(&mut self.model_mut().trade_offered);
+        for item in offered.iter().flatten() {
+            self.unlock_item(item.guid);
+        }
+    }
+
+    /// `InvalidateTradeSlot` (`0x4bfbd0`) for our 0-based slot, from the `ONLY_CONJURED` arm
+    /// (`0x4bf9fd`) and an own-side `SMSG_TRADE_STATUS_EXTENDED` that empties it (`0x5d4ad3`,
+    /// `0x5d4b33`): the item it held unlocks (`0x4bfc0a`), the slot empties, and
+    /// `TRADE_PLAYER_ITEM_CHANGED(slot)` fires (`0x4bfc3f`), now.
+    pub fn invalidate_trade_slot(&mut self, slot: u8) {
+        let cell = usize::from(slot);
+        if cell >= TRADE_SLOTS {
+            return;
+        }
+        let item = self.model_mut().trade_offered[cell].take();
+        if let Some(item) = item {
+            self.unlock_item(item.guid);
+        }
+        self.fire_event(
+            "TRADE_PLAYER_ITEM_CHANGED",
+            vec![super::ScriptValue::Int(i64::from(slot) + 1)],
+        );
+    }
+
+    /// A placement the app could not send (its bag position has no wire form): the slot gives
+    /// the item back, unlocked, as the reference's failed send never writes it (`0x4bfab1`), and
+    /// the slot's handler repaints with `TRADE_PLAYER_ITEM_CHANGED`.
+    pub fn return_unsent_trade_item(&mut self, id: u32) {
+        let Some(i) = id
+            .checked_sub(1)
+            .map(|i| i as usize)
+            .filter(|&i| i < TRADE_SLOTS)
+        else {
+            return;
+        };
+        super::tick::verb(&self.lua, |model| {
+            let Some(item) = model.trade_offered[i].take() else {
+                return;
+            };
+            if let Some(trade) = model.trade.as_mut() {
+                trade.player.slots[i] = None;
+            }
+            super::cursor::unlock_item(model, item.guid);
+            model.raise(
+                "TRADE_PLAYER_ITEM_CHANGED",
+                vec![super::ScriptValue::Int(i64::from(id))],
+            );
+        });
     }
 
     /// Drain the tokens `InitiateTrade` queued; the app sends `CMSG_INITIATE_TRADE` for each.
@@ -125,59 +202,136 @@ fn gold(model: &Model, pick: impl Fn(&TradeState) -> &TradeSideState) -> u32 {
     model.trade.as_ref().map(pick).map_or(0, |side| side.gold)
 }
 
-/// `ClickTradeButton(id)` on our slot (`TradeFrame.xml:135`): a held bag item is queued for
-/// `CMSG_SET_TRADE_ITEM` and the cursor cleared, the app filling our column itself since vmangos
-/// echoes a placement only to the partner (`TradeData.cpp:81`); an empty cursor on a filled slot
-/// queues a clear. Any other payload stays on the cursor.
-fn click_trade_button(model: &mut Model, id: u32) {
-    // Coins on the cursor go into the offer, the index unread (`0x4bfe34`).
-    if matches!(model.cursor, Some(CursorPayload::Money(_))) {
+/// `ClickTradeButton(id)` on our slot (`TradeFrame.xml:135`, `0x4bfdf0`). Coins on the cursor go
+/// into the offer, the index unread (`0x4bfe34`). Otherwise the held item, or none, is compared
+/// with the slot's (`0x4c0017`): the same, nothing on both sides included, is `ClearCursor(1,1)`
+/// (`0x4c0026`), which drops any other payload. Else the slot takes the held item, a
+/// `CMSG_SET_TRADE_ITEM`, or empties, a `CMSG_CLEAR_TRADE_ITEM` (`0x4bfa70`), and
+/// `SetCursorItem` puts the slot's old item back on the cursor, whole (count 0, `0x4c004e`),
+/// lifting no lock when the send went (`0x4c004a`-`0x4c0064`), so a placed item stays locked in
+/// its bag. `0x4bfa70` stores the slot and signals `TRADE_PLAYER_ITEM_CHANGED` with it
+/// (`0x4bfaef`) before that `SetCursorItem`, so the handler reads the slot as written. The VM
+/// fills our column itself, since vmangos echoes a placement only to the partner
+/// (`TradeData.cpp:81`).
+fn click_trade_button(lua: &Lua, id: u32) {
+    let money = super::tick::verb(lua, |model| {
+        if !matches!(model.cursor, Some(CursorPayload::Money(_))) {
+            return false;
+        }
         cursor::money::add_trade_money(model);
+        true
+    });
+    if money {
         return;
     }
-    match model.cursor.take() {
-        Some(CursorPayload::Item(item)) => {
-            let (bag, slot) = (item.bag, item.slot);
-            model.trade_set_items.push((id, bag, slot));
-            cursor::queue_cursor_update(model);
-            cursor::queue_lock_changed(model, bag, slot);
-        }
-        None => {
-            let filled = matches!(
-                id.checked_sub(1).and_then(|i| {
-                    model
-                        .trade
-                        .as_ref()
-                        .and_then(|t| t.player.slots.get(i as usize))
-                }),
-                Some(Some(_))
-            );
-            if filled {
-                model.trade_clear_items.push(id);
-            }
-        }
-        Some(other) => model.cursor = Some(other),
+    // A slot outside the seven reads as empty (`0x4bffc5`-`0x4c0001`).
+    let index = id
+        .checked_sub(1)
+        .map(|i| i as usize)
+        .filter(|&i| i < TRADE_SLOTS);
+    let (held, old) = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let held = match &model.cursor {
+            Some(CursorPayload::Item(item)) => Some(item.clone()),
+            _ => None,
+        };
+        (held, index.and_then(|i| model.trade_offered[i].clone()))
+    };
+    let key = |item: &Option<cursor::CursorItem>| item.as_ref().map(|i| (i.bag, i.slot));
+    if key(&held) == key(&old) {
+        super::tick::verb(lua, cursor::clear_cursor);
+        return;
     }
+    // `0x4bfa70`: a slot outside the seven sends nothing; the set send fails only on a missing
+    // player or item (`0x5d43af`, `0x5d43da`), which a held item never is here. The table keeps
+    // the item whole: what comes back is the stack.
+    let sent = super::tick::verb(lua, |model| {
+        let Some(i) = index else {
+            return false;
+        };
+        let placed = held.as_ref().map(|item| trade_slot_item(model, item));
+        match &held {
+            Some(item) => model.trade_set_items.push((id, item.bag, item.slot)),
+            None => model.trade_clear_items.push(id),
+        }
+        model.trade_offered[i] = held.map(|item| cursor::CursorItem {
+            count: None,
+            ..item
+        });
+        write_player_slot(model, i, placed);
+        true
+    });
+    cursor::set_cursor(lua, !sent, |_| old.map(CursorPayload::Item));
+}
+
+/// `0x4bfa70`'s local half: our 0-based slot shows `item` and signals
+/// `TRADE_PLAYER_ITEM_CHANGED` with its 1-based index (`0x4bfaef`). The reference writes only
+/// past a successful send (`0x4bfab1`), which needs an open trade.
+fn write_player_slot(model: &mut Model, i: usize, item: Option<TradeSlotItem>) {
+    let Some(trade) = model.trade.as_mut() else {
+        return;
+    };
+    trade.player.slots[i] = item;
+    model.raise(
+        "TRADE_PLAYER_ITEM_CHANGED",
+        vec![super::ScriptValue::Int(i as i64 + 1)],
+    );
+}
+
+/// What our slot shows for a held item: the bag record the app fed, else what the cursor carries.
+fn trade_slot_item(model: &Model, item: &cursor::CursorItem) -> TradeSlotItem {
+    let name = |link: Option<&str>| link.map(|l| cursor::item_link_name(Some(l)));
+    model
+        .containers
+        .get(&item.bag)
+        .and_then(|c| c.slots.get(&item.slot))
+        .filter(|s| s.item_id == item.item_id)
+        .map(|s| TradeSlotItem {
+            item_id: s.item_id,
+            name: name(s.link.as_deref()),
+            texture: s.texture.clone(),
+            count: s.count.max(1),
+            quality: s.quality,
+            inventory_type: s.inventory_type,
+            lock_id: 0,
+            object_flags: Some(s.flags),
+            enchantment: None,
+            link: s.link.clone(),
+        })
+        .unwrap_or_else(|| TradeSlotItem {
+            item_id: item.item_id,
+            name: name(item.link.as_deref()),
+            texture: item.texture.clone(),
+            count: cursor::held_count(model, item),
+            quality: item.quality,
+            link: item.link.clone(),
+            ..Default::default()
+        })
 }
 
 /// Register the trade globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // GetTradePlayerItemInfo(id): the five values `TradeFrame.lua:55` reads.
+    // GetTradePlayerItemInfo(id): name, texture, numItems, quality, enchantment; an empty slot is
+    // nil, nil, 0, 0, nil (`0x4c0613`), and a filled one's texture is a string. The fourth is the quality, -1 unless the template is cached
+    // and equippable (`0x4c059c`), never a usable flag; `TradeFrame.lua:55` names it `isUsable` and
+    // never reads it.
     g.set(
         "GetTradePlayerItemInfo",
-        lua.create_function(|lua, id: usize| {
-            let (slot, usable) = {
+        lua.create_function(|lua, Idx(id): Idx| {
+            let slot = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let slot = slot_at(&model, id, |t| &t.player);
-                let usable = slot
-                    .as_ref()
-                    .is_none_or(|s| super::item_stats::item_usable_by_id(&model, s.item_id));
-                (slot, usable)
+                slot_at(&model, id, |t| &t.player)
             };
             let Some(s) = slot else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(super::binding_abi::tuple(&[
+                    None,
+                    None,
+                    Some(0),
+                    Some(0),
+                    None,
+                ]));
             };
             let opt_str = |v: &Option<String>| -> mlua::Result<Value> {
                 Ok(match v {
@@ -187,9 +341,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             Ok(MultiValue::from_vec(vec![
                 opt_str(&s.name)?,
-                opt_str(&s.texture)?,
+                // The question mark while the template is unknown (`0x4c0529`).
+                Value::String(
+                    lua.create_string(
+                        s.texture
+                            .as_deref()
+                            .unwrap_or(super::item_stats::MISSING_ITEM_ICON),
+                    )?,
+                ),
                 Value::Integer(i64::from(s.count.max(1))),
-                flag(usable),
+                Value::Integer(super::item_stats::gated_quality(
+                    s.quality,
+                    s.inventory_type,
+                )),
                 opt_str(&s.enchantment)?,
             ]))
         })?,
@@ -202,7 +366,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     ] {
         g.set(
             name,
-            lua.create_function(move |lua, id: usize| {
+            lua.create_function(move |lua, Idx(id): Idx| {
                 let link = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     let slot = if side {
@@ -220,10 +384,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         )?;
     }
 
-    // GetTradeTargetItemInfo(id): the six values `TradeFrame.lua:84` reads.
+    // GetTradeTargetItemInfo(id): the six values `TradeFrame.lua:84` reads; an empty slot is
+    // nil, nil, 0, 0, nil, nil (`0x4c02f6`). The fourth is the quality through the same gate as
+    // the player's (`0x4c0241`).
     g.set(
         "GetTradeTargetItemInfo",
-        lua.create_function(|lua, id: usize| {
+        lua.create_function(|lua, Idx(id): Idx| {
             let (slot, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let slot = slot_at(&model, id, |t| &t.target);
@@ -232,8 +398,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .is_none_or(|s| super::item_stats::item_usable_by_id(&model, s.item_id));
                 (slot, usable)
             };
-            let Some(s) = slot else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+            // A template the cache lacks takes the miss too (`0x4c019b`, `0x4c02f6`).
+            let Some(s) = slot.filter(|s| s.name.is_some()) else {
+                return Ok(super::binding_abi::tuple(&[
+                    None,
+                    None,
+                    Some(0),
+                    Some(0),
+                    None,
+                    None,
+                ]));
             };
             let opt_str = |v: &Option<String>| -> mlua::Result<Value> {
                 Ok(match v {
@@ -241,15 +415,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => Value::Nil,
                 })
             };
-            let quality = match s.quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
             Ok(MultiValue::from_vec(vec![
                 opt_str(&s.name)?,
-                opt_str(&s.texture)?,
+                Value::String(
+                    lua.create_string(
+                        s.texture
+                            .as_deref()
+                            .unwrap_or(super::item_stats::MISSING_ITEM_ICON),
+                    )?,
+                ),
                 Value::Integer(i64::from(s.count.max(1))),
-                quality,
+                Value::Integer(super::item_stats::gated_quality(
+                    s.quality,
+                    s.inventory_type,
+                )),
                 flag(usable),
                 opt_str(&s.enchantment)?,
             ]))
@@ -355,8 +534,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ClickTradeButton",
         lua.create_function(|lua, id: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            click_trade_button(&mut model, id);
+            click_trade_button(lua, id);
             Ok(())
         })?,
     )?;
@@ -366,8 +544,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ClickTargetTradeButton",
         lua.create_function(|lua, _id: u32| {
             // Coins on the cursor still go into our offer, the index unread (`0x4c00a3`).
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            cursor::money::add_trade_money(&mut model);
+            super::tick::verb(lua, cursor::money::add_trade_money);
             Ok(())
         })?,
     )?;
@@ -387,6 +564,9 @@ mod tests {
             texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
             count,
             quality: Some(quality),
+            inventory_type: 0,
+            lock_id: 0,
+            object_flags: None,
             enchantment: None,
             link: Some(format!(
                 "|cffffffff|Hitem:{item_id}:0:0:0|h[Linen Cloth]|h|r"
@@ -428,6 +608,9 @@ mod tests {
             texture: None,
             count: 1,
             quality: None,
+            inventory_type: 0,
+            lock_id: 0,
+            object_flags: None,
             enchantment: None,
             link: None,
         });
@@ -466,32 +649,123 @@ mod tests {
 
         s.set_trade(Some(state()));
 
-        let (name, tex, count, usable): (String, String, i64, i64) = s
+        // Linen cloth has InventoryType 0, so the fourth value is the -1 sentinel.
+        let (name, tex, count, quality): (String, String, i64, i64) = s
             .eval(
-                "local n,t,c,u,e = GetTradePlayerItemInfo(1)\n\
-                 return n,t,c,u",
+                "local n,t,c,q,e = GetTradePlayerItemInfo(1)\n\
+                 return n,t,c,q",
             )
             .unwrap();
-        assert_eq!((name.as_str(), count, usable), ("Linen Cloth", 5, 1));
+        assert_eq!((name.as_str(), count, quality), ("Linen Cloth", 5, -1));
         assert_eq!(tex, "Interface\\Icons\\INV_Fabric_Linen_01");
         assert!(s
-            .eval::<bool>("local n,t,c,u,e = GetTradePlayerItemInfo(1)\nreturn e == nil")
+            .eval::<bool>("local n,t,c,q,e = GetTradePlayerItemInfo(1)\nreturn e == nil")
             .unwrap());
         assert!(s
             .eval::<bool>("return GetTradePlayerItemInfo(2) == nil")
             .unwrap());
 
-        // The target side adds quality as the fourth return.
+        // The target side adds the enchant and the usable flag; the fourth is the quality, -1 for
+        // linen cloth (InventoryType 0).
         let (name, _tex, count, quality, usable): (String, String, i64, i64, i64) =
             s.eval("return GetTradeTargetItemInfo(1)").unwrap();
         assert_eq!(
             (name.as_str(), count, quality, usable),
-            ("Linen Cloth", 1, 2, 1)
+            ("Linen Cloth", 1, -1, 1)
         );
         // The enchant slot (7) is filled on the target side.
         assert!(s
             .eval::<bool>("return GetTradeTargetItemInfo(7) ~= nil")
             .unwrap());
+    }
+
+    /// The fourth value is the quality, through the item-info gate (`0x4c059c`..`0x4c05c1`): the
+    /// template's quality for a cached, equippable item, else the number -1; five values on every
+    /// slot, the fourth never nil and never a usable flag.
+    #[test]
+    fn player_item_quality_is_gated_on_the_inventory_type() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        let mut weapon = item(1234, 1, 4);
+        weapon.inventory_type = 13;
+        st.player.slots[1] = Some(weapon);
+        // Equippable, but its template is still in flight.
+        let mut pending = item(1235, 1, 0);
+        pending.quality = None;
+        pending.inventory_type = 0;
+        st.player.slots[2] = Some(pending);
+        s.set_trade(Some(st));
+        for (slot, want) in [(1, "5:number:-1"), (2, "5:number:4"), (3, "5:number:-1")] {
+            assert_eq!(
+                s.eval::<String>(&format!(
+                    "local c = function(...) return arg.n .. ':' .. type(arg[4]) .. ':' .. \
+                     tostring(arg[4]) end return c(GetTradePlayerItemInfo({slot}))"
+                ))
+                .unwrap(),
+                want,
+                "slot {slot}"
+            );
+        }
+    }
+
+    /// The target side's quality goes through the same gate, and an empty slot pushes the six-value
+    /// miss tuple (`0x4c02f6`): nil, nil, 0, 0, nil, nil.
+    #[test]
+    fn target_item_info_gates_its_quality_and_pushes_six_values_on_a_miss() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        let mut weapon = item(1234, 1, 3);
+        weapon.inventory_type = 13;
+        st.target.slots[1] = Some(weapon);
+        s.set_trade(Some(st));
+        let shape = |s: &UiScript, slot: u32| -> String {
+            s.eval(&format!(
+                "local c = function(...) local o = {{}} for i = 1, arg.n do o[i] = tostring(arg[i]) end \
+                 return table.concat(o, ',') end return c(GetTradeTargetItemInfo({slot}))"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            shape(&s, 2),
+            "Linen Cloth,Interface\\Icons\\INV_Fabric_Linen_01,1,3,1,nil"
+        );
+        assert_eq!(shape(&s, 3), "nil,nil,0,0,nil,nil");
+        // A row whose template is still in flight takes the miss too (`0x4c019b`, `0x4c02f6`).
+        let mut st = state();
+        st.target.slots[3] = Some(TradeSlotItem {
+            item_id: 4306,
+            count: 1,
+            ..Default::default()
+        });
+        s.set_trade(Some(st));
+        assert_eq!(shape(&s, 4), "nil,nil,0,0,nil,nil");
+        assert_eq!(shape(&s, 0), "nil,nil,0,0,nil,nil");
+        assert_eq!(shape(&s, 9), "nil,nil,0,0,nil,nil");
+    }
+
+    /// The texture is a string for a filled slot: `0x5d8af0` falls back to the question mark while
+    /// the template is unknown.
+    #[test]
+    fn player_item_texture_falls_back_to_the_question_mark() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        let mut pending = item(1235, 1, 0);
+        pending.texture = None;
+        st.player.slots[1] = Some(pending);
+        s.set_trade(Some(st));
+        for (slot, want) in [
+            (1, "Interface\\Icons\\INV_Fabric_Linen_01"),
+            (2, "Interface\\Icons\\INV_Misc_QuestionMark"),
+        ] {
+            assert_eq!(
+                s.eval::<String>(&format!(
+                    "local n, t = GetTradePlayerItemInfo({slot}) return type(t) .. ':' .. t"
+                ))
+                .unwrap(),
+                format!("string:{want}"),
+                "slot {slot}"
+            );
+        }
     }
 
     #[test]
@@ -548,78 +822,145 @@ mod tests {
         assert!(s.run("SetTradeMoney(nil)").is_err(), "a non-number raises");
     }
 
+    /// `0x4bfa70` writes our slot and signals `TRADE_PLAYER_ITEM_CHANGED` with it (`0x4bfaef`)
+    /// before the cursor's `SetCursorItem` (`0x4c0064`); an empty cursor on a filled slot writes
+    /// the clear the same way, and `SetCursorItem`'s clear and put of the old item follow it.
     #[test]
-    fn click_trade_button_places_clears_and_refuses() {
-        use crate::script::cursor::{CursorItem, CursorPayload};
+    fn a_trade_slot_click_signals_its_slot_before_the_cursor() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(crate::script::cursor::two_item_bag()));
+        s.set_trade(Some(TradeState::default()));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        crate::script::tick::heard::listen(
+            &s,
+            &["TRADE_PLAYER_ITEM_CHANGED", "CURSOR_UPDATE"],
+            Some("tostring(arg1) .. ' ' .. tostring((GetTradePlayerItemInfo(2)))"),
+        );
+        s.run("ClickTradeButton(2)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            [
+                "TRADE_PLAYER_ITEM_CHANGED 2 Tough Jerky",
+                "CURSOR_UPDATE nil Tough Jerky"
+            ]
+        );
+        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 1)]);
 
-        let item = |bag: i64, slot: u32| {
-            CursorPayload::Item(CursorItem {
-                bar_placeable: true,
-                bag,
-                slot,
-                item_id: 2589,
-                texture: None,
-                link: None,
-                count: None,
-                quality: None,
-                equip_slots: Vec::new(),
-            })
-        };
+        s.run("ClickTradeButton(2)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            [
+                "TRADE_PLAYER_ITEM_CHANGED 2 nil",
+                "CURSOR_UPDATE nil nil",
+                "CURSOR_UPDATE nil nil"
+            ]
+        );
+        assert_eq!(s.take_trade_clear_items(), vec![2]);
+    }
+
+    /// `ClickTradeButton` (`0x4bfdf0`): a held item goes in and the slot's old item comes back on
+    /// the cursor (`0x4c0036`-`0x4c0064`), both items locked while in the slot; an empty hand
+    /// takes the old item back and queues the slot's clear; the same item on both sides, nothing
+    /// included, is `ClearCursor(1,1)` (`0x4c0026`), which drops a spell. The close unlocks.
+    #[test]
+    fn click_trade_button_swaps_the_old_item_onto_the_cursor() {
+        use crate::script::cursor::{bag_lock_probe, two_item_bag, CursorPayload, CursorSpell};
+        use crate::script::tick::heard;
 
         let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        s.set_trade(Some(TradeState::default()));
+        let locked = |s: &UiScript, slot: u32| {
+            s.eval::<bool>(&format!("return {} == 1", bag_lock_probe(slot)))
+                .unwrap()
+        };
 
-        // Empty cursor, no trade → nothing queued.
-        s.run("ClickTradeButton(1)").unwrap();
-        assert!(s.take_trade_set_items().is_empty());
-        assert!(s.take_trade_clear_items().is_empty());
+        s.run("PickupContainerItem(0, 1) ClickTradeButton(2)")
+            .unwrap();
+        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 1)]);
+        assert!(s.cursor_payload().is_none());
+        assert!(locked(&s, 1), "an offered item stays locked");
 
-        // A held backpack item dropped on our slot 2 queues (2, 0, 3) and clears the cursor.
-        s.model_mut().cursor = Some(item(0, 3));
+        heard::listen(
+            &s,
+            &["CURSOR_UPDATE", "ITEM_LOCK_CHANGED"],
+            Some("CursorHasItem()"),
+        );
+        s.run("PickupContainerItem(0, 2)").unwrap();
+        heard::take(&s);
         s.run("ClickTradeButton(2)").unwrap();
-        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 3)]);
-        assert!(
-            s.eval::<bool>("return not CursorHasItem()").unwrap(),
-            "the drop clears the cursor"
+        // `SetCursorItem(0, old)`: its `ClearCursor(0,1)` lifts no lock, then the set.
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE nil", "CURSOR_UPDATE 1"]);
+        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 2)]);
+        assert_eq!(
+            s.cursor_item().map(|i| i.slot),
+            Some(1),
+            "the old item is back"
         );
+        assert!(locked(&s, 1) && locked(&s, 2));
 
-        // An empty cursor clears a filled slot and does nothing on an empty one.
-        let mut st = TradeState::default();
-        st.player.slots[0] = Some(TradeSlotItem {
-            item_id: 2589,
-            count: 1,
-            ..Default::default()
-        });
-        s.set_trade(Some(st));
-        s.run("ClickTradeButton(1)").unwrap();
-        assert_eq!(s.take_trade_clear_items(), vec![1]);
-        s.run("ClickTradeButton(4)").unwrap();
-        assert!(
-            s.take_trade_clear_items().is_empty(),
-            "an empty slot clears nothing"
-        );
+        s.run("ClearCursor() ClickTradeButton(2)").unwrap();
+        assert_eq!(s.take_trade_clear_items(), vec![2]);
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(2));
+        s.run("ClearCursor()").unwrap();
+        heard::take(&s);
 
-        // The partner's column queues nothing and leaves the cursor alone.
-        s.model_mut().cursor = Some(item(0, 3));
-        s.run("ClickTargetTradeButton(1)").unwrap();
-        assert!(s.take_trade_set_items().is_empty());
-        assert!(
-            s.eval::<bool>("return CursorHasItem()").unwrap(),
-            "a partner-side click leaves the cursor untouched"
-        );
-
-        // A spell payload is refused and stays on the cursor.
-        s.model_mut().cursor = Some(CursorPayload::Spell(crate::script::cursor::CursorSpell {
+        // Nothing held and nothing offered: a plain clear, here of a spell.
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
             passive: false,
-            book_slot: 1,
-            book_type: "spell".into(),
             spell_id: 133,
             texture: None,
         }));
-        s.run("ClickTradeButton(1)").unwrap();
+        s.run("ClickTradeButton(4)").unwrap();
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE nil"]);
+        assert!(s.take_trade_clear_items().is_empty());
+
+        // The partner's column queues nothing and leaves the cursor alone.
+        s.run("PickupContainerItem(0, 1) ClickTargetTradeButton(1)")
+            .unwrap();
         assert!(s.take_trade_set_items().is_empty());
-        assert!(
-            s.eval::<bool>("return CursorHasSpell()").unwrap(),
-            "a spell cursor is refused, left in place"
+        assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
+
+        // Closing the window unlocks nothing (`0x4bfdc0`); `UnlockTradeItems` does, one event
+        // each (`0x4bfd03`), and an invalidated slot unlocks with its own event (`0x4bfbd0`).
+        s.run("ClickTradeButton(1)").unwrap();
+        heard::take(&s);
+        s.set_trade(None);
+        assert!(locked(&s, 1));
+        s.unlock_trade_items();
+        assert_eq!(heard::take(&s), ["ITEM_LOCK_CHANGED nil"]);
+        assert!(!locked(&s, 1));
+
+        heard::listen(
+            &s,
+            &["ITEM_LOCK_CHANGED", "TRADE_PLAYER_ITEM_CHANGED"],
+            None,
         );
+        s.run("PickupContainerItem(0, 2) ClickTradeButton(3)")
+            .unwrap();
+        heard::take(&s);
+        s.invalidate_trade_slot(2);
+        assert_eq!(
+            heard::take(&s),
+            ["ITEM_LOCK_CHANGED", "TRADE_PLAYER_ITEM_CHANGED"]
+        );
+        assert!(!locked(&s, 2));
+    }
+
+    /// The put-back passes count 0 (`0x4c004e`), so a split offered comes back as the whole stack.
+    /// The set send tests no trade (`0x4bfa70`, `0x5d4380`), so it goes out with none open.
+    #[test]
+    fn an_offered_split_comes_back_whole() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = crate::script::cursor::two_item_bag();
+        bag.slots.get_mut(&1).unwrap().count = 5;
+        s.set_container(0, Some(bag));
+        s.run("SplitContainerItem(0, 1, 2) ClickTradeButton(1)")
+            .unwrap();
+        assert_eq!(s.take_trade_set_items(), vec![(1, 0, 1)]);
+        s.run("ClickTradeButton(1)").unwrap();
+        let back = s.cursor_item().expect("the item is back");
+        assert_eq!((back.slot, back.count), (1, None));
     }
 }

@@ -2,16 +2,18 @@
 //! shaped through `cosmic-text` 0.16 and emitted as [`crate::ui_pass::UiQuad`]s.
 //!
 //! Glyphs are shaped one character at a time ([`engine::TextEngine::ensure_char`]) and the pen
-//! steps by the reference's law: `floor(advance) + 1` px per glyph (`(FT_advance>>6)+1.0` at
-//! `0x5d1120`), plus 1 more under a THICK outline (`0x5ca2b0`). The four client faces have no
-//! ligature or contextual substitution, which `engine::differential_tests` asserts.
+//! steps by the reference's law: the advance in whole px plus 1 (`(FT_advance>>6)+1.0` at
+//! `0x5d1120`), plus 1 more under a THICK outline (`0x5ca2b0`), and the pair's negative kern, the
+//! sum rounded up (`ComputeStep`, `0x5ca2d0`). Advances and kerns come off the face's own tables
+//! with FreeType's fixed point (`engine::sfnt`), not the shaper's floats. The four client faces
+//! have no ligature or contextual substitution, which `engine::differential_tests` asserts. A width
+//! is then a pure function of its characters, so one table answers a measure and a draw, even
+//! inside a Lua call.
 //!
-//! Kerning is dropped, where the reference applies negative pair kerns only, rounded up
-//! (`ComputeStep`, `0x5ca2d0`), about 0 px at UI sizes. A width is then a pure function of its
-//! characters, so one table answers a measure and a draw, even inside a Lua call.
-//!
-//! Glyph bitmaps are swash's unhinted coverage, where the reference runs FreeType with hinting
-//! (load flags `0x208a`/`0x20c2`), so stems are slightly slimmer at small sizes.
+//! The reference loads every glyph unhinted: both its load-flag words (`0x208a`/`0x20c2`, at
+//! `0x5d1324`) carry FreeType's `FT_LOAD_NO_HINTING` (`0x2`), as `FT_Load_Glyph` (`0x7cdb40`) reads
+//! it. The measure reads the unhinted outline (`engine::glyph_ink`); the cells are rasterized
+//! under `cosmic-text`'s default cache key, which hints.
 
 mod engine;
 mod layout;
@@ -28,7 +30,8 @@ pub(crate) use measurer::{editbox_advances, measure_request, AtlasMeasurer};
 
 pub(crate) use layout::{
     ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances, line_origin,
-    line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, TextSeat, UI_SEAT_NUDGE,
+    line_rows, measure_text, measure_wrapped_rows, string_width, unwrapped_height, FontSpec,
+    Justify, TextSeat, UI_SEAT_NUDGE,
 };
 
 /// The text size in logical px of a FontString with no font object: `GameFontNormal`'s 12.
@@ -82,15 +85,16 @@ mod cap_tests {
     }
 }
 // Line pitch has no line-height factor: the reference's `LayoutLines` (`0x5cdc20`) steps
-// `px(size) + spacing`, XML `spacing` defaulting to 0. Cosmic buffers take `size` as their line
+// `px(size) + px(spacing)`, the spacing defaulting to 0. Cosmic buffers take `size` as their line
 // height too, unused: every run shapes single-line (`Wrap::None`).
 
 /// The FontString display string, the ellipsis seam's answer, remembered per region. The reference
 /// builds it once (`0x771ec0`, into `CGxString+0xf8`) and rebuilds it only when the guard
 /// `[fontstring+0x60] & 1` is cleared: by `SetFont` (`0x7715e0`), `SetTextHeight` (`0x771666`),
-/// `SetText` (`0x771ea4`) or a resolved-rect size change (`0x768d20`); nothing per frame reaches
-/// `0x771ec0` or `0x7724a0`. This compares those inputs instead of keeping a dirty flag, sizes at
-/// the reference's `1e-5`, and not position, as a move rebuilds nothing.
+/// `SetText` (`0x771ea4`) or a resolved-rect size change (`0x768d20`), and a spacing change
+/// rebuilds at once (`0x77228f` → `0x7724a0`); nothing per frame reaches `0x771ec0` or `0x7724a0`.
+/// This compares those inputs instead of keeping a dirty flag, sizes at the reference's `1e-5`, and
+/// not position, as a move rebuilds nothing.
 #[derive(Default)]
 pub(crate) struct EllipsisMemo {
     entries: std::collections::HashMap<RegionHandle, Remembered>,
@@ -104,6 +108,8 @@ struct Remembered {
     font: Option<String>,
     height: Option<f32>,
     outline: Outline,
+    /// The line gap moves the fit, so it moves the answer.
+    spacing: f32,
     /// The answer; `None` means the text fits and draws raw, also worth remembering.
     display: Option<String>,
 }
@@ -131,8 +137,9 @@ impl EllipsisMemo {
             && (e.box_h - box_h).abs() < RECT_EPS
             && e.font.as_deref() == font.path
             && e.height == font.height
-            && e.outline == font.outline)
-            .then_some(&e.display)
+            && e.outline == font.outline
+            && e.spacing.to_bits() == font.spacing.to_bits())
+        .then_some(&e.display)
     }
 
     fn put(
@@ -156,6 +163,7 @@ impl EllipsisMemo {
                 font: font.path.map(str::to_string),
                 height: font.height,
                 outline: font.outline,
+                spacing: font.spacing,
                 display,
             },
         );
@@ -178,6 +186,8 @@ mod ellipsis_memo_tests {
             path,
             height,
             outline,
+            spacing: 0.0,
+            shadow_x: 0.0,
             alpha_gradient: None,
         }
     }

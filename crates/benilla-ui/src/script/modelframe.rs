@@ -35,6 +35,56 @@ impl Model {
         768.0 * (a * a + 1.0).sqrt()
     }
 
+    /// `ApplyRect`'s size threshold, 2⁻²² in the reference's layout units (`0x76b5e7`,
+    /// `0x76b602`, `[0x8029d4]`), in ours: [`crate::layout::SIZE_EPS`] times the layout unit.
+    pub(crate) fn size_eps(&self) -> f64 {
+        crate::layout::SIZE_EPS * f64::from(self.layout_unit())
+    }
+
+    /// The aspect globals `SetPoint`'s unchanged-anchor test quantizes offsets by
+    /// ([`crate::layout::Anchors::set`]), for the screen aspect [`Self::layout_unit`] reads.
+    pub(crate) fn layout_units(&self) -> crate::layout::LayoutUnits {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        crate::layout::LayoutUnits::from_aspect(a)
+    }
+
+    /// The drain's keep threshold, 1e-5 in the reference's layout units (`[0x80c5c8]`, tested in
+    /// `0x768d20`), in ours: [`crate::layout::RESOLVE_EPS`] times the layout unit.
+    pub(crate) fn resolve_eps(&self) -> f64 {
+        crate::layout::RESOLVE_EPS * f64::from(self.layout_unit())
+    }
+
+    /// `SetModel` on the pane `h` (`0x76cce0`): the file, seeded now if its facts are held (else
+    /// asked for), and the implicit rect it may give a size-less pane. A frame that is no model
+    /// pane is left as it is.
+    pub(crate) fn set_pane_model(&mut self, h: FrameHandle, path: String) {
+        // The reference's asset-resident test (`0x71d5a3`): the loader's Stand seed runs now, or
+        // when the file lands.
+        let facts = self.model_facts_for(&path);
+        let instance = self.model_instances + 1;
+        let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) else {
+            return;
+        };
+        m.set_file(path, facts.as_deref());
+        m.instance = instance;
+        self.model_instances = instance;
+        // A size-less pane takes the file's rect as soon as the file is known.
+        self.apply_implicit_rect(h);
+    }
+
+    /// `SetCamera(idx)` on the pane `h` (`0x76cec0`), against the facts of the file it holds.
+    pub(crate) fn set_pane_camera(&mut self, h: FrameHandle, idx: i32) {
+        let path = match self.arena.frame(h).map(|f| &f.kind_state) {
+            Some(KindState::Model(m)) => m.path.clone(),
+            _ => return,
+        };
+        let facts = path.and_then(|p| self.model_facts_for(&p));
+        if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.install_camera(idx, facts.as_deref());
+        }
+    }
+
     /// The implicit rect: a pane with no authored size takes its file's bounding-box extent, in
     /// layout units, as the reference's geometry overrides answer it (`0x76d080`, `0x76d0d0`).
     pub(crate) fn apply_implicit_rect(&mut self, h: FrameHandle) {
@@ -66,9 +116,8 @@ impl Model {
             input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
         input.width = w;
         input.height = ht;
-        if changed {
-            self.touch_layout_frame(h);
-        }
+        // The model-ready size write invalidates the frame (`0x76ce70`).
+        self.invalidate_frame(h, changed);
         if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             m.implicit_size = true;
         }
@@ -282,18 +331,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let path = string_arg(&path)
                 .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?
                 .to_string();
-            // The reference's asset-resident test (`0x71d5a3`): the loader's Stand seed runs now,
-            // or when the file lands.
-            let facts = lua
-                .app_data_mut::<Model>()
-                .expect("model app_data")
-                .model_facts_for(&path);
-            with_model(lua, &this, |m| m.set_file(path, facts.as_deref()))?;
-            // A size-less pane takes the file's rect as soon as the file is known.
+            // A pane of this kind, or the error.
+            with_model(lua, &this, |_| ())?;
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<Model>()
                 .expect("model app_data")
-                .apply_implicit_rect(h);
+                .set_pane_model(h, path);
             Ok(())
         })?,
     )?;
@@ -361,8 +404,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
             let c = int(&c);
-            let facts = facts_of_pane(lua, &this)?;
-            with_model(lua, &this, |m| m.install_camera(c, facts.as_deref()))
+            with_model(lua, &this, |_| ())?;
+            let h = frame_handle_of(lua, &this)?;
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .set_pane_camera(h, c);
+            Ok(())
         })?,
     )?;
     m.set(
@@ -507,12 +554,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.set_named_registry_value(REG_MODEL_METHODS, m)?;
-    playermodel_install(lua)
+    lua.set_named_registry_value(REG_MODEL_METHODS, m)
 }
 
 /// `PlayerModel`'s own three methods (table `0x84f1fc`); the rest are `Model`'s, reached on a miss.
-fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
+/// Only the in-game state registers it (`0x506230`, from `0x490260`), where `Model`'s is in the
+/// widget set both states install (`0x76f840`, from `0x706350`).
+pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
     // `SetUnit(unit)` (`0x84f1fc[0]` → `0x505d70`) clears the `SetModel` path; the unit token is
@@ -612,7 +660,7 @@ impl crate::script::UiScript {
         let mut model = self.model_mut();
         let panes: Vec<FrameHandle> = model
             .arena
-            .ticked_kinds()
+            .model_kinds()
             .iter()
             .copied()
             .filter(|&h| {
@@ -643,7 +691,7 @@ impl crate::script::UiScript {
         let model = self.model_ref();
         model
             .arena
-            .ticked_kinds()
+            .model_kinds()
             .iter()
             .filter_map(|&h| {
                 let f = model.arena.frame(h)?;
@@ -655,8 +703,8 @@ impl crate::script::UiScript {
                 };
                 let path = m.path.as_deref()?;
                 let facts = model.model_facts.get(&model_key(path))?;
-                // A pane whose camera is still pending paints nothing, not even its
-                // `OnUpdateModel` (`0x76d5f0`).
+                // A pane whose camera is still pending draws nothing (`0x76d5f0`); its
+                // `OnUpdateModel` still fires, from the paint hook ahead of that gate (`0x76d5ea`).
                 if m.camera_pending.is_some() {
                     return None;
                 }

@@ -74,12 +74,15 @@ pub(crate) use by_name::{AssistRequest, PlayerLookup, TargetByNameRequest};
 pub(crate) use by_name::SelectCommit;
 // The reaction decode and its faction catalog, which also tint the target frame
 // (`TargetFrame_CheckFaction`); `duel_rung` is the same walk, for `/reaction`.
-pub(crate) use ring::{duel_rung, ring_reaction, selection_variant, Factions, RingVariant};
+pub(crate) use ring::{
+    both_reactions_at_least_neutral, duel_rung, ring_reaction, selection_variant, Factions,
+    RingVariant,
+};
 #[cfg(test)]
 pub(crate) use ring::{ring_variant, PlayerPath, SelectorInput};
 
-pub(crate) use click::DeselectGuid;
 pub use click::Interact;
+pub(crate) use click::{clear_selection_on_world_teardown, deselect_on_ui_shutdown, DeselectGuid};
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -113,6 +116,9 @@ pub(crate) struct Hovered {
     /// [`Self::distance`] holds the hit, so a chest behind the unit does not inherit the mouseover.
     /// To [`click::select_on_click`] it is an object hit, which clears no selection.
     pub(crate) refused: bool,
+    /// The pick is the hovered plate's unit, the plate's enter publishing it (`0x7cb850`), not the
+    /// world's own pick: it stands only while that plate still holds the hover.
+    pub(crate) plate: bool,
 }
 
 impl Hovered {

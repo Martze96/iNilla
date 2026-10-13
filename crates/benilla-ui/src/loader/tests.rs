@@ -529,6 +529,77 @@ mod loader_tests {
             .unwrap());
     }
 
+    /// `<Gradient>` (`0x7700b0` → `0x6f2630` → `0x77f910`): both stops staged as transparent
+    /// black, so a missing one is that, and the orientation HORIZONTAL unless it reads VERTICAL;
+    /// an unknown one is reported and stays HORIZONTAL. The credits fades are this shape: a
+    /// black `<Color>` under a vertical alpha ramp.
+    #[test]
+    fn an_xml_gradient_writes_four_vertex_colours_over_its_fill() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="Fades">
+                   <Size><AbsDimension x="100" y="100"/></Size>
+                   <Anchors><Anchor point="CENTER"/></Anchors>
+                   <Layers><Layer level="ARTWORK">
+                     <Texture name="FadeV" setAllPoints="true">
+                       <Color r="0" g="0" b="0"/>
+                       <Gradient orientation="VERTICAL">
+                         <MinColor r="0" g="1.0" b="0" a="1.0"/>
+                         <MaxColor r="0" g="1.0" b="0" a="0"/>
+                       </Gradient>
+                     </Texture>
+                     <Texture name="FadeOdd" setAllPoints="true">
+                       <Color r="1" g="1" b="1"/>
+                       <Gradient orientation="SIDEWAYS">
+                         <MinColor r="1" g="0" b="0"/>
+                       </Gradient>
+                     </Texture>
+                   </Layer></Layers>
+                 </Frame>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Unknown orientation SIDEWAYS in element Gradient"),
+            "{:?}",
+            report.warnings
+        );
+        s.resolve();
+        let quads = s.extract();
+        // Told apart by their fills: FadeV's is black, FadeOdd's white.
+        let quad = |fill: [f32; 4]| {
+            quads
+                .iter()
+                .find_map(|q| match &q.content {
+                    QuadContent::Texture {
+                        color: Some(c),
+                        gradient,
+                        ..
+                    } if *c == fill => Some((Some(*c), *gradient)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{fill:?} extracts"))
+        };
+        let (bottom, top) = ([0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            quad([0.0, 0.0, 0.0, 1.0]),
+            (Some([0.0, 0.0, 0.0, 1.0]), Some([top, top, bottom, bottom])),
+            "opaque black at the bottom, clear at the top"
+        );
+        let (red, none) = ([1.0, 0.0, 0.0, 1.0], [0.0; 4]);
+        assert_eq!(
+            quad([1.0; 4]),
+            (Some([1.0; 4]), Some([red, none, none, red])),
+            "HORIZONTAL, the missing MaxColor transparent black"
+        );
+    }
+
     /// `CSimpleFrame::LoadXML 0x769820`: a strata `0x6f17d0` does not know logs at severity 1
     /// (`0x7699a4`) and skips `SetFrameStrata 0x76a470`.
     #[test]
@@ -1957,6 +2028,44 @@ mod loader_tests {
 
     // ── <SimpleHTML> ─────────────────────────────────────────────────────────────────────────
 
+    /// `file=` names a document read verbatim, never joined to the XML's own directory, whose text
+    /// becomes the frame's (`0x78a2a0`, `0x78a2b2`), as the login screen's agreements load
+    /// `eula.html`; a file that does not open leaves the frame empty.
+    #[test]
+    fn simplehtml_file_sets_the_documents_text() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="DocFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+                <SimpleHTML name="Doc" file="doc.html">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="DocFont"/>
+                </SimpleHTML>
+                <SimpleHTML name="Gone" file="gone.html">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="DocFont"/>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "doc.html")
+                .then(|| b"\xef\xbb\xbf<html><body><p>Hello</p></body></html>".to_vec())
+        };
+        let report = load_in(&s, &doc, "Interface/GlueXML/Doc.xml", &files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(
+            s.eval::<(i64, String)>(
+                "local r = Doc:GetRegions(); return Doc:GetNumRegions(), r:GetText()"
+            )
+            .unwrap(),
+            (1, "Hello".to_string())
+        );
+        assert_eq!(s.eval::<i64>("return Gone:GetNumRegions()").unwrap(), 0);
+    }
+
     /// A direct-child `<FontString>` declares `elementFont[0]` and `<FontStringHeader1>`
     /// `elementFont[1]`, neither a region, and `hyperlinkFormat=` lands at `+0x360`; stock
     /// `ItemTextFrame.xml:214` uses the first.
@@ -2089,6 +2198,223 @@ mod loader_tests {
             s.eval::<bool>("return BareBtn:GetNormalTexture():GetTexture() == nil")
                 .unwrap(),
             "blank, not painted"
+        );
+    }
+
+    /// `LoadXML` re-enters itself for the template before the instance (`0x76985c`), and each
+    /// state-texture element builds a new region through the `<Layers>` adder (`0x6f26f0`) that the
+    /// slot store installs, destroying the one it displaces (`0x778fd0` via `0x77900a`, the
+    /// highlight's `0x779110`, the checked pair's `0x785330`/`0x785440`). So an instance's element
+    /// keeps nothing of the template's: the fresh region's TexCoords, alpha and BLEND (`0x76fc40`;
+    /// the highlight keeps its own, `0x7789a4`), and `SetAllPoints` with no anchors (`0x7701c0`).
+    #[test]
+    fn an_instance_state_texture_replaces_the_templates() {
+        const TAGS: [(&str, &str); 6] = [
+            ("NormalTexture", "GetNormalTexture"),
+            ("PushedTexture", "GetPushedTexture"),
+            ("DisabledTexture", "GetDisabledTexture"),
+            ("HighlightTexture", "GetHighlightTexture"),
+            ("CheckedTexture", "GetCheckedTexture"),
+            ("DisabledCheckedTexture", "GetDisabledCheckedTexture"),
+        ];
+        let template: String = TAGS
+            .iter()
+            .map(|(tag, _)| {
+                format!(
+                    r#"<{tag} name="$parentTmpl{tag}" file="Interface\Tmpl{tag}" alpha="0.5" alphaMode="MOD">
+                        <Size><AbsDimension x="10" y="10"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="3" y="-3"/></Offset></Anchor></Anchors>
+                        <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
+                    </{tag}>"#
+                )
+            })
+            .collect();
+        let instance: String = TAGS
+            .iter()
+            .map(|(tag, _)| format!(r#"<{tag} file="Interface\Inst{tag}"/>"#))
+            .collect();
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(&format!(
+            r#"<Ui>
+                <CheckButton name="StateTmpl" virtual="true">
+                    <Size><AbsDimension x="40" y="20"/></Size>
+                    {template}
+                </CheckButton>
+                <CheckButton name="StateInst" inherits="StateTmpl">
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    {instance}
+                </CheckButton>
+                <CheckButton name="LaidOutInst" inherits="StateTmpl">
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                    <NormalTexture file="Interface\Laid" alpha="0.25">
+                        <Size><AbsDimension x="20" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                    </NormalTexture>
+                </CheckButton>
+            </Ui>"#
+        ));
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+        for (tag, getter) in TAGS {
+            let got: (String, Vec<f32>, String, f32, i64, String, bool, f32, f32) = s
+                .eval(&format!(
+                    r#"local t = StateInst:{getter}()
+                    local p, rel, rp, x, y = t:GetPoint(1)
+                    return t:GetTexture(), {{ t:GetTexCoord() }}, t:GetBlendMode(), t:GetAlpha(),
+                        t:GetNumPoints(), p .. ">" .. rp, rel == StateInst, x, y"#
+                ))
+                .unwrap();
+            assert_eq!(
+                got,
+                (
+                    format!("Interface\\Inst{tag}"),
+                    vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+                    "BLEND".to_string(),
+                    1.0,
+                    2,
+                    "TOPLEFT>TOPLEFT".to_string(),
+                    true,
+                    0.0,
+                    0.0,
+                ),
+                "<{tag}>: a fresh region, filling the button"
+            );
+            // The template's region was destroyed: its global is a dead handle, as the
+            // reference's unregister leaves it (`0x701cd0`).
+            assert!(
+                !s.eval::<bool>(&format!(
+                    "return (pcall(StateInstTmpl{tag}.GetTexture, StateInstTmpl{tag}))"
+                ))
+                .unwrap(),
+                "<{tag}>: the template's region is gone"
+            );
+        }
+        assert_eq!(
+            s.eval::<i64>("return table.getn({ StateInst:GetRegions() })")
+                .unwrap(),
+            TAGS.len() as i64,
+            "one region per slot, none of the template's left over"
+        );
+
+        // An instance element's own size, anchors and alpha lay the fresh region out.
+        let laid: (i64, String, f32, f32, f32, Vec<f32>) = s
+            .eval(
+                r#"local t = LaidOutInst:GetNormalTexture()
+                return t:GetNumPoints(), (t:GetPoint(1)), t:GetWidth(), t:GetHeight(),
+                    t:GetAlpha(), { t:GetTexCoord() }"#,
+            )
+            .unwrap();
+        assert_eq!(
+            laid,
+            (
+                1,
+                "CENTER".to_string(),
+                20.0,
+                16.0,
+                0.25,
+                vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+            )
+        );
+
+        s.resolve();
+        let drawn: Vec<String> = s
+            .extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !drawn.iter().any(|p| p.contains("Tmpl")),
+            "no template art left drawing: {drawn:?}"
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// An instance's state texture named as its template's carries the name: `GetName()` reads the
+    /// region's own (`SetName 0x76c650`, from `0x76fdf0`). The global stays the first holder's, as
+    /// `0x701bd0` publishes only into an empty one (`0x701c8a`), so it is the destroyed template
+    /// region's dead handle.
+    #[test]
+    fn a_same_named_instance_state_texture_keeps_its_name() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="NamedTmpl" virtual="true">
+                    <Size><AbsDimension x="40" y="20"/></Size>
+                    <NormalTexture name="$parentNormal" file="Interface\Tmpl"/>
+                </Button>
+                <Button name="NamedInst" inherits="NamedTmpl">
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <NormalTexture name="$parentNormal" file="Interface\Inst"/>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let got: (String, String, bool) = s
+            .eval(
+                r#"local t = NamedInst:GetNormalTexture()
+                return tostring(t:GetName()), t:GetTexture(),
+                    (pcall(NamedInstNormal.GetTexture, NamedInstNormal))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            got,
+            (
+                "NamedInstNormal".to_string(),
+                "Interface\\Inst".to_string(),
+                false
+            )
+        );
+    }
+
+    /// The Lua path leg (`0x781970` → `0x781b3f` → `0x778f10`) only swaps the file of a slot that
+    /// holds a region (`0x770200`): the region, its TexCoords, blend, alpha and anchors stay.
+    #[test]
+    fn a_lua_path_on_a_loaded_state_texture_keeps_the_region() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="PathBtn">
+                    <Size><AbsDimension x="40" y="20"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <NormalTexture file="Interface\Before" alphaMode="MOD">
+                        <Size><AbsDimension x="10" y="10"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
+                    </NormalTexture>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let got: (bool, String, Vec<f32>, String, f32, i64, String) = s
+            .eval(
+                r#"local held = PathBtn:GetNormalTexture()
+                held:SetAlpha(0.5)
+                PathBtn:SetNormalTexture("Interface\\After")
+                local t = PathBtn:GetNormalTexture()
+                return t == held, t:GetTexture(), { t:GetTexCoord() }, t:GetBlendMode(),
+                    t:GetAlpha(), t:GetNumPoints(), (t:GetPoint(1))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            got,
+            (
+                true,
+                "Interface\\After".to_string(),
+                vec![0.25, 0.25, 0.25, 0.75, 0.75, 0.25, 0.75, 0.75],
+                "MOD".to_string(),
+                0.5,
+                1,
+                "TOPLEFT".to_string(),
+            )
         );
     }
 }
@@ -2516,6 +2842,87 @@ mod post_load_show_tests {
         assert_eq!(
             s.eval::<String>("return table.concat(LOG, ',')").unwrap(),
             "child-load,child-show,load,show"
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// The pre-load hook defers the frame's layout (`0x7697cc`) and the post-load hook undefers a
+    /// visible one first of all (`0x76a310` → `0x768060(0)` → `0x7680e0(1)`), so its rect applies
+    /// and fires `OnSizeChanged` (`0x76b580`) before its `<Frames>` are built (`0x76a36f`), its
+    /// `OnLoad` (`0x76a387`) and its `OnShow` (`0x76a3b3`); a child's own hook does the same
+    /// inside, so the order is parent size, child size, child load, parent load.
+    #[test]
+    fn a_visible_frames_first_onsizechanged_fires_before_its_children_and_onload() {
+        let mut s = UiScript::new().unwrap();
+        s.run("LOG = {} function Log(tag) table.insert(LOG, tag) end")
+            .unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="SizedBorn">
+                    <Size><AbsDimension x="100" y="50"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <Scripts>
+                        <OnSizeChanged>Log(SizedBornChild and "size+child" or "size")</OnSizeChanged>
+                        <OnLoad>Log("load")</OnLoad>
+                        <OnShow>Log("show")</OnShow>
+                    </Scripts>
+                    <Frames>
+                        <Frame name="SizedBornChild">
+                            <Size><AbsDimension x="10" y="10"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                            <Scripts>
+                                <OnSizeChanged>Log("child-size")</OnSizeChanged>
+                                <OnLoad>Log("child-load")</OnLoad>
+                            </Scripts>
+                        </Frame>
+                    </Frames>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load_in(&s, &doc, "Test.xml", &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let at_load = s.eval::<String>("return table.concat(LOG, ',')").unwrap();
+        s.resolve();
+        let after_drain = s.eval::<String>("return table.concat(LOG, ',')").unwrap();
+        assert_eq!(
+            at_load, "size,child-size,child-load,load,show",
+            "fired inside the load, not at the next drain"
+        );
+        assert_eq!(after_drain, at_load, "and not again");
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// A frame hidden at the end of its load stays deferred (`0x76a2f0` undefers only a visible
+    /// one), so its first `OnSizeChanged` is its first show's, ahead of its `OnShow`.
+    #[test]
+    fn a_hidden_frames_first_onsizechanged_waits_for_its_show() {
+        let mut s = UiScript::new().unwrap();
+        s.run("LOG = {} function Log(tag) table.insert(LOG, tag) end")
+            .unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="SizedHidden" hidden="true">
+                    <Size><AbsDimension x="100" y="50"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <Scripts>
+                        <OnSizeChanged>Log("size")</OnSizeChanged>
+                        <OnLoad>Log("load")</OnLoad>
+                        <OnShow>Log("show")</OnShow>
+                    </Scripts>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load_in(&s, &doc, "Test.xml", &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+        assert_eq!(
+            s.eval::<String>("return table.concat(LOG, ',')").unwrap(),
+            "load"
+        );
+        s.run("SizedHidden:Show()").unwrap();
+        assert_eq!(
+            s.eval::<String>("return table.concat(LOG, ',')").unwrap(),
+            "load,size,show"
         );
         assert!(s.errors().is_empty(), "{:?}", s.errors());
     }

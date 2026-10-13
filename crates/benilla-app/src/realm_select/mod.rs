@@ -5,19 +5,22 @@
 //! `GlueScreenInfo` has no entry for it): it is shown over the current screen and hidden again,
 //! and that screen is where the player returns.
 //!
-//! The IO thread publishes the list from two parks (`crate::net::io`), the login-side realm park
-//! and the character park, and takes one answer. The policy, in order:
+//! The IO thread publishes the list from two parks (`crate::net::io`), the logon park and the
+//! character park, and takes one answer. The policy, in order:
 //!
 //! 1. `WOW_REALM`, matched case-insensitively; a name not on the list falls through.
-//! 2. The realm this session is on, so a logout or a dropped connection returns to it.
+//! 2. The realm this session is on, so an unattended reconnect returns to it.
 //! 3. The remembered realm, the persisted `realmName` CVar.
 //! 4. An unattended run (`crate::run_mode::unattended`) takes the first realm that is up.
 //! 5. Otherwise the dialog.
 //!
 //! Change Realm costs a world dial, not a login. `RequestRealmList` (`0x46ecf0` -> `0x46b8d0`)
-//! begins a realm query on the realmd socket, which stays open until world entry (`0x46b70c`), and
-//! names no screen; only `ConnectToRealm` (`0x46b210`) drops the world connection, once a realm is
+//! begins a realm query on the realmd socket, which stays open until world entry (`0x46b70c`) and
+//! is dialled again for a query after it (`0x5b2200`), and names no screen; only `ConnectToRealm` (`0x46b210`) drops the world connection, once a realm is
 //! chosen. So the character park serves the list in place and Cancel there does nothing.
+//!
+//! Under `WOW_GLUE_STOCK=1` the stock `RealmList` and its verbs take the list instead
+//! ([`crate::ui_script::glue_mgr`]), and this policy stands down.
 
 mod category;
 mod input;
@@ -94,7 +97,8 @@ pub(super) enum SortKey {
     Load,
     /// `SortRealms("name")`, case 2: a case-folding compare.
     Name,
-    /// `SortRealms("mode")`, case 3: the `(pvp, rp)` pair.
+    /// `SortRealms("mode")`, case 3: the `Cfg_Configs` pair, RP before PvP, so Normal, PvP, RP,
+    /// RP-PvP ascending.
     Type,
 }
 
@@ -164,7 +168,14 @@ impl Realms {
                         la.total_cmp(&lb)
                     }
                     SortKey::Name => ra.name.to_lowercase().cmp(&rb.name.to_lowercase()),
-                    SortKey::Type => self.pvp_rp(ra.realm_type).cmp(&self.pvp_rp(rb.realm_type)),
+                    // RP decides before PvP (`0x46e92c`-`0x46e978`).
+                    SortKey::Type => {
+                        let rp_pvp = |t: u32| {
+                            let (pvp, rp) = self.pvp_rp(t);
+                            (rp, pvp)
+                        };
+                        rp_pvp(ra.realm_type).cmp(&rp_pvp(rb.realm_type))
+                    }
                 };
                 if ord != std::cmp::Ordering::Equal {
                     return if descending { ord.reverse() } else { ord };
@@ -175,6 +186,36 @@ impl Realms {
             std::cmp::Ordering::Equal
         });
         rows
+    }
+
+    /// The client Region's categories and the realm types, as the stock glue's realm verbs read
+    /// them; no categories until the DBC is read.
+    pub(crate) fn glue_setup(
+        &self,
+    ) -> (
+        Vec<benilla_ui::script::GlueRealmCategory>,
+        Vec<benilla_ui::script::GlueRealmType>,
+    ) {
+        let categories = self
+            .categories
+            .iter()
+            .flatten()
+            .map(|c| benilla_ui::script::GlueRealmCategory {
+                id: c.id,
+                name: c.name.clone(),
+            })
+            .collect();
+        let types = self
+            .types
+            .rows()
+            .iter()
+            .map(|t| benilla_ui::script::GlueRealmType {
+                realm_type: t.realm_type,
+                pvp: t.pvp,
+                rp: t.rp,
+            })
+            .collect();
+        (categories, types)
     }
 
     /// A realm type's `(pvp, rp)` in `Cfg_Configs.dbc`, `(false, false)` for a type with no row.
@@ -240,10 +281,16 @@ impl Realms {
         self.offset = self.offset.min(max);
     }
 
-    /// Answer a park with a realm and remember it as [`Self::current`].
-    pub(super) fn enter(&mut self, choice: &RealmChoice, name: String) {
-        self.current = Some(name.clone());
-        let _ = choice.0.send(RealmRequest::Enter(name));
+    /// Answer a park with a realm, by the record the list holds, stamped with the abandon
+    /// generation `generation` the app holds now, and remember it as [`Self::current`].
+    pub(super) fn enter(&mut self, choice: &RealmChoice, name: String, generation: u64) {
+        if let Some(realm) = self.realms.iter().find(|r| r.name == name) {
+            let _ = choice.0.send(RealmRequest::Enter {
+                realm: realm.clone(),
+                generation,
+            });
+        }
+        self.current = Some(name);
     }
 
     /// `RealmList:Hide()`, and nothing else.
@@ -252,8 +299,33 @@ impl Realms {
     }
 }
 
-/// `GetRealmInfo`'s `realmDown`: flag bit 0x02, greyed and not enterable; the reference's
-/// auto-pick (`0x46ea20`) skips a realm on these low bits.
+#[cfg(test)]
+impl Realms {
+    /// A US client's state at startup, read without an install: Region 1's two categories and the
+    /// shipped `Cfg_Configs.dbc` types 0, 1, 6 and 8.
+    pub(crate) fn us_client() -> Realms {
+        let ty = |realm_type, pvp, rp| benilla_formats::RealmConfig {
+            realm_type,
+            pvp,
+            rp,
+        };
+        Realms {
+            categories: Some(category::tests::us()),
+            types: RealmConfigs::from_rows(vec![
+                ty(0, false, false),
+                ty(1, true, false),
+                ty(6, false, true),
+                ty(8, true, true),
+            ]),
+            ..Realms::default()
+        }
+    }
+}
+
+/// `GetRealmInfo`'s `realmDown`: flag bit 0x02 of the record's flags byte (`+0x08`, `0x46ef83`),
+/// greyed and not enterable. The reference's own pick, `SetPreferredInfo`'s `0x46ea20`, skips only
+/// bit 0x01 (`0x46ea7c`), so it can suggest a realm that is down; `auto_answer` skipping one is
+/// benilla's policy ladder, not the reference's.
 pub(crate) fn is_down(realm: &RealmInfo) -> bool {
     realm.flags & 0x02 != 0
 }
@@ -274,6 +346,10 @@ pub(crate) fn take_input(mut realms: ResMut<Realms>) {
 /// The realm-selection subsystem: the park's policy plus the screen.
 pub(crate) struct RealmSelectPlugin;
 
+/// The subsystem's `Update` chain, for a reader of [`Realms`] to order itself after.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RealmSelectSet;
+
 impl Plugin for RealmSelectPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Realms>()
@@ -287,7 +363,7 @@ impl Plugin for RealmSelectPlugin {
             .add_systems(
                 Update,
                 (
-                    apply_realm_policy,
+                    apply_realm_policy.run_if(crate::ui_script::glue::native_glue),
                     // Ungated by state: the dialog stands over login and character select alike.
                     screen::drive_screen,
                     // Input before the row refresh, so a click shows on the frame it landed.
@@ -295,7 +371,8 @@ impl Plugin for RealmSelectPlugin {
                     (
                         (input::clicks, input::keys)
                             .chain()
-                            .run_if(|realms: Res<Realms>| realms.owns_input()),
+                            .run_if(|realms: Res<Realms>| realms.owns_input())
+                            .run_if(crate::ui_script::glue::native_glue),
                         (tick_refresh, screen::refresh_list)
                             .chain()
                             .run_if(|realms: Res<Realms>| realms.shown),
@@ -303,6 +380,7 @@ impl Plugin for RealmSelectPlugin {
                         .chain(),
                 )
                     .chain()
+                    .in_set(RealmSelectSet)
                     .after(benilla_world::schedule::WorldStage::Net)
                     .before(crate::glue::GlueVisuals),
             );
@@ -315,12 +393,18 @@ fn apply_realm_policy(
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
     cvars: Res<crate::cvars::Cvars>,
+    abandon: Option<Res<crate::net::LoginAbandon>>,
 ) {
+    let generation = crate::net::LoginAbandon::now(abandon.as_deref());
     if !realms.env_read {
         realms.env_read = true;
         realms.env_realm = std::env::var("WOW_REALM").ok().filter(|s| !s.is_empty());
     }
     for msg in msgs.read() {
+        // A query that got no answer leaves the list as it stands.
+        if msg.failed {
+            continue;
+        }
         realms.realms = msg.realms.clone();
         realms.refresh_in = REFRESH_SECS;
         // The registered default is empty: a client that has never connected.
@@ -339,6 +423,9 @@ fn apply_realm_policy(
         if realms.shown {
             continue;
         }
+        // A server that lists no realm gets the empty list, as the reference shows it once the
+        // connect fails `REALM_LIST_REALM_NOT_FOUND` with no realm held (`0x46bf86` → `0x46c06e`):
+        // no realm answers it.
         match auto_answer(
             &realms,
             remembered.as_deref(),
@@ -346,7 +433,7 @@ fn apply_realm_policy(
         ) {
             Some(name) => {
                 realms.select(&name);
-                realms.enter(&choice, name);
+                realms.enter(&choice, name, generation);
             }
             None => realms.open(),
         }
@@ -667,6 +754,44 @@ mod tests {
             Some("Up"),
             "unattended skips the offline row rather than dialing it"
         );
+    }
+
+    /// A server that lists no realm: nothing is dialled, and the list goes up empty, as the
+    /// reference shows it (`0x46bf86` → `0x46c06e`).
+    #[test]
+    fn an_empty_list_dials_nothing_and_shows_the_list() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Realms>()
+            .init_resource::<crate::cvars::Cvars>()
+            .insert_resource(RealmChoice(tx.into()))
+            .add_message::<RealmListMessage>()
+            .add_systems(Update, apply_realm_policy);
+        app.world_mut().write_message(RealmListMessage {
+            realms: Vec::new(),
+            failed: false,
+        });
+        app.update();
+        assert!(rx.try_recv().is_err(), "no dial");
+        assert!(
+            app.world().resource::<Realms>().shown,
+            "the empty list is up"
+        );
+        assert_eq!(auto_answer(&list(Vec::new()), None, true), None);
+    }
+
+    /// Mode ascending is Normal, PvP, RP, RP-PvP: RP decides before PvP (`0x46e92c`-`0x46e978`).
+    #[test]
+    fn the_mode_sort_puts_rp_after_pvp() {
+        let mut r = Realms::us_client();
+        r.realms = vec![
+            realm("RpPvp", 1, 8, 0, 0, 1.0),
+            realm("Rp", 1, 6, 0, 0, 1.0),
+            realm("Pvp", 1, 1, 0, 0, 1.0),
+            realm("Normal", 1, 0, 0, 0, 1.0),
+        ];
+        r.sort.click(SortKey::Type);
+        assert_eq!(names(&r), ["Normal", "Pvp", "Rp", "RpPvp"]);
     }
 
     /// The reference disables an offline realm's Okay.

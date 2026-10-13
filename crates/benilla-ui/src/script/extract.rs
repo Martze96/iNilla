@@ -5,8 +5,10 @@ use crate::layout::Rect;
 use crate::order::{self, ZTarget};
 use crate::widget::FrameHandle;
 
-use super::clip::{effective_clip, scroll_clip_sources};
-use super::{colorselect, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
+use super::clip::DrawClips;
+use super::{
+    colorselect, layer_batch, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript,
+};
 
 impl UiScript {
     /// Every live draw target, visible or not: each frame's slot then its regions, in arena order.
@@ -58,18 +60,32 @@ impl UiScript {
 
     /// The render list in painter order, ascending by `ZKey`; call [`UiScript::resolve`] first.
     pub fn extract(&self) -> Vec<ExtractedQuad> {
+        // The files set since the last draw take their stamps: this draw forces them.
+        self.model_mut().texels.flush();
         let model = self.model_ref();
         let list = order::traversal(&model.arena);
         let mut out = Vec::with_capacity(list.len());
-        // Scroll child → its ScrollFrame's rect; a quad clips to every ancestor ScrollFrame's.
-        let scroll_sources = scroll_clip_sources(&model);
-        for &(target, zkey) in list.iter() {
+        // A scroll child's subtree clips to its ScrollFrames' rects, nested ones intersecting.
+        let mut clips = DrawClips::new(&model, &list);
+        // Every texture quad's batch and texture, for the batches' End sort below.
+        let mut batch_quads: Vec<layer_batch::BatchQuad> = Vec::new();
+        for &order::DrawEntry {
+            target,
+            key: zkey,
+            scope,
+        } in list.iter()
+        {
+            // Under a ScrollFrame with no rect the callback draws nothing (`0x787253`).
+            let Some(clip) = clips.clip(scope) else {
+                continue;
+            };
+            // A region's texture, which ranks it in the batch sort.
+            let mut region_tex = None;
             let (rect, alpha, content, clip, scale) = match target {
                 ZTarget::Frame(fh) => {
                     let frame = model.arena.frame(fh);
                     let alpha = frame.map(|f| f.effective_alpha).unwrap_or(1.0);
                     let scale = frame.map(|f| f.effective_scale).unwrap_or(1.0);
-                    let clip = effective_clip(&model, &scroll_sources, fh);
                     let content = match frame.map(|f| &f.kind_state) {
                         Some(crate::widget::KindState::Minimap(m)) => QuadContent::Minimap {
                             zoom: m.zoom,
@@ -89,7 +105,8 @@ impl UiScript {
                             icon: m.icon.clone(),
                             camera: m.camera,
                             light: m.light,
-                            fog: m.armed_fog(),
+                            fog: m.scene_fog(),
+                            ffx: m.ffx,
                         },
                         _ => QuadContent::Frame,
                     };
@@ -112,7 +129,6 @@ impl UiScript {
                             continue;
                         }
                     }
-                    let clip = owner.and_then(|o| effective_clip(&model, &scroll_sources, o));
                     let mut rect = owner.and_then(|o| model.resolved.get(&o).copied());
                     // A StatusBar's fill has no anchors: `bar_fill_rect` places it.
                     let mut bar_fill: Option<&crate::widget::StatusBarState> = None;
@@ -179,7 +195,7 @@ impl UiScript {
                             });
                         }
                     }
-                    // A Button's non-current state textures emit no quad, and its ButtonText takes
+                    // A Button's state textures draw by their shown bit like any region, and its ButtonText takes
                     // the current state's font instance (disabled > highlighted > normal).
                     let mut state_font: Option<&FontObject> = None;
                     let mut state_color: Option<[f32; 4]> = None;
@@ -191,7 +207,7 @@ impl UiScript {
                         let hovered = owner.is_some() && model.mouseover == owner;
                         // The press is not read here: the state texture latches on the transition
                         // (`ButtonState::set_state`). Only the Highlight, unlatched, reads hover.
-                        if !bs.region_visible(rh, hovered) {
+                        if !bs.highlight_draws(rh, hovered) {
                             continue;
                         }
                         if bs.text == Some(rh) {
@@ -247,6 +263,7 @@ impl UiScript {
                         continue;
                     }
                     let mut data = data_ref.cloned().unwrap_or_default();
+                    region_tex = data.tex.id();
                     // One hop (region combine `0x772180`): the region's alpha times its owner's
                     // `effective_alpha`, which `SetAlpha 0x76a690` already carries down the tree.
                     let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
@@ -302,26 +319,33 @@ impl UiScript {
                     if let Some(c) = state_color {
                         data.vertex_color = Some(c);
                     }
-                    // A region draws at its resolved rect only: drawable regions carry anchors
-                    // (authored, or `region::implicit_creation_anchor`) and a failed resolve
-                    // latches unresolvable (`0x768d55`), so an unanchored Lua region draws nowhere,
-                    // as in the reference. The bar fill and thumbs keep their fraction geometry.
+                    // A region draws at its resolved rect: drawable regions carry anchors
+                    // (authored, or `region::implicit_creation_anchor`), so a region that never
+                    // resolved draws nowhere, as in the reference. After a failed resolve
+                    // (`0x768d55`) a FontString stops (`0x7730b7` needs the valid bit) and a
+                    // Texture keeps the quad its last good resolve wrote (`0x7706e0`). The bar
+                    // fill and thumbs keep their fraction geometry.
                     if let Some(sb) = bar_fill {
                         data.tex_coords = Some(bar_fill_uv(data.tex_coords, sb));
-                    }
-                    if bar_fill.is_none() && !thumb_fill && !color_thumb {
-                        rect = model.region_resolved.get(&rh).copied();
                     }
                     let is_text = matches!(
                         region.map(|r| r.kind),
                         Some(crate::widget::RegionKind::FontString)
                     );
+                    if bar_fill.is_none() && !thumb_fill && !color_thumb {
+                        rect = model.region_resolved.get(&rh).copied().or_else(|| {
+                            (!is_text)
+                                .then(|| model.region_kept.get(&rh).copied())
+                                .flatten()
+                        });
+                    }
                     // Generated art fills only an empty slot (`ColorPickerFrame.xml` sets none).
                     let content = if let Some(art) =
-                        color_art.filter(|_| data.texture.is_none() && data.fill.is_none())
+                        color_art.filter(|_| data.tex.path().is_none() && data.tex.fill().is_none())
                     {
                         art
                     } else if is_text {
+                        let spacing = data.line_gap();
                         QuadContent::Text {
                             text: data.text,
                             color: data.vertex_color,
@@ -334,6 +358,7 @@ impl UiScript {
                             text_height: data.text_height,
                             shadow: data.font_shadow,
                             outline: data.outline,
+                            spacing,
                             alpha_gradient: data.alpha_gradient,
                             // The owner's property: an addon's strings on a plate slide with it.
                             world_seat: owner
@@ -341,16 +366,21 @@ impl UiScript {
                         }
                     } else {
                         // The draw gate is the texture slot, never the colour (`0x7706e0`: empty
-                        // `+0xcc` emits nothing); a vertex colour alone is a tint. A gradient fills
-                        // the texture slot, so it draws, at its midpoint since a quad has one tint.
-                        let fill = data.fill.or_else(|| data.gradient.map(|g| g.midpoint()));
-                        let has_path = data.texture.is_some();
+                        // `+0xcc` emits nothing): a vertex colour or a gradient alone is a tint.
+                        let fill = data.tex.fill();
+                        let has_path = data.tex.path().is_some();
                         let has_texture = has_path || fill.is_some();
                         QuadContent::Texture {
-                            path: data.texture,
+                            path: std::mem::take(&mut data.tex).into_path(),
                             color: has_texture
                                 .then(|| texture_color(fill, data.vertex_color))
                                 .flatten(),
+                            // The quad record carries the four colours with stride 4
+                            // (`0x77304d`), one per vertex, each times the texel.
+                            gradient: data
+                                .gradient
+                                .filter(|_| has_texture)
+                                .map(|g| g.vertex_colors()),
                             // The renderer acts on ADD only: the other four `alphaMode` values
                             // answer `GetBlendMode` but draw as straight alpha.
                             additive: data.blend == crate::script::BlendMode::Add,
@@ -377,6 +407,20 @@ impl UiScript {
                 QuadContent::ModelPane { .. } => zkey.callback(order::DrawLayer::Artwork).raw(),
                 _ => zkey.raw(),
             };
+            // A slot's texture by its stamp; the colour picker's two images, built when it loads
+            // (`0x78b580`, `0x78b8a0`), before anything a script sets.
+            let rank = match &content {
+                QuadContent::Texture { .. } => region_tex.map(|id| model.texels.stamp(id)),
+                QuadContent::ColorWheel | QuadContent::ColorValue { .. } => Some(0),
+                _ => None,
+            };
+            if let (Some(rank), Some(batch)) = (rank, order::quad_batch(z)) {
+                batch_quads.push(layer_batch::BatchQuad {
+                    index: out.len(),
+                    batch,
+                    rank,
+                });
+            }
             out.push(ExtractedQuad {
                 target,
                 z,
@@ -389,10 +433,9 @@ impl UiScript {
             // A ScrollingMessageFrame adds one Text quad per visible ring line, stacked bottom-up
             // with each line's fade alpha; the ring lives in its kind state, not in FontStrings.
             if let (ZTarget::Frame(fh), Some(fr)) = (target, rect) {
-                // The Backdrop draws at the frame slot; the lines take the ARTWORK content key,
-                // where the client's message strings live, over the BACKGROUND (hover box) art.
+                // The lines take the ARTWORK content key, where the client's message strings
+                // live, over the BACKGROUND (hover box) art.
                 let paint = super::layout::FramePaint { alpha, scale };
-                Self::emit_backdrop(&model, fh, fr, zkey.raw(), paint, clip, &mut out);
                 Self::emit_message_lines(
                     &model,
                     fh,
@@ -404,6 +447,8 @@ impl UiScript {
                 );
             }
         }
+        // Each layer batch's End sorts its quads by texture (`0x7731a0`).
+        layer_batch::sort_batches(&mut out, &batch_quads);
         out
     }
 }

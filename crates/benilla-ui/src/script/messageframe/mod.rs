@@ -25,6 +25,35 @@ mod scrolling;
 pub(super) use plain::REG_MESSAGEFRAME_METHODS;
 pub(super) use scrolling::REG_SCROLLINGMESSAGEFRAME_METHODS;
 
+/// A message frame's update after its `OnUpdate`, in its walk slot, so only while shown: a hidden
+/// frame's lines keep their time. The plain class (`0x786200`) first drains its queued messages
+/// against the lines that fit (`0x786247`), which [`MessageFrameState::trim_to_viewport`] stands
+/// for, then fades (`0x7862b0`); the scrolling class (`0x788460`) only fades.
+///
+/// [`MessageFrameState::trim_to_viewport`]: crate::widget::MessageFrameState::trim_to_viewport
+pub(super) fn update(model: &mut Model, h: FrameHandle, elapsed: f32) {
+    let rows = UiScript::message_viewport_rows(model, h);
+    match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+        Some(KindState::Message(mf)) => {
+            mf.trim_to_viewport(rows);
+            mf.tick(elapsed);
+        }
+        Some(KindState::ScrollingMessage(smf)) => smf.tick(elapsed),
+        _ => {}
+    }
+}
+
+/// `lua_isnumber` (`0x6f34d0`) then `lua_tonumber` (`0x6f3620`): a number, or a string Lua reads
+/// as one. The message-frame verbs gate every colour channel and id on it.
+pub(super) fn is_number(lua: &mlua::Lua, v: &mlua::Value) -> Option<f64> {
+    lua.coerce_number(v.clone()).ok().flatten()
+}
+
+/// A channel the verb has already gated with [`is_number`], as the `f32` it stores.
+pub(super) fn channel(lua: &mlua::Lua, v: &mlua::Value) -> f32 {
+    is_number(lua, v).map_or(0.0, |n| n as f32)
+}
+
 /// `AddMessage`'s text; `None` means the whole call does nothing, no line and no error. Both
 /// bindings (`0x795590`, `0x792900`) jump to their epilogue (`0x79582b`, `0x792b81`) when
 /// `lua_isstring` (`0x6f3510`) fails, `lua_tostring` (`0x6f3690`) gives NULL or the string is empty
@@ -142,6 +171,39 @@ pub(super) struct MessageFont {
     /// The child's `justifyH`, which centres `UIErrorsFrame`'s lines and keeps chat flush left;
     /// LEFT without a declared FontString, not the FontString default of CENTER.
     pub(super) justify_h: JustifyH,
+    /// The font's spacing as set, a negative included (`+0x50`).
+    pub(super) spacing: f32,
+}
+
+/// `0x766750`: a length snapped to whole pixels, here of the 768-tall root grid, the device pixel
+/// of a 768-tall window: a positive one rounds up (`+0.99999`, then truncation), a negative one
+/// truncates toward zero.
+fn snap_px(v: f32) -> f32 {
+    if v > 0.0 {
+        (v + 0.999_99).trunc()
+    } else {
+        v.trunc()
+    }
+}
+
+impl MessageFont {
+    /// The font height, the default 14 when none is set.
+    fn height_or_default(&self) -> f32 {
+        self.height.unwrap_or(14.0)
+    }
+
+    /// The gap between a line string's rows and, in the scrolling class, between messages: each
+    /// line string inherits the frame's font (`0x7888fd`) through the clamping setter (`0x7708fd`
+    /// → `0x772240`), and the stack snaps its field (`0x78899e` → `0x766750`).
+    fn line_gap(&self, scale: f32) -> f32 {
+        snap_px(self.spacing.max(0.0) * scale)
+    }
+
+    /// The plain class's pitch, its fit and its slot step (`0x785f03`-`0x785f2a`, `0x786184`): the
+    /// font's own spacing, unclamped (`0x785f06`), and the height, each snapped.
+    fn plain_pitch(&self, scale: f32) -> f32 {
+        snap_px(self.height_or_default() * scale) + snap_px(self.spacing * scale)
+    }
 }
 
 /// The FontString region holding a message frame's font, made on the first font-block call when
@@ -175,7 +237,7 @@ pub(super) fn ensure_font_region(
     let mut data = crate::script::RegionData::default();
     data.justify.set_h(JustifyH::Left);
     model.region_data.insert(rh, data);
-    model.touch_layout();
+    model.touch_layout_region(rh);
     Some(rh)
 }
 
@@ -201,6 +263,7 @@ impl UiScript {
                         shadow: d.font_shadow,
                         outline: d.outline,
                         justify_h: d.justify.paint_h(),
+                        spacing: d.spacing,
                     })
             })
             .unwrap_or(MessageFont {
@@ -209,16 +272,27 @@ impl UiScript {
                 shadow: None,
                 outline: Outline::default(),
                 justify_h: JustifyH::Left,
+                spacing: 0.0,
             })
     }
 
     /// How many rows frame `fh`'s resolved rect holds at its font's pitch, the client's
-    /// `numLinesDisplayed`: the scrolling class's page size and the plain class's capacity.
+    /// `numLinesDisplayed`: the scrolling class's page size and the plain class's capacity. Both
+    /// the rect and the pitch are scaled (`0x785f0a`, `0x785f1f`); a pitch of 0 or less, which a
+    /// negative spacing can make on the plain class, holds nothing (`0x785f8f`).
     pub(super) fn message_viewport_rows(model: &Model, fh: FrameHandle) -> usize {
-        let pitch = Self::message_frame_font(model, fh)
-            .height
-            .unwrap_or(14.0)
-            .max(1.0);
+        let font = Self::message_frame_font(model, fh);
+        let Some(frame) = model.arena.frame(fh) else {
+            return 0;
+        };
+        let scale = frame.effective_scale;
+        let pitch = match frame.kind_state {
+            KindState::Message(_) => font.plain_pitch(scale),
+            _ => font.height_or_default() * scale + font.line_gap(scale),
+        };
+        if pitch <= 0.0 {
+            return 0;
+        }
         model.resolved.get(&fh).map_or(0, |r| {
             ((r.top - r.bottom) / pitch).floor().max(0.0) as usize
         })
@@ -272,6 +346,10 @@ impl UiScript {
                 font.height.map(f32::to_bits).hash(&mut h);
                 wrap_width.to_bits().hash(&mut h);
                 (font.outline as u8).hash(&mut h);
+                font.shadow
+                    .map_or(0.0, |s| s.offset[0])
+                    .to_bits()
+                    .hash(&mut h);
                 scale.to_bits().hash(&mut h);
                 h.finish()
             };
@@ -287,6 +365,10 @@ impl UiScript {
                 font.height.map(f32::to_bits).hash(&mut hasher);
                 wrap_width.to_bits().hash(&mut hasher);
                 (font.outline as u8).hash(&mut hasher);
+                font.shadow
+                    .map_or(0.0, |s| s.offset[0])
+                    .to_bits()
+                    .hash(&mut hasher);
                 scale.to_bits().hash(&mut hasher);
                 let key = hasher.finish();
                 if line.rows_key == key {
@@ -299,6 +381,7 @@ impl UiScript {
                     height: font.height,
                     wrap_width,
                     outline: font.outline,
+                    shadow_x: font.shadow.map_or(0.0, |s| s.offset[0]),
                     scale,
                     text: line.text.clone(),
                     key,
@@ -334,11 +417,12 @@ impl UiScript {
         }
     }
 
-    /// Push one [`QuadContent::Text`] per visible message of either class, each `rows × pitch`
-    /// tall. The pitch is the font height, the client's line step (`LayoutLines` `0x5cdc20`: size
-    /// plus a spacing of 0); the message frame's own relayout (`0x788750`, `0x788c00`) is not fully
-    /// traced. A scrolling frame stacks up from the bottom, `scroll_offset` choosing the bottom
-    /// message. A MessageFrame does too for `insertMode` BOTTOM, and for TOP hangs the newest off
+    /// Push one [`QuadContent::Text`] per visible message of either class, each `rows·S +
+    /// (rows−1)·gap` tall, its wrapped block (`0x5c2070`). The scrolling class anchors each line
+    /// string on the previous one's top at its snapped spacing (`0x788954`-`0x788975`) and charges
+    /// `spacing + height` per message (`0x78899e`-`0x7889ad`); the plain class steps each row by its
+    /// own pitch, the raw spacing included ([`MessageFont::plain_pitch`]). A scrolling frame stacks
+    /// up from the bottom, `scroll_offset` choosing the bottom message. A MessageFrame does too for `insertMode` BOTTOM, and for TOP hangs the newest off
     /// the top edge (`UIErrorsFrame.xml:4`); the reference's anchor per mode is untraced, and this
     /// reading reproduces both stock uses. A message that partly fits draws clipped; a faded
     /// scrolling line keeps its rows, as the reference never re-packs chat.
@@ -346,7 +430,7 @@ impl UiScript {
         model: &Model,
         fh: FrameHandle,
         fr: Rect,
-        z: u64,
+        z: u128,
         paint: FramePaint,
         clip: Option<Rect>,
         out: &mut Vec<ExtractedQuad>,
@@ -378,9 +462,15 @@ impl UiScript {
             KindState::Message(s) => s.justify,
             _ => None,
         };
-        // The resolved rect is scaled and the font height is frame-local, so the pitch scales.
-        let pitch = font.height.unwrap_or(14.0) * paint.scale;
-        if pitch <= 0.0 || fr.top <= fr.bottom {
+        // The resolved rect is scaled and the font is frame-local, so the height and gap scale.
+        let line_h = font.height_or_default() * paint.scale;
+        let gap = font.line_gap(paint.scale);
+        // A row's advance: the scrolling class's height plus gap, the plain class's own pitch.
+        let row_step = match &frame.kind_state {
+            KindState::Message(_) => font.plain_pitch(paint.scale),
+            _ => line_h + gap,
+        };
+        if line_h <= 0.0 || row_step <= 0.0 || fr.top <= fr.bottom {
             return;
         }
         // Clip to the frame, intersected with any ScrollFrame ancestor's clip.
@@ -394,13 +484,14 @@ impl UiScript {
                 break; // the next band starts outside the frame
             }
             let line = &lines[idx];
-            let band_h = f32::from(line.rows.max(1)) * pitch;
+            let rows = f32::from(line.rows.max(1));
+            let band_h = rows * line_h + (rows - 1.0) * gap;
             let (bottom, top) = if from_top {
                 (fr.top - used - band_h, fr.top - used)
             } else {
                 (fr.bottom + used, fr.bottom + used + band_h)
             };
-            used += band_h;
+            used += rows * row_step;
             if line.alpha <= 0.0 {
                 continue; // faded: holds its rows, draws nothing
             }
@@ -431,6 +522,8 @@ impl UiScript {
                     font_height: font.height,
                     text_height: None, // message lines have no SetTextHeight
                     outline: font.outline,
+                    // The line string's own field, clamped; the host snaps it.
+                    spacing: font.spacing.max(0.0),
                     alpha_gradient: None,
                     world_seat: false, // interface, not world
                 },

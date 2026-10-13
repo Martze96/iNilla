@@ -129,7 +129,7 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
 
     let mut registry: Vec<AddOnInfo> = INSTALLED
         .iter()
-        .map(|n| super::addons::info_from_toc(n, &read_toc(root, n)))
+        .map(|n| super::addons::info_from_toc(n, &read_toc(root, n), false))
         .collect();
     s.register_addons(registry.clone(), Some(root.to_path_buf()), None, None);
     s.set_realm_name("Harness");
@@ -576,7 +576,7 @@ fn dragging_a_bagnon_slot_picks_the_item_up() {
     let (dx, dy) = centre_of(&mut s, &empty);
     s.mouse_move(sx, sy);
     s.mouse_button(sx, sy, "LeftButton", true);
-    s.mouse_move(sx + 12.0, sy + 12.0); // past DRAG_START_THRESHOLD ⇒ OnDragStart
+    s.mouse_move(sx + 12.0, sy + 12.0); // past the drag-start distance ⇒ OnDragStart
     s.mouse_move(dx, dy);
     s.mouse_button(dx, dy, "LeftButton", false);
 
@@ -938,14 +938,18 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
         .map(|q| q.content.clone())
         .expect("the popup's background art reaches the render list");
 
-    let QuadContent::Texture { color, .. } = bg else {
+    let QuadContent::Texture {
+        color, gradient, ..
+    } = bg
+    else {
         unreachable!("filtered to Texture above")
     };
-    // The stops are (0,0,0,0.9) and (0.2,0.2,0.2,0.9). A quad carries one tint, so the paint shows
-    // their midpoint, 0.1 grey; the reference shades per vertex.
+    // VERTICAL, MinColor (0,0,0,0.9) on the bottom pair and MaxColor (0.2,0.2,0.2,0.9) on the top.
+    let (min, max) = ([0.0, 0.0, 0.0, 0.9], [0.2, 0.2, 0.2, 0.9]);
+    assert_eq!(color, None, "the art carries no one-colour tint");
     assert_eq!(
-        color,
-        Some([0.1, 0.1, 0.1, 0.9]),
+        gradient,
+        Some([max, max, min, min]),
         "the <Gradient> must tint the art; untinted this is the reported white box"
     );
 }
@@ -1169,7 +1173,6 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         &mut memory,
         None,
         Default::default(),
-        Vec::new(),
         Vec::new(),
     );
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());

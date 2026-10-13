@@ -6,6 +6,10 @@ pub const SMSG_CHAR_ENUM: u16 = 0x003B;
 // Character delete: CMSG a full u64 guid, SMSG one result byte (`CHAR_DELETE_SUCCESS` = 0x39).
 pub const CMSG_CHAR_DELETE: u16 = 0x0038;
 pub const SMSG_CHAR_DELETE: u16 = 0x003C;
+// Character rename at select: CMSG a full u64 guid and the new name's cstring, SMSG a result byte
+// then, on success, the guid and the name (`Packets/Character.cpp:31-35`, `:61-69`).
+pub const CMSG_CHAR_RENAME: u16 = 0x02C7;
+pub const SMSG_CHAR_RENAME: u16 = 0x02C8;
 /// The server's refusal of a `CMSG_PLAYER_LOGIN`: one result byte.
 pub const SMSG_CHARACTER_LOGIN_FAILED: u16 = 0x0041;
 pub const SMSG_NAME_QUERY_RESPONSE: u16 = 0x0051; // 81
@@ -55,6 +59,10 @@ pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
 /// `FACTION_FLAG_VISIBLE`; no fresh standing comes with it (`ReputationMgr::SendVisible`).
 pub const SMSG_SET_FACTION_VISIBLE: u16 = 0x0123;
 pub const SMSG_SET_FACTION_STANDING: u16 = 0x0124;
+/// The forced-reaction table, whole, on every change of a `SPELL_AURA_FORCE_REACTION` aura
+/// (`ReputationMgr::SendForceReactions`): a `u32` count, then `(faction id, reaction rank)` pairs
+/// of two `u32`s.
+pub const SMSG_SET_FORCED_REACTIONS: u16 = 0x02A5;
 /// Set a faction's at-war flag from the reputation pane; none of the pane's three verbs is acked.
 pub const CMSG_SET_FACTION_ATWAR: u16 = 0x0125; // 293
 pub const CMSG_SET_FACTION_INACTIVE: u16 = 0x0317; // 791

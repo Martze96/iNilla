@@ -473,6 +473,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Load out of date AddOns, inverted (`0x402c3b`): "1" enforces the check. Read by the load walk
     // ([`Cvars::addon_version_check`]) and live by the VM's gate.
     same("checkAddonVersion", "1"),
+    // `scriptMemory` (`0x402e63`: name `0x82e81c`, "49152" `0x82e858`, category 4, record
+    // `0x882654`): the Lua heap cap in KB, shown in MB by the glue AddOns screen
+    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`). Deviation: nothing caps the heap
+    // here; the row holds what the screen's box was set to.
+    same("scriptMemory", "49152"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
     // (`0x63a3c4`, `0x842a5c`). Here it reports the wgpu backend (`wgpu::Backend::to_str`), pushed
@@ -720,4 +725,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // "Last character selected": a 0-based row (the selection cell `[0x83856c]` under `"%d"`), so
     // "0" is the first character. It mirrors [`crate::char_select::Roster::pending_index`].
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
+    // The four user agreements the login screen walks (`0x402db6`, `0x402dd9`, `0x402dfc`,
+    // `0x402e1f`; "0" `0x82e570`, category 4): "Status of the TOS" (`0x82e8e4`), "... the EULA"
+    // (`0x82e8c8`), "... the Scanning notice" (`0x82e89c`) and "... the Contest notice"
+    // (`0x82e86c`). The glue manager reads them once at startup (`0x46a400`) as accepted (1) and
+    // changed (negative), and its `Accept*` writes "1" (`0x46aef0` and its siblings).
+    same("readTOS", "0"),
+    same("readEULA", "0"),
+    same("readScanning", "0"),
+    same("readContest", "0"),
 ];

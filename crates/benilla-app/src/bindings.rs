@@ -29,7 +29,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use benilla_ui::script::keybind::KeybindRequest;
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
 
 use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
@@ -93,7 +93,46 @@ pub(crate) struct BindingsState {
     /// Normalized like [`latched`](Self::latched) and reconciled against `ButtonInput` every
     /// pass, so a window deactivate empties it and a key held across an alt-tab resumes, as in
     /// the reference. Keyboard only: mouse edges cannot repeat.
-    down: Vec<KeyCode>,
+    down: KeyDownList,
+}
+
+/// The keys believed down, the reference's own list (`0x4248b3`): a press of a key on it is an
+/// auto-repeat, whatever the OS flagged. One instance is the bindings', another the UI key feed's
+/// ([`crate::ui_script`]), which decides repeat for the frames by the same rule and reconcile.
+#[derive(Default)]
+pub(crate) struct KeyDownList(Vec<KeyCode>);
+
+impl KeyDownList {
+    /// Drop what is no longer physically down, per bevy's button plane: a window deactivate
+    /// empties it (the reference's `0x424790` wipe), so the first repeat after an alt-tab is a
+    /// fresh press and re-latches.
+    pub(crate) fn reconcile(&mut self, keys: &ButtonInput<KeyCode>) {
+        self.0.retain(|&kc| key_physically_down(kc, keys));
+    }
+
+    /// Record a press; whether the key was already down, which makes it a repeat.
+    pub(crate) fn press(&mut self, key: KeyCode) -> bool {
+        let key = chord::normalize_key(key);
+        let repeat = self.0.contains(&key);
+        if !repeat {
+            self.0.push(key);
+        }
+        repeat
+    }
+
+    pub(crate) fn release(&mut self, key: KeyCode) {
+        let key = chord::normalize_key(key);
+        self.0.retain(|&kc| kc != key);
+    }
+}
+
+/// `ENTER` is down while either physical key is, since [`chord::normalize_key`] folds
+/// `NUMPADENTER` into it.
+fn key_physically_down(kc: KeyCode, keys: &ButtonInput<KeyCode>) -> bool {
+    match kc {
+        KeyCode::Enter => keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter),
+        kc => keys.pressed(kc),
+    }
 }
 
 /// The physical input a latch waits on: a keyboard key by its code, not its name, so its release
@@ -323,25 +362,28 @@ fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<Bindi
 }
 
 /// Rebuild the dispatch map when the engine table moved (a rebind, a set switch, the seed, a
-/// load), and fire `UPDATE_BINDINGS` so the Lua consumers (the action bar's hotkey corners)
-/// repaint.
+/// load, a registration), and fire the `UPDATE_BINDINGS` a host-side load owes so the Lua
+/// consumers (the action bar's hotkey corners) repaint. The reference signals it from `SetBinding`
+/// (`0x4b805b`), which signals in place, and from the copy of a set into the live table
+/// (`0x4b649d`); reading a `Bindings.xml` (`0x4b6f70`) signals nothing.
 fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<BindingDispatch>) {
     let Some(mut script) = script else { return };
     let generation = script.keybinds_generation();
-    if *dispatch.seen_generation.get(&script) == Some(generation) {
-        return;
-    }
-    *dispatch.seen_generation.get(&script) = Some(generation);
-    dispatch.map.clear();
-    for (key, command) in script.binding_keys() {
-        match Chord::parse(&key) {
-            Some(ch) => {
-                dispatch.map.insert(ch, command);
+    if *dispatch.seen_generation.get(&script) != Some(generation) {
+        *dispatch.seen_generation.get(&script) = Some(generation);
+        dispatch.map.clear();
+        for (key, command) in script.binding_keys() {
+            match Chord::parse(&key) {
+                Some(ch) => {
+                    dispatch.map.insert(ch, command);
+                }
+                None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
             }
-            None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
         }
     }
-    script.fire_event("UPDATE_BINDINGS", vec![]);
+    if script.take_keybinds_signal_owed() {
+        script.fire_event("UPDATE_BINDINGS", vec![]);
+    }
 }
 
 /// A wheel delta in lines (notches), whatever unit the OS reported: a trackpad's `Pixel` deltas
@@ -451,9 +493,7 @@ fn latch_and_dispatch(
     // ── The pressed-key reconcile ── against bevy's button planes, before this frame's messages:
     // a release the window never saw drops off the list, and a window deactivate empties it, the
     // reference's `0x424790` wipe, so a key held across an alt-tab re-latches on its next repeat.
-    state
-        .down
-        .retain(|&kc| physically_down(&Held::Key(kc), &keys, &buttons));
+    state.down.reconcile(&keys);
 
     // ── Keyboard ── press edges run their command, gated on ownership and the capture arm;
     // release edges unlatch and run the `runOnUp` up-half.
@@ -472,15 +512,17 @@ fn latch_and_dispatch(
                             | KeyCode::ArrowUp
                             | KeyCode::ArrowDown
                     );
+                // The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the
+                // walk goes on and the world frame's binding runs while typing.
+                let arrow_exempt = arrow_exempt
+                    || chord::key_token(ev.key_code, &layout)
+                        == Some(chord::KeyName::Word("PRINTSCREEN"));
                 // A keyboard frame ate this one key (the world map's `OnKeyDown`, a cinematic);
                 // per key, so every other binding is untouched.
                 let eaten = capture.consumed.contains(&ev.key_code);
                 // A repeat is a key we already believe is down, the reference's test. Recorded
                 // before the gates below, so a key held through a focused box stays down.
-                let repeat = state.down.contains(&key);
-                if !repeat {
-                    state.down.push(key);
-                }
+                let repeat = state.down.press(key);
                 // `sup`: the Super deviation (module doc).
                 if (typing && !arrow_exempt) || eaten || sup || repeat {
                     continue;
@@ -500,12 +542,44 @@ fn latch_and_dispatch(
                     key: BindKey::Key(name),
                 };
                 if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                    // The world frame's key-down ran it and returned that (`0x483b70`), so its
+                    // key-up and repeats are the world frame's, not a stale earlier consumer's.
+                    if let Some(s) = script.as_mut() {
+                        s.note_world_key(&name.to_string());
+                    }
                     press(&mut state, &mut script, command, Held::Key(key));
                 }
             }
             ButtonState::Released => {
-                state.down.retain(|&kc| kc != key);
+                state.down.release(key);
                 release(&mut state, &mut script, Held::Key(key));
+                // The release, to the frame that took the press (`0x765fd0`), here and not in the
+                // key feed so it follows this key's press in event order: a binding's press has
+                // just made the world frame its consumer. PRINTSCREEN arrives as an up alone on
+                // Windows (`VK_SNAPSHOT` sends no `WM_KEYDOWN`), and with no consumer on record the
+                // client runs the key-down walk on it (`0x76603c`-`0x76604d`), the world frame's
+                // binding last: the up then runs the chord as a press, with no latch since no
+                // release follows.
+                let Some(name) = chord::walk_name(ev.key_code, &layout) else {
+                    continue;
+                };
+                let Some(s) = script.as_mut() else {
+                    continue;
+                };
+                if s.key_up(&name) == KeyUp::Walked(KeyWalk::Declined) && !sup {
+                    if let Some(token) = chord::key_token(ev.key_code, &layout) {
+                        let chord = Chord {
+                            alt,
+                            ctrl,
+                            shift,
+                            key: BindKey::Key(token),
+                        };
+                        if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                            press(&mut state, &mut script, command, Held::Key(key));
+                            state.latched.retain(|(k, _)| *k != Held::Key(key));
+                        }
+                    }
+                }
             }
         }
     }
@@ -598,10 +672,7 @@ fn physically_down(
     buttons: &ButtonInput<MouseButton>,
 ) -> bool {
     match key {
-        Held::Key(KeyCode::Enter) => {
-            keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter)
-        }
-        Held::Key(kc) => keys.pressed(*kc),
+        Held::Key(kc) => key_physically_down(*kc, keys),
         Held::Mouse(b) => buttons.pressed(*b),
         // A notch is a press and a release in one frame; it is never "held".
         Held::Wheel => false,
@@ -794,12 +865,97 @@ mod tests {
     }
 
     fn with_addon(bindings: &str) -> UiScript {
-        let mut script = core_script();
+        let script = core_script();
         script.register_addon_bindings(
             "ProbeAddon",
             &benilla_ui::bindings_xml::parse(bindings).expect("well-formed"),
         );
         script
+    }
+
+    /// `SetBinding` signalled its `UPDATE_BINDINGS` in place (`0x4b805b`): the dispatch map still
+    /// re-derives, and the frame fires no second signal for the same change.
+    #[test]
+    fn a_verbs_binding_change_is_signalled_once() {
+        let script = core_script();
+        let mut app = vm_harness(script);
+        app.update();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                "UPDATES = 0 local f = CreateFrame('Frame') f:RegisterEvent('UPDATE_BINDINGS') \
+                 f:SetScript('OnEvent', function() UPDATES = UPDATES + 1 end) \
+                 SetBinding('F', 'JUMP')",
+            )
+            .unwrap();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "the verb's own signal");
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            1,
+            "no second signal from the feed"
+        );
+        assert!(app
+            .world()
+            .resource::<BindingDispatch>()
+            .map
+            .values()
+            .any(|c| c == "JUMP"));
+    }
+
+    /// Only the two reference sites signal `UPDATE_BINDINGS`: a set's copy into the live table
+    /// (`0x4b649d`, here the host's load) and a stored `SetBinding`. Reading an addon's
+    /// `Bindings.xml` (`0x4b6f70`) moves the dispatch table and signals nothing.
+    #[test]
+    fn registering_an_addons_bindings_signals_nothing_but_a_load_does() {
+        let script = core_script();
+        script
+            .run(
+                "UPDATES = 0 local f = CreateFrame('Frame') f:RegisterEvent('UPDATE_BINDINGS') \
+                 f:SetScript('OnEvent', function() UPDATES = UPDATES + 1 end)",
+            )
+            .unwrap();
+        let mut app = vm_harness(script);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            1,
+            "the seed's load owes its signal"
+        );
+        app.update();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "once");
+
+        {
+            let script = app.world().non_send_resource::<UiScript>();
+            // The verb signals in place and owes nothing; only then does the registration run.
+            script
+                .run(r#"SetBinding("J", "PROBEHOLD") UPDATES = 0"#)
+                .unwrap();
+            script.register_addon_bindings(
+                "ProbeAddon",
+                &benilla_ui::bindings_xml::parse(PROBE_BINDINGS).expect("well-formed"),
+            );
+        }
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            0,
+            "a registration signals nothing"
+        );
+        assert!(
+            app.world()
+                .resource::<BindingDispatch>()
+                .map
+                .values()
+                .any(|c| c == "PROBEHOLD"),
+            "but the dispatch map re-derives"
+        );
+
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .load_binding_set(1);
+        app.update();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "a load does");
     }
 
     /// A `runOnUp` body is one chunk run twice, `keystate` "down" then "up"; a plain one runs on
@@ -898,6 +1054,67 @@ mod tests {
             !state(&app).pressed(Input::MoveForward),
             "only the arrows are exempt — every other key a focused box still eats"
         );
+    }
+
+    /// The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the walk goes on and
+    /// the binding runs while typing, with every other key still eaten.
+    #[test]
+    fn printscreen_runs_its_binding_while_a_box_has_focus() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(r#"SetBinding("PRINTSCREEN", "PROBEEDGE"); SetBinding("G", "PROBEHOLD")"#)
+            .expect("bind");
+        let mut app = vm_harness(script);
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
+
+        press_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_DOWN"), 0, "G is eaten by the box");
+
+        press_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "PRINTSCREEN is declined, so its binding runs"
+        );
+    }
+
+    /// A press that resolved to a binding is the world frame's (`0x483b70`): the key's up goes to
+    /// it, not to the hidden frame that took the key's last press.
+    #[test]
+    fn a_press_that_runs_a_binding_makes_the_world_frame_its_consumer() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(
+                r#"
+                SetBinding("G", "PROBEEDGE")
+                CreateFrame("WorldFrame", "WorldFrame")
+                ups = 0
+                stale = CreateFrame("Frame", "StaleG")
+                stale:EnableKeyboard(true)
+                stale:SetScript("OnKeyDown", function() end)
+                stale:SetScript("OnKeyUp", function() ups = ups + 1 end)
+                "#,
+            )
+            .expect("bind");
+        let mut app = vm_harness(script);
+        {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            assert!(s.key_input("G"), "the frame takes G first");
+            s.run("stale:Hide()").unwrap();
+        }
+        press_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "the binding took the press"
+        );
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        s.run("stale:Show()").unwrap();
+        assert!(s.key_up("G").taken());
+        assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
     }
 
     /// A box taking focus releases nothing already held: the reference's focused box freezes the
@@ -1061,6 +1278,165 @@ mod tests {
             state(&app).pressed(Input::MoveForward),
             "the first repeat after re-activation re-latches"
         );
+    }
+
+    /// The UI key feed beside the dispatch, as the world runs them: the feed first, on the same
+    /// events, with the world frame in the walk.
+    fn feed_and_dispatch_harness() -> App {
+        fn feed(
+            mut script: NonSendMut<UiScript>,
+            mut capture: ResMut<UiKeyboardCapture>,
+            mut events: MessageReader<KeyboardInput>,
+            keys: Res<ButtonInput<KeyCode>>,
+            layout: Res<LayoutNames>,
+            mut clipboard: NonSendMut<crate::textinput::HostClipboard>,
+            mut down: Local<KeyDownList>,
+        ) {
+            capture.consumed.clear();
+            crate::ui_script::feed_keys(
+                &mut script,
+                &mut capture,
+                events.read(),
+                &keys,
+                &mut down,
+                false,
+                crate::textinput::Mods {
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    sup: false,
+                },
+                &layout,
+                &mut clipboard,
+                None,
+            );
+        }
+        let script = core_script();
+        script
+            .run(r#"CreateFrame("WorldFrame", "WorldFrame")"#)
+            .expect("world frame");
+        let mut app = vm_harness(script);
+        app.insert_non_send_resource(crate::textinput::HostClipboard::holding(""))
+            .add_systems(Update, feed.before(latch_and_dispatch));
+        app
+    }
+
+    /// A key held across an alt-tab resumes at its next OS repeat even when its binding made the
+    /// world frame its consumer: the feed decides repeat from the same wiped pressed-key list
+    /// (`0x424790`), not from the OS flag, so the repeat is a fresh press for both and W runs
+    /// again (`0x4248b3`).
+    #[test]
+    fn a_held_movement_key_resumes_after_an_alt_tab_through_the_feed_too() {
+        let mut app = feed_and_dispatch_harness();
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(Input::MoveForward));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        app.update();
+        assert!(
+            !state(&app).pressed(Input::MoveForward),
+            "the deactivate releases the direction bits"
+        );
+
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(Input::MoveForward),
+            "the first repeat after re-activation re-latches"
+        );
+        assert!(
+            !app.world()
+                .resource::<UiKeyboardCapture>()
+                .consumed
+                .contains(&KeyCode::KeyW),
+            "…the feed did not hand the repeat to the world frame's stub"
+        );
+
+        // A real repeat of the key now held is the stub's, and eaten by nobody's binding.
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(Input::MoveForward));
+    }
+
+    /// A press and its release in one frame's batch reach the dispatch in event order: the release
+    /// follows the press that made the world frame the consumer, so it is not sent on to the frame
+    /// that took the key's last press.
+    #[test]
+    fn a_press_and_a_release_in_one_batch_go_to_the_world_frame_not_a_stale_consumer() {
+        let mut app = feed_and_dispatch_harness();
+        {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.run(
+                r#"
+                ups = 0
+                stale = CreateFrame("Frame", "StaleBatch")
+                stale:EnableKeyboard(true)
+                stale:SetScript("OnKeyDown", function() end)
+                stale:SetScript("OnKeyUp", function() ups = ups + 1 end)
+                "#,
+            )
+            .unwrap();
+            assert!(s.key_input("W"), "the frame takes W once");
+            s.run("stale:EnableKeyboard(false)").unwrap();
+        }
+        press_key(&mut app, KeyCode::KeyW);
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        let s = app.world().non_send_resource::<UiScript>();
+        assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
+    }
+
+    /// PRINTSCREEN reaches Windows as an up alone (`VK_SNAPSHOT` sends no `WM_KEYDOWN`). With no
+    /// consumer on record the client runs the key-down walk on the up (`0x76603c`-`0x76604d`), the
+    /// world frame's binding last, so the binding runs on the release; a frame that takes the walk
+    /// keeps it from the binding; and a platform that sends both halves runs it once.
+    #[test]
+    fn printscreen_as_an_up_alone_runs_its_binding_through_the_key_down_walk() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(
+                r#"SetBinding("PRINTSCREEN", "PROBEEDGE") CreateFrame("WorldFrame", "WorldFrame")"#,
+            )
+            .expect("bind");
+        let mut app = vm_harness(script);
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_EDGE"), 1, "the up alone runs it");
+
+        // A frame that takes the key-down walk keeps it from the binding.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                r#"
+                got = 0
+                cover = CreateFrame("Frame", "PrintCover")
+                cover:EnableKeyboard(true)
+                cover:SetScript("OnKeyDown", function() got = got + 1 end)
+                "#,
+            )
+            .unwrap();
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "got"), 1, "the frame took the walk");
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "…so the binding did not run"
+        );
+
+        // A platform that sends both halves: the press ran it and made the world frame the
+        // consumer, so the up is delivered, not walked again.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("cover:Hide()")
+            .unwrap();
+        press_key(&mut app, KeyCode::PrintScreen);
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_EDGE"), 2, "…once, not twice");
     }
 
     /// An addon's bindings that call the movement functions: a Start and a Stop alone.

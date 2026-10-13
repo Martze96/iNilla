@@ -31,6 +31,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
             characters,
             realm: None,
+            cause: super::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         }],
         ServerPacket::CharacterLoginFailed { result } => {
             vec![SessionEvent::CharacterLoginFailed { result }]
@@ -179,12 +182,14 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             reason,
             required_level,
             item_guid,
+            item2_guid,
             bag_slot,
         } if reason != 0 => {
             vec![SessionEvent::InventoryFailure {
                 reason,
                 required_level,
                 item_guid,
+                item2_guid,
                 bag_slot,
             }]
         }
@@ -461,8 +466,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             items,
         }],
         ServerPacket::LootError { guid, error } => vec![SessionEvent::LootError { guid, error }],
-        ServerPacket::LootReleaseResponse { guid, .. } => {
-            vec![SessionEvent::LootReleaseResponse { guid }]
+        ServerPacket::LootReleaseResponse { guid, result } => {
+            vec![SessionEvent::LootReleaseResponse { guid, result }]
         }
         ServerPacket::LootRemoved { slot } => vec![SessionEvent::LootRemoved { slot }],
         ServerPacket::LootMoneyNotify { amount } => {
@@ -818,6 +823,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::SetFactionStanding { standings } => {
             vec![SessionEvent::ReputationDelta { standings }]
         }
+        ServerPacket::SetForcedReactions { reactions } => {
+            vec![SessionEvent::ForcedReactions { reactions }]
+        }
         ServerPacket::SetFactionVisible { list_id } => {
             vec![SessionEvent::ReputationVisible { list_id }]
         }
@@ -1094,6 +1102,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         | ServerPacket::AuthResponse { .. }
         | ServerPacket::CharCreate { .. }
         | ServerPacket::CharDelete { .. }
+        | ServerPacket::CharRename { .. }
         | ServerPacket::AddonInfo { .. } => Vec::new(),
     }
 }
