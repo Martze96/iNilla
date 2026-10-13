@@ -46,11 +46,19 @@ kira = { path = "third_party/kira" }
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
 opt-level = 3
+# One codegen unit each, since `lto = "off"` below drops the ThinLTO that inlines across a crate's
+# units: at 16 units the dependencies cost +1.2 cpu_ms at the leg pin, at one nothing, and a cold
+# build is no slower.
+codegen-units = 1
 
 # Our crates at opt-level 1: Bevy's generic hot paths monomorphize into them, and at opt-level 0
-# Stormwind drops from a pinned 60 fps to ~45; the warm incremental rebuild cost is ~0.
+# Stormwind drops from a pinned 60 fps to ~45.
 [profile.dev]
 opt-level = 1
+# No ThinLTO: above opt-level 0 rustc runs it over a crate's own codegen units by default, and an
+# incremental rebuild redoes it whole: 19 s of a one-line `benilla-app` edit's 25 s, and half its
+# 5.3 GB. Off, our crates cost +0.7 cpu_ms (+6 %) at the leg pin.
+lto = "off"
 
 # No debuginfo trimming: `debug = "line-tables-only"` measures no recurring win on macOS + sccache.
 
@@ -72,6 +80,11 @@ incremental = true
 # unresolved and the link fails intermittently (rustc #86049).
 lto = "off"
 
+# One codegen unit each, as in dev: at 16 the dependencies cost +1.2 cpu_ms against `release` at
+# the leg pin, at one the profile is +0.5, and a cold build is no slower.
+[profile.play.package."*"]
+codegen-units = 1
+
 # iNilla: the iOS app. Release optimisation, built as a static library on Linux (no linker
 # involved) and linked on macOS (`ios/package-ipa.sh`). No LTO — the final link is Apple's and
 # sees an archive — and symbols stay in, so a crash report's backtrace names functions.
@@ -80,3 +93,4 @@ inherits = "release"
 debug = false
 strip = false
 incremental = false
+

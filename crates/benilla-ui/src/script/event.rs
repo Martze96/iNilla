@@ -1,7 +1,7 @@
 //! Handler firing: the FrameScript calling convention for events, ticks and show/hide. The
 //! reference sets `this` (`0x872e64`), `event` (`0x84b648`) and `arg1..argN` (`0x8722dc`) around
-//! the call, restoring each after, and `pcall`s with no arguments; the handler here also gets the
-//! same values as `(self, event, ...)` arguments, which 1.12 does not pass.
+//! the call, restoring each after, and `pcall`s with no arguments; so does [`invoke_with_globals`],
+//! which sets only the args it is given, so a script fired with none leaves `arg1..argN` as found.
 //! Handler errors return to the caller, which records them in [`super::Model::errors`].
 
 use std::borrow::Cow;
@@ -38,7 +38,7 @@ pub(super) fn fire_all_event_listeners(lua: &Lua, event: &str, args: &[ScriptVal
             if let Err(e) = fire_event_handler(lua, id, event, args) {
                 lua.app_data_mut::<Model>()
                     .expect("model app_data")
-                    .record_script_error(e.to_string());
+                    .record_lua_error(&e);
             }
         }
         at = next;
@@ -93,17 +93,22 @@ pub(super) fn fire_size_changes(lua: &Lua) {
             .pending_size_changed,
     );
     for (id, w, h) in pending {
-        if let Err(e) = fire(
-            lua,
-            id,
-            "OnSizeChanged",
-            None,
-            vec![Value::Number(f64::from(w)), Value::Number(f64::from(h))],
-        ) {
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .record_script_error(e.to_string());
-        }
+        fire_size_changed(lua, id, w, h);
+    }
+}
+
+/// `OnSizeChanged(width, height)` on frame `id`, its error recorded.
+pub(super) fn fire_size_changed(lua: &Lua, id: u32, w: f32, h: f32) {
+    if let Err(e) = fire(
+        lua,
+        id,
+        "OnSizeChanged",
+        None,
+        vec![Value::Number(f64::from(w)), Value::Number(f64::from(h))],
+    ) {
+        lua.app_data_mut::<Model>()
+            .expect("model")
+            .record_lua_error(&e);
     }
 }
 

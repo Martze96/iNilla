@@ -170,6 +170,10 @@ fn the_stock_interface_inside_uiparent_is_unmoved_by_where_the_scale_lives() {
     let (w, h) = (768.0 * 16.0 / 9.0, 768.0);
     let mut script = UiScript::new().expect("VM");
     script.set_screen_size(w, h);
+    // Art with an extent, as the app's probe gives it, so a texture sized 0 on an axis (a tab's
+    // middle, sized by its unmeasured label) resolves instead of failing: a failed texture keeps
+    // the quad its last good resolve wrote, which no later scale moves.
+    script.set_texture_size_probe(Box::new(|_| Some((32, 32))));
     let failures = super::load_default_ui(&script);
     assert!(
         failures.is_empty(),
@@ -187,6 +191,11 @@ fn the_stock_interface_inside_uiparent_is_unmoved_by_where_the_scale_lives() {
             "#,
         )
         .unwrap();
+    // A frame of the session: a hidden frame pending its resolve passes nothing on (`0x76814b`),
+    // and the stock `FCF_OnUpdate`'s `MouseIsOver` getters are what resolve the hidden Combat Log
+    // every frame (`0x7a1980`), which the tabs anchored through it read.
+    script.tick(0.016);
+    script.resolve();
     let _ = script.take_errors();
 
     // The old home: a root `1/S` larger, `UIParent` at scale 1.

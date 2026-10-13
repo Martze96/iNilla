@@ -141,6 +141,7 @@ fn spawn_screen(
 
     let root = commands
         .spawn((
+            crate::glue::NativeGlue,
             LoginUi {
                 with_art: art.button_up.is_some(),
                 s,
@@ -603,23 +604,25 @@ pub(super) fn refresh_checkbox(
     }
 }
 
-/// Leaving the login screen: drop the tree, the scene, and any open dialog.
+/// Leaving the login screen: drop the tree and any open dialog.
 pub(super) fn exit_login(
     mut commands: Commands,
     roots: Query<Entity, With<LoginUi>>,
-    mut preview: ResMut<crate::portrait::GluePreview>,
     mut dialog: ResMut<crate::glue::dialog::GlueDialog>,
 ) {
     for e in &roots {
         commands.entity(e).despawn();
     }
-    // The next screen sets its own scene the same frame.
-    preview.scene = None;
-    preview.look = None;
     if let Some(root) = dialog.root.take() {
         commands.entity(root).despawn();
     }
     dialog.close();
+}
+
+/// Leaving the native login screen drops its scene; the next screen sets its own the same frame.
+pub(super) fn clear_login_scene(mut preview: ResMut<crate::portrait::GluePreview>) {
+    preview.scene = None;
+    preview.look = None;
 }
 
 /// `WOW_LOGIN_SHOT_OUT=<path>`: one PNG of the login screen once it has settled.

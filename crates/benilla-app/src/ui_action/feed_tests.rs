@@ -159,6 +159,113 @@ fn a_landed_item_template_also_lands_the_consumable_gate() {
     );
 }
 
+/// `PickupAction` and `PlaceAction` fire their slots' `ACTIONBAR_SLOT_CHANGED` in place
+/// (`0x4e5db0` and `0x4e684f` into `0x4e58e0`), each reading the slot as written, count and
+/// consumable gate included; the store catching up a frame later fires nothing more.
+#[test]
+fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    app.add_systems(Update, super::drain::drain_action_sets.after(feed_actions));
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    info.spells = vec![ItemSpellEntry {
+        index: 0,
+        spell_id: 433,
+        trigger: 0,
+        charges: -1,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    }];
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    app.update();
+    app.update();
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut::<UiScript>()
+    }
+    script(&mut app)
+        .run(
+            r#"
+            SLOT_EVENTS = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function()
+                table.insert(SLOT_EVENTS, arg1 .. ":" .. tostring(GetActionTexture(arg1))
+                    .. ":" .. tostring(IsConsumableAction(arg1)))
+            end)
+            "#,
+        )
+        .unwrap();
+    let seen: Vec<String> = script(&mut app)
+        .eval(&format!(
+            "PickupAction({JERKY_ACTION}) PlaceAction(1) local s = SLOT_EVENTS SLOT_EVENTS = {{}} return s"
+        ))
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            format!("{JERKY_ACTION}:nil:nil"),
+            format!("1:{JERKY_ICON}:1"),
+        ],
+        "both slots signal before the verbs return, the placed one with its gate"
+    );
+
+    app.update();
+    app.update();
+    let late: Vec<String> = script(&mut app).eval("return SLOT_EVENTS").unwrap();
+    assert!(late.is_empty(), "the feed re-fired {late:?}");
+    let bar = app.world().resource::<PlayerActions>();
+    assert!(bar.buttons.contains_key(&0) && !bar.buttons.contains_key(&JERKY_SLOT));
+}
+
+/// A verb run after the drain and before the next feed (an addon's `PlaceAction` from a handler)
+/// is not rolled back: the store has not caught up, so a re-resolve in that window pushes nothing
+/// over the verb's write and fires nothing.
+#[test]
+fn a_verbs_bar_write_survives_a_resolve_of_the_stale_store() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    app.update();
+    app.update();
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut::<UiScript>()
+    }
+    script(&mut app)
+        .run(&format!(
+            r#"
+            PickupAction({JERKY_ACTION}) PlaceAction(1)
+            SLOT_EVENTS = {{}}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function() table.insert(SLOT_EVENTS, arg1) end)
+            "#
+        ))
+        .unwrap();
+    // The store has not seen the move; something else asks for a resolve.
+    app.world_mut().resource_mut::<PlayerActions>().dirty = true;
+    app.update();
+    let late: Vec<i64> = script(&mut app).eval("return SLOT_EVENTS").unwrap();
+    assert!(late.is_empty(), "the stale store fired {late:?}");
+    let faces: (Option<String>, Option<String>) = script(&mut app)
+        .eval(&format!(
+            "return GetActionTexture(1), GetActionTexture({JERKY_ACTION})"
+        ))
+        .unwrap();
+    assert_eq!(
+        faces,
+        (Some(JERKY_ICON.to_string()), None),
+        "the verb's write was rolled back"
+    );
+}
+
 /// `IsConsumableAction 0x4e5250`'s two clauses; the item class is neither.
 #[test]
 fn is_consumable_is_ammo_thrown_or_a_negative_charge_use_block() {
@@ -556,4 +663,53 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
         None,
         "an unresolvable reason shows nothing"
     );
+}
+
+/// Every first pass through the failure handler `0x6e1a00`, a local refusal included, disarms the
+/// tradeskill repeat when it names the armed spell (`0x6e1a3c`-`0x6e1a55`); another spell's does
+/// not.
+#[test]
+fn a_refusal_of_the_armed_craft_disarms_the_batch() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script.run("DoTradeSkill(2, 3)").unwrap();
+    }
+    let repeat = |app: &App| {
+        app.world()
+            .non_send_resource::<UiScript>()
+            .trade_skill_repeat()
+    };
+    app.world_mut()
+        .resource_mut::<CastErrors>()
+        .push_local(133, 0x0c);
+    app.update();
+    assert_eq!(repeat(&app), (2963, 3), "another spell's refusal");
+    app.world_mut()
+        .resource_mut::<CastErrors>()
+        .push_local(2963, 0x0c);
+    app.update();
+    assert_eq!(repeat(&app), (0, 3), "the armed craft's refusal disarms");
 }

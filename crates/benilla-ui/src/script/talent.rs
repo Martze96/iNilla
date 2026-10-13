@@ -19,8 +19,10 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
+use super::binding_abi::flag;
 use super::tooltip_spell::{spell_view_of, TalentLines};
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// One talent page, a `TalentTab.dbc` row: `GetTalentTabInfo`'s source.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -125,13 +127,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `texture` is nil: the stock frame never reads it. Out of range answers a single nil.
+    // `texture` is nil: the stock frame never reads it. Out of range answers nil, nil, 0, nil
+    // (`0x4f3132`).
     g.set(
         "GetTalentTabInfo",
-        lua.create_function(|lua, i: usize| {
+        lua.create_function(|lua, Idx(i): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(tab) = i.checked_sub(1).and_then(|n| model.talents.tabs.get(n)) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(super::binding_abi::tuple(&[None, None, Some(0), None]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&tab.name)?),
@@ -144,7 +147,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetNumTalents",
-        lua.create_function(|lua, tab: usize| {
+        lua.create_function(|lua, Idx(tab): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let n = tab
                 .checked_sub(1)
@@ -156,10 +159,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetTalentInfo",
-        lua.create_function(|lua, (tab, i): (usize, usize)| {
+        lua.create_function(|lua, (Idx(tab), Idx(i)): (Idx, Idx)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(t) = talent_at(&model, tab, i) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // `0x4f3454`: nil, nil, 1, 1, 0, 0, nil, nil.
+                return Ok(super::binding_abi::tuple(&[
+                    None,
+                    None,
+                    Some(1),
+                    Some(1),
+                    Some(0),
+                    Some(0),
+                    None,
+                    None,
+                ]));
             };
             let texture = match &t.texture {
                 Some(tex) => Value::String(lua.create_string(tex)?),
@@ -172,8 +185,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Integer(i64::from(t.column)),
                 Value::Integer(i64::from(t.rank)),
                 Value::Integer(i64::from(t.max_rank)),
-                Value::Integer(i64::from(t.exceptional)),
-                Value::Boolean(t.meets_prereq),
+                flag(t.exceptional),
+                flag(t.meets_prereq),
             ]))
         })?,
     )?;
@@ -188,7 +201,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 for p in &t.prereqs {
                     out.push(Value::Integer(i64::from(p.tier)));
                     out.push(Value::Integer(i64::from(p.column)));
-                    out.push(Value::Boolean(p.learnable));
+                    out.push(flag(p.learnable));
                 }
             }
             Ok(MultiValue::from_vec(out))
@@ -217,14 +230,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CheckTalentMasterDist(): polled by that dialog's OnUpdate, false hides it. The reference
+    // CheckTalentMasterDist(): polled by that dialog's OnUpdate, nil hides it. The reference
     // re-runs its interact-range test on the latched trainer (`0x5df980`, `d² <= [0xc4c28c]`);
     // no packet either way.
     g.set(
         "CheckTalentMasterDist",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.talent_master_pending)
+            Ok(flag(model.talent_master_pending))
         })?,
     )?;
 

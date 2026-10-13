@@ -54,9 +54,11 @@ use booth::{
 mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
+/// A model file's own authored lights, folded as the reference's gather does (`0x718960`).
+pub(crate) use glue_booth::{scene_rig, SceneRig};
 pub(crate) use glue_booth::{
     CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
+    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SelectLook, GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
@@ -119,6 +121,11 @@ pub(crate) fn model_pane_booth(name: &str) -> Option<&'static str> {
         .find(|(pane, _)| *pane == name)
         .map(|(_, slot)| *slot)
 }
+
+/// The systems that write [`GluePreview`], one per glue screen set (the native screens', the
+/// stock glue VM's); the glue booth reads it after them, the same frame.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct GluePreviewFeed;
 
 /// World is layer 0, the UI pass layer 1; each portrait slot gets its own layer from here up.
 const PORTRAIT_LAYER_BASE: usize = 2;
@@ -797,13 +804,20 @@ impl Plugin for PortraitPlugin {
                     glue_booth::pillarbox_glue_scene,
                     // After the scene: the pet's seat and its light are the scene's to publish.
                     glue_booth::sync_glue_pet,
+                    // After every glue spawn: the stage's clock reaches the players it made.
+                    glue_booth::pace_glue_clock
+                        .after(glue_booth::drive_create_test)
+                        .after(test_bake::dump_booth_target)
+                        .before(benilla_world::doodad_anim::MatAnimTick)
+                        .before(benilla_world::doodad_anim::sample_mat_anim),
                     dressup::sync_dressup_booth,
                     // After the syncs, the only writers of the yaw it spends.
                     booth::drive_booth_turn,
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
                 )
-                    .chain(),
+                    .chain()
+                    .after(GluePreviewFeed),
             )
             // Re-face each booth's eye-glow cards to its own camera.
             .add_systems(Update, booth::face_booth_billboards)
@@ -1484,6 +1498,7 @@ fn sync_portraits(
                     bone: r.bone,
                     offset: r.offset,
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect();
             let booth_billboards: Vec<BoothBillboardSpec> = billboards
@@ -1495,6 +1510,7 @@ fn sync_portraits(
                     offset: b.seat.offset(),
                     kind: b.kind,
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect();
             // A source material was not resident, so a twin is the world one; retry next frame.
@@ -1898,6 +1914,7 @@ fn sync_body_booth(
                 bone: r.bone,
                 offset: r.offset,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             })
             .collect();
         let booth_billboards: Vec<BoothBillboardSpec> = billboards
@@ -1909,6 +1926,7 @@ fn sync_body_booth(
                 offset: b.seat.offset(),
                 kind: b.kind,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             })
             .collect();
         // The worn items' effects, spawned after the model hands over the joints.
@@ -2103,7 +2121,8 @@ fn gate_booth_cameras(
             booth.pipes_since = None;
             false
         };
-        let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
+        // A hidden pane's scene stays up but undrawn: its camera sleeps, so its emitters freeze.
+        let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some() && !preview.hidden;
         // The glue screens publish no pane and stay on `live_scene`.
         let live_pane = booth.live && panes.0.contains_key(token.as_str());
         let active = test

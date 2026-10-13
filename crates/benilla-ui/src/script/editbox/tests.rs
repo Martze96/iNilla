@@ -656,6 +656,85 @@ fn get_number_parses_the_text() {
     assert_eq!(s.eval::<f64>("return E:GetNumber()").unwrap(), 0.0);
 }
 
+/// `GetNumber` pushes `SStrToFloat` of the text (`0x798790` → `0x64aaa0`): a prefix parse with no
+/// whitespace skip and no `+`.
+#[test]
+fn get_number_is_the_references_prefix_parse() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    for (text, want) in [
+        ("12abc", 12.0),
+        (" 12", 0.0),
+        ("+12", 0.0),
+        ("inf", 0.0),
+        ("nan", 0.0),
+        ("-12.5x", -12.5),
+        (".5", 0.5),
+        ("5.", 5.0),
+        ("1e3", 1000.0),
+        ("1E+2", 100.0),
+        ("0x10", 0.0),
+        ("", 0.0),
+    ] {
+        s.run(&format!("E:SetText({text:?})")).unwrap();
+        assert_eq!(
+            s.eval::<f64>("return E:GetNumber()").unwrap(),
+            want,
+            "{text:?}"
+        );
+    }
+}
+
+/// The four config flags are `GetBoolOrDefault` reads with default 1 (`0x797d1e`, `0x797e8e`,
+/// `0x797ffe`, `0x79816e`): a bare call enables, nil, `"0"` and `"no"` disable.
+#[test]
+fn editbox_flag_setters_read_get_bool_or_default_with_default_one() {
+    use crate::script::object::frame_handle_of;
+    use crate::widget::EditBoxState;
+    type Pick = fn(&EditBoxState) -> bool;
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    let state = |pick: Pick| {
+        let t: mlua::Table = s.lua().globals().get("E").unwrap();
+        let h = frame_handle_of(s.lua(), &t).unwrap();
+        super::with_eb(s.lua(), h, |eb| pick(eb)).unwrap()
+    };
+    for (set, pick) in [
+        ("SetAutoFocus", (|eb| eb.auto_focus) as Pick),
+        ("SetNumeric", |eb| eb.numeric),
+        ("SetPassword", |eb| eb.password),
+        ("SetMultiLine", |eb| eb.multi_line),
+    ] {
+        let put = |arg: &str| s.run(&format!("E:{set}({arg})")).unwrap();
+        put("true");
+        put("false");
+        put("");
+        assert!(state(pick), "{set}: no argument takes the default 1");
+        for (arg, want) in [
+            ("nil", false),
+            ("true", true),
+            ("false", false),
+            ("0", false),
+            ("0.5", false),
+            ("1", true),
+            ("2^32", false),
+            (r#""0""#, false),
+            (r#""1""#, true),
+            (r#""no""#, false),
+            (r#""yes""#, true),
+            (r#""off""#, false),
+            (r#""on""#, true),
+            (r#""""#, true),
+            ("{}", true),
+        ] {
+            put(if want { "false" } else { "true" });
+            assert_eq!(state(pick), !want, "{set}: setup");
+            put(arg);
+            assert_eq!(state(pick), want, "{set}({arg})");
+        }
+    }
+}
+
 // ── the generic OnChar and OnKeyDown ─────────────────────────────────────────────────────────
 
 #[test]

@@ -5,6 +5,9 @@
 
 /// A trace, printed only under `FrameXML_Debug` (`"-- Creating %s named %s"`, `0x6ee2bc`).
 pub const TRACE: u8 = 0;
+/// An error the load goes on past: an unnamed template (`0x6ee1cc`), a template name already
+/// registered (`0x6ee5af`).
+pub const WARNING: u8 = 1;
 /// A file-level failure: a file that did not open or did not parse (`0x6edad4`, `0x704c15`).
 pub const FAILURE: u8 = 2;
 

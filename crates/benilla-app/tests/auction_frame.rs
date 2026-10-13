@@ -759,6 +759,7 @@ fn the_create_gate_and_the_deposit() {
             slots: std::collections::HashMap::from([(
                 1,
                 benilla_ui::script::ContainerSlot {
+                    guid: 0x4001,
                     texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
                     count: 4,
                     quality: Some(1),
@@ -834,9 +835,12 @@ fn the_create_gate_and_the_deposit() {
             .unwrap(),
         2
     );
-    let _ = s.take_auction_start();
+    let _ = s.take_auction_starts();
     s.run("AuctionsCreateAuctionButton:Click()").unwrap();
-    let start = s.take_auction_start().expect("Create queues one auction");
+    let start = s
+        .take_auction_starts()
+        .pop()
+        .expect("Create queues one auction");
     assert_eq!(start.min_bid, 10000);
     assert_eq!(start.buyout, 0);
     assert_eq!(start.duration, 1440, "the long run time is still selected");

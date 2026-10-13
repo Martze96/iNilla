@@ -24,7 +24,7 @@ use super::{
 
 /// An item action's icon when its template has not answered or its display id has no
 /// `ItemDisplayInfo` row: the reference's literal `0x847fe4`, from the resolver's `0x5d8927`.
-pub(super) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+pub(crate) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 
 /// The feed's memory of what it last pushed, for per-slot change events.
 #[derive(Default)]
@@ -100,6 +100,17 @@ pub(super) fn feed_actions(
     // formatter `0x62c360`.
     let mut fail_lines: Vec<crate::ui_chat::combat::PendingCombat> = Vec::new();
     let fail_args = name_tables.args(spells.as_deref());
+    // Each first pass through the failure handler `0x6e1a00`, a local refusal or the server's,
+    // disarms the tradeskill repeat when it names the armed spell (`0x6e1a3c`-`0x6e1a55`).
+    let refused: Vec<u32> = cast_errors
+        .0
+        .iter()
+        .filter(|f| f.caster == crate::ui_action::Caster::Player && !f.redisplay)
+        .map(|f| f.spell_id)
+        .collect();
+    for spell_id in refused {
+        script.trade_skill_cast_failed(spell_id);
+    }
     let texts: Vec<cast_fail::CastFailLine> = cast_errors
         .0
         .drain(..)
@@ -351,7 +362,7 @@ pub(super) fn feed_actions(
         // pushed and fires `ACTIONBAR_SLOT_CHANGED` with its Lua action id.
         let mut fresh: HashMap<u32, ActionSlot> = HashMap::new();
         for (slot, button) in &actions.buttons {
-            let (texture, count, consumable) = match button.kind {
+            let (texture, count, consumable, use_spell) = match button.kind {
                 ACTION_KIND_SPELL => {
                     let icon = spells.as_ref().and_then(|sp| {
                         let d = sp.catalog.get(button.action)?;
@@ -366,7 +377,7 @@ pub(super) fn feed_actions(
                             &commands,
                         )
                     });
-                    (icon, 0, false)
+                    (icon, 0, false, None)
                 }
                 ACTION_KIND_ITEM => {
                     // Never nil: the reference's resolver `0x5d88b0` returns the question mark,
@@ -382,7 +393,15 @@ pub(super) fn feed_actions(
                     // The Count gate (`0x4e5250`, [`ItemInfo::is_consumable`]) reads the icon's
                     // template, so it rides the same push.
                     let consumable = template.as_ref().is_some_and(|t| t.is_consumable());
-                    (Some(texture), count, consumable)
+                    // The spell `0x4e5a50` resolves the slot to (`0x4e5ae0`): the first block with
+                    // a spell and trigger 0.
+                    let use_spell = template.as_ref().and_then(|t| {
+                        t.spells
+                            .iter()
+                            .find(|sp| sp.spell_id != 0 && sp.trigger == 0)
+                            .map(|sp| sp.spell_id)
+                    });
+                    (Some(texture), count, consumable, use_spell)
                 }
                 // A macro slot shows the macro's own icon (`0x4e6bf9` calls `0x4f0fd0`), never its
                 // bound spell's, though its state follows the bound spell.
@@ -392,8 +411,9 @@ pub(super) fn feed_actions(
                         .and_then(|m| m.texture.clone()),
                     0,
                     false,
+                    None,
                 ),
-                _ => (None, 0, false),
+                _ => (None, 0, false, None),
             };
             fresh.insert(
                 u32::from(*slot) + 1,
@@ -403,23 +423,40 @@ pub(super) fn feed_actions(
                     action: button.action,
                     count,
                     consumable,
+                    use_spell,
                 },
             );
         }
-        // A macro rename changes the name line (`GetActionText`) but not the slot value, so a
-        // macro edit re-fires every macro slot.
-        let changed: Vec<u32> = fresh
+        // A slot is pushed only when this feed's own source moved since its last push, so a
+        // verb's write (`PickupAction`, `PlaceAction`, an addon's from a handler this frame) is
+        // never rolled back by a store that has not caught up; it fires `ACTIONBAR_SLOT_CHANGED`
+        // only when what it pushes differs visibly from what the VM shows, so the store catching
+        // up with a verb is no change. The item's ON_USE spell is pushed but never signalled: the
+        // place leaves it to this re-feed, and no handler paints it. A macro rename changes the
+        // name line (`GetActionText`) but not the slot value, so a macro edit re-fires every
+        // macro slot.
+        let held = script.action_slots();
+        let shown = |s: Option<&ActionSlot>| {
+            s.map(|s| ActionSlot {
+                use_spell: None,
+                ..s.clone()
+            })
+        };
+        let changed: Vec<(u32, bool)> = fresh
             .keys()
             .chain(memory.pushed.keys())
             .copied()
             .collect::<HashSet<_>>()
             .into_iter()
-            .filter(|a| {
-                fresh.get(a) != memory.pushed.get(a)
-                    || (macros_moved && fresh.get(a).is_some_and(|s| s.kind == ACTION_KIND_MACRO))
+            .filter_map(|a| {
+                let macro_moved =
+                    macros_moved && fresh.get(&a).is_some_and(|s| s.kind == ACTION_KIND_MACRO);
+                let moved = fresh.get(&a) != memory.pushed.get(&a);
+                let signal = macro_moved || (moved && shown(fresh.get(&a)) != shown(held.get(&a)));
+                (moved || macro_moved).then_some((a, signal))
             })
             .collect();
-        for &action in &changed {
+        for &(action, _) in &changed {
             script.set_action(action, fresh.get(&action).cloned());
         }
         memory.pushed = fresh;
@@ -428,7 +465,7 @@ pub(super) fn feed_actions(
             changed.len(),
             memory.pushed.len()
         );
-        for action in changed {
+        for (action, _) in changed.into_iter().filter(|&(_, signal)| signal) {
             script.fire_event(
                 "ACTIONBAR_SLOT_CHANGED",
                 vec![ScriptValue::Int(i64::from(action))],
@@ -483,12 +520,23 @@ pub(super) fn feed_actions(
                 }
                 _ => false,
             };
+            // Only into the VM's slot when it still holds this action: a verb that moved another
+            // there since keeps its write until the identity resolve catches up.
             if changed {
-                script.set_action(action, Some(slot.clone()));
-                script.fire_event(
-                    "ACTIONBAR_SLOT_CHANGED",
-                    vec![ScriptValue::Int(i64::from(action))],
-                );
+                let held = script.action_slot(action);
+                if held
+                    .as_ref()
+                    .is_some_and(|h| (h.kind, h.action) == (slot.kind, slot.action))
+                {
+                    let mut next = held.unwrap_or_default();
+                    next.count = slot.count;
+                    next.texture = slot.texture.clone();
+                    script.set_action(action, Some(next));
+                    script.fire_event(
+                        "ACTIONBAR_SLOT_CHANGED",
+                        vec![ScriptValue::Int(i64::from(action))],
+                    );
+                }
             }
         }
     }
@@ -499,7 +547,7 @@ pub(super) fn feed_actions(
 /// the spell's own aura is live and cancelable (`0x4e6bbd`, the `0x4e55f0` predicate of
 /// [`super::toggle::active_action_toggle`]), then the spell's icon. The spellbook's
 /// `GetSpellTexture` (`0x4b3f50`) never serves `ActiveIconID`.
-fn spell_action_icon(
+pub(crate) fn spell_action_icon(
     spell_id: u32,
     d: &benilla_formats::SpellDisplay,
     spells: &super::Spells,

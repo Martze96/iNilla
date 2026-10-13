@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::QueryCache;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
 use crate::ui_session::NpcSession;
 
 mod feed;
@@ -69,6 +69,12 @@ impl GuildRegistrarState {
         true
     }
 
+    /// An open registrar on `npc`, past the gates [`Self::open`] runs, for a test.
+    #[cfg(test)]
+    pub(crate) fn open_for_test(&mut self, npc: u64) {
+        self.open = Some(Registrar { npc, cost: 0 });
+    }
+
     /// `GetGuildCharterCost()`: 0 with no registrar open.
     fn cost(&self) -> u32 {
         self.open.as_ref().map_or(0, |r| r.cost)
@@ -99,6 +105,8 @@ pub(crate) struct PetitionState {
     records_epoch: u64,
     /// Lines composed at apply time, shown by the feed, which holds the `script` handle.
     lines: Vec<lines::Line>,
+    /// What the feed last announced of the charter, across a `/reload`.
+    fed: feed::FedPetition,
 }
 
 /// The charter the petition window is showing.
@@ -244,6 +252,21 @@ impl PetitionState {
         self.open = None;
         self.signing = false;
         self.lines.clear();
+        self.forget_announced();
+    }
+
+    /// The UI session's end: the next session's VM is told the charter afresh.
+    pub(crate) fn forget_announced(&mut self) {
+        self.fed = feed::FedPetition::default();
+    }
+
+    /// The sweep's free of the signer list (`0x4f3eb0`): no signers, and none announced, as the
+    /// free fires nothing.
+    fn free_signers(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.signers.clear();
+        }
+        self.fed.forget_signers();
     }
 
     /// What `SignPetition`, `OfferPetition` and `RenamePetition` address.
@@ -261,6 +284,11 @@ impl Plugin for UiPetitionPlugin {
         crate::query_cache::register::<PetitionState>(app);
         app.init_resource::<GuildRegistrarState>()
             .init_resource::<PetitionState>()
+            .add_sweep_leg(SweepLeg::Registrar, feed::close_registrar_on_leave_world)
+            .add_sweep_leg(
+                SweepLeg::Petition,
+                feed::free_petition_signers_on_leave_world,
+            )
             .add_systems(
                 Update,
                 (
@@ -688,6 +716,57 @@ mod tests {
         assert!(
             !petition.signing,
             "no sign of the old session still in flight"
+        );
+    }
+
+    /// A `/reload` with a charter shown: every `PETITION_SHOW` answers a packet, so the new VM
+    /// hears none, and the sweep's petition leg (`0x490b11` → `0x4f3eb0`) frees the signers with
+    /// no event; the new VM reads none.
+    #[test]
+    fn a_reload_replays_no_petition_show_and_frees_the_signers() {
+        use crate::ui_script::sweep_test::{reload_in_place, seen, seen_in, spied_vm};
+        use crate::ui_script::SweepApp;
+        const EVENTS: [&str; 2] = ["PETITION_SHOW", "PETITION_CLOSED"];
+        let (commands, _rx) = commands();
+        let mut names = NameCache::default();
+        names.insert_player(0xbb, "Signer".to_string(), None);
+        names.insert_player(0xaa, "Owner".to_string(), None);
+        let mut petition = PetitionState::default();
+        petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+        petition.apply_record(PetitionQueryResponse {
+            petition_id: 7,
+            name: "Legacy".into(),
+            min_signatures: 9,
+            ..Default::default()
+        });
+        let mut app = App::new();
+        app.insert_resource(petition)
+            .insert_resource(names)
+            .insert_resource(commands)
+            .init_resource::<GuildRegistrarState>()
+            .init_resource::<crate::net::SelfGuid>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_sweep_leg(
+                SweepLeg::Petition,
+                feed::free_petition_signers_on_leave_world,
+            )
+            .add_systems(Update, feed::feed_petition);
+        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.update();
+        assert_eq!(seen_in(&app), ["PETITION_SHOW"]);
+
+        let dying = reload_in_place(&mut app, &EVENTS);
+        assert_eq!(seen(&dying), ["PETITION_SHOW"], "the free fires nothing");
+        app.update();
+        app.update();
+        assert!(seen_in(&app).is_empty(), "no replay into the new VM");
+        assert_eq!(
+            app.world()
+                .non_send_resource::<benilla_ui::script::UiScript>()
+                .eval::<i64>("return GetNumPetitionNames()")
+                .unwrap(),
+            0
         );
     }
 }

@@ -127,10 +127,17 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     );
     s.run("StickyBtn:SetDisabledTexture(\"Interface\\\\D.blp\")")
         .unwrap();
+    // The slot store shows the new texture and moves the shown pointer onto it, but hides nothing
+    // (`0x77902f`..`0x779041`): the normal art keeps its bit until the next switch clears it.
+    let mut both = visible(&s, "StickyBtn");
+    both.sort();
     assert_eq!(
-        visible(&s, "StickyBtn"),
-        vec!["Interface\\D.blp".to_string()],
-        "and real disabled art displaces it on the spot"
+        both,
+        vec![
+            "Interface\\D.blp".to_string(),
+            "Interface\\N.blp".to_string()
+        ],
+        "real disabled art joins it on the spot; the store hides nothing"
     );
     s.run("StickyBtn:Enable()").unwrap();
     assert_eq!(visible(&s, "StickyBtn"), n, "back to normal on Enable");
@@ -1367,4 +1374,63 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     s.run(r#"CreateFrame("CheckButton", "ChkColorBtn")"#)
         .unwrap();
     assert_eq!(s.arity("ChkColorBtn:GetTextColor()").unwrap(), 4);
+}
+
+/// `CheckButton:SetChecked` (`0x799bf0`) reads its argument through `GetBoolOrDefault` (`0x6f1c10`)
+/// with default 1 (`0x799c77`): absent, a table, a function and an unknown string check; nil and
+/// zero do not; a string goes by its first byte, then by `on`/`off`/`enabled`/`disabled`; a number
+/// keeps only the low dword of its truncation.
+#[test]
+fn set_checked_reads_its_argument_as_get_bool_or_default() {
+    let s = script();
+    s.run(r#"C = CreateFrame("CheckButton", "C")"#).unwrap();
+    for (arg, checked) in [
+        ("", true),
+        ("nil", false),
+        ("true", true),
+        ("false", false),
+        ("0", false),
+        ("0.5", false),
+        ("-0.5", false),
+        ("1", true),
+        ("-1", true),
+        ("2^32", false),
+        ("2^32 + 1", true),
+        ("1/0", false),
+        ("{}", true),
+        ("function() end", true),
+        (r#""yes""#, true),
+        (r#""Yes""#, true),
+        (r#""y""#, true),
+        (r#""t""#, true),
+        (r#""on""#, true),
+        (r#""enabled""#, true),
+        (r#""1abc""#, true),
+        (r#""01""#, false),
+        (r#"" 0""#, true),
+        ("\"\"", true),
+        (r#""abc""#, true),
+        (r#""off""#, false),
+        (r#""Disabled""#, false),
+        (r#""no""#, false),
+        (r#""false""#, false),
+        (r#""true""#, true),
+        (r#""0""#, false),
+        (r#""1""#, true),
+        (r#"" 1""#, true),
+        (r#""-1""#, true),
+    ] {
+        // Start from the opposite state so a call that changes nothing reads as a failure.
+        s.run(&format!(
+            "C:SetChecked({})",
+            if checked { "nil" } else { "1" }
+        ))
+        .unwrap();
+        s.run(&format!("C:SetChecked({arg})")).unwrap();
+        assert_eq!(
+            s.eval::<bool>("return C:GetChecked() == 1").unwrap(),
+            checked,
+            "SetChecked({arg})"
+        );
+    }
 }

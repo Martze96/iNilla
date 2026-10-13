@@ -174,7 +174,7 @@ pub struct WorldLoadProgress {
     pub ready: usize,
     pub total: usize,
     /// The tile under the view focus is furnished; false at startup and whenever a teleport lands
-    /// on unloaded ground, same map or not, which is the loading screen's backstop trigger.
+    /// on unloaded ground, same map or not. The loading screen's backstop trigger.
     pub focus_resident: bool,
     /// The focus tile and its 8 neighbours are up with every placement they reference; consumers
     /// read [`Self::presentable`], which adds the backlogs.
@@ -233,7 +233,7 @@ pub struct ViewFocus {
     /// The picked character's map and position, before an avatar exists.
     entry: Option<(u32, [f32; 3])>,
     /// The focus is settled, so spawning is paced; false through entry, a teleport and a world
-    /// swap, while the loading cover absorbs the burst.
+    /// swap, while the loading cover or the settle hold absorbs the burst.
     pub(crate) paced: bool,
 }
 
@@ -657,7 +657,7 @@ fn stream_terrain(
     }
 
     // Request new tiles once the WDT has answered. While paced, one per frame and nearest first,
-    // so a fresh row's landings stagger; entry and teleports request all at once under the cover.
+    // so a fresh row's landings stagger; entry and teleports request all at once.
     let mut fresh_empty = true;
     if wdt_index.is_some() || state.wdt_ungated {
         let live = focus.paced;

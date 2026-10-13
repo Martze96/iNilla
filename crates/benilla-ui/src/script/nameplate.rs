@@ -10,7 +10,7 @@
 
 use mlua::Lua;
 
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle, RegionKind};
 
@@ -138,6 +138,11 @@ pub(crate) struct NamePlates {
 }
 
 impl NamePlates {
+    /// Whether `frame` is a plate, whose leave publishes the empty mouseover (`0x7cb8b0`).
+    pub(crate) fn is_plate(&self, frame: FrameHandle) -> bool {
+        self.by_frame.contains_key(&frame)
+    }
+
     /// Whether the `0x7cba30` veto refuses `frame`: only a plate, only while the veto stands.
     pub(crate) fn vetoes(&self, frame: FrameHandle) -> bool {
         self.hit_test_vetoed && self.by_frame.contains_key(&frame)
@@ -272,13 +277,17 @@ impl UiScript {
     }
 
     /// The freelook toggle (`0x60f830`): entering camera freelook disables mouse input on every
-    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`).
+    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`). The disable is
+    /// `EnableMouse(false)`'s (`0x76af50(2)`), whose removal tail (`0x764ba0`, flag 0, `0x76af7f`)
+    /// ends a hovered plate's hover through its leave (`0x7cb8b0`).
     pub fn set_nameplate_mouse(&mut self, enabled: bool) {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let frames: Vec<FrameHandle> = model.nameplates.plates.iter().map(|p| p.frame).collect();
+        let frames: Vec<FrameHandle> = {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            model.nameplates.plates.iter().map(|p| p.frame).collect()
+        };
         for frame in frames {
-            model.arena.set_mouse_enabled(frame, enabled);
+            super::visibility::set_mouse_enabled(lua, frame, enabled);
         }
     }
 
@@ -469,8 +478,11 @@ impl Plate {
             .arena
             .create_region(bar, RegionKind::Texture, DrawLayer::Artwork, 0)
             .expect("live bar");
+        model.set_texel(
+            fill,
+            super::texel::TexSet::File(BAR_FILL_TEXTURE.to_string()),
+        );
         let fill_data = model.region_data.entry(fill).or_default();
-        fill_data.texture = Some(BAR_FILL_TEXTURE.to_string());
         // The fill keeps `CSimpleTexture`'s default BLEND (`0x76fc40`), written out as a fact.
         fill_data.blend = BlendMode::Blend;
         if let Some(KindState::StatusBar(sb)) =
@@ -483,12 +495,12 @@ impl Plate {
         }
 
         for rh in [glow, skull, raid] {
-            model.region_data.entry(rh).or_default().hidden = true;
+            model.set_region_hidden(rh, true);
         }
 
         // Born retired and hidden: addons tell a live plate from a pooled one by `IsShown()`.
         // Silent, since nothing can have set a handler on a frame not yet handed out.
-        model.arena.set_shown(frame, false);
+        model.set_shown_silent(frame, false);
 
         model
             .nameplates
@@ -525,32 +537,32 @@ impl Plate {
         input.height = g.height;
 
         for rh in [border, glow] {
-            model.region_data.entry(rh).or_default().anchors = vec![
+            model.region_data.entry(rh).or_default().anchors = Anchors::from([
                 Anchor::new(Point::TopLeft, plate_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, plate_id, Point::BottomRight, 0.0, 0.0),
-            ];
+            ]);
         }
 
         let bar_input = model.layout_inputs.entry(bar).or_default();
-        bar_input.anchors = vec![Anchor::new(
+        bar_input.anchors = Anchors::from([Anchor::new(
             Point::BottomLeft,
             plate_id,
             Point::BottomLeft,
             g.bar_off_x,
             g.bar_off_y,
-        )];
+        )]);
         bar_input.width = g.bar_width;
         bar_input.height = g.bar_height;
 
         // The name's (`0x7cb456`) and level's (`0x7cb7f5`) anchors, which `_Nameplates` checks.
         let name_data = model.region_data.entry(name).or_default();
-        name_data.anchors = vec![Anchor::new(
+        name_data.anchors = Anchors::from([Anchor::new(
             Point::Bottom,
             plate_id,
             Point::Center,
             0.0,
             0.0,
-        )];
+        )]);
         name_data.font_height = Some(g.name_height);
 
         for rh in [name, level] {
@@ -561,33 +573,39 @@ impl Plate {
         }
 
         let level_data = model.region_data.entry(level).or_default();
-        level_data.anchors = vec![Anchor::new(
+        level_data.anchors = Anchors::from([Anchor::new(
             Point::Center,
             plate_id,
             Point::BottomRight,
             -g.level_off_x,
             g.level_off_y,
-        )];
+        )]);
         level_data.font_height = Some(g.level_height);
         level_data.font_explicit.height = true;
         model.touch_measure(level);
 
         let skull_data = model.region_data.entry(skull).or_default();
-        skull_data.anchors = vec![Anchor::new(
+        skull_data.anchors = Anchors::from([Anchor::new(
             Point::Center,
             plate_id,
             Point::BottomRight,
             -g.level_off_x,
             g.level_off_y,
-        )];
+        )]);
         skull_data.size = Some((g.skull_size, g.skull_size));
 
         let raid_data = model.region_data.entry(raid).or_default();
-        raid_data.anchors = vec![Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)];
+        raid_data.anchors =
+            Anchors::from([Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)]);
         raid_data.size = Some((g.raid_size, g.raid_size));
 
-        // The first lay-out adds anchor targets, so the full touch; once per geometry change.
-        model.touch_layout();
+        // Once per geometry change: each node it wrote is invalidated, as the plate setup's
+        // `SetPoint`/`SetAllPoints` with the invalidate flag do (`0x7cb456`..`0x7cb806`).
+        model.invalidate_frame(frame, true);
+        model.invalidate_frame(bar, true);
+        for rh in [border, glow, name, level, skull, raid] {
+            model.invalidate_region(rh, true);
+        }
         model.nameplates.plates[i].laid_out = Some(g);
     }
 
@@ -606,29 +624,21 @@ impl Plate {
         let last = p.last.clone();
         let world_id = model.frame_id(world);
 
-        // Re-seated whenever it moves, as the reference does (`0x509ec0`). A moved offset keeps
-        // the graph's edges, so the precise touch; the first seat adds an edge, so the retarget.
+        // Re-seated whenever it moves, as the reference does (`0x509ec0`).
         if last
             .as_ref()
             .is_none_or(|l| l.top_centre != state.top_centre)
         {
-            let fresh = model
-                .layout_inputs
-                .get(&frame)
-                .is_none_or(|i| i.anchors.is_empty());
             let input = model.layout_inputs.entry(frame).or_default();
-            input.anchors = vec![Anchor::new(
+            input.anchors = Anchors::from([Anchor::new(
                 Point::Top,
                 world_id,
                 Point::BottomLeft,
                 state.top_centre.0,
                 state.top_centre.1,
-            )];
-            if fresh {
-                model.touch_layout_retarget_frame(frame, &[], &[world_id]);
-            } else {
-                model.touch_layout_frame(frame);
-            }
+            )]);
+            // `SetPoint` with the invalidate flag (`0x50a044`).
+            model.invalidate_frame(frame, true);
         }
 
         if last.is_none() {
@@ -665,7 +675,8 @@ impl Plate {
         if last.as_ref().is_none_or(|l| l.name != state.name) {
             model.region_data.entry(name).or_default().text = Some(state.name.clone());
             model.touch_measure(name);
-            model.touch_layout_region(name);
+            // A new string clears the valid bit and invalidates (`0x771ea4`).
+            model.clear_region_valid(name);
         }
         if last.as_ref().is_none_or(|l| l.hovered != state.hovered) {
             let c = if state.hovered {
@@ -673,9 +684,13 @@ impl Plate {
             } else {
                 [1.0, 1.0, 1.0, 1.0]
             };
-            model.region_data.entry(name).or_default().vertex_color = Some(c);
+            model
+                .region_data
+                .entry(name)
+                .or_default()
+                .set_vertex_color(Some(c));
             // The glow really shows, as addons read mouseover from it; it only paints nothing.
-            model.region_data.entry(glow).or_default().hidden = !state.hovered;
+            model.set_region_hidden(glow, !state.hovered);
         }
 
         if last.as_ref().is_none_or(|l| {
@@ -684,23 +699,23 @@ impl Plate {
             match (state.level, state.skull) {
                 // The skull flag wins the seat, whatever the level.
                 (_, true) => {
-                    model.region_data.entry(level).or_default().hidden = true;
-                    model.region_data.entry(skull).or_default().hidden = false;
+                    model.set_region_hidden(level, true);
+                    model.set_region_hidden(skull, false);
                 }
                 (Some(n), false) => {
                     let c = state.level_colour;
                     let data = model.region_data.entry(level).or_default();
                     data.text = Some(n.to_string());
-                    data.vertex_color = Some([c[0], c[1], c[2], 1.0]);
-                    data.hidden = false;
-                    model.region_data.entry(skull).or_default().hidden = true;
+                    data.set_vertex_color(Some([c[0], c[1], c[2], 1.0]));
+                    model.set_region_hidden(level, false);
+                    model.set_region_hidden(skull, true);
                     model.touch_measure(level);
-                    model.touch_layout_region(level);
+                    model.clear_region_valid(level);
                 }
                 // No level yet and no skull: the seat stays empty.
                 (None, false) => {
-                    model.region_data.entry(level).or_default().hidden = true;
-                    model.region_data.entry(skull).or_default().hidden = true;
+                    model.set_region_hidden(level, true);
+                    model.set_region_hidden(skull, true);
                 }
             }
         }
@@ -711,9 +726,9 @@ impl Plate {
                     let (u0, v0) = (f32::from(idx & 3) * 0.25, f32::from(idx >> 2) * 0.25);
                     let data = model.region_data.entry(raid).or_default();
                     data.tex_coords = Some(TexCoords::Rect([u0, u0 + 0.25, v0, v0 + 0.25]));
-                    data.hidden = false;
+                    model.set_region_hidden(raid, false);
                 }
-                None => model.region_data.entry(raid).or_default().hidden = true,
+                None => model.set_region_hidden(raid, true),
             }
         }
 
@@ -744,8 +759,8 @@ fn texture(
         .arena
         .create_region(frame, RegionKind::Texture, layer, 0)
         .expect("live plate");
+    model.set_texel(rh, super::texel::TexSet::File(path.to_string()));
     let data = model.region_data.entry(rh).or_default();
-    data.texture = Some(path.to_string());
     data.blend = blend;
     rh
 }
@@ -765,11 +780,11 @@ fn font_string(model: &mut Model, frame: FrameHandle, justify_v: JustifyV) -> Re
     rh
 }
 
-/// Whether a text's owner is a plate. A plate's rect snaps to device pixels as it slides, and its
-/// text must follow that rect, not the UI's coarser grid, or it jumps. Asked of the frame so an
-/// addon's strings on the plate get it too; a string on the plate's health bar does not.
+/// Whether a text's owner is a plate or a chat bubble. Their rects snap to device pixels as they
+/// slide, and their text must follow that rect, not the UI's coarser grid, or it jumps. Asked of
+/// the frame so an addon's strings on one get it too; a string on the plate's health bar does not.
 pub(super) fn is_world_seated(model: &Model, frame: FrameHandle) -> bool {
-    model.nameplates.by_frame.contains_key(&frame)
+    model.nameplates.by_frame.contains_key(&frame) || super::chat_bubble::is_bubble(model, frame)
 }
 
 /// Whether this is the plate's own glow art on its ADD mode, which the quad walk
@@ -777,7 +792,7 @@ pub(super) fn is_world_seated(model: &Model, frame: FrameHandle) -> bool {
 /// the bar ([`LIT_BOOST`]), because the rim reads as hard edge lines in our linear-blending
 /// pipeline. The art has no alpha and is mostly black, so as BLEND it would be an opaque box.
 pub(super) fn is_unpainted_glow(data: &RegionData) -> bool {
-    data.blend == BlendMode::Add && data.texture.as_deref() == Some(GLOW_TEXTURE)
+    data.blend == BlendMode::Add && data.tex.path().as_deref() == Some(GLOW_TEXTURE)
 }
 
 /// The lit bar's brighten, a multiply of the fill tint in encoded sRGB like the client's modulate:

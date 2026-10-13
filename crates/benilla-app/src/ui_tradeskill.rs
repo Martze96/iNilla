@@ -44,19 +44,43 @@ pub(crate) struct TradeSkillOpen {
     pub(crate) line: Option<u32>,
 }
 
-/// The Create All repeat (`DoTradeSkill` `0x500280`): latch the count, cast once, and re-cast on
-/// each of our own `SMSG_SPELL_GO`s for the spell until dry; a failure, a close or the session end
-/// stops it.
+/// The repeat count (`[0xbde060]`) a dying VM left, seated in the next: the world-enter init a
+/// `/reload` runs disarms the spell (`0x4fc76b`) but keeps the count. The session end drops it.
 #[derive(Resource, Default)]
-pub(crate) struct TradeSkillRepeat {
-    pub(crate) spell_id: u32,
-    pub(crate) remaining: u32,
+pub(crate) struct TradeSkillRepeatCarry(pub(crate) u32);
+
+/// Fold the repeat count out of the dying VM, with the CVar fold.
+pub(crate) fn fold_dying_vm_repeat(world: &mut World) {
+    let Some((_, count)) = world
+        .get_non_send_resource::<UiScript>()
+        .map(UiScript::trade_skill_repeat)
+    else {
+        return;
+    };
+    if let Some(mut carry) = world.get_resource_mut::<TradeSkillRepeatCarry>() {
+        carry.0 = count;
+    }
 }
 
-impl TradeSkillRepeat {
-    fn clear(&mut self) {
-        self.spell_id = 0;
-        self.remaining = 0;
+/// Seat the folded count in a new in-game VM before its load runs; the spell stays disarmed.
+pub(crate) fn seed_repeat(world: &World, script: &mut UiScript) {
+    if let Some(carry) = world.get_resource::<TradeSkillRepeatCarry>() {
+        script.seed_trade_skill_repeat_count(carry.0);
+    }
+}
+
+/// The world-enter inits for the craft windows (`0x4fc750` at `0x4909bf`, `0x4f5ee0` at
+/// `0x4909c4`) on each cascade, the worldport's included, whose VM survives: the lists and
+/// selections go and the armed spell disarms silently, the repeat count kept.
+pub(crate) fn reset_crafts_on_world_enter(
+    script: Option<NonSendMut<UiScript>>,
+    mut cascades: MessageReader<crate::net::WorldEnterCascadeMessage>,
+) {
+    if cascades.read().next().is_none() {
+        return;
+    }
+    if let Some(mut script) = script {
+        script.reset_crafts_on_world_enter();
     }
 }
 
@@ -73,7 +97,7 @@ impl Plugin for UiTradeSkillPlugin {
         app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<TradeSkillOpens>()
             .init_resource::<TradeSkillOpen>()
-            .init_resource::<TradeSkillRepeat>()
+            .init_resource::<TradeSkillRepeatCarry>()
             .add_systems(Startup, load_spell_focus.after(AssetSet::Open))
             .add_systems(
                 Update,
@@ -83,21 +107,23 @@ impl Plugin for UiTradeSkillPlugin {
                     open_trade_skill.before(feed_trade_skill),
                     feed_trade_skill.in_set(UnitFeed),
                     drain_trade_skill.after(UiInput),
+                    // In the feed phase, ahead of every feed that pushes the lists.
+                    reset_crafts_on_world_enter.in_set(crate::ui_script::UiFeed),
                 ),
             );
     }
 }
 
-/// The book, its repeat and any queued opener end with the session.
+/// The book, any queued opener and the carried repeat end with the session.
 fn on_session_end(
     In(_): In<SessionEvent>,
     mut opens: ResMut<TradeSkillOpens>,
     mut open: ResMut<TradeSkillOpen>,
-    mut repeat: ResMut<TradeSkillRepeat>,
+    mut carry: ResMut<TradeSkillRepeatCarry>,
 ) {
     opens.0.clear();
     open.line = None;
-    repeat.clear();
+    carry.0 = 0;
 }
 
 fn load_spell_focus(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
@@ -126,7 +152,6 @@ fn open_trade_skill(
     mut craft_open: ResMut<crate::ui_craft::CraftOpen>,
     skill_lines: Option<Res<SkillLines>>,
     spells: Option<Res<Spells>>,
-    mut repeat: ResMut<TradeSkillRepeat>,
 ) {
     for spell_id in opens.0.drain(..) {
         let Some(skill_lines) = skill_lines.as_deref() else {
@@ -153,9 +178,6 @@ fn open_trade_skill(
             craft_open.craft_type = craft_type;
         } else {
             debug!("ui_tradeskill: opener {spell_id} opens skill line {line}");
-            if open.line != Some(line) {
-                repeat.clear();
-            }
             open.line = Some(line);
         }
     }
@@ -328,7 +350,6 @@ fn feed_trade_skill(
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
-    repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     objects: Objects,
     items: Res<Items>,
@@ -387,14 +408,12 @@ fn feed_trade_skill(
             rank,
             max_rank,
             recipes,
-            repeat_count: repeat.remaining,
         })
     })();
 
-    let repeat_changed = match (&*last, &fresh) {
-        (Some(l), Some(f)) => l.repeat_count != f.repeat_count,
-        _ => false,
-    };
+    // `CloseTradeSkill` closes the VM's window and signals `TRADE_SKILL_CLOSE` in the verb
+    // (`0x4fc884`).
+    let closed_in_place = !script.trade_skill_open();
     if fresh == *last {
         return;
     }
@@ -415,80 +434,78 @@ fn feed_trade_skill(
             );
             script.fire_event("TRADE_SKILL_SHOW", vec![]);
         }
-        (Some(_), Some(_)) => {
-            script.fire_event("TRADE_SKILL_UPDATE", vec![]);
-            if repeat_changed {
-                script.fire_event("UPDATE_TRADESKILL_RECAST", vec![]);
-            }
-        }
-        (Some(_), None) => script.fire_event("TRADE_SKILL_CLOSE", vec![]),
-        (None, None) => {}
+        (Some(_), Some(_)) => script.fire_event("TRADE_SKILL_UPDATE", vec![]),
+        (Some(_), None) if !closed_in_place => script.fire_event("TRADE_SKILL_CLOSE", vec![]),
+        (Some(_), None) | (None, None) => {}
     }
     *last = fresh;
 }
 
-/// Drain the Lua intents and run the repeat: `DoTradeSkill` latches and casts through the one
-/// cast-send path, our own GO re-casts, and a failure or `CloseTradeSkill` stops it.
+/// Drain the Lua intents and feed the VM's repeat (`0x4fd7b0`) our own cast edges: `DoTradeSkill`
+/// arms it in the verb and casts through the one cast-send path, each GO recasts what the hook
+/// answers, and a failure disarms it.
 fn drain_trade_skill(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TradeSkillOpen>,
-    mut repeat: ResMut<TradeSkillRepeat>,
     mut cast_events: MessageReader<CastEvent>,
     targeting: cast_target::CastTargeting,
     mut ladder: CastLadder,
+    mut seen_aborts: Local<u32>,
 ) {
     let Some(mut script) = script else {
         return;
     };
 
+    // The verb reads the held list, not the open marker (`0x5002e1`, `0x5002e9`), so a recipe
+    // still held after a close casts (`0x500314`).
     for (spell_id, count) in script.take_trade_skill_dos() {
-        if open.line.is_none() {
-            debug!("ui_tradeskill: DoTradeSkill({spell_id}) with no open book — ignored");
-            continue;
-        }
         debug!("ui_tradeskill: DoTradeSkill({spell_id}) ×{count}");
-        repeat.spell_id = spell_id;
-        repeat.remaining = count.max(1);
         ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
     }
 
-    // The repeat's continuation: our own cast edges for the latched spell.
-    let self_entity = ladder.self_player.single().ok().map(|(e, _)| e);
-    for ev in cast_events.read() {
-        if repeat.remaining == 0 || Some(ev.entity) != self_entity || ev.spell_id != repeat.spell_id
-        {
-            continue;
-        }
-        match ev.kind {
-            CastEventKind::Go => {
-                repeat.remaining -= 1;
-                if repeat.remaining > 0 {
-                    debug!(
-                        "ui_tradeskill: recast {} ({} left)",
-                        repeat.spell_id, repeat.remaining
-                    );
-                    ladder.send(repeat.spell_id, &targeting.context(), CastCommit::Spell);
-                }
-            }
-            CastEventKind::Fail => {
-                debug!("ui_tradeskill: cast failed — repeat stops");
-                repeat.clear();
-            }
-            _ => {}
-        }
+    // A cancelled targeting cursor is the cast abort with its disarm flag (`StopTargeting
+    // 0x6e4900`, `TryCast`'s supersede `0x6e4d71`, both `0x6e4940(cl=1)` → `0x4fd790`).
+    let aborts = ladder.ground.aborts();
+    if *seen_aborts != aborts {
+        *seen_aborts = aborts;
+        script.trade_skill_disarm();
     }
 
-    // A filter or expand/collapse fires `TRADE_SKILL_UPDATE` from inside the reference's C call
-    // (`0x4fd710`, `0x4fd750`); ours is the touched flag, answered the same frame.
-    let touched = script.take_trade_skill_touched();
-    if touched && open.line.is_some() {
-        script.fire_event("TRADE_SKILL_UPDATE", vec![]);
+    let self_entity = ladder.self_player.single().ok().map(|(e, _)| e);
+    for ev in cast_events.read() {
+        if Some(ev.entity) != self_entity {
+            continue;
+        }
+        if let Some(spell_id) = repeat_edge(&mut script, ev) {
+            debug!(
+                "ui_tradeskill: recast {spell_id} ({} left)",
+                script.trade_skill_repeat().1
+            );
+            // The recast, then its signal (`0x4fd7d7`, `0x4fd7dc`).
+            ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
+            script.trade_skill_recast_sent();
+        }
     }
 
     if script.take_trade_skill_close() {
         debug!("ui_tradeskill: client-side close (no packet)");
         open.line = None;
-        repeat.clear();
+    }
+}
+
+/// One of our own cast edges into the VM's repeat: every GO whose first guid is the player, not
+/// an item, and without flag `0x41` runs the hook (`0x6e81d3`-`0x6e81de` → `0x4fd7b0`), and a
+/// failure disarms the armed spell (`0x6e1a3c`). Returns the spell to recast.
+fn repeat_edge(script: &mut UiScript, ev: &CastEvent) -> Option<u32> {
+    match ev.kind {
+        CastEventKind::Go if !ev.item_cast && ev.cast_flags & 0x41 == 0 => {
+            script.trade_skill_spell_go(ev.spell_id)
+        }
+        CastEventKind::Fail => {
+            script.trade_skill_cast_failed(ev.spell_id);
+            None
+        }
+        _ => None,
     }
 }
 
@@ -579,17 +596,325 @@ mod tests {
         assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
     }
 
+    /// `CloseTradeSkill` signals `TRADE_SKILL_CLOSE` in the verb (`0x4fc884`), so the feed that
+    /// finds the book closed a frame later signals no second close; a close the VM did not make
+    /// still signals from the feed.
+    #[test]
+    fn a_verbs_close_is_signalled_once() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<TradeSkillOpen>()
+            .init_resource::<PlayerActions>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<Items>()
+            .init_resource::<crate::spell::Cooldowns>()
+            .insert_resource(crate::net::NetCommands(tx))
+            .insert_resource(Spells::empty_for_tests())
+            .insert_resource(SkillLines {
+                catalog: benilla_formats::SkillLineCatalog::from_spell_lines([]),
+            });
+        app.world_mut()
+            .spawn((ObjectStore(Default::default()), SelfPlayer));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "CLOSES = 0 local f = CreateFrame('Frame') f:RegisterEvent('TRADE_SKILL_CLOSE') \
+                 f:SetScript('OnEvent', function() CLOSES = CLOSES + 1 end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.add_systems(Update, feed_trade_skill);
+        let closes = |app: &App| {
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<i64>("return CLOSES")
+                .unwrap()
+        };
+
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
+        app.update();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("CloseTradeSkill()")
+            .unwrap();
+        assert_eq!(closes(&app), 1, "the verb's own signal");
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = None;
+        app.update();
+        assert_eq!(closes(&app), 1, "no second signal from the feed");
+
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
+        app.update();
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = None;
+        app.update();
+        assert_eq!(closes(&app), 2, "a close from outside the VM still signals");
+    }
+
+    /// Our GOs count the batch down and recast, a GO flagged `0x41` is not ours to count
+    /// (`0x6e81de`), and the last craft recasts and signals nothing (`0x4fd7cf`).
+    #[test]
+    fn our_cast_edges_drive_the_vms_repeat() {
+        let mut script = UiScript::new().unwrap();
+        script.set_trade_skill(Some(TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script
+            .run(
+                "RECASTS = 0 local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UPDATE_TRADESKILL_RECAST') \
+                 f:SetScript('OnEvent', function() RECASTS = RECASTS + 1 end) \
+                 DoTradeSkill(2, 3)",
+            )
+            .unwrap();
+        assert_eq!(
+            script.trade_skill_repeat(),
+            (2963, 3),
+            "row 2, under its header"
+        );
+        let go_from = |cast_flags, item_cast| CastEvent {
+            entity: Entity::PLACEHOLDER,
+            spell_id: 2963,
+            kind: CastEventKind::Go,
+            cast_flags,
+            item_cast,
+            seq: 0,
+        };
+        let go = |cast_flags| go_from(cast_flags, false);
+        assert_eq!(repeat_edge(&mut script, &go(0x01)), None, "flag 0x01");
+        assert_eq!(repeat_edge(&mut script, &go(0x40)), None, "flag 0x40");
+        assert_eq!(
+            repeat_edge(&mut script, &go_from(0, true)),
+            None,
+            "an item's GO"
+        );
+        assert_eq!(script.trade_skill_repeat(), (2963, 3), "none counted");
+        // The drain's order: the recast, then its signal (`0x4fd7d7`, `0x4fd7dc`).
+        let edge = |script: &mut UiScript, ev: &CastEvent| {
+            let recast = repeat_edge(script, ev);
+            if recast.is_some() {
+                script.trade_skill_recast_sent();
+            }
+            recast
+        };
+        assert_eq!(edge(&mut script, &go(0x20)), Some(2963));
+        assert_eq!(edge(&mut script, &go(0)), Some(2963));
+        assert_eq!(edge(&mut script, &go(0)), None);
+        assert_eq!(
+            script.eval::<i64>("return RECASTS").unwrap(),
+            3,
+            "the arm and two recasts; the last craft is silent"
+        );
+    }
+
+    /// The whole client headless, our player seated, Tailoring's Bolt of Linen Cloth (2963) in the
+    /// catalog and the VM's book, and the commands it sends.
+    fn headless_tailor() -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
+        use crate::net::{Guid, GuidIndex, SelfGuid};
+        const ME: u64 = 0x77;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let world = app.world_mut();
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        let me = world
+            .spawn((
+                Guid(ME),
+                SelfPlayer,
+                Transform::default(),
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x19),
+                    (22, 100),
+                    (28, 100),
+                ])),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        world.insert_resource(Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([(
+                2963,
+                SpellDisplay {
+                    name: "Bolt of Linen Cloth".into(),
+                    ..Default::default()
+                },
+            )])),
+            ..Spells::empty_for_tests()
+        });
+        let mut script = UiScript::new().unwrap();
+        script.set_trade_skill(Some(TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        world.insert_non_send_resource(script);
+        (app, rx)
+    }
+
+    fn drain(app: &mut App) {
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .run_system_once(drain_trade_skill)
+            .expect("the drain runs");
+    }
+
+    /// `DoTradeSkill` reads the held list, not the open marker (`0x5002e1`), and casts
+    /// (`0x500314`): after `CloseTradeSkill` a held recipe still goes out.
+    #[test]
+    fn a_craft_after_the_close_still_casts() {
+        let (mut app, rx) = headless_tailor();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("CloseTradeSkill() DoTradeSkill(2, 1)")
+            .unwrap();
+        drain(&mut app);
+        assert!(
+            rx.try_iter().any(|c| matches!(
+                c,
+                crate::net::ClientCommand::CastSpell { spell_id: 2963, .. }
+            )),
+            "the craft was dropped"
+        );
+    }
+
+    /// A cancelled targeting cursor is the cast abort with its disarm flag (`0x6e4900`,
+    /// `0x6e4940(cl=1)` → `0x4fd790`): the armed batch disarms, with its signal.
+    #[test]
+    fn a_cancelled_cursor_disarms_the_batch() {
+        let (mut app, _rx) = headless_tailor();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("DoTradeSkill(2, 3)")
+            .unwrap();
+        drain(&mut app);
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .trade_skill_repeat(),
+            (2963, 3)
+        );
+        {
+            let mut ground = app
+                .world_mut()
+                .resource_mut::<crate::spell::targeting::SpellTargeting>();
+            ground.cancel();
+            assert_eq!(
+                ground.aborts(),
+                0,
+                "nothing up, nothing aborts (`0x6e4907`)"
+            );
+            ground.enter(133, crate::spell::CastCommit::Spell, 0x2);
+            ground.cancel();
+        }
+        drain(&mut app);
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .trade_skill_repeat(),
+            (0, 3)
+        );
+    }
+
+    /// The world-enter inits (`0x4fc750`, `0x4f5ee0`) on a worldport's cascade, whose VM
+    /// survives: the lists empty, the spell disarms silently and the count stays.
+    #[test]
+    fn the_world_enter_cascade_empties_the_lists_and_disarms_silently() {
+        let mut app = App::new();
+        app.add_message::<crate::net::WorldEnterCascadeMessage>()
+            .add_systems(Update, reset_crafts_on_world_enter);
+        let mut script = UiScript::new().unwrap();
+        script.set_trade_skill(Some(TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown_secs: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script
+            .run(
+                "RECASTS = 0 local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UPDATE_TRADESKILL_RECAST') \
+                 f:SetScript('OnEvent', function() RECASTS = RECASTS + 1 end) \
+                 DoTradeSkill(2, 3)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.update();
+        let count = |app: &App| {
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<i64>("return GetNumTradeSkills()")
+                .unwrap()
+        };
+        assert_eq!(count(&app), 2, "no cascade, no reset");
+        app.world_mut()
+            .write_message(crate::net::WorldEnterCascadeMessage);
+        app.update();
+        let script = app.world().non_send_resource::<UiScript>();
+        assert_eq!(count(&app), 0);
+        assert_eq!(script.eval::<i64>("return GetNumCrafts()").unwrap(), 0);
+        assert_eq!(script.trade_skill_repeat(), (0, 3));
+        assert_eq!(
+            script.eval::<i64>("return RECASTS").unwrap(),
+            1,
+            "the arm's signal only: the init disarms silently"
+        );
+    }
+
     /// Driven through the real handler registration.
     #[test]
-    fn the_session_end_closes_the_book_and_drops_the_repeat() {
+    fn the_session_end_closes_the_book() {
         let mut app = App::new();
         app.add_plugins(UiTradeSkillPlugin);
         app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
-        {
-            let mut repeat = app.world_mut().resource_mut::<TradeSkillRepeat>();
-            repeat.spell_id = 3915;
-            repeat.remaining = 4;
-        }
 
         crate::net::handlers::dispatch(
             app.world_mut(),
@@ -600,7 +925,5 @@ mod tests {
         );
 
         assert_eq!(app.world().resource::<TradeSkillOpen>().line, None);
-        let repeat = app.world().resource::<TradeSkillRepeat>();
-        assert_eq!((repeat.spell_id, repeat.remaining), (0, 0));
     }
 }

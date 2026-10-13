@@ -315,7 +315,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.resolve();
 
-    // Drag Fireball off its book button (press → past the 4px threshold → the payload is up).
+    // Drag Fireball off its book button (press → past the drag-start distance → the payload is up).
     let (l, r, t, b) = (
         s.eval::<f32>("return SpellButton1:GetLeft()").unwrap(),
         s.eval::<f32>("return SpellButton1:GetRight()").unwrap(),
@@ -352,17 +352,23 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 117,
             link: None,
-            locked: false,
+            guid: 0x710,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
@@ -1258,4 +1264,110 @@ fn the_stock_afk_and_dnd_commands_reach_the_wire() {
         SendType::from_token("TEXT_EMOTE").is_none(),
         "a real ChatTypeInfo key that is nonetheless not sendable stays None"
     );
+}
+
+/// A session's dock on the whole shipped UI: the login's events, the Combat Log selected and
+/// deselected, and the dock moved by the bars `UIParent_ManageFramePositions` places, with
+/// `FCF_OnUpdate` running every frame. The docked tabs sit on one row on ChatFrame1's background
+/// throughout. The hidden Combat Log's layout waits while it is hidden, and the dock's own reads
+/// (`MouseIsOver`'s getters in `FCF_OnUpdate`) resolve it each frame (`0x7a1980`), so its tab
+/// follows the dock.
+#[test]
+fn the_docked_tabs_follow_the_dock_through_a_session() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(768.0 * 16.0 / 9.0, 768.0);
+    s.set_texture_size_probe(Box::new(|_| Some((32, 32))));
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "{failures:?}");
+    super::lifecycle::finish_ui_load_with(&mut s, |_| {}, super::fire_chat_login);
+    s.fire_world_enter();
+    let frames = |s: &mut UiScript, n: usize| {
+        for _ in 0..n {
+            s.tick(0.016);
+            s.resolve();
+        }
+    };
+    let check = |s: &mut UiScript, step: &str| {
+        // Hover the dock, so the tabs show (`FCF_OnUpdate`).
+        let (x, y): (f32, f32) = s
+            .eval(
+                "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+                 (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+            )
+            .unwrap();
+        s.mouse_move(x, y);
+        frames(s, 45);
+        let row: f32 = s.eval("return ChatFrame1Background:GetTop()").unwrap();
+        let quads = s.extract();
+        for tab in ["ChatFrame1Tab", "ChatFrame2Tab"] {
+            let q = quads
+                .iter()
+                .find(|q| {
+                    matches!(q.content, QuadContent::Frame)
+                        && s.target_owner_name(q.target).as_deref() == Some(tab)
+                })
+                .unwrap_or_else(|| panic!("{step}: {tab} draws"));
+            let bottom = q.rect.expect("a placed tab").bottom;
+            assert!(
+                (bottom - row).abs() < 0.01,
+                "{step}: {tab} sits at {bottom}, the dock's row is {row}"
+            );
+        }
+    };
+    let click = |s: &mut UiScript, tab: &str| {
+        s.run(&format!(
+            "this = {tab} FCF_Tab_OnClick('LeftButton') this = nil"
+        ))
+        .unwrap();
+        frames(s, 5);
+    };
+    frames(&mut s, 30);
+    check(&mut s, "login");
+    click(&mut s, "ChatFrame2Tab");
+    check(&mut s, "Combat Log selected");
+    click(&mut s, "ChatFrame1Tab");
+    check(&mut s, "General selected");
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update() UIParent_ManageFramePositions()")
+        .unwrap();
+    frames(&mut s, 5);
+    check(&mut s, "bottom-left bar");
+    s.run("PetActionBarFrame:Show() UIParent_ManageFramePositions()")
+        .unwrap();
+    frames(&mut s, 5);
+    check(&mut s, "pet bar");
+    click(&mut s, "ChatFrame2Tab");
+    check(&mut s, "Combat Log selected over the pet bar");
+    s.run("PetActionBarFrame:Hide() UIParent_ManageFramePositions()")
+        .unwrap();
+    frames(&mut s, 5);
+    check(&mut s, "pet bar gone");
+    click(&mut s, "ChatFrame1Tab");
+    check(&mut s, "General selected again");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The stock chat frames re-read window 1's channels on the cascade's `UPDATE_CHAT_WINDOWS`
+/// (`ChatFrame.lua:1272`), so `ChatFrame1` lists `GuildRecruitment` before
+/// `SetGuildRecruitmentMode(1)` returns (`0x49eb70`, then `0x49eb5f` and `0x4a00a9`).
+#[test]
+fn the_recruitment_join_reaches_the_chat_frame_before_the_verb_returns() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame();
+    s.set_guild_recruitment_plan(benilla_ui::script::RecruitmentPlan::Join {
+        name: "GuildRecruitment - City".into(),
+        shortcut: "GuildRecruitment".into(),
+        id: 25,
+    });
+    let listed: bool = s
+        .eval(
+            "SetGuildRecruitmentMode(1) \
+             for _, c in ipairs(ChatFrame1.channelList) do \
+               if c == 'GuildRecruitment' then return true end \
+             end return false",
+        )
+        .unwrap();
+    assert!(listed, "ChatFrame1.channelList lacks GuildRecruitment");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

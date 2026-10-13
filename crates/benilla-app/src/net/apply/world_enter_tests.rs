@@ -27,6 +27,7 @@ fn app() -> (App, Receiver<ClientCommand>) {
         })
         .init_resource::<ServerWallClock>()
         .init_resource::<crate::ui_mail::MailPending>()
+        .init_resource::<crate::ui_mail::MailOpen>()
         .init_resource::<crate::ui_battlefield::Battlefield>()
         .init_resource::<crate::ui_dialog_verbs::MeetingStone>()
         .add_message::<EnteredWorldMessage>()
@@ -153,11 +154,6 @@ fn the_client_schedules_the_sends_in_the_reference_order() {
     assert!(runs_before(
         &mut app,
         crate::ui_battlefield::reset_on_world_enter,
-        crate::ui_dialog_verbs::meeting_stone_enter_world
-    ));
-    assert!(runs_before(
-        &mut app,
-        crate::ui_dialog_verbs::meeting_stone_leave_world,
         crate::ui_dialog_verbs::meeting_stone_enter_world
     ));
 }

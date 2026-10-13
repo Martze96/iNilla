@@ -819,9 +819,23 @@ const HEADER: &str = "\
 ";
 
 /// Dirty and one quiet second since the last change: save, so a crash loses at most that second.
+/// Deviation: the reference's `SaveConfig` (`0x63d980`) writes only at world entry (`0x46b6f6`),
+/// at the leave-world tail (`0x490c35`-`0x490c64`) and at shutdown (`0x63daf0`), so a crash or a
+/// kill loses every change since; here a player's settings survive one.
 fn save_config_when_quiet(mut cvars: ResMut<Cvars>) {
     if cvars.dirty && cvars.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET) {
         write_config(&mut cvars);
+    }
+}
+
+impl Cvars {
+    /// `CVar::SaveConfig` (`0x63d980`) on demand, as the reference's callers that save at once do
+    /// (`EnterWorld`, `0x46b6f6`): the file written now if anything moved, the quiet second
+    /// skipped.
+    pub(crate) fn save(&mut self) {
+        if self.dirty {
+            write_config(self);
+        }
     }
 }
 
@@ -1829,6 +1843,9 @@ mod tests {
         app.world_mut().write_message(crate::net::CharListMessage {
             characters: roster(),
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
         assert_eq!(
@@ -1856,6 +1873,9 @@ mod tests {
         app.world_mut().write_message(crate::net::CharListMessage {
             characters: roster(),
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
 

@@ -109,6 +109,8 @@ fn cast_event(entity: Entity, spell_id: u32, kind: CastEventKind) -> CastEvent {
         entity,
         spell_id,
         kind,
+        cast_flags: 0,
+        item_cast: false,
         seq: 1,
     }
 }
@@ -909,6 +911,8 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         entity: caster,
         spell_id: GROUND,
         kind: CastEventKind::GroundImpact { pos: at },
+        cast_flags: 0,
+        item_cast: false,
         seq: 2,
     });
     app.update();

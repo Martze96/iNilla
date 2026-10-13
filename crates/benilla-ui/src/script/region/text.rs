@@ -1,7 +1,7 @@
 //! The FontString-only methods: the string, its measured width, justification, non-space wrap and
 //! text height. The font block it shares with EditBox comes from [`crate::script::font_block`].
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::justify;
 use crate::script::Model;
@@ -18,12 +18,20 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
+            let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
+            let same = data.text == text;
             data.text = text;
             // Fresh text draws whole: an armed write-on gradient belongs to the old string.
             data.alpha_gradient = None;
-            // SetText must not touch the layout, since the extent has not moved yet; it names
-            // itself on the measure ledger.
+            // New text names itself on the measure ledger, and on the layout only when it empties
+            // or fills, which drops or takes up the measure the sweep reads.
             model.touch_measure(rh);
+            model.touch_layout_text(rh, was_shown);
+            // A new string clears the valid bit and invalidates (`0x771ea4`); the same one returns
+            // first (`0x771df1`).
+            if !same {
+                model.clear_region_valid(rh);
+            }
             Ok(())
         })?,
     )?;
@@ -152,15 +160,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // SetNonSpaceWrap/CanNonSpaceWrap (`0x79e9f0`/`0x79ead0`), FontString only: the getter
-    // answers 1 or nil, and a call with no argument enables.
+    // answers 1 or nil. The flag is `GetBoolOrDefault` (`0x6f1c10`, default 1, `0x79ea7e`): a call
+    // with no argument enables, an explicit nil disables.
     m.set(
         "SetNonSpaceWrap",
-        lua.create_function(|lua, (this, enable): (Table, Value)| {
-            let on = match &enable {
-                Value::Nil => true,
-                Value::Boolean(b) => *b,
-                _ => true,
-            };
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let on = crate::script::binding_abi::bool_or_default(args.front(), true);
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.region_data.entry(rh).or_default().non_space_wrap = Some(on);
@@ -198,7 +203,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // ── the shared font block ───────────────────────────────────────────────────────────────
     //
-    // The font object, font, text colour and shadow getters and setters are type-guard shims over
-    // one implementation each (`0x79f210` SetFont, `0x79f3b0` GetFont), shared with EditBox.
-    super::super::font_block::install(lua, m, region_handle_of, "FontString", None)
+    // The font object, font, text colour, shadow and spacing getters and setters are type-guard
+    // shims over one implementation each (`0x79f210` SetFont, `0x79f3b0` GetFont), shared with
+    // EditBox; the spacing pair is the FontString's own (`0x79e2b0`, `0x79e1d0`), which clamps.
+    super::super::font_block::install(
+        lua,
+        m,
+        region_handle_of,
+        super::super::font_block::FontKind::FontString,
+        None,
+    )
 }

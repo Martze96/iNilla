@@ -148,6 +148,7 @@ fn fire_sites() -> Vec<(String, Vec<char>, String)> {
             for call in [
                 concat!("fire_event", "("),
                 concat!("fire_event_into", "("),
+                concat!("model.raise", "("),
                 concat!("pending_events.push", "(("),
             ] {
                 let mut from = 0;
@@ -250,6 +251,38 @@ fn every_event_we_fire_carries_the_reference_s_arguments() {
          ends, so nothing else in the build can see this:\n  {}",
         wrong.len(),
         wrong.join("\n  ")
+    );
+}
+
+/// The in-game event table (`0x703d90`, name array `0xbe1198`) holds the names of
+/// `reference/1.12-event-catalog.tsv` and the glue table the 26 of `GLUE_EVENTS`; `RegisterEvent`
+/// drops any other name (`0x702140`), so an event fired under a name off both reaches no frame
+/// that registered it by name.
+#[test]
+fn every_event_we_fire_is_in_the_reference_table() {
+    let tsv = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/1.12-event-catalog.tsv"
+    );
+    let text = std::fs::read_to_string(tsv).expect("reference/1.12-event-catalog.tsv");
+    let names: std::collections::BTreeSet<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('\t').map(|(_, n)| n))
+        .chain(benilla_ui::script::GLUE_EVENTS)
+        .collect();
+    assert!(names.len() > 390, "the catalog stopped being read");
+    let mut off: Vec<String> = fire_sites()
+        .into_iter()
+        .filter(|(name, _, _)| !names.contains(name.as_str()))
+        .map(|(name, _, at)| format!("{name} from {at}"))
+        .collect();
+    off.sort();
+    off.dedup();
+    assert!(
+        off.is_empty(),
+        "fired under a name the reference's event table lacks:\n  {}",
+        off.join("\n  ")
     );
 }
 

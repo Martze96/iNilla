@@ -7,9 +7,12 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{KeyWalk, UiScript};
 
-use super::{CursorPayloadHeld, PlayerUiClickConsumed, PlayerUiHover, UiKeyboardCapture};
+use super::{
+    CursorPayloadHeld, PlayerUiClickConsumed, PlayerUiHover, PlayerUiPressConsumed,
+    UiKeyboardCapture,
+};
 use crate::bindings::WheelNotches;
 use crate::textinput::{self, keymap, HostClipboard};
 
@@ -20,6 +23,7 @@ use crate::textinput::{self, keymap, HostClipboard};
 pub(super) struct PointerFeed<'w> {
     hover: ResMut<'w, PlayerUiHover>,
     click_consumed: ResMut<'w, PlayerUiClickConsumed>,
+    press_consumed: ResMut<'w, PlayerUiPressConsumed>,
     hovered: Res<'w, crate::target::Hovered>,
     hovered_object: Res<'w, crate::target::HoveredObject>,
     occlusion: Res<'w, crate::target::PickOcclusion>,
@@ -92,21 +96,32 @@ pub(super) fn feed_ui_input(
         ResMut<UiKeyboardCapture>,
         NonSendMut<HostClipboard>,
     ),
+    // The keys this feed believes down, a fact about the keyboard and not the VM.
+    mut pressed: Local<crate::bindings::KeyDownList>,
+    // Who sends the key-ups: the bindings pass in the world, this feed on the glue screens.
+    state: Option<Res<State<crate::char_select::ClientState>>>,
     // The characters the active layout makes, which name a key for a keyboard frame.
     layout: Res<crate::bindings::LayoutNames>,
 ) {
     let (keyboard, keys, capture, clipboard) = (&mut kbd.0, &kbd.1, &mut kbd.2, &mut kbd.3);
+    // In the world the bindings pass sends the key-ups, in event order with the presses it
+    // follows; on the glue screens, which have none, this feed does.
+    let releases = !state
+        .as_ref()
+        .is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld);
     let world_pick = pointer.world_pick();
     // The OS pointer is not ours while a probe drives a gesture through the real pointer path or a
     // capture pins it: skip the mouse half whole, else-arm included, whose `pointer_left_window`
     // would disarm the probe's gesture between its press and release.
     let synthetic = pointer.synthetic.0 || pointer.capture_pinned.0;
-    let (hover, click_consumed, payload_held) = (
+    let (hover, click_consumed, press_consumed, payload_held) = (
         &mut pointer.hover,
         &mut pointer.click_consumed,
+        &mut pointer.press_consumed,
         &mut pointer.payload_held,
     );
     click_consumed.0 = false;
+    press_consumed.0 = false;
     let Some(mut script) = script else {
         capture.typing = false;
         capture.arrows_fall_through = false;
@@ -183,7 +198,8 @@ pub(super) fn feed_ui_input(
                         click_consumed.0 = true;
                     }
                 }
-                script.mouse_button(x, y, name, true);
+                // A press the UI consumed is not the world's, hovered frame or not.
+                press_consumed.0 |= script.mouse_button(x, y, name, true);
             }
             if buttons.just_released(btn) {
                 script.mouse_button(x, y, name, false);
@@ -194,7 +210,7 @@ pub(super) fn feed_ui_input(
         // The OS pointer left: leave the hovered frame once, and disarm any press or drag every
         // frame, since no release ends it and a stale gesture would fire on re-entry.
         if hover.0.take().is_some() {
-            script.mouse_move(f32::MIN, f32::MIN);
+            script.pointer_left_hover();
         }
         script.pointer_left_window();
     }
@@ -203,15 +219,20 @@ pub(super) fn feed_ui_input(
     // and before the keys (an Escape that clears focus still counts as captured this frame).
     capture.typing = script.has_keyboard_focus();
     capture.consumed.clear();
+    script.set_alt_down(alt);
     // ── The alt-arrow exemption ────────────────────────────────────────────────────────────────
     // An EditBox in alt-arrow mode (`ignoreArrows`, set on the chat box at `ChatFrame.xml:21`)
     // passes the arrows on unless ALT is held: its handler returns 0 at `0x77b1c4` and the
-    // binding runs at `CGWorldFrame`; a focused box swallows any other key (`0x77b35e` returns 1).
+    // binding runs at `CGWorldFrame`; a focused box swallows any other key (`0x77b35e` returns 1),
+    // PRINTSCREEN excepted (`0x77b17f`, see `crate::bindings`).
     capture.arrows_fall_through = !alt && script.editbox_alt_arrow_mode();
 
-    // ── Keyboard → VM ── box-event keys go to `key_input` by name, editing keys through the
-    // per-OS chord table as an `EditAction` or a clipboard operation (the macOS NSPasteboard
-    // needs this main-thread system), the rest to `char_input`. Repeats arrive as `Pressed`.
+    // ── Keyboard → VM ── every press is one key-down walk by name (`0x765f10`), in which a box is
+    // a frame like the rest; a box the walk reached then takes the key's editing action through
+    // the per-OS chord table as an `EditAction` or a clipboard operation (the macOS NSPasteboard
+    // needs this main-thread system), and the characters go to `char_input`, a walk of its own.
+    // A repeat goes to the frame that took the press instead (`0x766070`), a release likewise
+    // (`0x765fd0`).
     let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     let mods = keymap::Mods {
         shift,
@@ -219,84 +240,121 @@ pub(super) fn feed_ui_input(
         alt,
         sup,
     };
+    feed_keys(
+        &mut script,
+        capture,
+        keyboard.read(),
+        keys,
+        &mut pressed,
+        releases,
+        mods,
+        &layout,
+        clipboard,
+        wl_display,
+    );
+
+    // The payload-held mirror, written last so a same-frame pickup or ESC clear shows: the
+    // Send-side view the world-click deselect gates on.
+    payload_held.0 = script.cursor_payload().is_some();
+
+    for err in script.take_errors() {
+        warn!("ui_script(input): {err}");
+    }
+}
+
+/// The keyboard half of the frame: each event as the key-down or repeat walk and what a box the
+/// walk reached does with the key. `down` is this feed's pressed-key list, which decides repeat
+/// as the bindings' does (`0x4248b3`), never from the OS flag: after an alt-tab wipes it
+/// (`0x424790`, the reconcile against `keys`) the first repeat is a fresh press, and a platform
+/// that never sets the flag still repeats right. `releases` says whether the key-up dispatch is
+/// this feed's: in the world the bindings pass sends it, in order with the press it follows
+/// (`crate::bindings`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn feed_keys<'a>(
+    script: &mut UiScript,
+    capture: &mut UiKeyboardCapture,
+    events: impl Iterator<Item = &'a KeyboardInput>,
+    keys: &ButtonInput<KeyCode>,
+    down: &mut crate::bindings::KeyDownList,
+    releases: bool,
+    mods: keymap::Mods,
+    layout: &crate::bindings::LayoutNames,
+    clipboard: &mut HostClipboard,
+    wl_display: Option<*mut std::ffi::c_void>,
+) {
+    down.reconcile(keys);
+    let keymap::Mods {
+        shift: _,
+        ctrl,
+        alt,
+        sup,
+    } = mods;
     let mac = cfg!(target_os = "macos");
-    for ev in keyboard.read() {
+    for ev in events {
+        // What the layout names the key: the clipboard chords' letters, and a keyboard frame's
+        // `arg1`, which the Key Bindings window also stores, so a key's press dispatches by the
+        // name it was bound under.
+        let token = crate::bindings::chord::key_token(ev.key_code, layout);
+        // `None` is a key the client drops before any walk (a Windows or Command key, a media
+        // key): no down, no up, and no focus granted to an `autoFocus` box.
+        let name = crate::bindings::chord::walk_name(ev.key_code, layout);
         if ev.state != ButtonState::Pressed {
+            down.release(ev.key_code);
+            if let Some(name) = name.as_deref().filter(|_| releases) {
+                script.key_up(name);
+            }
             continue;
         }
-        let named = match ev.key_code {
-            KeyCode::Enter | KeyCode::NumpadEnter => Some("ENTER"),
-            KeyCode::Escape => Some("ESCAPE"),
-            KeyCode::Tab => Some("TAB"),
-            _ => None,
+        let repeat = down.press(ev.key_code);
+        let named = matches!(
+            ev.key_code,
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Escape | KeyCode::Tab
+        );
+        let walk = match name.as_deref() {
+            Some(name) if repeat => script.key_repeat(name),
+            Some(name) => script.key_down(name),
+            None => KeyWalk::Declined,
         };
-        // What the layout names the key: the clipboard chords' letters, and a keyboard frame's
-        // `arg1` below.
-        let token = crate::bindings::chord::key_token(ev.key_code, &layout);
-        // Dispatched unconditionally: unfocused, they fall through to the camera and turn keys.
+        // The gate is existence, not handling: a shown keyboard frame with an `OnKeyDown` swallows
+        // the key whatever its script does (`0x76b7d0`, `0x76ba25`). Consumption suppresses only
+        // the key's binding: `OnChar` is a separate dispatcher (`0x765df0`), so the stack-split
+        // spinner still gets a digit its `OnKeyDown` ate, and it is not a focus change, so it
+        // releases nothing held. A box that took the key counts too: it returned 1 (`0x77b1db`
+        // -> `0x77b35e`) and the world frame, last in the walk, never saw it, so an F-key that
+        // gave an `autoFocus` box the focus runs no binding. An unconsumed press is acted on in
+        // the binding dispatch (`crate::bindings`), which runs after this pass and reads the
+        // capture gate.
+        if walk != KeyWalk::Declined {
+            capture.consumed.push(ev.key_code);
+        }
+        let editing_key = matches!(
+            ev.key_code,
+            KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::Home
+                | KeyCode::End
+        );
+        if walk == KeyWalk::Frame && editing_key {
+            // Not `typing`: a frame eating one key is not a box taking focus, and treating it as
+            // one would stop a held movement key.
+            continue;
+        }
+        if named {
+            continue;
+        }
+        // The box's own key-down switch (`0x77b160`) does the editing, copy, cut, paste and
+        // select-all, so only a box the walk reached acts; a frame that took the key, or a gated
+        // arrow the box declined, leaves it alone.
         let chord = keymap::chord(ev.key_code, token, mods, mac);
-        // A keyboard frame gets these by name before their chord runs (a dialog needs BACKSPACE);
-        // `frame_key_input` declines at a focused box, so no frame steals its editing keys. `true`
-        // suppresses the chord and the key's binding (the reference's existence gate, `0x76b7d0`).
-        let frame_named = match ev.key_code {
-            KeyCode::Backspace => Some("BACKSPACE"),
-            KeyCode::Delete => Some("DELETE"),
-            KeyCode::ArrowLeft => Some("LEFT"),
-            KeyCode::ArrowRight => Some("RIGHT"),
-            KeyCode::ArrowUp => Some("UP"),
-            KeyCode::ArrowDown => Some("DOWN"),
-            KeyCode::Home => Some("HOME"),
-            KeyCode::End => Some("END"),
-            _ => None,
-        };
-        if let Some(name) = frame_named {
-            if script.frame_key_input(name) {
-                // Not `typing`: a frame eating one key is not a box taking focus, and treating it
-                // as one would stop a held movement key.
-                capture.consumed.push(ev.key_code);
-                continue;
-            }
-        }
-        // Every other key reaches a keyboard frame by name too: the reference's key-down walk
-        // takes its `arg1` from the table the binding chord uses (`0x4b66b0`), `chord::key_token`
-        // under the active layout here, so the Key Bindings window stores the name the key's
-        // press dispatches by. The gate is existence, not handling: a shown keyboard frame with
-        // an `OnKeyDown` swallows the key whatever its script does (`0x76b7d0`, `0x76ba25`).
-        // Consumption suppresses only the key's binding: `OnChar` is a separate dispatcher
-        // (`0x765df0`), so the stack-split spinner still gets a digit its `OnKeyDown` ate, and it
-        // is not a focus change, so it releases nothing held.
-        else if named.is_none() {
-            if let Some(token) = token {
-                if script.frame_key_input(&token.to_string()) {
-                    capture.consumed.push(ev.key_code);
-                }
-            }
-        }
-        if let Some(name) = named {
-            // An unconsumed press is not acted on here: ESCAPE's close ladder, TAB's targeting and
-            // ENTER's chat open live in the binding dispatch (`crate::bindings`), which runs after
-            // this pass and reads the capture gate.
-            if script.key_input(name) {
-                capture.consumed.push(ev.key_code);
-            }
-        } else if let Some(chord) = chord {
-            // The gate is on the key, not the action: a gated arrow never reaches the box (the
-            // reference's `return 0`), while HOME/END, which also make a `Move`, do.
-            let gated_arrow = capture.arrows_fall_through
-                && matches!(
-                    ev.key_code,
-                    KeyCode::ArrowLeft
-                        | KeyCode::ArrowRight
-                        | KeyCode::ArrowUp
-                        | KeyCode::ArrowDown
-                );
+        if let Some(chord) = chord.filter(|_| walk == KeyWalk::Box) {
             match chord {
-                keymap::Chord::Edit(action) if !gated_arrow => {
+                keymap::Chord::Edit(action) => {
                     script.editbox_action(action);
                 }
-                // Declined: the key falls through to its binding, which `bindings.rs` allows
-                // because `arrows_fall_through` exempts exactly these four from the typing gate.
-                keymap::Chord::Edit(_) => {}
                 // Copy and cut need a selection (`0x77e1d0`), and a password box yields its mask
                 // run, never the real text; paste sanitizes and inserts.
                 keymap::Chord::Copy => {
@@ -315,25 +373,15 @@ pub(super) fn feed_ui_input(
                     }
                 }
             }
-        } else if !(sup || (ctrl && !alt)) {
+        } else if chord.is_none() && !(sup || (ctrl && !alt)) {
             // Command-modified chars never insert (Cmd+L must not type "l"), but Ctrl+Alt passes:
             // that is AltGr, and macOS Option+letter arrives with only `alt`.
+            // The char walk gates no binding (`0x765df0` reaches no keybinding), so whether a
+            // frame took the character is not recorded: the key-down already decided that.
             if let Some(text) = &ev.text {
-                // Same suppression as the named keys: the number row is a binding, so a digit typed
-                // into a keyboard frame (the stack-split spinner) must not also fire an action.
-                if script.char_input(text) {
-                    capture.consumed.push(ev.key_code);
-                }
+                script.char_input(text);
             }
         }
-    }
-
-    // The payload-held mirror, written last so a same-frame pickup or ESC clear shows: the
-    // Send-side view the world-click deselect gates on.
-    payload_held.0 = script.cursor_payload().is_some();
-
-    for err in script.take_errors() {
-        warn!("ui_script(input): {err}");
     }
 }
 

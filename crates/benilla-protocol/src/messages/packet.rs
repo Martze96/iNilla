@@ -80,6 +80,12 @@ pub enum ServerPacket {
     CharDelete {
         result: u8,
     },
+    /// `SMSG_CHAR_RENAME`: the result byte (0 success, `0x31` name in use, any other a failure)
+    /// and, when the body carries one, the renamed character's guid and new name.
+    CharRename {
+        result: u8,
+        renamed: Option<(u64, String)>,
+    },
     /// `SMSG_CHARACTER_LOGIN_FAILED`: a 1-based reason index, not a `ResponseCodes` value, that
     /// the client maps (`0x5aae08`) 1 to "world server is down" and past 6 to "login failed".
     CharacterLoginFailed {
@@ -296,6 +302,11 @@ pub enum ServerPacket {
     SetFactionStanding {
         standings: Vec<(u32, i32)>,
     },
+    /// `SMSG_SET_FORCED_REACTIONS`: the whole forced-reaction table, `(Faction.dbc id, reaction
+    /// rank)` per forced faction, replacing the last one.
+    SetForcedReactions {
+        reactions: Vec<(u32, u32)>,
+    },
     /// `SMSG_SET_FACTION_VISIBLE`: sets `FACTION_FLAG_VISIBLE` on one slot; it carries no standing.
     SetFactionVisible {
         list_id: u32,
@@ -458,6 +469,8 @@ pub enum ServerPacket {
         reason: u8,
         required_level: Option<u32>,
         item_guid: u64,
+        /// The second item the refused operation named: a swap's other end, or 0.
+        item2_guid: u64,
         /// The destination bag's absolute player slot (255 = the player's own array).
         bag_slot: u8,
     },
@@ -1245,8 +1258,9 @@ pub enum ServerPacket {
     /// order with no count or names, so record i is `STOCK_SECURE_ADDONS[i]`. Status 2 drops the
     /// addon from the client's Lua index, which hides Blizzard's addons from the AddOns list.
     AddonInfo {
-        /// One status per record, in arrival order.
-        statuses: Vec<u8>,
+        /// One record per addon, in arrival order; the names are empty until
+        /// [`super::pair_with_sent`] gives them.
+        records: Vec<super::AddonRecord>,
     },
     Other {
         opcode: u16,
@@ -1262,6 +1276,7 @@ impl ServerPacket {
             ServerPacket::CharEnum { .. } => "SMSG_CHAR_ENUM".into(),
             ServerPacket::CharCreate { .. } => "SMSG_CHAR_CREATE".into(),
             ServerPacket::CharDelete { .. } => "SMSG_CHAR_DELETE".into(),
+            ServerPacket::CharRename { .. } => "SMSG_CHAR_RENAME".into(),
             ServerPacket::CharacterLoginFailed { .. } => "SMSG_CHARACTER_LOGIN_FAILED".into(),
             ServerPacket::UpdateObject { .. } => "SMSG_UPDATE_OBJECT".into(),
             ServerPacket::CompressedMoves { .. } => "SMSG_COMPRESSED_MOVES".into(),
@@ -1327,6 +1342,7 @@ impl ServerPacket {
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
+            ServerPacket::SetForcedReactions { .. } => "SMSG_SET_FORCED_REACTIONS".into(),
             ServerPacket::SetFactionVisible { .. } => "SMSG_SET_FACTION_VISIBLE".into(),
             ServerPacket::NameQueryResponse { .. } => "SMSG_NAME_QUERY_RESPONSE".into(),
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),

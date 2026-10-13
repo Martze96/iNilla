@@ -52,10 +52,6 @@ const CLEAR_AFTER_READY_FRAMES: u32 = 3;
 /// [`WAIT_LOG_EVERY`] seconds.
 const WAIT_LOG_AFTER: f32 = 3.0;
 const WAIT_LOG_EVERY: f32 = 2.0;
-/// How far (yd) a same-map snap must move the body to count as a load. It clears every combat
-/// relocation (charge and intercept 25 yd, blink 20, knockbacks under 30), which also ends in a
-/// server teleport and must never black out the screen.
-const SNAP_LOAD_MIN_YD: f32 = 100.0;
 
 /// Consecutive covered, in-world frames before the cover is on the glass: renders are serial, so
 /// at 3 the two frames before have presented.
@@ -162,8 +158,6 @@ pub(crate) struct LoadingScreen {
     /// `Time::elapsed_secs` at the last raise and at the last wait log line.
     active_since: f32,
     last_wait_log: f32,
-    /// The avatar's position last frame, to measure a snap (applied in `Input`, a stage earlier).
-    last_pos: Option<Vec3>,
 }
 
 impl LoadingScreen {
@@ -270,7 +264,7 @@ impl Plugin for LoadingScreenPlugin {
             // In `First`, ahead of every consumer in `PreUpdate` and `Update`.
             .add_systems(First, count_entry_cover)
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
-            // In `WorldStage::Present`, after Input and Stream: a teleport snaps in Input and the
+            // In `WorldStage::Present`, after Input and Stream: a worldport snaps in Input and the
             // streamer refocuses in Stream, so the cover lands on the same frame, never a flash.
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present));
         // The cover's input rule, registered here so the two cannot be registered apart.
@@ -485,9 +479,9 @@ fn drive_loading_screen(
             screen.raise("worldport", false, Some(w.map_id), now);
         }
     }
-    // A same-map teleport ends any awaited snap; whether it needs a screen is decided below.
-    let teleported = teleports.read().next().is_some();
-    if teleported {
+    // A same-map teleport ends any awaited snap and raises nothing: the reference's
+    // `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises.
+    if teleports.read().next().is_some() {
         screen.snap_landed(None);
     }
     // Logout, a lost session or a refused login: `CharSelect` applies next frame, so cover the torn
@@ -516,33 +510,17 @@ fn drive_loading_screen(
     }
 
     // --- Backstop: the ground under the focus is not resident and nothing raised us. In world
-    // only, since behind the glue nothing loads; and only while the focus is the body, since in a
-    // cinematic or free-fly residency describes the camera's tile. ---
+    // only, since behind the glue nothing loads; only while the focus is the body, since in a
+    // cinematic or free-fly residency describes the camera's tile; and never while a same-map
+    // teleport's settle hold is up. ---
     if !screen.active
         && !progress.focus_resident
         && focus.follows_body()
+        && !player_settling
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         // Same map by construction: the ground under the body.
         screen.raise("focus not resident", false, map_id, now);
-    }
-
-    // --- At a snap, the same test against the clear's own predicate: a teleport inside the keep
-    // band lands on resident terrain while the destination's buildings may still be arriving. ---
-    let body = player.as_ref().map(|p| p.pos);
-    let relocated = match (teleported, screen.last_pos, body) {
-        (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
-        // No previous position (the entry frame): treat it as a relocation.
-        (true, _, _) => true,
-        _ => false,
-    };
-    screen.last_pos = body;
-    if relocated
-        && !screen.active
-        && *state.get() == crate::char_select::ClientState::InWorld
-        && !(progress.is_ready() && progress.presentable())
-    {
-        screen.raise("teleport, destination not presentable", false, map_id, now);
     }
 
     // --- Clear, sustained a few frames. ---
@@ -787,5 +765,110 @@ mod tests {
         // The dismiss is the only thing that lets the next screen resolve its own.
         screen.dismiss();
         assert!(!screen.art_resolved);
+    }
+
+    /// `drive_loading_screen` alone, in world, standing on resident ground at `at` (wow coords).
+    fn in_world(at: [f32; 3]) -> App {
+        let mut player = crate::player::Player::default();
+        player.active = true;
+        player.pos = benilla_assets::coords::wow_to_bevy(at);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(crate::char_select::ClientState::InWorld)
+            .add_message::<crate::net::EnteredWorldMessage>()
+            .add_message::<crate::net::WorldportMessage>()
+            .add_message::<crate::net::TeleportMessage>()
+            .add_message::<crate::net::LoggedOutMessage>()
+            .add_message::<crate::net::DisconnectedMessage>()
+            .add_message::<crate::net::CharacterLoginFailedMessage>()
+            .init_resource::<LoadingScreen>()
+            .init_resource::<crate::pipe_warm::WarmPass>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(CurrentMap(1))
+            .insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, true))
+            .insert_resource(WorldLoadProgress {
+                ready: 9,
+                total: 9,
+                focus_resident: true,
+                scene_ready: true,
+                ..Default::default()
+            })
+            .insert_resource(player)
+            .add_systems(Update, drive_loading_screen);
+        app.update();
+        app
+    }
+
+    /// The snap's frame as the stream sees it: the body held over ground not yet loaded.
+    fn land_unloaded(app: &mut App, at: [f32; 3]) {
+        let pos = benilla_assets::coords::wow_to_bevy(at);
+        let mut player = app.world_mut().resource_mut::<crate::player::Player>();
+        player.pos = pos;
+        player.settling = true;
+        app.insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, false));
+        app.insert_resource(WorldLoadProgress {
+            ready: 0,
+            total: 9,
+            ..Default::default()
+        });
+    }
+
+    fn covering(app: &App) -> bool {
+        app.world().resource::<LoadingScreen>().covering()
+    }
+
+    const GM_ISLAND: [f32; 3] = [16222.0, 16252.0, 12.5];
+    const SOUTH_SEAS: [f32; 3] = [-11880.0, -4700.0, 2.0];
+    const NORTHSHIRE: [f32; 3] = [-8949.95, -132.493, 83.5312];
+
+    /// GM Island to the South Seas, both on Kalimdor.
+    #[test]
+    fn a_same_map_teleport_across_the_continent_shows_no_loading_screen() {
+        let mut app = in_world(GM_ISLAND);
+        assert!(!covering(&app), "standing on resident ground");
+
+        land_unloaded(&mut app, SOUTH_SEAS);
+        app.world_mut().write_message(crate::net::TeleportMessage {
+            guid: 1,
+            counter: 0,
+            position: SOUTH_SEAS,
+            orientation: 0.0,
+        });
+        app.update();
+        assert!(!covering(&app), "the snap frame raises no screen");
+
+        for _ in 0..30 {
+            app.update();
+            assert!(
+                !covering(&app),
+                "nor does the destination streaming in under the held body"
+            );
+        }
+    }
+
+    #[test]
+    fn unloaded_ground_under_a_body_no_snap_holds_is_covered() {
+        let mut app = in_world(GM_ISLAND);
+        land_unloaded(&mut app, SOUTH_SEAS);
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .settling = false;
+        app.update();
+        assert!(covering(&app));
+    }
+
+    #[test]
+    fn a_worldport_covers_its_load() {
+        let mut app = in_world(GM_ISLAND);
+        land_unloaded(&mut app, NORTHSHIRE);
+        app.world_mut().write_message(crate::net::WorldportMessage {
+            map_id: 0,
+            position: NORTHSHIRE,
+            orientation: 0.0,
+            needs_ack: true,
+            transport_entry: None,
+        });
+        app.update();
+        assert!(covering(&app));
     }
 }

@@ -223,6 +223,7 @@ fn set_font_object_takes_the_object_or_the_name() {
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -283,6 +284,7 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -318,6 +320,7 @@ fn mutating_a_font_object_repaints_everything_that_inherits_it() {
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -504,6 +507,7 @@ fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
             justify_h: Some(JustifyH::Right),
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -536,14 +540,18 @@ fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
     );
 }
 
-/// Line spacing is not built: the reference's `SetSpacing` is absent here, so a call raises rather
-/// than store a number nothing draws.
+/// A registered font object answers the spacing pair (`0x7a09f0`, `0x7a0ab0`), 0 until set, and a
+/// set reaches the FontStrings that inherit it.
 #[test]
-fn the_unmodelled_spacing_pair_fails_loudly() {
+fn a_font_objects_spacing_reaches_its_fontstrings() {
     let s = script();
     s.register_font_object("SomeFont", FontObject::default());
-    assert!(s.run("SomeFont:SetSpacing(4)").is_err());
-    assert!(s.eval::<bool>("return SomeFont.SetSpacing == nil").unwrap());
+    s.run("FS = CreateFrame('Frame'):CreateFontString() FS:SetFontObject(SomeFont)")
+        .unwrap();
+    assert_eq!(s.eval::<f32>("return SomeFont:GetSpacing()").unwrap(), 0.0);
+    s.run("SomeFont:SetSpacing(4)").unwrap();
+    assert_eq!(s.eval::<f32>("return SomeFont:GetSpacing()").unwrap(), 4.0);
+    assert_eq!(s.eval::<f32>("return FS:GetSpacing()").unwrap(), 4.0);
 }
 
 /// A button's state fonts take the object or the name; they are stored as names and re-resolved at
@@ -945,7 +953,7 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         "an addon's own face, spelled in its own case, must load"
     );
     assert!(
-        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\gone.ttf', 18) == nil")
+        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\gone.ttf', 30) == nil")
             .unwrap(),
         "a path the store does not hold is the reference's falsey load failure"
     );
@@ -956,7 +964,10 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         face, "Interface\\AddOns\\MSBT\\Fonts\\porky.ttf",
         "the refused face must not replace the one that loaded"
     );
-    assert_eq!(height, 18.0, "…while the height, which never fails, is set");
+    assert_eq!(
+        height, 18.0,
+        "a refused load writes nothing, the height included (`0x771571`)"
+    );
 }
 
 /// MSBT's per-event sequence over the stock `MasterFont` (`Fonts.xml:55`, a `<Shadow>` only): its

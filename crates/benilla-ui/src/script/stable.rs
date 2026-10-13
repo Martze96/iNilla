@@ -186,6 +186,56 @@ fn drag_verb(from: u8, to: u8, state: &StableState) -> Option<StableIntent> {
     }
 }
 
+/// `ClickStablePet(i)`'s one value (`0x4cb420`), keyed only on whether the cursor held a pet: a
+/// plain click selects and answers 1, so the stock window repaints; a drop answers nil, packet or
+/// not, and the repaint comes with the server's next list.
+fn click_stable_pet(model: &mut Model, i: i64) -> Value {
+    let Some(to) = slot_index(i) else {
+        // Out of range: a click selects nothing, a drop clears the cursor.
+        if !matches!(
+            model.cursor,
+            Some(super::cursor::CursorPayload::StablePet(_))
+        ) {
+            model.stable.selected = 0;
+            return Value::Number(1.0);
+        }
+        super::cursor::clear_cursor(model);
+        return Value::Nil;
+    };
+    let to = to as u8;
+
+    // A drop.
+    if let Some(super::cursor::CursorPayload::StablePet(held)) = model.cursor.clone() {
+        let from = held.slot;
+        let intent = model
+            .stable
+            .state
+            .as_ref()
+            .and_then(|state| drag_verb(from, to, state));
+        super::cursor::clear_cursor(model);
+        if let Some(intent) = intent {
+            model.stable.intents.push(intent);
+        }
+        return Value::Nil;
+    }
+
+    // A plain click: select only.
+    let pet_number = model
+        .stable
+        .state
+        .as_ref()
+        .and_then(|s| s.slots[usize::from(to)].as_ref())
+        .map(|p| p.pet_number);
+    model.stable.selected = match (to, pet_number) {
+        // Slot 0 selects the summoned pet by its sentinel, not a pet number.
+        (0, _) => -1,
+        (_, Some(n)) => n as i32,
+        // An empty slot selects nothing.
+        (_, None) => 0,
+    };
+    Value::Number(1.0)
+}
+
 /// Register the stable globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -296,77 +346,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ClickStablePet(i) → one value (`0x4cb420`), keyed only on whether the cursor held a pet: a
-    // plain click selects and answers 1, so the stock window repaints; a drop answers nil, packet
-    // or not, and the repaint comes with the server's next list.
+    // ClickStablePet(i) → one value ([`click_stable_pet`]).
     g.set(
         "ClickStablePet",
         lua.create_function(|lua, i: i64| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let Some(to) = slot_index(i) else {
-                // Out of range: a click selects nothing, a drop clears the cursor.
-                if !matches!(
-                    model.cursor,
-                    Some(super::cursor::CursorPayload::StablePet(_))
-                ) {
-                    model.stable.selected = 0;
-                    return Ok(Value::Number(1.0));
-                }
-                super::cursor::clear_cursor(&mut model);
-                return Ok(Value::Nil);
-            };
-            let to = to as u8;
-
-            // A drop.
-            if let Some(super::cursor::CursorPayload::StablePet(held)) = model.cursor.clone() {
-                let from = held.slot;
-                let intent = model
-                    .stable
-                    .state
-                    .as_ref()
-                    .and_then(|state| drag_verb(from, to, state));
-                super::cursor::clear_cursor(&mut model);
-                if let Some(intent) = intent {
-                    model.stable.intents.push(intent);
-                }
-                return Ok(Value::Nil);
-            }
-
-            // A plain click: select only.
-            let pet_number = model
-                .stable
-                .state
-                .as_ref()
-                .and_then(|s| s.slots[usize::from(to)].as_ref())
-                .map(|p| p.pet_number);
-            model.stable.selected = match (to, pet_number) {
-                // Slot 0 selects the summoned pet by its sentinel, not a pet number.
-                (0, _) => -1,
-                (_, Some(n)) => n as i32,
-                // An empty slot selects nothing.
-                (_, None) => 0,
-            };
-            Ok(Value::Number(1.0))
+            Ok(super::tick::verb(lua, |model| click_stable_pet(model, i)))
         })?,
     )?;
 
-    // PickupStablePet(i): the mode-10 cursor grab, returning nothing. The gate is the family icon,
-    // not occupancy (`0x495010`): no icon, no grab.
+    // PickupStablePet(i) (`0x4cb7a0`): the mode-10 cursor grab, returning nothing. The binding
+    // takes an occupied slot only (`0x4cb7f9`); the grab (`0x495010`) clears with
+    // `ClearCursor(1,1)` (`0x495034`) before its own check, the family icon: no icon, no grab, the
+    // cursor left clear. The set fires nothing of its own.
     g.set(
         "PickupStablePet",
         lua.create_function(|lua, i: i64| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let texture = slot_index(i)
-                .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
-                .and_then(|p| p.icon.clone());
-            if let Some(texture) = texture {
-                model.cursor = Some(super::cursor::CursorPayload::StablePet(
-                    super::cursor::CursorStablePet {
-                        slot: i as u8,
-                        texture,
-                    },
-                ));
-                super::cursor::queue_cursor_update(&mut model);
+            let occupied = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                slot_index(i)
+                    .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
+                    .is_some()
+            };
+            if occupied {
+                super::cursor::set_cursor(lua, true, |model| {
+                    let texture = slot_index(i)
+                        .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
+                        .and_then(|p| p.icon.clone())?;
+                    Some(super::cursor::CursorPayload::StablePet(
+                        super::cursor::CursorStablePet {
+                            slot: i as u8,
+                            texture,
+                        },
+                    ))
+                });
             }
             Ok(())
         })?,
@@ -729,5 +741,36 @@ mod tests {
     fn the_paperdoll_setter_is_callable() {
         let s = UiScript::new().unwrap();
         s.eval::<()>("SetPetStablePaperdoll(nil)").unwrap();
+    }
+
+    /// The grab clears first (`0x495034`) and only then checks the family icon: a slot without one
+    /// leaves the cursor clear. The set fires nothing of its own, so every `CURSOR_UPDATE` reads
+    /// the emptied cursor.
+    #[test]
+    fn a_stable_grab_clears_before_its_icon_check() {
+        let mut s = UiScript::new().unwrap();
+        let mut iconless = pet(8, "Bruiser", 38);
+        iconless.icon = None;
+        s.set_stable(Some(state([Some(pet(7, "Rex", 41)), Some(iconless), None])));
+        crate::script::cursor::install_kind_probe(&s);
+        crate::script::tick::heard::listen(&s, &["CURSOR_UPDATE"], Some("CursorKind()"));
+        s.set_cursor_for_test(crate::script::cursor::CursorPayload::Macro(
+            crate::script::cursor::CursorMacro {
+                index: 1,
+                texture: None,
+            },
+        ));
+        s.run("PickupStablePet(1)").unwrap();
+        assert!(s.cursor_payload().is_none(), "cleared, and nothing grabbed");
+        assert_eq!(crate::script::tick::heard::take(&s), ["CURSOR_UPDATE none"]);
+        s.run("PickupStablePet(0)").unwrap();
+        assert!(matches!(
+            s.cursor_payload(),
+            Some(crate::script::cursor::CursorPayload::StablePet(_))
+        ));
+        assert_eq!(crate::script::tick::heard::take(&s), ["CURSOR_UPDATE none"]);
+        // An empty slot is the binding's own refusal, ahead of the grab and its clear.
+        s.run("PickupStablePet(2)").unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
     }
 }

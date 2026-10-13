@@ -76,8 +76,8 @@ pub(super) fn publish_view_focus(
         }
     }
     *was_flying = flying;
-    // Spawn caps pace only a live avatar in a settled world; under the loading cover (entry, a
-    // teleport, a world swap) a cap would only lengthen the reveal.
+    // Spawn caps pace only a live avatar in a settled world; through entry, a teleport or a world
+    // swap a cap would only lengthen the load.
     *focus = match player.as_deref() {
         Some(p) if p.active => {
             let wow = benilla_assets::coords::bevy_to_wow(p.pos);

@@ -237,6 +237,46 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// Whether a display id has a model row behind it (`CreatureDisplayInfo` → `CreatureModelData`),
+    /// the chain `0x5ec480` walks after the race row's id.
+    pub(crate) fn resolves_model(&self, display_id: u32) -> bool {
+        self.catalog.model(display_id).is_some()
+    }
+
+    /// A catalog with no cached models, for tests that only ask whether a display resolves.
+    #[cfg(test)]
+    pub(crate) fn from_catalog(catalog: CreatureCatalog) -> Self {
+        Creatures {
+            catalog,
+            models: HashMap::new(),
+        }
+    }
+
+    /// A cache of built, batch-less displays, each with a rig: `(display id, skeleton,
+    /// animations)`, for a booth test that bakes off [`Self::display_rig`].
+    #[cfg(test)]
+    pub(crate) fn rigged_for_test(
+        rigs: Vec<(
+            u32,
+            benilla_assets::ModelSkeleton,
+            Option<benilla_assets::ModelAnimations>,
+        )>,
+    ) -> Self {
+        let mut c = Creatures {
+            catalog: Default::default(),
+            models: HashMap::new(),
+        };
+        for (display_id, skeleton, animations) in rigs {
+            let mut dm = display::empty_shell();
+            dm.parts = Some(Vec::new());
+            dm.skeleton = skeleton;
+            dm.inverse_bindposes = Some(Handle::default());
+            dm.animations = animations;
+            c.models.insert(display_id, dm);
+        }
+        c
+    }
+
     /// A display's foley material (`Material.dbc` id), the creature half of the footfall rustle.
     pub(crate) fn foley_material(&self, display_id: u32) -> Option<u32> {
         self.catalog.foley_material(display_id)
@@ -853,7 +893,12 @@ fn setup_entities(
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
     match CharCreateCatalog::load(&mut chain) {
-        Ok(catalog) => commands.insert_resource(CharCreate(catalog)),
+        Ok(catalog) => {
+            if let Some(e) = catalog.name_gen_error() {
+                warn!("NameGen.dbc unavailable, the create screen's random name is empty: {e}");
+            }
+            commands.insert_resource(CharCreate(catalog));
+        }
         Err(e) => warn!("char-create catalog unavailable, the create screen is disabled: {e:#}"),
     }
     match load_item_display_catalog(&mut chain) {

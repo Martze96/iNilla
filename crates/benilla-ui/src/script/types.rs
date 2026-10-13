@@ -1,6 +1,6 @@
 use mlua::{Lua, Value};
 
-use crate::layout::{Anchor, Rect};
+use crate::layout::{Anchors, Rect};
 use crate::order::ZTarget;
 
 /// A value the host passes into Lua, such as a `fire_event` argument, without an mlua handle.
@@ -93,13 +93,20 @@ pub enum QuadContent {
         /// The embedded `CGLight`, off on every shipped pane; a lit batch under it draws black, as
         /// in the reference.
         light: crate::widget::ModelLight,
-        /// The fog, when armed; a material with the UNFOGGED bit ignores it.
+        /// The fog the scene draws with ([`crate::widget::ModelState::scene_fog`]); a material
+        /// with the UNFOGGED bit ignores it.
         fog: Option<crate::widget::ModelFog>,
+        /// A `ModelFFX` (`0x46fa00`): the glue screens' scene, which the app's glue booth draws.
+        ffx: bool,
     },
     /// A `Texture` region: a BLP path, a solid or vertex colour, or both (a tinted texture).
     Texture {
         path: Option<String>,
+        /// The solid fill times the one vertex colour; with `gradient`, the fill alone.
         color: Option<[f32; 4]>,
+        /// A gradient's four vertex colours, `[TL, TR, BR, BL]` ([`Gradient::vertex_colors`]),
+        /// each multiplying the texel and `color`; `None` for a one-colour quad.
+        gradient: Option<[[f32; 4]; 4]>,
         /// The `ADD` blend instead of straight alpha.
         additive: bool,
         /// `None` is the full texture.
@@ -129,17 +136,6 @@ pub enum QuadContent {
         /// `0..=1`; the widget's value moves only its marker, never the strip.
         sat: f32,
     },
-    /// One `Backdrop` piece, the tiled background or one of the 8 border pieces, drawn in the
-    /// frame's slot behind its regions; per-corner UVs, since the top and bottom edges turn 90°.
-    Backdrop {
-        path: String,
-        /// The `SetBackdropColor` or `SetBackdropBorderColor` tint, pre-alpha.
-        color: [f32; 4],
-        /// `[TL, TR, BR, BL]`, screen order.
-        uvs: [[f32; 2]; 4],
-        /// Sample with repeat (wrap) addressing.
-        tile: bool,
-    },
     /// A `FontString` region with its resolved font; the app measures and draws it.
     Text {
         text: Option<String>,
@@ -155,6 +151,9 @@ pub enum QuadContent {
         /// 1.12's `MasterFont` sets `(1,-1)` black, so nearly every stock font has one.
         shadow: Option<FontShadow>,
         outline: Outline,
+        /// The gap between lines in logical px, never negative: the line step is the font height
+        /// plus this, rounded up to a whole device pixel (`LayoutLines` `0x5cdc20`).
+        spacing: f32,
         /// `SetAlphaGradient`: before `start` opaque, the next `length` characters fading from 1
         /// to 0, the rest invisible.
         alpha_gradient: Option<(f32, f32)>,
@@ -294,6 +293,8 @@ pub struct FontObject {
     pub outline: Outline,
     pub justify_h: Option<JustifyH>,
     pub justify_v: Option<JustifyV>,
+    /// The gap between lines (`spacing=`, `SetSpacing`), stored as given (`+0x50`).
+    pub spacing: Option<f32>,
 }
 
 /// One entry of [`UiScript::extract`](super::UiScript::extract)'s render list, in the client's
@@ -303,7 +304,7 @@ pub struct ExtractedQuad {
     /// A frame's own slot, or one of its regions.
     pub target: ZTarget,
     /// The packed draw-order key (`ZKey::raw`); entries are sorted ascending by it.
-    pub z: u64,
+    pub z: u128,
     /// `None` when the owning frame's anchors do not resolve; a renderer skips it.
     pub rect: Option<Rect>,
     /// A frame's `effective_alpha`, or a region's alpha times its owner's, one hop only.
@@ -316,24 +317,31 @@ pub struct ExtractedQuad {
     pub scale: f32,
 }
 
-/// A two-stop linear gradient (`SetGradientAlpha`/`SetGradient`).
+/// A two-stop gradient (`SetGradientAlpha`/`SetGradient`, XML `<Gradient>`): the four-colour form
+/// of the vertex-colour slot (`+0xb0`, count 4), which `0x77f910` writes and `SetVertexColor`
+/// collapses back to one colour (`0x77f87f`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gradient {
-    /// `"VERTICAL"`, matched case-insensitively; anything else is horizontal, as in the client.
+    /// `VERTICAL` (1) rather than `HORIZONTAL` (0), the `0x811b00` enum.
     pub vertical: bool,
-    /// RGBA; `SetGradient`, which takes no alpha, sets both alphas to 1.
+    /// `MinColor`, RGBA in `0..=1`; `SetGradient`, which takes no alpha, sets both alphas to 1.
     pub start: [f32; 4],
+    /// `MaxColor`.
     pub end: [f32; 4],
 }
 
 impl Gradient {
-    /// The midpoint, the one colour a one-tint quad can show.
-    pub fn midpoint(&self) -> [f32; 4] {
-        let mut out = [0.0; 4];
-        for (i, chan) in out.iter_mut().enumerate() {
-            *chan = (self.start[i] + self.end[i]) / 2.0;
+    /// The quad's vertex colours in screen order `[TL, TR, BR, BL]`. `0x77f910` writes the
+    /// vertices in `0x7705b0`'s order `TL BL TR BR`: HORIZONTAL the min on the left pair and the
+    /// max on the right (`0x77f9c3`), VERTICAL the min on the bottom pair and the max on the top
+    /// (`0x77fa2c`).
+    pub fn vertex_colors(&self) -> [[f32; 4]; 4] {
+        let (min, max) = (self.start, self.end);
+        if self.vertical {
+            [max, max, min, min]
+        } else {
+            [min, max, max, min]
         }
-        out
     }
 }
 
@@ -346,16 +354,17 @@ pub(crate) struct RegionData {
     ///
     /// Deviation: kept apart from [`Self::vertex_color`], which the reference's `Texture:SetAlpha`
     /// (`0x79b580`) rewrites, because the drawn product differs only on a region that sets both,
-    /// which no stock code does, and a FontString's `SetAlpha` then keeps its font colour.
+    /// or a gradient and an alpha, which no stock code does, and a FontString's `SetAlpha` then
+    /// keeps its font colour.
     pub(crate) alpha: Option<f32>,
-    /// A texture path (`SetTexture("Interface\\...")`).
-    pub(crate) texture: Option<String>,
-    /// `SetTexture(r, g, b, a)` or an XML `<Color>` with no `file=`, sharing `+0xcc` with
-    /// [`Self::texture`]: setting one clears the other. The reference makes an 8×8 texture of it
-    /// (`0x770360` → `0x44a9c0` → `0x5c5350`), so its alpha multiplies with the vertex colour's.
-    pub(crate) fill: Option<[f32; 4]>,
-    /// `SetGradientAlpha`/`SetGradient`, stored whole and drawn as its midpoint: the renderer has
-    /// one tint per quad, so the reference's gradient is not built.
+    /// The texture slot (`+0xcc`): a path (`SetTexture("Interface\\...")`) or a solid fill
+    /// (`SetTexture(r, g, b, a)`, an XML `<Color>` with no `file=`), each clearing the other. The
+    /// reference makes an 8×8 texture of a fill (`0x770360` → `0x44a9c0` → `0x5c5350`), so its alpha
+    /// multiplies with the vertex colour's. Written only through [`super::Model::set_texel`].
+    pub(crate) tex: super::texel::TexSlot,
+    /// `SetGradientAlpha`/`SetGradient` or `<Gradient>`: four vertex colours, drawn as
+    /// `texel × vertexColour` like [`Self::vertex_color`], whose slot it shares, so setting either
+    /// clears the other. It is no texture: a gradient alone draws nothing (`0x7706e0`).
     pub(crate) gradient: Option<Gradient>,
     /// `SetVertexColor` (`0x79abd0` → `0x77f750`, `+0xb8`), `SetStatusBarColor` or a text colour,
     /// drawn as `texel × colour` per channel, alpha included: a `<Color 1,1,1,0.2>` tinted
@@ -381,7 +390,7 @@ pub(crate) struct RegionData {
     /// extent, never the owner's rect; one still unset leaves the region unresolved (`0x767a20`).
     /// Empty is a Lua region nobody anchored, which never draws: every other has an authored or
     /// creation-time anchor ([`super::region::implicit_creation_anchor`]).
-    pub(crate) anchors: Vec<Anchor>,
+    pub(crate) anchors: Anchors,
     /// `SetDesaturated` (`0x79c1e0`): the renderer greys the texel, so the binding reports support.
     pub(crate) desaturated: bool,
     /// `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`), `None` on. Stored, not applied:
@@ -392,9 +401,10 @@ pub(crate) struct RegionData {
     pub(crate) justify: crate::justify::Justify,
     /// The `<TexCoords>`/`SetTexCoord` mapping; `None` is the full texture.
     pub(crate) tex_coords: Option<TexCoords>,
-    /// `SetTexCoordModifiesRect`, the reference's `+0x124` (written only at `0x79c113`, in
-    /// `0x79c080`). Stored, not applied: there a set flag makes `SetTexCoord` re-derive the rect
-    /// from the UV quad (`0x770462`); no stock or corpus code sets it.
+    /// The reference's `+0x124`: `SetTexCoordModifiesRect` writes it (`0x79c113`, in `0x79c080`)
+    /// and installing the texture as a StatusBar's bar sets it (`0x783220`, in `0x7831f0`). Stored,
+    /// not applied: there a set flag makes `SetTexCoord` re-derive the rect from the UV quad
+    /// (`0x770462`); no stock or corpus code sets it.
     pub(crate) tex_coord_modifies_rect: bool,
     /// Rotation about the centre, radians counterclockwise; always 0: 1.12 has no Texture setter.
     pub(crate) rotation: f32,
@@ -415,6 +425,11 @@ pub(crate) struct RegionData {
     pub(crate) outline: Outline,
     /// Resolved drop shadow (font object `<Shadow>`), drawn behind the glyphs.
     pub(crate) font_shadow: Option<FontShadow>,
+    /// The gap between lines, as set (`SetSpacing`, XML `spacing=` or the font object): a
+    /// FontString's own setter clamps it (`0x772240`), the message frames' and the EditBox's font
+    /// stores it raw (`0x79fb40`). A line string reads it through [`Self::line_gap`]; the plain
+    /// message frame's pitch reads it raw (`0x785f06`).
+    pub(crate) spacing: f32,
     /// The host-measured size of a FontString with no explicit height.
     pub(crate) measured: Option<MeasuredText>,
 }
@@ -439,6 +454,8 @@ pub(crate) struct FontExplicit {
     pub(crate) justify_h: bool,
     /// `SetJustifyV`, or XML `justifyV=`.
     pub(crate) justify_v: bool,
+    /// `SetSpacing`, or XML `spacing=` (inherit bit `0x10`).
+    pub(crate) spacing: bool,
 }
 
 /// A cached host measurement of a FontString's laid-out text.
@@ -466,9 +483,26 @@ impl MeasuredText {
 }
 
 impl RegionData {
-    /// The measure-cache key of the text, font, wrap width, outline and owner scale. A Lua metric
-    /// read treats a measure under another key as absent; the layout keeps the old box until the
-    /// new one lands, except for empty text, which is never measured.
+    /// Write the one vertex colour (`0x77f750`), which collapses a gradient's four (`0x77f87f`).
+    pub(crate) fn set_vertex_color(&mut self, color: Option<[f32; 4]>) {
+        self.vertex_color = color;
+        self.gradient = None;
+    }
+
+    /// The gap a line string lays its lines out by: [`Self::spacing`] clamped at 0, as a line
+    /// string stores it through `0x772240`.
+    pub(crate) fn line_gap(&self) -> f32 {
+        self.spacing.max(0.0)
+    }
+
+    /// The shadow's x offset in UI units, 0 for none ([`MeasureRequest::shadow_x`]).
+    pub(crate) fn shadow_x(&self) -> f32 {
+        self.font_shadow.map_or(0.0, |s| s.offset[0])
+    }
+
+    /// The measure-cache key of the text, font, wrap width, outline, line gap, shadow and owner
+    /// scale. A Lua metric read treats a measure under another key as absent; the layout keeps the
+    /// old box until the new one lands, except for empty text, which is never measured.
     pub(crate) fn measure_key(&self, scale: f32) -> u64 {
         // By reference: `String` hashes as `str` does, and this runs for every FontString every
         // frame, so a clone would allocate for nothing.
@@ -486,8 +520,10 @@ impl RegionData {
         let wrap_width = self.size.map(|s| s.0).filter(|w| *w > 0.0);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         // The outline changes the measure: a THICK one steps each glyph 1 px further
-        // (`GlyphStepBase 0x5ca2b0`).
+        // (`GlyphStepBase 0x5ca2b0`); so does the shadow's x offset, which seeds the line.
         (self.outline as u8).hash(&mut hasher);
+        self.line_gap().to_bits().hash(&mut hasher);
+        self.shadow_x().to_bits().hash(&mut hasher);
         scale.to_bits().hash(&mut hasher);
         hasher.finish()
     }
@@ -505,6 +541,11 @@ pub struct EditBoxAdvanceRequest {
     pub height: Option<f32>,
     /// A THICK outline adds 1 px to every glyph step (`GlyphStepBase 0x5ca2b0`).
     pub outline: Outline,
+    /// The gap between a multiline box's rows, in frame-local units: the row pitch is the height
+    /// plus it (`0x77d133`-`0x77d161`).
+    pub spacing: f32,
+    /// The shadow's x offset in UI units, 0 for none: it seeds each drawn row's pen.
+    pub shadow_x: f32,
     /// The box's `effective_scale`. The host measures at `height × scale × seam` but divides by
     /// the seam alone, so advances come back in screen UI units, like the mouse feed and the
     /// box's rect; a [`MeasureRequest`] answer is frame-local instead.
@@ -558,6 +599,12 @@ pub struct MeasureRequest {
     pub wrap_width: Option<f32>,
     /// A THICK outline adds 1 px to every glyph step (`GlyphStepBase 0x5ca2b0`).
     pub outline: Outline,
+    /// The gap between wrapped lines in frame-local units ([`RegionData::line_gap`]), scaled like
+    /// the height: the measure is `N·S + (N−1)·gap` (`0x5c2070`).
+    pub spacing: f32,
+    /// The shadow's x offset in UI units, 0 for none: `GetStringWidth` seeds its line with it,
+    /// unscaled by the frame (`0x772890` hands `[fs+0x108]` to the kernel as it is).
+    pub shadow_x: f32,
     /// The owner's `effective_scale`. The host measures at `font_height × scale × seam` and
     /// divides by that whole product: advances step to whole pixels, so a measure at the
     /// unscaled size is not proportional to the drawn one.
@@ -581,6 +628,8 @@ pub struct LineMeasureRequest {
     /// The frame's inner width: already scale-multiplied, unlike `height`, the font's own size.
     pub wrap_width: f32,
     pub outline: Outline,
+    /// The font's shadow x offset in UI units, 0 for none: it seeds each drawn row's pen.
+    pub shadow_x: f32,
     /// As for [`MeasureRequest::scale`].
     pub scale: f32,
     pub text: String,

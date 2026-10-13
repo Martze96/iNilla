@@ -57,6 +57,16 @@ pub(crate) fn str_at(rs: &RecordSet, r: &Record, i: usize) -> Option<String> {
     }
 }
 
+/// The `Name_Lang` column benilla reads, the enUS one (the reference reads its client's locale
+/// slot, `[0xc0e080]`). Other locales are unsupported for now (issue #429).
+pub(crate) const LOCALE_SLOT: usize = 0;
+
+/// The name a `Name_Lang` block holds, the eight locale columns from `first`: the column at
+/// [`LOCALE_SLOT`], `None` when it is empty.
+pub(crate) fn name_lang_at(rs: &RecordSet, r: &Record, first: usize) -> Option<String> {
+    str_at(rs, r, first + LOCALE_SLOT)
+}
+
 /// `SpellIcon.dbc`: id → extensionless texture path (`Interface\Icons\…`).
 pub(crate) fn load_spell_icon_map(chain: &mut Chain) -> Result<HashMap<u32, String>> {
     let bytes = chain

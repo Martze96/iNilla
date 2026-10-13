@@ -22,6 +22,33 @@ mod regions;
 mod scripts;
 mod widgets;
 
+impl LoadReport {
+    /// A load fault that is no script raise: the handler hears the row's own text.
+    pub(super) fn fault(&mut self, text: String) {
+        self.handler_errors.push(text.clone());
+        self.errors.push(text);
+    }
+
+    /// A script raise: the row is `text`, the handler hears the bare Lua message of `e`.
+    pub(super) fn raise(&mut self, text: String, e: &mlua::Error) {
+        self.handler_errors.push(crate::script::lua_message(e));
+        self.errors.push(text);
+    }
+
+    /// Each of [`Self::errors`] with what the Lua error handler is called with for it.
+    pub fn raised(&self) -> impl Iterator<Item = (&str, &str)> {
+        debug_assert_eq!(
+            self.errors.len(),
+            self.handler_errors.len(),
+            "every error row is written through `fault` or `raise`"
+        );
+        self.errors
+            .iter()
+            .map(String::as_str)
+            .zip(self.handler_errors.iter().map(String::as_str))
+    }
+}
+
 /// The outcome of a [`load`]; nothing aborts a load, as the reference logs and continues.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadReport {
@@ -31,6 +58,11 @@ pub struct LoadReport {
     /// Failures the reference raises on: a handler that fails to compile, a method call that
     /// errors, a malformed included document.
     pub errors: Vec<String>,
+    /// What the Lua error handler is called with for each of [`Self::errors`], row for row
+    /// ([`Self::raised`]): the bare Lua message of a raise, as `lua_pcall` leaves it for the
+    /// reference's error function (`0x703b40`), and the row's own text for a fault that is no
+    /// script raise.
+    handler_errors: Vec<String>,
     /// `<Include file=>` and `<Script file=>` paths the provider lacks. The reference logs
     /// `"Couldn't open %s"` (`0x6edaa0`, `0x846ff4`) or `"Error loading %s"` (`0x872e50`) and goes
     /// on (`0x6ee00d`); kept apart from `warnings` so a load that resolved nothing is not clean.
@@ -101,15 +133,17 @@ pub fn load_into_under(
     loader.report
 }
 
-/// Apply a template to an existing frame, `CreateFrame`'s fourth argument. Returns the warnings,
-/// then the errors. The frame always survives: an unknown name leaves it bare, as in the
-/// reference, and only virtual elements are registered. The frame's own name is the `$parent`
+/// Apply a template to an existing frame, `CreateFrame`'s fourth argument. Returns the report:
+/// its errors are script errors for the error handler, as the reference's `CreateFrame` builds the
+/// template through the XML instantiator `0x6ee280`, whose OnLoad runs under the error function
+/// (`0x704d50`). The frame always survives an error, and only virtual elements are registered; an
+/// unknown name never gets here, since the binding raises first. The frame's own name is the `$parent`
 /// base (`MyButton` makes `$parentText` `MyButtonText`). Runs inside the `CreateFrame` binding, so
 /// it enters at [`Loader::decorate`]: [`Loader::materialize`] would recurse.
-pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &str) -> Vec<String> {
+pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &str) -> LoadReport {
     let template = template.trim();
     if template.is_empty() {
-        return Vec::new();
+        return LoadReport::default();
     }
     // A template never reads a file: `<Include>` and `<Script file=>` are top-level only.
     let no_files = |_: &str| -> Option<Vec<u8>> { None };
@@ -136,14 +170,8 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
     {
         let model = loader.model();
         let templates = model.framexml_templates.borrow();
-        // Looked up as `framexml::expand` looks it up (exact, then case-folded); keep them in step.
         for name in [template].into_iter().filter(|s| !s.is_empty()) {
-            let Some(el) = templates.get(name).or_else(|| {
-                templates
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                    .map(|(_, v)| v)
-            }) else {
+            let Some(el) = templates.get(name) else {
                 continue;
             };
             any_resolved = true;
@@ -179,9 +207,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
 
     loader.decorate(&expanded, wrapper, &self_name, &parent_name, &dbg);
 
-    let mut out = loader.report.warnings;
-    out.extend(loader.report.errors);
-    out
+    loader.report
 }
 
 /// Join a FrameXML reference to its file's directory, lexically: `\` and `/` both separate, `..`
@@ -209,11 +235,10 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
-/// A `CSimpleModel` kind, whose `LoadXML` (`0x76cac0`) reads `scale=` as the model's scale.
+/// A `CSimpleModel` kind, whose `LoadXML` (`0x76cac0`) reads `scale=` as the model's scale;
+/// `ModelFFX` shares it (its second vtable's slot 2).
 pub(super) fn model_kind_tag(tag: &str) -> bool {
-    ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
-        .iter()
-        .any(|k| k.eq_ignore_ascii_case(tag))
+    crate::script::frame_kind_from_tag(tag).is_some_and(crate::widget::FrameKind::is_model)
 }
 
 impl Loader<'_> {
@@ -352,8 +377,7 @@ impl Loader<'_> {
                         Some(bytes) => {
                             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
                                 self.report
-                                    .errors
-                                    .push(format!("<Script file=\"{path}\">: {e}"));
+                                    .raise(format!("<Script file=\"{path}\">: {e}"), &e);
                             }
                         }
                         None => {
@@ -377,23 +401,51 @@ impl Loader<'_> {
                     // `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a file path.
                     let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
                     if let Err(e) = self.run_named(&chunk, &name) {
-                        self.report.errors.push(format!("inline <Script>: {e}"));
+                        self.report.raise(format!("inline <Script>: {e}"), &e);
                     }
                 }
                 TopLevel::Font(el) => self.do_font(el),
-                TopLevel::Template(el) => {
-                    // Registered raw; `expand` resolves its own `inherits` at instantiation. An
-                    // unnamed one was warned at parse time.
-                    if let Some(name) = el.name() {
-                        self.model()
-                            .framexml_templates
-                            .borrow_mut()
-                            .insert(name.to_string(), el.clone());
-                    }
-                }
+                TopLevel::Template(el) => self.register_template(el),
                 TopLevel::Instance(el) => {
                     let expanded = self.expand(el);
                     self.materialize(&expanded, None, framexml::DEFAULT_PARENT_NAME);
+                }
+            }
+        }
+    }
+
+    /// A top-level `virtual` element, registered raw (`0x6ee500`, called at `0x6ee1bd` under the
+    /// live context word): `expand` resolves its own `inherits` at instantiation.
+    fn register_template(&mut self, el: &Element) {
+        // No name, or an empty one (`0x6ee1a9` tests its first byte): `0x871020` at severity 1
+        // into the document's record (`0x6ee1c4`-`0x6ee1cf`), and nothing registers.
+        let Some(name) = el.name().filter(|n| !n.is_empty()) else {
+            let line = "Unnamed virtual node at top level";
+            self.report.status.report(status::WARNING, line);
+            self.report.warnings.push(line.to_string());
+            return;
+        };
+        let model = self.model();
+        let context = model.exec_context.borrow().clone();
+        let registered =
+            model
+                .framexml_templates
+                .borrow_mut()
+                .register(name, el.clone(), context.as_deref());
+        drop(model);
+        match registered {
+            framexml::Registration::Refused => {
+                // `0x871188` over the refused spelling, at severity 1 into the document's record.
+                let line = format!("Virtual object named {name} already exists");
+                self.report.status.report(status::WARNING, line.clone());
+                self.report.warnings.push(line);
+            }
+            // Either way the entry now holds this node, traced at `0x6ee6dd` (`0x87116c`).
+            framexml::Registration::Added | framexml::Registration::Replaced => {
+                if self.debug() {
+                    let trace = format!("-- Added virtual frame {name}");
+                    self.report.status.report(status::TRACE, trace.clone());
+                    self.report.traces.push(trace);
                 }
             }
         }
@@ -418,8 +470,7 @@ impl Loader<'_> {
         if status::runs_as_lua(&joined) {
             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
                 self.report
-                    .errors
-                    .push(format!("<Include file=\"{path}\">: {e}"));
+                    .raise(format!("<Include file=\"{path}\">: {e}"), &e);
             }
             return;
         }
@@ -441,9 +492,7 @@ impl Loader<'_> {
             Err(e) => {
                 let line = status::unparsed(&self.status_path(&joined));
                 self.report.status.report(status::FAILURE, line);
-                self.report
-                    .errors
-                    .push(format!("<Include file=\"{path}\">: {e}"))
+                self.report.fault(format!("<Include file=\"{path}\">: {e}"))
             }
         }
     }
@@ -452,17 +501,14 @@ impl Loader<'_> {
     pub(super) fn expand(&mut self, el: &Element) -> Element {
         let model = self.model();
         let templates = model.framexml_templates.borrow();
-        let view: HashMap<&str, &Element> =
-            templates.iter().map(|(k, v)| (k.as_str(), v)).collect();
         // A font object in an inherit chain is skipped, not warned as an unknown template.
         let fonts = model.framexml_fonts.borrow();
         let font_names: std::collections::HashSet<&str> =
             fonts.keys().map(|k| k.as_str()).collect();
         let mut warns = Vec::new();
-        let out = framexml::expand_known(el, &view, &font_names, &mut warns);
+        let out = framexml::expand_known(el, &*templates, &font_names, &mut warns);
         drop(font_names);
         drop(fonts);
-        drop(view);
         drop(templates);
         drop(model);
         self.report.warnings.extend(warns);
@@ -474,11 +520,7 @@ impl Loader<'_> {
     pub(super) fn expand_region(&mut self, el: &Element) -> Element {
         // One verbatim name, matched case-insensitively, as `framexml::expand` looks it up.
         let hit = el.attr("inherits").is_some_and(|name| {
-            let model = self.model();
-            let templates = model.framexml_templates.borrow();
-            !name.is_empty()
-                && (templates.contains_key(name)
-                    || templates.keys().any(|k| k.eq_ignore_ascii_case(name)))
+            !name.is_empty() && self.model().framexml_templates.borrow().contains(name)
         });
         if hit {
             self.expand(el)
@@ -600,8 +642,7 @@ impl Loader<'_> {
             Ok(f) => f,
             Err(e) => {
                 self.report
-                    .errors
-                    .push(format!("CreateFrame global missing: {e}"));
+                    .fault(format!("CreateFrame global missing: {e}"));
                 return None;
             }
         };
@@ -609,7 +650,7 @@ impl Loader<'_> {
             match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
-                    self.report.errors.push(format!(
+                    self.report.fault(format!(
                         "CreateFrame(<{}>{}): {e}",
                         el.tag,
                         resolved_name
@@ -663,17 +704,25 @@ impl Loader<'_> {
         // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, `0x767800`).
         self.apply_size(el, wrapper, dbg_name);
         self.apply_anchors(el, wrapper, parent_name, dbg_name);
-        // 5 · <Layers> regions (`0x769d70`); `$parent` in a region name is this frame.
-        self.apply_layers(el, wrapper, self_name, dbg_name);
+        // 5 · <Layers> regions (`0x769d70`) and the <Backdrop> plate (`0x77e6c0`), whose nine
+        //     pieces are regions too, in document order: both are arms of the one child loop
+        //     (`0x769b1c`), so the order they link into `GetRegions` is the file's. A template's
+        //     children come first, as its LoadXML runs first. `$parent` in a region name is this
+        //     frame.
+        for child in &el.children {
+            if child.tag.eq_ignore_ascii_case("Layers") {
+                self.apply_layers(child, wrapper, self_name, dbg_name);
+            } else if child.tag.eq_ignore_ascii_case("Backdrop") {
+                self.apply_backdrop(child, wrapper, dbg_name);
+            }
+        }
         // 5·b · a direct-child `<FontString>`: the widget's own text font (EditBox, message frame).
         self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
-        // 5a · <Backdrop> plate (LoadXML `0x77e6c0`): the tiled bg + 8-piece border.
-        self.apply_backdrop(el, wrapper, dbg_name);
         // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
         self.apply_title_region(el, wrapper, self_name, dbg_name);
         // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
         //      so a Frame wearing a <Button> template skips the Button steps.
-        self.apply_statusbar(el, wrapper, dbg_name);
+        self.apply_statusbar(el, wrapper, self_name, dbg_name);
         self.apply_slider(el, wrapper, self_name, dbg_name);
         self.apply_colorselect(el, wrapper, self_name, dbg_name);
         self.apply_button(el, wrapper, self_name, dbg_name);
@@ -683,6 +732,9 @@ impl Loader<'_> {
         self.apply_minimap(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (`0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
+        // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
+        //      inside the load window, so ahead of every <Frames> child and of our own OnLoad.
+        self.apply_scrollframe(el, wrapper, self_name, dbg_name);
 
         // 7 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
         //     <Frames>, whose OnLoads fire before ours (`0x76a060`).
@@ -691,28 +743,6 @@ impl Loader<'_> {
             for child in &frames_el.children {
                 let expanded = self.expand(child);
                 self.materialize(&expanded, Some(wrapper), self_name);
-            }
-        }
-
-        // 7b · <ScrollChild>: its one child is built through `Instantiate 0x6ee280` like
-        //      `<Frames>`, then stored at `+0x318` with `+0x314 = 1`, which is `SetScrollChild`
-        //      and gives the ScrollFrame its scroll range. An empty one errors in the reference.
-        for sc in children_named(el, "ScrollChild") {
-            let Some(child) = sc.children.first() else {
-                self.report.errors.push(format!(
-                    "{dbg_name}: <ScrollChild> is empty — the reference errors here, and a \
-                     ScrollFrame with no child has no scroll range at all"
-                ));
-                continue;
-            };
-            let expanded = self.expand(child);
-            let Some(child_wrapper) = self.materialize(&expanded, Some(wrapper), self_name) else {
-                continue; // materialize already reported why
-            };
-            if let Err(e) = wrapper.call_method::<()>("SetScrollChild", child_wrapper) {
-                self.report
-                    .errors
-                    .push(format!("{dbg_name}: <ScrollChild>: {e}"));
             }
         }
 
@@ -902,10 +932,18 @@ pub(super) fn font_object_from_element(el: &Element) -> FontObject {
         justify_h,
         justify_v,
         shadow,
+        // `spacing=` (`0x783ee0`, read with `atof` when not empty), inherited down the flattened
+        // chain like the other attributes.
+        spacing: el
+            .attr("spacing")
+            .filter(|v| !v.is_empty())
+            .map(crate::framexml::atof),
     }
 }
 
 #[cfg(test)]
 mod template_name_tests;
+#[cfg(test)]
+mod template_registry_tests;
 #[cfg(test)]
 mod tests;
