@@ -18,6 +18,8 @@ use bevy::app::AppExit;
 /// Why the client cannot start: the message a person is shown and a log carries.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct NoInstall {
+    // iNilla: read only by the dialog, which iOS does not have.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     title: &'static str,
     message: String,
 }
@@ -74,6 +76,10 @@ fn message(looked_in: &[PathBuf]) -> String {
 /// is `unattended`, so an instrumented run never waits on a click.
 pub(crate) fn fail(err: &NoInstall, unattended: bool) -> AppExit {
     eprintln!("benilla: {}", err.message());
+    // iNilla: no dialog on iOS, where rfd has no backend; stderr is the session log there.
+    #[cfg(target_os = "ios")]
+    let _ = unattended;
+    #[cfg(not(target_os = "ios"))]
     if !unattended {
         // Linux shows it through `zenity` and logs nothing when that is missing, which stderr covers.
         rfd::MessageDialog::new()

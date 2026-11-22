@@ -54,10 +54,6 @@ fancy-regex = { version = "0.18", default-features = false, features = ["std", "
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
-# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
-# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
-# parent handle, which a message dialog without a parent never reads.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Thread-to-ECS channels: crossbeam's `Receiver` is `Sync`, so it is a resource without a mutex.
 crossbeam-channel = "0.5"
 benilla-assets = { path = "../benilla-assets", default-features = false }
@@ -122,6 +118,11 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 # on iOS, where arboard has no backend (it would build its X11 one) — `inilla-platform::pasteboard` is.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 arboard = "3"
+# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
+# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
+# parent handle, which a message dialog without a parent never reads. iNilla: not on iOS, where
+# rfd has no backend; there stderr, the session log, carries the message.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 # iNilla: the game's UIView behind Bevy's raw window handle (the safe-area insets), and winit's
 # iOS window extension (the landscape lock). The versions already in the tree via Bevy.

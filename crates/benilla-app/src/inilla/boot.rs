@@ -23,6 +23,13 @@ use inilla_platform::{device, paths, stdio};
 /// How many session logs to keep in `Diagnostics/`.
 const KEEP_LOGS: usize = 10;
 
+/// Whether a boot without a WoW install goes on, for the setup screen to supply the data: inside
+/// the app container, the same switch under which [`prepare`] sets `WOW_DATA=` until the data is
+/// complete. Off it, upstream's fatal `no_install` holds.
+pub(crate) fn sets_up_data() -> bool {
+    paths::in_container()
+}
+
 /// Prepare the process. Call once, first thing, before [`crate::run`].
 pub fn prepare() {
     if !paths::in_container() {

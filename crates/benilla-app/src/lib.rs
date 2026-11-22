@@ -298,7 +298,16 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // Fonts, art and the stock interface all come from the install, so without one the client
     // ends here, before any window or plugin exists (`no_install`).
     let data_dir = match no_install::resolve() {
-        Ok(data_dir) => data_dir,
+        Ok(data_dir) => Some(data_dir),
+        // iNilla: the first start on iOS has no data yet; its setup screen fetches or imports it
+        // and asks for a restart, so the boot goes on without an `mpq://` source.
+        Err(err) if inilla::boot::sets_up_data() => {
+            eprintln!(
+                "benilla: {} (iNilla: the setup screen supplies it)",
+                err.message()
+            );
+            None
+        }
         Err(err) => return no_install::fail(&err, run_mode::unattended()),
     };
 
@@ -355,12 +364,15 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
 
     // The `mpq://` source must be registered before `AssetPlugin` (in `DefaultPlugins`) builds. The
     // install is found by `benilla_formats::wow_data`, as everywhere, and is required above; one
-    // whose archives will not open ends the boot the same way (`no_install`).
-    if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
-        return no_install::fail(
-            &no_install::NoInstall::unreadable(&data_dir, &e),
-            run_mode::unattended(),
-        );
+    // whose archives will not open ends the boot the same way (`no_install`). iNilla: none while
+    // the setup screen supplies the data (`inilla::boot::sets_up_data`).
+    if let Some(data_dir) = &data_dir {
+        if let Err(e) = benilla_assets::register_mpq_source(&mut app, data_dir) {
+            return no_install::fail(
+                &no_install::NoInstall::unreadable(data_dir, &e),
+                run_mode::unattended(),
+            );
+        }
     }
 
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`

@@ -27,8 +27,9 @@ Every upstream file iNilla changes, and why. Each change is marked `iNilla` in a
 | file | change |
 |---|---|
 | `Cargo.toml` | `[profile.ios]` (release, no LTO, symbols kept) |
-| `crates/benilla-app/Cargo.toml` | depends on `inilla-core`, `inilla-platform`, `ureq`, `serde_json`; `bevy_egui` no longer optional; `arboard` not on iOS; the Wayland clipboard's `cfg` excludes iOS; `raw-window-handle` and `winit` on iOS |
-| `crates/benilla-app/src/lib.rs` | `mod inilla`, `pub use inilla_boot`, `add_plugins(inilla::InillaPlugin)` |
+| `crates/benilla-app/Cargo.toml` | depends on `inilla-core`, `inilla-platform`, `ureq`, `serde_json`; `bevy_egui` no longer optional; `arboard` and `rfd` not on iOS; the Wayland clipboard's `cfg` excludes iOS; `raw-window-handle` and `winit` on iOS |
+| `crates/benilla-app/src/lib.rs` | `mod inilla`, `pub use inilla_boot`, `add_plugins(inilla::InillaPlugin)`; with no install the boot goes on without `mpq://` while `inilla::boot::sets_up_data()` (in the app container), for the setup screen |
+| `crates/benilla-app/src/no_install.rs` | no `rfd` dialog on iOS (stderr, the session log, carries the message) |
 | `crates/benilla-app/src/bindings.rs` | the synthetic seam: `Held::Synth` and `BindingLatches::synth_hold`/`synth_release`/`synth_release_all` |
 | `crates/benilla-app/src/textinput/clipboard.rs` | the iOS pasteboard backend |
 | `crates/benilla-app/src/net/io.rs` | the world address passes through `inilla::world_address` (the realm override) |
