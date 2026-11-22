@@ -34,8 +34,9 @@ use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
-use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::target::{selection_variant, CombatFlash, Factions, RingVariant, Selection};
+use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
+use crate::target::{selection_variant, CombatFlash, RingVariant, Selection};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, TextSeat, UiFontAtlas};
 use benilla_world::view::WorldCamera;
 
@@ -75,32 +76,53 @@ impl Default for NameConfig {
 /// The a1-a3 prefix slots of the line stack (`0x608f50`), CGPlayer vtable `+0x7c/+0x80/+0x84`
 /// (`0x5ec9e0`, `0x5eca40`, `0x5eca80`): each set `PLAYER_FLAGS` bit (vmangos `Player.h:316-318`)
 /// stacks in slot order with no space before the name; the base CGUnit slots are stubs, so NPCs
-/// never decorate. The tags are `CHAT_FLAG_AFK/DND/GM` (`GlobalStrings.lua:534-536`).
+/// never decorate. Each slot's tag is the global `FrameScript_GetText` answers for its key
+/// (`0x5eca17`, `0x5eca54`, `0x5eca99`); a missing or empty one adds none (`0x5eca23`, `0x5eca28`).
 /// The own player's AFK slot also reads the client-side mirror `[0xb6e5cc]` ([`drive_nameplates`]).
-const FLAG_PREFIXES: [(u32, &str); 3] = [(0x2, "<AFK>"), (0x4, "<DND>"), (0x8, "<GM>")];
+pub(crate) const FLAG_PREFIXES: [(u32, &str); 3] = [
+    (0x2, "CHAT_FLAG_AFK"),
+    (0x4, "CHAT_FLAG_DND"),
+    (0x8, "CHAT_FLAG_GM"),
+];
 
 /// The name-line prefix for a player's `PLAYER_FLAGS`; empty when unflagged.
-fn flag_prefix(player_flags: u32) -> String {
+fn flag_prefix(player_flags: u32, strings: &NameLineStrings) -> String {
     FLAG_PREFIXES
         .iter()
         .filter(|(bit, _)| player_flags & bit != 0)
-        .map(|(_, s)| *s)
+        .filter_map(|(_, key)| strings.strings.get(*key))
+        .map(String::as_str)
         .collect()
 }
 
-/// The strings the a4 rank prefix resolves (`UNIT_PVP_NAME` and the `PVP_RANK_*` titles), which
-/// the honor feed reads off each VM once ([`crate::ui_honor`]), where `0x609370` reads them live
-/// at every rebuild: the world-text pass runs without the VM.
+/// The strings the name line resolves, the a1-a3 flag tags ([`FLAG_PREFIXES`]) and the a4 rank
+/// prefix's (`UNIT_PVP_NAME` and the `PVP_RANK_*` titles). `0x5ec9e0`-`0x5ecabb` and `0x609370`
+/// read them at every rebuild; the world-text pass runs without the VM, so a player line's rebuild
+/// asks ([`Self::ask_reread`]) and the honor feed reads them the next frame with the host lent
+/// ([`crate::ui_honor`]), a change rebuilding the lines that used them.
 #[derive(Resource, Default)]
-pub(crate) struct PvpNameStrings {
+pub(crate) struct NameLineStrings {
     /// The VM session the strings were read from; `None` before the first VM.
     session: Option<u64>,
     /// Moves when a read changes the strings, so a line built from the old ones rebuilds.
     generation: u64,
     strings: HashMap<String, String>,
+    /// A player line rebuilt from the held strings since the last read.
+    reread: std::sync::atomic::AtomicBool,
 }
 
-impl PvpNameStrings {
+impl NameLineStrings {
+    /// A player line was rebuilt: read the strings again.
+    pub(crate) fn ask_reread(&self) {
+        self.reread
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a rebuild asked for a read since the last one, clearing the ask.
+    pub(crate) fn take_reread(&mut self) -> bool {
+        std::mem::take(self.reread.get_mut())
+    }
+
     /// The VM session the strings were read from; `None` before the first VM.
     pub(crate) fn session(&self) -> Option<u64> {
         self.session
@@ -148,7 +170,7 @@ struct TitleKey {
     title: benilla_ui::script::RankTitle,
     /// The a4 bit (`0x20`) was set and the strings held the template when the line was built.
     on: bool,
-    /// The [`PvpNameStrings`] generation the line was built from.
+    /// The [`NameLineStrings`] generation the line was built from.
     strings: u64,
 }
 
@@ -156,7 +178,8 @@ struct TitleKey {
 /// its descriptor arrives.
 fn title_key(
     cfg: &NameConfig,
-    strings: &PvpNameStrings,
+    strings: &NameLineStrings,
+    teams: Option<&crate::chr_classes::RacePvpTeams>,
     net: &NetEntity,
     store: Option<&ObjectStore>,
 ) -> Option<TitleKey> {
@@ -164,10 +187,12 @@ fn title_key(
     (net.kind == EntityKind::Player).then(|| TitleKey {
         title: benilla_ui::script::RankTitle {
             rank: store.0.player_pvp_rank().unwrap_or(0),
+            // The race's side off the chain (`0x5efe00`), -1 with no table.
             team: store
                 .0
                 .unit_race()
-                .map_or(-1, crate::ui_unit::race_pvp_team),
+                .zip(teams)
+                .map_or(-1, |(race, teams)| teams.team(race)),
             female: store.0.unit_gender() == Some(1),
         },
         on: cfg.player_pvp_title && strings.ready(),
@@ -177,13 +202,24 @@ fn title_key(
 
 /// `0x608f50`'s main name line: the a1-a3 flag tags glued on with no separator, then the a4 slot,
 /// `0x609370`'s ranked-player leg where `key` is on and the builder resolves, else the plain name.
-fn name_line(flags: u32, key: Option<TitleKey>, strings: &PvpNameStrings, name: &str) -> String {
+fn name_line(flags: u32, key: Option<TitleKey>, strings: &NameLineStrings, name: &str) -> String {
     let decorated = key
         .filter(|key| key.on)
         .and_then(|key| strings.decorated(key, name));
-    let mut line = flag_prefix(flags);
+    let mut line = flag_prefix(flags, strings);
     line.push_str(decorated.as_deref().unwrap_or(name));
     line
+}
+
+/// The name block through the grammar rewrite `0x7716f0` before it is built (`0x6c703f`): the
+/// whole text `0x608f50` made, lines and all, so a `|1` or `|2` reads what came before it across
+/// the line breaks.
+fn grammar_lines(lines: Vec<String>) -> Vec<String> {
+    let text = lines.join("\n");
+    match benilla_ui::strings::expand_grammar_escapes(&text) {
+        std::borrow::Cow::Borrowed(_) => lines,
+        std::borrow::Cow::Owned(rewritten) => rewritten.split('\n').map(str::to_owned).collect(),
+    }
 }
 
 /// A live plate: its entity and stack, and the inputs the stack was built from, so a steady frame
@@ -275,10 +311,19 @@ const ROCK_SNAP: f32 = 1.0;
 /// larger source is crisper up close.
 const BAKE_PX: f32 = 36.0;
 
+/// The face of the overhead names: the Lua global `UNIT_NAME_FONT`, resolved once per world
+/// session. `PlayerNameInitialize` (`0x6c7470`) reads it through `FrameScript::GetVariable`
+/// (`0x704350`) at world entry and creates the name font from it (`GxuFontCreateFont`, `0x5c1ae0`,
+/// size 0.99, flags 4) into `s_nameFont` (`0xce8738`); each locale's `Fonts.xml` assigns it, so a
+/// zhCN install names a CJK face. `None` draws in the default face, as `DamageTextFont` does.
+#[derive(Resource, Default)]
+pub(crate) struct UnitNameFont(pub(crate) Option<String>);
+
 /// Build one name-block mesh in pitch units: x centered, y up, line `i`'s baseline at
 /// `lineCount - i`, one pitch being the font size. The baseline sits `TextEngine::ascent_ratio`
-/// into the layout cell (the `[0x17c]` load param), as in the 2-D path.
-fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
+/// into the layout cell (the `[0x17c]` load param), as in the 2-D path. `font` is the
+/// `UNIT_NAME_FONT` face, for the baseline and the glyphs both.
+fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String], font: Option<&str>) -> Mesh {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Indices, PrimitiveTopology};
 
@@ -293,7 +338,7 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
     // The size the glyphs are laid out at: `BAKE_PX` rounded to whole device pixels and back.
     let src = e.drawn_size(BAKE_PX);
     let baseline_frac =
-        ((f64::from(src) * f64::from(e.ascent_ratio(None)) + 0.5).floor() / f64::from(src)) as f32;
+        ((f64::from(src) * f64::from(e.ascent_ratio(font)) + 0.5).floor() / f64::from(src)) as f32;
     for (i, line) in lines.iter().enumerate() {
         let glyphs = layout_text_quads(
             &mut e,
@@ -306,12 +351,15 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
             },
             0,
             FontSpec {
-                path: None, // UNIT_NAME_FONT = Friz Quadrata, the default face
+                path: font, // UNIT_NAME_FONT
                 height: Some(BAKE_PX),
                 outline: Outline::None,
+                monochrome: false,
                 spacing: 0.0, // one line
                 shadow_x: 0.0,
                 alpha_gradient: None,
+                non_space_wrap: false,
+                max_lines: 0,
             },
             // A world billboard: the glyphs are re-seated in pitch units below, off the UI grid.
             TextSeat::Exact,
@@ -350,6 +398,44 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
     mesh
 }
 
+/// What `ShouldShowName` (`0x6070a0`) reads for one unit.
+struct NameGate {
+    /// `IsSelectable`: the ladder's first call, vtable `+0x58` (`0x5f1ec0`), is a jump to slot
+    /// `+0x54` (`0x60be60`), so a unit the player cannot select never shows a name.
+    selectable: bool,
+    /// A V-key plate (`+0xe60`) or a chat bubble (`+0xe64`) stands in for the name.
+    plated: bool,
+    /// The `bytes_1` byte 3 `& 3` vis-flag (`0x607101`, `0x60f62e`).
+    ghost_visual: bool,
+    is_self: bool,
+    self_faded: bool,
+    /// The current selection (`[0xb4e2d8]`).
+    targeted: bool,
+    dead_creature: bool,
+    kind: EntityKind,
+}
+
+/// The ladder: not selectable, plated or ghosted shows nothing; the own unit by `UnitNameOwn`
+/// before the target rescue; the target always; a dead creature only as the target (that leg is
+/// untraced); everyone else by the kind's CVar.
+fn should_show_name(g: &NameGate, cfg: &NameConfig) -> bool {
+    if !g.selectable || g.plated || g.ghost_visual {
+        false
+    } else if g.is_self {
+        cfg.own && !g.self_faded
+    } else if g.targeted {
+        true
+    } else if g.dead_creature {
+        false
+    } else {
+        match g.kind {
+            EntityKind::Player => cfg.player,
+            EntityKind::Unit => cfg.npc,
+            _ => false,
+        }
+    }
+}
+
 /// Drive the plates: gate, resolve lines and colour, and rebuild the plate on change, in Update
 /// where mesh churn is supported.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
@@ -365,29 +451,31 @@ pub(crate) fn drive_nameplates(
         // Whether the body is drawn: a unit outside the scene has nothing to float a name over.
         Option<&InheritedVisibility>,
     )>,
-    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    // The selector's relation inputs: `CanAttack` both ways, the reaction toward the player.
+    relations: crate::target::RelationWorld,
     // The optimistic AFK mirror (`[0xb6e5cc]`), the own player's `<AFK>` override.
     mirror: Res<crate::ui_chat::AfkMirror>,
     // The show-gate inputs, one tuple param for Bevy's 16-param ceiling.
     gates: (
+        Res<UnitNameFont>,
         Res<Selection>,
         Res<CombatFlash>,
         Option<Res<crate::player::CameraControl>>,
         Res<crate::vplates::VPlates>,
         Res<crate::chat_bubble::BubblesActive>,
-        // The selector's party roster (`0xbc6f48`), for the pale party variants.
-        Res<crate::ui_party::GroupState>,
         // The UnitName* CVar mask.
         Res<NameConfig>,
-        // The rank strings, read off the current VM ([`PvpNameStrings`]).
-        Res<PvpNameStrings>,
+        // The rank strings, read off the current VM ([`NameLineStrings`]).
+        Res<NameLineStrings>,
+        // The active player, whose own flagged creations stay selectable (`IsSelectable`).
+        Res<crate::net::SelfGuid>,
     ),
     names: Res<NameCache>,
-    // The guild cache, the a5 line's text; `ResMut` because a miss sends `CMSG_GUILD_QUERY`.
-    mut guilds: ResMut<crate::ui_guild::GuildState>,
+    // The guild cache, the a5 line's text; a miss sends `CMSG_GUILD_QUERY` through a shared read.
+    guilds: Res<crate::ui_guild::GuildState>,
     net_commands: Res<NetCommands>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    // Each race's PvP side, the a4 rank title's team digit.
+    teams: Option<Res<crate::chr_classes::RacePvpTeams>>,
     camera: Query<&Transform, With<WorldCamera>>,
     mut atlas: Option<ResMut<UiFontAtlas>>,
     mut plates: ResMut<Nameplates>,
@@ -402,12 +490,17 @@ pub(crate) fn drive_nameplates(
         Query<(), With<crate::entities::mount::MountChild>>,
     ),
 ) {
-    let (selection, flash, rig, vplates, bubbles, group, name_cfg, pvp_strings) = gates;
+    let (unit_font, selection, flash, rig, vplates, bubbles, name_cfg, pvp_strings, self_guid) =
+        gates;
     let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
         return;
     };
     // A glyph-sheet reset moves every cached UV.
     drop_stale_glyph_caches(&mut plates, atlas.generation, &mut commands);
+    // The cached meshes were laid out in the old name face.
+    if unit_font.is_changed() {
+        drop_name_meshes(&mut plates, &mut commands);
+    }
     // The palette materials, once (they need the atlas image).
     if plates.materials.is_empty() {
         let image = atlas.image();
@@ -445,6 +538,7 @@ pub(crate) fn drive_nameplates(
     }
     // The billboard facing: screen-aligned (the camera's own rotation), this frame's camera.
     let facing = cam_tf.rotation;
+    let (rel, me) = (relations.get(), relations.me());
     let mut seen = bevy::ecs::entity::EntityHashSet::default();
     for (entity, net, guid, tf, store, is_self, drawn) in &units {
         // A name needs a drawn body; this precedes the ShouldShowName ladder.
@@ -453,42 +547,34 @@ pub(crate) fn drive_nameplates(
         }
         // No distance cull: the name's update, cull and build (`0x6c6d40`, `0x6c6e00`,
         // `0x6c6e90`) compare none; the 20-yard cap (`0x60f600`) is the V-key frame's.
-        // ShouldShowName's order: own unit by its CVar, the target (`[0xb4e2d8]`), the kind CVar.
-        // A V-key plate or chat bubble (`+0xe64`) suppresses the name (`0x6070a0`). A dead
-        // creature shows only as the target, as in the reference; that gate leg is untraced.
-        let show = if vplates.0.contains(&entity) || bubbles.0.contains(&entity) {
-            false
-        } else if store.is_some_and(|s| s.0.unit_is_ghost_visual()) {
-            // The ghost vis-flag suppresses the name, target rescue included: `0x607101` and
-            // `0x60f62e` both test `bytes_1` byte 3 `& 3`.
-            false
-        } else if is_self {
-            // The own CVar, before the rescue; no name over a fully faded first-person avatar
-            // (our reading of `ShouldShowName`'s untraced `vtable+0x58` leg).
-            name_cfg.own
-                && rig
+        let show = should_show_name(
+            &NameGate {
+                selectable: crate::target::is_selectable(store, self_guid.0),
+                plated: vplates.0.contains(&entity) || bubbles.0.contains(&entity),
+                ghost_visual: store.is_some_and(|s| s.0.unit_is_ghost_visual()),
+                is_self,
+                // No name over a fully faded first-person avatar. Deviation: `ShouldShowName`'s
+                // first leg is `IsSelectable` (`0x60be60`), which passes our own unit; the avatar's
+                // fade stands in because what hides the own name in first person in 1.12.1 is
+                // untraced.
+                self_faded: rig
                     .as_deref()
                     .map_or(1.0, crate::player::CameraControl::self_fade)
-                    > 0.0
-        } else if selection.target == Some(entity) {
-            true
-        } else if net.kind == EntityKind::Unit && store.is_some_and(|s| s.0.unit_is_dead()) {
-            false
-        } else {
-            match net.kind {
-                EntityKind::Player => name_cfg.player,
-                EntityKind::Unit => name_cfg.npc,
-                _ => false,
-            }
-        };
+                    <= 0.0,
+                targeted: selection.target == Some(entity),
+                dead_creature: net.kind == EntityKind::Unit
+                    && store.is_some_and(|s| s.0.unit_is_dead()),
+                kind: net.kind,
+            },
+            &name_cfg,
+        );
         if !show {
             continue;
         }
-        // Re-read by `peek`: resolve's `&mut`-tied return cannot outlive the subname read.
-        if names.resolve_unit(guid.0, store, &net_commands).is_none() {
-            continue;
-        }
-        let Some(name) = names.peek_unit(guid.0, store) else {
+        // Read, never asked: this runs every frame, where the reference builds the text only when
+        // the plate is dirty (`0x6c6f80`). The unit's create asks for its name
+        // (`crate::net::objects`), and its landing redisplays.
+        let Some(name) = names.resolve_unit(guid.0, store, Ask::Read) else {
             continue;
         };
         // The player flag prefixes (a1-a3), glued onto the name with no space.
@@ -507,12 +593,15 @@ pub(crate) fn drive_nameplates(
         };
         // The one `"\n<%s>"` slot: a6 subtitle for an NPC, a5 guild for a player (CVar-gated).
         let bracketed = match net.kind {
-            EntityKind::Unit => benilla_protocol::guid::entry(guid.0)
+            EntityKind::Unit => store
+                .and_then(|s| s.0.object_entry())
+                .filter(|&e| e != 0)
                 .and_then(|e| names.creature_subname(e))
                 // vmangos sends "" for most templates: an empty subname is no line.
                 .filter(|s| !s.trim().is_empty()),
-            EntityKind::Player if name_cfg.player_guild => store
-                .and_then(|s| crate::ui_guild::unit_guild_name(&s.0, &mut guilds, &net_commands)),
+            EntityKind::Player if name_cfg.player_guild => store.and_then(|s| {
+                crate::ui_guild::unit_guild_name(guid.0, &s.0, &guilds, &net_commands)
+            }),
             _ => None,
         };
         // The selector's first-priority branch: the combat flash while we melee this unit.
@@ -520,17 +609,18 @@ pub(crate) fn drive_nameplates(
             NamePaint::Flash
         } else {
             NamePaint::Variant(selection_variant(
-                factions.as_deref(),
-                &reputations,
-                store,
-                self_store.single().ok(),
+                &rel,
+                store.map(|s| relations.unit_of(guid.0, s)).as_ref(),
+                me.as_ref(),
                 net.kind == EntityKind::Player,
-                group.members.iter().any(|m| m.guid == guid.0),
+                store.is_some_and(|s| s.0.unit_is_dead()),
+                // `0x4e7f70`: us or one of the four party slots, never the raid roster.
+                rel.in_party(guid.0),
             ))
         };
 
         seen.insert(entity);
-        let key = title_key(&name_cfg, &pvp_strings, net, store);
+        let key = title_key(&name_cfg, &pvp_strings, teams.as_deref(), net, store);
         match plates.live.get(&entity) {
             // The steady frame compares the inputs in place, allocating nothing; a rebuild from
             // these inputs is the stack `LiveName` holds.
@@ -547,14 +637,20 @@ pub(crate) fn drive_nameplates(
                     }
                 }
                 let mut lines = vec![name_line(flags, key, &pvp_strings, name)];
+                if net.kind == EntityKind::Player {
+                    pvp_strings.ask_reread();
+                }
                 if let Some(bracketed) = bracketed {
                     lines.push(format!("<{bracketed}>"));
                 }
+                let lines = grammar_lines(lines);
                 debug!("nameplates: rebuild {entity} -> {lines:?} ({color:?})");
                 let mesh = plates
                     .meshes
                     .entry(lines.clone())
-                    .or_insert_with(|| meshes.add(build_name_mesh(atlas, &lines)))
+                    .or_insert_with(|| {
+                        meshes.add(build_name_mesh(atlas, &lines, unit_font.0.as_deref()))
+                    })
                     .clone();
                 let material = plates.materials[&color].clone();
                 // The spawn-frame seat: placement can miss a plate whose unit despawns later
@@ -697,7 +793,10 @@ pub(crate) struct NameplatesPlugin;
 struct NameAnchorTrace(bool);
 
 /// The overhead-name rows' change callback: the name trio, the guild line and the rank prefix.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut names: ResMut<NameConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut names: bevy::prelude::Mut<'_, NameConfig>,
+) {
     match ev.key().as_str() {
         "unitnameplayer" => names.player = ev.flag(),
         "unitnamenpc" => names.npc = ev.flag(),
@@ -710,20 +809,22 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut names: ResMut<NameC
 
 impl Plugin for NameplatesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.insert_resource(NameAnchorTrace(
             std::env::var_os("WOW_PROBE_NAME_TRACE").is_some(),
         ))
         .init_resource::<Nameplates>()
         .init_resource::<NameConfig>()
-        .init_resource::<PvpNameStrings>()
-        // After targeting, V-key plates and chat bubbles: the gate reads their verdicts.
+        .init_resource::<NameLineStrings>()
+        .init_resource::<UnitNameFont>()
+        // After targeting, V-key plates and chat bubbles: the gate reads their verdicts. After the
+        // VM pass too, whose script calls change the selection a plate marks.
         .add_systems(
             Update,
             drive_nameplates
                 .after(crate::target::TargetUpdate)
                 .after(crate::vplates::VPlateSet)
-                .after(crate::chat_bubble::BubbleSet),
+                .after(crate::chat_bubble::BubbleSet)
+                .after(crate::vm_pass::VmPass::End),
         )
         .add_systems(Update, evict_name_meshes)
         .add_systems(
@@ -748,15 +849,20 @@ fn drop_stale_glyph_caches(plates: &mut Nameplates, generation: u64, commands: &
             plates.meshes.len(),
             plates.live.len(),
         );
-        for live in plates.live.values() {
-            if let Ok(mut e) = commands.get_entity(live.plate) {
-                e.despawn();
-            }
-        }
-        plates.live.clear();
-        plates.meshes.clear();
+        drop_name_meshes(plates, commands);
     }
     plates.baked_from = Some(generation);
+}
+
+/// Empty the mesh cache and despawn the live plates, which hold the old `Mesh3d`.
+fn drop_name_meshes(plates: &mut Nameplates, commands: &mut Commands) {
+    for live in plates.live.values() {
+        if let Ok(mut e) = commands.get_entity(live.plate) {
+            e.despawn();
+        }
+    }
+    plates.live.clear();
+    plates.meshes.clear();
 }
 
 /// Drop the line-stack mesh dedup on a cross-map transition: the old map's names never return.
@@ -776,6 +882,41 @@ mod tests {
     use super::*;
     use crate::target::{ring_variant, PlayerPath, SelectorInput};
 
+    /// `ShouldShowName`'s first leg is `IsSelectable`: an encounter trigger such as Naxxramas's
+    /// invisible "The Lich King" (`UNIT_FLAG_NOT_SELECTABLE`) shows no name with NPC names on, nor
+    /// as the target.
+    #[test]
+    fn a_unit_the_player_cannot_select_shows_no_name() {
+        let npc_names = NameConfig {
+            npc: true,
+            ..NameConfig::default()
+        };
+        let npc = |selectable, targeted| NameGate {
+            selectable,
+            plated: false,
+            ghost_visual: false,
+            is_self: false,
+            self_faded: false,
+            targeted,
+            dead_creature: false,
+            kind: EntityKind::Unit,
+        };
+        assert!(should_show_name(&npc(true, false), &npc_names));
+        assert!(!should_show_name(&npc(false, false), &npc_names));
+        assert!(
+            !should_show_name(&npc(false, true), &npc_names),
+            "no target rescue for it either"
+        );
+        assert!(
+            should_show_name(&npc(true, true), &NameConfig::default()),
+            "a selectable target shows with NPC names off"
+        );
+        assert!(
+            !should_show_name(&npc(true, false), &NameConfig::default()),
+            "NPC names default off"
+        );
+    }
+
     /// `>` not `>=` at the knee and `0.075*d` beyond: the jump at the knee is the reference's.
     #[test]
     fn height_scale_matches_the_byte_law() {
@@ -789,18 +930,30 @@ mod tests {
     /// Bare concatenation in slot order AFK, DND, GM (`0x608f50`); other bits ignored.
     #[test]
     fn flag_prefix_matches_the_slot_law() {
-        assert_eq!(flag_prefix(0), "");
-        assert_eq!(flag_prefix(0x8), "<GM>");
-        assert_eq!(flag_prefix(0x2), "<AFK>");
-        assert_eq!(flag_prefix(0x4), "<DND>");
-        assert_eq!(flag_prefix(0x8 | 0x2), "<AFK><GM>", "slot order, a1 first");
+        let strings = strings_of(
+            1,
+            &[
+                ("CHAT_FLAG_AFK", "<AFK>"),
+                ("CHAT_FLAG_DND", "<DND>"),
+                ("CHAT_FLAG_GM", "<GM>"),
+            ],
+        );
+        assert_eq!(flag_prefix(0, &strings), "");
+        assert_eq!(flag_prefix(0x8, &strings), "<GM>");
+        assert_eq!(flag_prefix(0x2, &strings), "<AFK>");
+        assert_eq!(flag_prefix(0x4, &strings), "<DND>");
         assert_eq!(
-            flag_prefix(0x2 | 0x4 | 0x8),
+            flag_prefix(0x8 | 0x2, &strings),
+            "<AFK><GM>",
+            "slot order, a1 first"
+        );
+        assert_eq!(
+            flag_prefix(0x2 | 0x4 | 0x8, &strings),
             "<AFK><DND><GM>",
             "all three stack — the client enforces no exclusivity"
         );
         assert_eq!(
-            flag_prefix(0x10 | 0x20 | 0x1),
+            flag_prefix(0x10 | 0x20 | 0x1, &strings),
             "",
             "ghost/resting/leader don't decorate"
         );
@@ -854,8 +1007,8 @@ mod tests {
     const RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);
 
     /// The rank strings a VM defining `pairs` hands over, as the honor feed sets them.
-    fn strings_of(session: u64, pairs: &[(&str, &str)]) -> PvpNameStrings {
-        let mut strings = PvpNameStrings::default();
+    fn strings_of(session: u64, pairs: &[(&str, &str)]) -> NameLineStrings {
+        let mut strings = NameLineStrings::default();
         strings.set(session, set_of(pairs));
         strings
     }
@@ -894,27 +1047,68 @@ mod tests {
     fn title_key_reads_the_rank_byte_the_race_and_the_cvar() {
         let cfg = NameConfig::default();
         let ready = strings_of(1, &[TEMPLATE]);
-        let bare = PvpNameStrings::default();
+        let bare = NameLineStrings::default();
         // Human (race 1 → team 1), rank 7.
         let (net, human) = unit(EntityKind::Player, &[HUMAN_MALE, RANK_7]);
-        let key = title_key(&cfg, &ready, &net, Some(&human)).unwrap();
+        let key = title_key(
+            &cfg,
+            &ready,
+            Some(&crate::chr_classes::RacePvpTeams::stock()),
+            &net,
+            Some(&human),
+        )
+        .unwrap();
         assert_eq!(
             (key.title.rank, key.title.team, key.title.female, key.on),
             (7, 1, false, true)
         );
         // Orc (race 2 → team 0), female; the CVar off, and the strings unloaded, each drop the bit.
         let (_, orc) = unit(EntityKind::Player, &[(36, 0x010102), RANK_7]);
-        let orc = title_key(&cfg, &ready, &net, Some(&orc)).unwrap();
+        let orc = title_key(
+            &cfg,
+            &ready,
+            Some(&crate::chr_classes::RacePvpTeams::stock()),
+            &net,
+            Some(&orc),
+        )
+        .unwrap();
         assert_eq!((orc.title.team, orc.title.female), (0, true));
         let off = NameConfig {
             player_pvp_title: false,
             ..cfg
         };
-        assert!(!title_key(&off, &ready, &net, Some(&human)).unwrap().on);
-        assert!(!title_key(&cfg, &bare, &net, Some(&human)).unwrap().on);
+        assert!(
+            !title_key(
+                &off,
+                &ready,
+                Some(&crate::chr_classes::RacePvpTeams::stock()),
+                &net,
+                Some(&human)
+            )
+            .unwrap()
+            .on
+        );
+        assert!(
+            !title_key(
+                &cfg,
+                &bare,
+                Some(&crate::chr_classes::RacePvpTeams::stock()),
+                &net,
+                Some(&human)
+            )
+            .unwrap()
+            .on
+        );
         let (creature, _) = unit(EntityKind::Unit, &[]);
         assert!(
-            title_key(&cfg, &ready, &creature, Some(&human)).is_none(),
+            title_key(
+                &cfg,
+                &ready,
+                Some(&crate::chr_classes::RacePvpTeams::stock()),
+                &creature,
+                Some(&human)
+            )
+            .is_none(),
             "a creature has no a4"
         );
     }
@@ -925,12 +1119,23 @@ mod tests {
     fn the_name_line_glues_the_flag_tags_onto_the_ranked_name() {
         let strings = strings_of(
             1,
-            &[TEMPLATE, SERGEANT, ("PVP_RANK_7_1_FEMALE", "Sergeant (f)")],
+            &[
+                TEMPLATE,
+                SERGEANT,
+                ("PVP_RANK_7_1_FEMALE", "Sergeant (f)"),
+                ("CHAT_FLAG_AFK", "<AFK>"),
+            ],
         );
         let line = |cfg: &NameConfig, (net, store): &(NetEntity, ObjectStore), flags, name| {
             name_line(
                 flags,
-                title_key(cfg, &strings, net, Some(store)),
+                title_key(
+                    cfg,
+                    &strings,
+                    Some(&crate::chr_classes::RacePvpTeams::stock()),
+                    net,
+                    Some(store),
+                ),
                 &strings,
                 name,
             )
@@ -956,6 +1161,23 @@ mod tests {
         // `UNIT_FIELD_BYTES_0` byte 2 = 1: the `_FEMALE` twin.
         let female = unit(EntityKind::Player, &[(36, 0x01_0101), RANK_7]);
         assert_eq!(line(&cfg, &female, 0, "Alice"), "Sergeant (f) Alice");
+    }
+
+    /// The a1-a3 slots read `CHAT_FLAG_AFK`, `CHAT_FLAG_DND` and `CHAT_FLAG_GM` through
+    /// `FrameScript_GetText` (`0x5eca1c`, `0x5eca59`, `0x5eca9e`): an addon's own string shows, and
+    /// a missing or empty one adds no tag (`0x5eca23`, `0x5eca28`).
+    #[test]
+    fn the_flag_tags_are_the_chat_flag_globals() {
+        let strings = strings_of(1, &[("CHAT_FLAG_AFK", "<Away>"), ("CHAT_FLAG_GM", "<Dev>")]);
+        assert_eq!(
+            name_line(0x2 | 0x4 | 0x8, None, &strings, "Bob"),
+            "<Away><Dev>Bob"
+        );
+        assert_eq!(
+            name_line(0x2, None, &NameLineStrings::default(), "Bob"),
+            "Bob",
+            "no strings, no tag"
+        );
     }
 
     /// The decoration is `0x609370`'s: title first, `None` off rank 0 or a key the install lacks.
@@ -1012,8 +1234,14 @@ mod tests {
     fn a_changed_string_set_moves_the_key_and_reaches_the_line() {
         let (net, store) = unit(EntityKind::Player, &[HUMAN_MALE, RANK_7]);
         let cfg = NameConfig::default();
-        let built = |strings: &PvpNameStrings| {
-            let key = title_key(&cfg, strings, &net, Some(&store));
+        let built = |strings: &NameLineStrings| {
+            let key = title_key(
+                &cfg,
+                strings,
+                Some(&crate::chr_classes::RacePvpTeams::stock()),
+                &net,
+                Some(&store),
+            );
             (key, name_line(0, key, strings, "Bob"))
         };
         let mut strings = strings_of(1, &[TEMPLATE, SERGEANT]);
@@ -1184,5 +1412,70 @@ mod tests {
         assert_eq!(plates.materials.len(), 1);
         assert_eq!(plates.live.len(), 1);
         assert!(world.get_entity(plate).is_ok());
+    }
+
+    /// A changed `UNIT_NAME_FONT` drops every mesh laid out in the old face, and the live plates.
+    #[test]
+    fn a_new_name_face_drops_the_meshes_and_the_live_plates() {
+        let mut world = World::new();
+        let unit = world.spawn_empty().id();
+        let plate = world.spawn_empty().id();
+        let mut plates = primed(Some(7), unit, plate);
+
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            drop_name_meshes(&mut plates, &mut commands);
+        }
+        queue.apply(&mut world);
+
+        assert!(plates.meshes.is_empty());
+        assert!(plates.live.is_empty());
+        assert_eq!(plates.materials.len(), 1, "materials hold no glyphs");
+        assert!(world.get_entity(plate).is_err());
+    }
+
+    /// The face reaches the layout: the same line is wider in Friz Quadrata than in Arial Narrow.
+    #[test]
+    fn the_name_mesh_lays_out_in_the_unit_name_font() {
+        use bevy::mesh::VertexAttributeValues;
+        benilla_formats::wow_data_or_skip!();
+        let mut atlas = UiFontAtlas::for_test(1.0).expect("the client faces open");
+        let lines = vec!["Magister Kalendris".to_string()];
+        let span = |mesh: &Mesh| {
+            let Some(VertexAttributeValues::Float32x3(p)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("positions");
+            };
+            let xs = p.iter().map(|v| v[0]);
+            xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min)
+        };
+        let friz = span(&build_name_mesh(&mut atlas, &lines, None));
+        let arial = span(&build_name_mesh(
+            &mut atlas,
+            &lines,
+            Some("Fonts\\ARIALN.TTF"),
+        ));
+        assert!(friz > 0.0 && arial > 0.0);
+        assert!(
+            (friz - arial).abs() > 0.05,
+            "the face is honoured: {friz} vs {arial}"
+        );
+    }
+
+    /// The block goes through `0x7716f0` whole: a plain block is left as it is, and a `|2` rewrites
+    /// its word on its own line.
+    #[test]
+    fn the_name_block_runs_the_grammar_rewrite() {
+        let plain = vec!["Bob".to_string(), "<Guild>".to_string()];
+        assert_eq!(grammar_lines(plain.clone()), plain);
+        assert_eq!(
+            grammar_lines(vec![
+                "Garde |2Orgrimmar".to_string(),
+                "<Guilde>".to_string()
+            ]),
+            ["Garde d'Orgrimmar", "<Guilde>"]
+        );
     }
 }

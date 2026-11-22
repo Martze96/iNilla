@@ -29,7 +29,7 @@ fn enum_entry(
     for c in pos {
         b.extend_from_slice(&c.to_le_bytes());
     }
-    b.extend_from_slice(&0u32.to_le_bytes()); // guild id
+    b.extend_from_slice(&(guid as u32 + 40).to_le_bytes()); // guild id
     b.extend_from_slice(&0x0200_0000u32.to_le_bytes()); // character flags (DECLINED, a junk value)
     b.push(1); // first login
     b.extend_from_slice(&pet_display.to_le_bytes()); // pet display id
@@ -71,7 +71,7 @@ fn char_enum_roster_parses_and_decodes() {
     ));
 
     let p = messages::parse_server(messages::opcode::SMSG_CHAR_ENUM, &body).unwrap();
-    let ServerPacket::CharEnum { ref characters } = p else {
+    let ServerPacket::CharEnum { ref characters, .. } = p else {
         panic!("char enum")
     };
     assert_eq!(characters.len(), 2);
@@ -84,7 +84,7 @@ fn char_enum_roster_parses_and_decodes() {
         (c.skin, c.face, c.hair_style, c.hair_color, c.facial_hair),
         (3, 4, 5, 6, 7)
     );
-    assert_eq!((c.zone, c.flags), (12, 0x0200_0000));
+    assert_eq!((c.zone, c.guild_id, c.flags), (12, 47, 0x0200_0000));
     // The pet triple sits before the equipment array: a misread slides every display id below.
     assert_eq!(
         (c.pet_display_id, c.pet_level, c.pet_family),
@@ -120,6 +120,101 @@ fn char_enum_roster_parses_and_decodes() {
         }
         other => panic!("expected CharacterList, got {other:?}"),
     }
+}
+
+/// The character list parse stores level 1 for a record read with level 0 and sets the record's
+/// new-character byte `+0x10a` (`0x5b44e8` `test al,al`, `0x5b44f2` the store of 1, `0x5b44f9` the
+/// flag); any other level is kept and clears the byte (`0x5b4502`). The first-login wire byte
+/// (`+0x109`, 1 in every entry here) has no part in it.
+#[test]
+fn a_level_zero_record_is_stored_as_level_one_and_flagged_new() {
+    let mut body = vec![3u8];
+    for (guid, level) in [(1, 0), (2, 1), (3, 60)] {
+        body.extend(enum_entry(
+            guid,
+            "Lv",
+            1,
+            1,
+            0,
+            level,
+            0,
+            [1.0, 2.0, 3.0],
+            0,
+        ));
+    }
+    let p = messages::parse_server(messages::opcode::SMSG_CHAR_ENUM, &body).unwrap();
+    let ServerPacket::CharEnum { characters, .. } = p else {
+        panic!("char enum")
+    };
+    let read: Vec<_> = characters
+        .iter()
+        .map(|c| (c.guid, c.level, c.new_character))
+        .collect();
+    assert_eq!(read, [(1, 1, true), (2, 1, false), (3, 60, false)]);
+}
+
+/// Each name is read by `CDataStore::GetCString` at a capacity of 0x30 (`0x5b439f`-`0x5b43a7`):
+/// 47 bytes and the NUL fit. One of 48 bytes or more reads empty and poisons the store, so the
+/// end check after the records fails (`0x5b4523`) and the list is emptied (`0x5b4539`-`0x5b455d`).
+#[test]
+fn a_name_past_the_cap_empties_the_character_list() {
+    let roster = |second: &str| {
+        let mut body = vec![2u8];
+        body.extend(enum_entry(7, "Two", 1, 1, 0, 1, 0, [1.0, 2.0, 3.0], 0));
+        body.extend(enum_entry(9, second, 1, 8, 1, 60, 1, [1.0, 2.0, 3.0], 0));
+        let p = messages::parse_server(messages::opcode::SMSG_CHAR_ENUM, &body).unwrap();
+        let ServerPacket::CharEnum { characters, .. } = p else {
+            panic!("char enum")
+        };
+        characters
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+    };
+    let fits = "a".repeat(47);
+    assert_eq!(roster(&fits), ["Two", fits.as_str()], "47 bytes fit");
+    assert!(
+        roster(&"a".repeat(48)).is_empty(),
+        "48 bytes poison the read"
+    );
+    // Twelve four-byte characters: 48 bytes in 12 characters.
+    assert!(roster(&"\u{1F600}".repeat(12)).is_empty());
+}
+
+/// A list's parse, as `(records kept, failed)`.
+fn read_list(body: &[u8]) -> (usize, bool) {
+    let p = messages::parse_server(messages::opcode::SMSG_CHAR_ENUM, body).unwrap();
+    let ServerPacket::CharEnum { characters, failed } = p else {
+        panic!("char enum")
+    };
+    (characters.len(), failed)
+}
+
+/// `0x5b42a0` fails a list, emptied, with a count above 10 (`0x5b42d5`-`0x5b42e6`) or a store not
+/// read to its end (`0x5b4523`-`0x5b455d`): bytes after the last record, a record cut short, a name
+/// past its cap or no count at all. Up to ten records read to the end pass.
+#[test]
+fn a_list_over_ten_or_not_read_to_its_end_fails_emptied() {
+    let list = |count: u8, records: u64, name: &str| {
+        let mut body = vec![count];
+        for guid in 0..records {
+            body.extend(enum_entry(guid, name, 1, 1, 0, 1, 0, [1.0, 2.0, 3.0], 0));
+        }
+        body
+    };
+    assert_eq!(read_list(&[0]), (0, false));
+    assert_eq!(read_list(&list(10, 10, "Ten")), (10, false));
+    assert_eq!(read_list(&list(11, 11, "Eleven")), (0, true));
+    assert_eq!(read_list(&[255]), (0, true), "the count alone fails it");
+    assert_eq!(read_list(&[0, 0]), (0, true), "a byte after no record");
+    let mut trailing = list(2, 2, "Two");
+    trailing.push(0);
+    assert_eq!(read_list(&trailing), (0, true), "a byte after the last");
+    let mut cut = list(2, 2, "Two");
+    cut.pop();
+    assert_eq!(read_list(&cut), (0, true), "the last record cut short");
+    assert_eq!(read_list(&list(1, 1, &"a".repeat(48))), (0, true));
+    assert_eq!(read_list(&[]), (0, true), "no count");
 }
 
 #[test]

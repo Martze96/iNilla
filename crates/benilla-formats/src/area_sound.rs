@@ -9,7 +9,7 @@ use crate::Chain;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{loc_str, parse, str_at, u32_at};
 
 /// The audio-relevant slice of one `AreaTable` row.
 pub struct AreaEntry {
@@ -27,7 +27,7 @@ pub struct AreaEntry {
     pub sound_provider: u32,
     /// The preset while the listener is submerged (11 is "Underwater"), `0` to inherit.
     pub sound_provider_underwater: u32,
-    /// The zone/subzone display name (enUS column).
+    /// The zone/subzone display name, the locale's column.
     pub name: String,
 }
 
@@ -35,7 +35,8 @@ pub struct AreaEntry {
 pub struct ZoneMusicEntry {
     pub id: u32,
     pub set_name: String,
-    /// Silence between tracks in ms, uniform in `[min, max]`.
+    /// The bounds of the silence between tracks, ms; the client takes one fixed point between
+    /// them (`0x460100`).
     pub silence_min: [u32; 2],
     pub silence_max: [u32; 2],
     /// `SoundEntries` kits (type 28), the track pool per phase.
@@ -77,6 +78,24 @@ pub struct AreaAudio<'a> {
 }
 
 impl AreaSoundCatalog {
+    /// A catalog holding one `ZoneMusic` row of no tracks, `[day, night]` silence bounds, for
+    /// consumers' unit tests.
+    pub fn zone_music_for_tests(id: u32, silence_min: [u32; 2], silence_max: [u32; 2]) -> Self {
+        let row = ZoneMusicEntry {
+            id,
+            set_name: String::new(),
+            silence_min,
+            silence_max,
+            sounds: [0; 2],
+        };
+        Self {
+            areas: HashMap::new(),
+            zone_music: HashMap::from([(id, row)]),
+            intros: HashMap::new(),
+            ambience: HashMap::new(),
+        }
+    }
+
     pub fn area(&self, id: u32) -> Option<&AreaEntry> {
         self.areas.get(&id)
     }
@@ -207,6 +226,7 @@ fn ambience_schema() -> Schema {
 
 /// Read the four tables off the patch chain.
 pub fn load_area_sound_catalog(chain: &mut Chain) -> Result<AreaSoundCatalog> {
+    let locale = chain.locale();
     let read = |chain: &mut Chain, file: &str, schema: Schema, what: &str| {
         let bytes = chain
             .read_file(file)
@@ -233,7 +253,7 @@ pub fn load_area_sound_catalog(chain: &mut Chain) -> Result<AreaSoundCatalog> {
                 intro_sound: u32_at(r, 9).unwrap_or(0),
                 sound_provider: u32_at(r, 5).unwrap_or(0),
                 sound_provider_underwater: u32_at(r, 6).unwrap_or(0),
-                name: str_at(&rs, r, 11).unwrap_or_default(),
+                name: loc_str(&rs, r, 11, locale).unwrap_or_default(),
             },
         );
     }

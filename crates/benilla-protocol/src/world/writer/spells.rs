@@ -46,12 +46,33 @@ impl WorldWriter {
         )
     }
 
+    /// `CMSG_CAST_SPELL` with any targets block: a spell whose record gathered more than one bind.
+    pub fn cast_spell_targets(
+        &mut self,
+        spell_id: u32,
+        target: messages::UseItemTarget,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_targets(spell_id, target),
+        )
+    }
+
     /// `CMSG_CAST_SPELL` with `TARGET_FLAG_ITEM` and the item's packed guid: an enchant on the item
     /// picked in the craft frame.
     pub fn cast_spell_item(&mut self, spell_id: u32, item_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_CAST_SPELL,
             &messages::cast_spell_item(spell_id, item_guid),
+        )
+    }
+
+    /// `CMSG_CAST_SPELL` with `TARGET_FLAG_TRADE_ITEM` and the trade slot: an enchant cast on the
+    /// partner's non-traded slot (`0x6e6900`).
+    pub fn cast_spell_trade_item(&mut self, spell_id: u32, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_trade_item(spell_id, slot),
         )
     }
 

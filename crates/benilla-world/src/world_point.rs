@@ -31,6 +31,66 @@ pub enum Subject {
     Unit(Entity),
 }
 
+/// The terrain heightfield alone, asked about a column: the narrow read for a caller that holds
+/// the whole of [`WorldPoint`] nowhere, such as the call host's minimap ground cast. Read-only.
+#[derive(SystemParam)]
+pub struct TerrainHeights<'w> {
+    /// Absent in an app with no world, where every column misses.
+    streamer: Option<Res<'w, crate::terrain_stream::TerrainStreamer>>,
+    adt_tiles: Option<Res<'w, Assets<benilla_assets::AdtTile>>>,
+}
+
+impl TerrainHeights<'_> {
+    /// The MCNK heightfield's height (WoW `z`) under a point (Bevy space): the terrain-only trace
+    /// down its column. `None` off the streamed set or over a hole.
+    pub fn under(&self, pos: Vec3) -> Option<f32> {
+        crate::terrain_stream::terrain_height_under(
+            self.streamer.as_deref()?,
+            self.adt_tiles.as_deref()?,
+            pos,
+        )
+    }
+}
+
+/// The area under the player alone, asked of the world: the narrow read for a caller that holds
+/// the whole of [`WorldPoint`] nowhere, such as the call host's raid rows. Read-only.
+#[derive(SystemParam)]
+pub struct AreaUnderfoot<'w> {
+    /// Absent in an app with no world, where there is no area.
+    area: Option<Res<'w, CurrentArea>>,
+}
+
+impl AreaUnderfoot<'_> {
+    /// The finest area the player stands in, as [`WorldPoint::area`] reads it.
+    pub fn area(&self) -> Option<u32> {
+        self.area.as_deref()?.0
+    }
+}
+
+/// A streamed unit's liquid at a point, asked of the world: the narrow read for a caller that
+/// holds the whole of [`WorldPoint`] nowhere, such as a relayed move's handler stepping its mover.
+/// Read-only; it answers as [`WorldPoint::liquid_at`] does for [`Subject::Unit`].
+#[derive(SystemParam)]
+pub struct UnitLiquid<'w, 's> {
+    liquids: Query<'w, 's, &'static WaterChunkInfo>,
+    index: Res<'w, crate::liquid::WaterIndex>,
+    placements: RoomPlacements<'w, 's>,
+    unit_rooms: Query<'w, 's, &'static UnitWmoRoom>,
+}
+
+impl UnitLiquid<'_, '_> {
+    /// The liquid `unit` finds at `wow` (WoW space): its own room's, as [`unit_claim`] picks it.
+    pub fn liquid_at(&self, unit: Entity, wow: [f32; 3]) -> Option<LiquidHit> {
+        let over = self
+            .index
+            .over(wow[0], wow[1])
+            .iter()
+            .filter_map(|&e| self.liquids.get(e).ok());
+        let claim = unit_claim(self.unit_rooms.get(unit).ok(), &self.placements);
+        liquid_at(over, wow, claim)
+    }
+}
+
 /// The world, asked about a point; read-only, so it never conflicts with a caller's parameters.
 #[derive(SystemParam)]
 pub struct WorldPoint<'w, 's> {

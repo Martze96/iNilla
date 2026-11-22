@@ -2,6 +2,8 @@
 //! the reference's registered one ([`Reference`]). The runtime that holds the live values is the
 //! parent module.
 
+use benilla_ui::script::CvarCheck;
+
 /// One host-backed CVar: its name, benilla's default, and where that default stands against the
 /// reference's ([`Reference`]).
 pub(crate) struct Registered {
@@ -16,13 +18,36 @@ pub(crate) struct Registered {
     /// Registered with flag bit1 (`rec+0x1c & 0x2`, `flags` 2 or 3 at the register site): a write
     /// is staged in [`super::Row::pending`] until [`super::Cvars::commit_latched`].
     pub(crate) latched: bool,
+    /// The change callback's refusal, run on every write before it is stored
+    /// ([`benilla_ui::script::CvarCheck`]).
+    pub(crate) check: Option<CvarCheck>,
 }
 
 impl Registered {
+    /// What the row boots at on a client of this locale index (`[0xc0e080]`): `default`, except
+    /// on the locales a [`Reference::SameByLocale`] row lists.
+    pub(crate) fn default_for(&self, locale: usize) -> &'static str {
+        match &self.reference {
+            Reference::SameByLocale { except } => except
+                .iter()
+                .find(|(index, _)| *index == locale)
+                .map_or(self.default, |(_, value)| value),
+            _ => self.default,
+        }
+    }
+
     /// Mark the row latched.
     pub(crate) const fn latched(self) -> Self {
         Self {
             latched: true,
+            ..self
+        }
+    }
+
+    /// Give the row its callback's refusal.
+    pub(crate) const fn checked(self, check: CvarCheck) -> Self {
+        Self {
+            check: Some(check),
             ..self
         }
     }
@@ -44,6 +69,12 @@ pub(crate) enum Reference {
         registered: &'static str,
         why: &'static str,
     },
+    /// The reference registers `default` on every locale but those in `except`, each of which it
+    /// registers the paired string on, and benilla ships exactly that ([`Registered::default_for`]):
+    /// the register site picks its default string by `[0xc0e080]` (`0x603368`, `0x63a738`).
+    SameByLocale {
+        except: &'static [(usize, &'static str)],
+    },
     /// The reference ships `value` and benilla ships another; `why` is the reason.
     Deviates {
         value: &'static str,
@@ -55,12 +86,29 @@ pub(crate) enum Reference {
 }
 
 /// A row whose default is the reference's own registered string.
-const fn same(name: &'static str, default: &'static str) -> Registered {
+pub(super) const fn same(name: &'static str, default: &'static str) -> Registered {
     Registered {
         name,
         default,
         reference: Reference::Same(default),
         latched: false,
+        check: None,
+    }
+}
+
+/// A row whose default is the reference's own registered string, but not on every locale: the
+/// register site picks the string by the locale index, `default` on all but `except`'s.
+pub(super) const fn same_by_locale(
+    name: &'static str,
+    default: &'static str,
+    except: &'static [(usize, &'static str)],
+) -> Registered {
+    Registered {
+        name,
+        default,
+        reference: Reference::SameByLocale { except },
+        latched: false,
+        check: None,
     }
 }
 
@@ -76,6 +124,7 @@ const fn overridden(
         default,
         reference: Reference::Overridden { registered, why },
         latched: false,
+        check: None,
     }
 }
 
@@ -91,6 +140,7 @@ const fn deviates(
         default,
         reference: Reference::Deviates { value, why },
         latched: false,
+        check: None,
     }
 }
 
@@ -101,27 +151,42 @@ const fn ours(name: &'static str, default: &'static str, why: &'static str) -> R
         default,
         reference: Reference::Ours(why),
         latched: false,
+        check: None,
     }
 }
 
 /// The table as the script VM's registrar wants it: `(name, default)` pairs in table order.
 pub(crate) fn registered_pairs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    REGISTERED.iter().map(|r| (r.name, r.default))
+    let locale = crate::ui_script::client_locale().index();
+    all_rows().map(move |r| (r.name, r.default_for(locale)))
+}
+
+/// The locale indices a default depends on: koKR (`0x603368`) and zhCN (`0x63a738`) in the
+/// table `0x8558a4`.
+const KO_KR: usize = 1;
+const ZH_CN: usize = 4;
+
+/// Every registered row: the knobs something reads ([`REGISTERED`]), then the reference's other
+/// script-visible CVars, which nothing here reads ([`super::inert::INERT`]).
+pub(crate) fn all_rows() -> impl Iterator<Item = &'static Registered> {
+    REGISTERED.iter().chain(super::inert::INERT)
 }
 
 /// The host-backed CVars, one row per knob that has a reader: a host knob, or a Lua consumer
-/// such as the stock Video Options window's verbs.
-///
-/// Not registered for want of a reader, though pfUI's `hdgraphic` writes them: `lodDist`
-/// (`0x688524`, "100.0", read at `0x6afb1d` for the doodad LOD swap), `footstepBias` (`0x6888b4`,
-/// "0.125", read at `0x68fcb6`), `mapObjLightLOD` (`0x6886ec`, "0") and `SkyCloudLOD` (`0x6d1d33`,
-/// "0"). `DistCull` (`0x688570`) has no reader in the reference either. `maxLOD` is no 1.12 CVar.
+/// such as the stock Video Options window's verbs. The reference's other script-visible CVars,
+/// which nothing here reads, are `super::inert::INERT`: `lodDist`, `footstepBias`,
+/// `mapObjLightLOD`, `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
+/// `maxLOD` is no 1.12 CVar and stays unregistered.
 pub(crate) const REGISTERED: &[Registered] = &[
     // `realmName` (`0x83f2d0`): registered `""` (`0x882748`), help "Last realm connected to"
     // (`0x85d684`); the client builds its SavedVariables path from it (`0x5ab7d0`). Written from
     // the session's realm when addons load. `Ace/AceState.lua:27` trims it at
     // PLAYER_ENTERING_WORLD, so a nil breaks every Ace addon.
     same("realmName", ""),
+    // `accountName` (`0x402bd2`, record `[0x8826c8]`): registered `""`, help "Saved account
+    // name", category 4. The login screen's remembered name: `GetSavedAccountName` (`0x46cdd0`)
+    // reads it and `SetSavedAccountName` (`0x46cdf0`) sets it.
+    same("accountName", ""),
     // The logon server address (register site `0x5ab6a6`), a string row judged by
     // `realmlist::on_cvar`.
     deviates(
@@ -136,8 +201,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // forward/back, strafe and turn (`0x513d36`/`0x514e23`/`0x514f0b`/`0x514fca`). Off, the clear
     // does nothing at all: no echo, no mirror write, no packet.
     same("autoClearAFK", "1"),
-    same("MasterVolume", "1"),
-    same("SoundVolume", "1"),
+    same("MasterVolume", "1.0"),
+    same("SoundVolume", "1.0"),
     same("MusicVolume", "0.4"),
     same("AmbienceVolume", "0.6"),
     // Registered "1" at `0x45737a`/`0x45739b`/`0x460a9d`. `MasterSoundEffects` is the Enable All
@@ -149,10 +214,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The race/sex refusal voice lines (`0x457877`), `SoundOptionsFrame.lua:3`; the master enable
     // greys it.
     same("EnableErrorSpeech", "1"),
-    // Not a 1.12 CVar or checkbox; the later-era name. The reference mutes on losing focus, music
-    // included (`WM_ACTIVATE` to `0x7a4860`'s `FSOUND_SetMute(-3, active ? 0 : 1)`), so "0" is its
-    // behaviour. The knob is `SoundConfig::background_sound`.
-    same("Sound_EnableSoundWhenGameIsInBG", "0"),
+    // The knob is `SoundConfig::background_sound`.
+    ours(
+        "Sound_EnableSoundWhenGameIsInBG",
+        "0",
+        "1.12 registers no such CVar and has no box for it: it mutes on losing focus, music \
+         included (`WM_ACTIVATE` to `0x7a4860`'s `FSOUND_SetMute(-3, !active)`), so OFF is the \
+         reference's own behaviour; the name is the later era's",
+    ),
     // Registered "1" (`0x4573be`); `SoundConfig::reverb` carries the evidence for shipping "0".
     deviates(
         "SoundReverb",
@@ -163,10 +232,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
          machine a player runs today",
     ),
     // FMOD 3's mix-ahead buffer in ms (`0x4571ca`, flags 2: read once at sound init); here it sizes
-    // the render thread's ring ahead of the IO callback (`sound::output`). `0x457520` registers
-    // "50" or "100" by a host probe (`0x835e10`/`0x835e0c`), which one on a current machine
-    // untraced; ours is the larger, since the depth has to hide a whole stalled IO cycle.
-    same("SoundBufferSize", "100").latched(),
+    // the render thread's ring ahead of the IO callback (`sound::output`). The default string is
+    // `0x457520`'s: "50" (`0x835e10`) when the detection record has processor class 1 at `+0x18`
+    // (`0x639a00`), else "100" (`0x835e0c`). Class 1 is a processor frequency above 1500 MHz
+    // (`0x6414c0`). `0x42c0e0` asks `CallNtPowerInformation` for 4 processor records (`0x60` bytes),
+    // which fails on a host with more logical CPUs; `0x42c060` then reads the calibrated counter
+    // rate (`0x884060`), above 1500 MHz on a current x86 part, so those hosts register "50". It is
+    // shipped (`sound::output::MIX_AHEAD_MS` is the same number, and a test holds the two together).
+    same("SoundBufferSize", "50").latched(),
     // benilla's own, not a 1.12 CVar. Deviation: the reference clips at full scale and has no
     // headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed
     // voice lines); benilla limits because every SFX is mastered to full scale and overlapping
@@ -191,7 +264,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `ContainerFrame.lua:483` and `UIDropDownMenu.lua:525` branch on it and `OptionsFrame.lua:13`
     // gives it a checkbox.
     same("useUiScale", "0"),
-    same("farclip", "350"),
+    // `farclip` (`0x688654`, "350", callback `0x688d40`), which refuses outside [177, 777].
+    same("farclip", "350").checked(benilla_ui::script::check_farclip),
     // `nearclip` (`0x68867a`: name `0x84ffb0`, default `0x84fb48` "0.1", flags 1, callback
     // `0x688d90`, record `[0xc7f348]`). The camera re-reads the record every frame: `0x511bc0`
     // (sole caller `0x483094`) stamps `[cam+0x38]` from it through the handle `[0xbe1078]` that
@@ -204,8 +278,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `autoLootDefault` is the later-era name, 1.12 having only the shift gesture.
     same("deselectOnClick", "1"),
     // `AutoInteract` (`0x603390`, record `[0xc4d9a4]`), Click-to-Move (`UIOptionsFrame.lua:7`):
-    // "1" on koKR alone (`0x603368`). The knob is [`crate::player::Approach`].
-    same("AutoInteract", "0"),
+    // "1" when the locale is koKR, else "0" (`0x603368`-`0x603376`). The knob is
+    // [`crate::player::Approach`].
+    same_by_locale("AutoInteract", "0", &[(KO_KR, "1")]),
     // `BlockTrades` (`0x842fbc`), `UIOptionsFrame.lua:11`: the refusal leg `0x4bf7bc` fires only
     // when it is set. The knob is [`crate::ui_trade::BlockTrades`].
     same("BlockTrades", "0"),
@@ -214,71 +289,89 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `TOGGLEAUTOSELFCAST` toggles it.
     same("autoSelfCast", "0"),
     // The five saved camera views and the live index, at the reference's names and default strings;
-    // owned by [`crate::player::camera_view`]. Registered so a `SaveView` persists.
+    // owned by [`crate::player::camera_view`]. Registered so a `SaveView` persists. The index's
+    // validator `0x50bfc0` takes 0 to 4; each view's three take their field's range, from
+    // `[0x84f790]` (`0x50b9ec`): distance `0x50b310`, pitch `0x50b380`, yaw `0x50b3c0`.
     same(
         crate::player::camera_view::CVAR_ACTIVE_VIEW,
         crate::player::camera_view::ACTIVE_VIEW_DEFAULT,
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_view),
     same(
         crate::player::camera_view::VIEW_CVARS[0][0],
         crate::player::camera_view::VIEW_DEFAULTS[0][0],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_distance_max),
     same(
         crate::player::camera_view::VIEW_CVARS[0][1],
         crate::player::camera_view::VIEW_DEFAULTS[0][1],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_pitch),
     same(
         crate::player::camera_view::VIEW_CVARS[0][2],
         crate::player::camera_view::VIEW_DEFAULTS[0][2],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_yaw),
     same(
         crate::player::camera_view::VIEW_CVARS[1][0],
         crate::player::camera_view::VIEW_DEFAULTS[1][0],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_distance_max),
     same(
         crate::player::camera_view::VIEW_CVARS[1][1],
         crate::player::camera_view::VIEW_DEFAULTS[1][1],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_pitch),
     same(
         crate::player::camera_view::VIEW_CVARS[1][2],
         crate::player::camera_view::VIEW_DEFAULTS[1][2],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_yaw),
     same(
         crate::player::camera_view::VIEW_CVARS[2][0],
         crate::player::camera_view::VIEW_DEFAULTS[2][0],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_distance_max),
     same(
         crate::player::camera_view::VIEW_CVARS[2][1],
         crate::player::camera_view::VIEW_DEFAULTS[2][1],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_pitch),
     same(
         crate::player::camera_view::VIEW_CVARS[2][2],
         crate::player::camera_view::VIEW_DEFAULTS[2][2],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_yaw),
     same(
         crate::player::camera_view::VIEW_CVARS[3][0],
         crate::player::camera_view::VIEW_DEFAULTS[3][0],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_distance_max),
     same(
         crate::player::camera_view::VIEW_CVARS[3][1],
         crate::player::camera_view::VIEW_DEFAULTS[3][1],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_pitch),
     same(
         crate::player::camera_view::VIEW_CVARS[3][2],
         crate::player::camera_view::VIEW_DEFAULTS[3][2],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_yaw),
     same(
         crate::player::camera_view::VIEW_CVARS[4][0],
         crate::player::camera_view::VIEW_DEFAULTS[4][0],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_distance_max),
     same(
         crate::player::camera_view::VIEW_CVARS[4][1],
         crate::player::camera_view::VIEW_DEFAULTS[4][1],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_pitch),
     same(
         crate::player::camera_view::VIEW_CVARS[4][2],
         crate::player::camera_view::VIEW_DEFAULTS[4][2],
-    ),
+    )
+    .checked(benilla_ui::script::check_camera_yaw),
     same("mouseInvertPitch", "0"),
     ours(
         "autoLootDefault",
@@ -303,17 +396,22 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
     // whose registered 0.04 is stop 1: the reference's slider boots at Medium.
-    same("WorldDetail", "1"),
+    ours(
+        "WorldDetail",
+        "1",
+        "the Environment Detail stop our Graphics page and `GetWorldDetail` read; 1.12 keeps the \
+         stop in `smallCull` and `frillDensity` and registers no CVar of this name",
+    ),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into
     // `[0x868620]`, which nothing reads: no mechanism here either. Its readers are Lua ones:
     // `SetWorldDetail` writes it per stop, and `OptionsFrame_SetDefaults` reads its default
     // (`OptionsFrame.lua:431`). `hwDetect` sets 0.04 on the fallback row a modern GPU reaches.
-    same(benilla_ui::script::CVAR_SMALL_CULL, "0.04"),
+    same(benilla_ui::script::CVAR_SMALL_CULL, "0.04").checked(benilla_ui::script::check_small_cull),
     // `frillDensity` (`0x68862e`: name `0x8423d8`, default `0x864644` "16", flags 1, callback
-    // `0x688de0`, record `[0xc7f2f4]`): detail-doodad cells visited per chunk, clamped to [1, 256]
-    // and handed through `0x6725a0` to `[0xc7b494]`, the bound of the scatter loop at
-    // `0x6bfcfb`/`0x6bff1c`. One knob with `WorldDetail`, each keeping its own clamp. `hwDetect`
+    // `0x688de0`, record `[0xc7f2f4]`): detail-doodad cells visited per chunk; the callback refuses
+    // outside [1, 256] and hands the rest through `0x6725a0` to `[0xc7b494]`, the bound of the
+    // scatter loop at `0x6bfcfb`/`0x6bff1c`. One knob with `WorldDetail`. `hwDetect`
     // (`0x639a60`) sets it from `VideoHardware.dbc` field `+0x18`, 24 on videoID 170. pfUI's
     // `hdgraphic` reads `GetCVar("frillDensity") > 48` and writes up to 256.
     deviates(
@@ -323,7 +421,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "the reference's registered 16 is stop 0 and its post-`hwDetect` 24 is on no \
          stop at all, so every stop diverges; Medium (32) is the nearest one no sparser than a \
          fresh install, and erring sparse is the worse failure for ground cover",
-    ),
+    )
+    .checked(benilla_ui::script::check_frill_density),
     // ── Combat log display ranges, in yards ──────────────────────────────────────────────────────
     //
     // Registered by `0x626d00` from the `{name, default}` pairs at `0x8629e0`, read as the record's
@@ -360,12 +459,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("SoundListenerAtCharacter", "1"),
     // `EmoteSounds` (`0x4573b9`): the received text-emote voice kit, and only that.
     same("EmoteSounds", "1"),
+    // `MapWaterSounds` (`0x462ac9`, record `[0xb2306c]`, handler `0x462af0`): 0 hard-stops the four
+    // liquid loops and keeps the driver `0x462b50` from arming any (`liquid_loop`).
+    same("MapWaterSounds", "1"),
     // `SoundZoneMusicNoDelay` (`0x4578b3`): `next_track_time`'s immediate path.
     same("SoundZoneMusicNoDelay", "0"),
     // `assistAttack` (`0x48fc50`, record `[0xb4d8f8]`): `/assist` also starts the swing. The "3"
     // beside it is the next registration's, `minimapZoom`: stock `/assist` selects without
     // swinging.
     same("assistAttack", "0"),
+    // `targetNearestDistance` (`0x48fda4`, record `[0xb4e2a8]`, callback `0x490720`): the TAB range
+    // ([`crate::target::TabRange`]).
+    same("targetNearestDistance", "41.000000")
+        .checked(benilla_ui::script::check_target_nearest_distance),
     // ── Mouse-look speed, per axis ───────────────────────────────────────────────────────────────
     //
     // `cameraYawMoveSpeed` is the MOUSE_LOOK_SPEED slider (`UIOptionsFrame.lua:89`); a nil there
@@ -373,46 +479,64 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // writes `cameraPitchMoveSpeed` as half of it (`:355-356`). The reference integrates
     // OS-accelerated pixels where we take raw device deltas, so the unit factor lives in
     // `camera::LOOK_YAW_PER_SPEED` and these defaults stay the reference's. The validator
-    // `0x50c000` → `0x50b330` rejects values outside [0.1, 360] rather than clamping, and
-    // `player::camera::on_cvar` does the same.
-    same("cameraYawMoveSpeed", "180"),
-    same("cameraPitchMoveSpeed", "90"),
+    // `0x50c000` → `0x50b330` refuses values outside [0.1, 360] rather than clamping.
+    same("cameraYawMoveSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
+    same("cameraPitchMoveSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
+    // The distance axis's yards a second (`0x50b7f3`, read at `0x5113d9`): the wheel's glide and
+    // `MoveViewIn`/`Out`. Its validator `0x50c040` refuses a value out of range.
+    same("cameraDistanceMoveSpeed", "8.33").checked(benilla_ui::script::check_camera_decay),
     // MOUSE_SENSITIVITY (`UIOptionsFrame.lua:87`): FrameXML's spelling of the binary's `mouseSpeed`
     // (`0x402c7b`); lookups are case-insensitive (`CVar::Lookup 0x63de30`), here as there. The
-    // reference's default is `SPI_GETMOUSESPEED × 0.1`, "1.0" on stock Windows, and its record
-    // `[0x882704]` has no reader: the slider sets the OS pointer speed (`0x402ec0`, [0.1, 2.0]).
-    // The default matches; Deviation: here the dial multiplies the camera's own rate, because
+    // reference's default is `SPI_GETMOUSESPEED × 0.1` (`0x42cd60`) formatted `%1.1f` (`0x82e994`,
+    // `0x402c4d`-`0x402c7b`): "1.0" on a stock OS (speed 10). Its record `[0x882704]` has no reader:
+    // the slider sets the OS pointer speed (`0x402ec0`, [0.1, 2.0]).
+    // The default is that string; Deviation: here the dial multiplies the camera's own rate, because
     // benilla does not change the OS pointer speed, a system-wide setting.
-    same("mousespeed", "1"),
+    same("mousespeed", "1.0"),
     // The zoom-out limit is `cameraDistanceMax × cameraDistanceMaxFactor`, held to [0, 50]
     // (`0x5112d6`). `cameraDistanceMax` (`0x50beb2`, default `0x84fbd0`) has no panel row; its
-    // validator `0x50b310` refuses a value outside [0, 50], and `player::camera::on_cvar` does the
-    // same. The factor is MAX_FOLLOW_DIST (`UIOptionsFrame.lua:90`), registered "1.0" (`0x82e92c`)
-    // with no validator: the slider's 1 to 2 is the slider's, not the CVar's.
-    same("cameraDistanceMax", "15.0"),
-    same("cameraDistanceMaxFactor", "1"),
+    // validator `0x50b310` refuses a value outside [0, 50]. The factor is MAX_FOLLOW_DIST
+    // (`UIOptionsFrame.lua:90`), registered "1.0" (`0x82e92c`) with no validator: the slider's 1
+    // to 2 is the slider's, not the CVar's.
+    same("cameraDistanceMax", "15.0").checked(benilla_ui::script::check_camera_distance_max),
+    same("cameraDistanceMaxFactor", "1.0"),
     // `cameraSmoothStyle` (`0x50ba92`, default `[0x84f4f4]` "1"), the auto-return behind the
     // character. The engine's enum is 0 Never, 1 Smart, 2 Always, as the stock dropdown writes it
     // (`UIOptionsFrame.lua:525,536,547`); 3, the Never entry's position, is the validator's upper
     // bound (`0x50b330(v, 0, 3)`). See `FollowStyle`.
-    same("cameraSmoothStyle", "1"),
+    same("cameraSmoothStyle", "1").checked(benilla_ui::script::check_camera_smooth_style),
     // Read instead of `cameraSmoothStyle` while the state mask holds Track or Fear; no panel row.
-    same("cameraSmoothTrackingStyle", "1"),
+    same("cameraSmoothTrackingStyle", "1").checked(benilla_ui::script::check_camera_smooth_style),
     // AUTO_FOLLOW_SPEED (`UIOptionsFrame.lua:88`), deg/s, registered "180.0" (`[0xbe1070]`): it
     // sets the transition's duration (`|dyaw| / rate * factor`), an average rate, not a slew. The
-    // knob clamps it to `FOLLOW_SPEED_RANGE`. The stock Save also writes `cameraPitchSmoothSpeed`
-    // at a quarter (`:353`), unregistered here: `FollowRig` has one rate.
-    same("cameraYawSmoothSpeed", "180"),
+    // validator `0x50c000` refuses outside [0.1, 360] and the follow reader (`0x512d75`) uses the
+    // stored value as is; 90 to 270 is only the stock slider's range.
+    same("cameraYawSmoothSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
+    // `cameraCustomViewSmoothing` (`0x50bad0`, read at `0x50fc33`): with it set, a customised view
+    // still takes the auto-return.
+    same("cameraCustomViewSmoothing", "0"),
+    // A timed view's pitch rate (`0x512935`), which `UIOptionsFrame.lua:353` also writes,
+    // registered "45.0" (`0x50b90b`) with the same validator.
+    same("cameraPitchSmoothSpeed", "45.0").checked(benilla_ui::script::check_camera_rate),
+    // A timed view's distance rate (`0x5121be`), registered "8.33" (`0x50b8a2`), `0x50c040`.
+    same("cameraDistanceSmoothSpeed", "8.33").checked(benilla_ui::script::check_camera_decay),
+    // The style a view verb passes `0x512e90` (`0x50b5db`), registered "1" (`0x50b972`): 1 timed,
+    // 2 instant, and any other seats nothing.
+    same("cameraViewBlendStyle", "1"),
+    // One arm's duration bound (`0x510f4d`, `0x513255`), registered "0.1" and "2.0" (`0x50bf81`,
+    // `0x50bfa4`), `0x50bfe0`, which orders nothing between the two.
+    same("cameraSmoothTimeMin", "0.1").checked(benilla_ui::script::check_camera_time),
+    same("cameraSmoothTimeMax", "2.0").checked(benilla_ui::script::check_camera_time),
     // `cameraPivot` `[0xbe10a4]` "1" (`0x50bda3`), smart pivot: gate `0x510690`, routing
     // `0x50fee0`, release `0x5107f0`; ours is `player::camera_dynamics::SmartPivot`.
     same("cameraPivot", "1"),
     // Read by the routing (`0x50fff5`/`0x510004`) in radians of camera rotation, so they carry to
     // benilla's raw-device units unchanged.
     same("cameraPivotDXMax", "0.05"),
-    same("cameraPivotDYMin", "0"),
+    same("cameraPivotDYMin", "0.00"),
     // The pitch bias's ease-back once the pivot lets go, deg/s (`[0xbe0fc8]`; `0x512a50` divides
     // |Δ| by rate · π/180 for the duration); no panel row.
-    same("cameraTargetSmoothSpeed", "90"),
+    same("cameraTargetSmoothSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
     // `cameraWaterCollision` `[0xbe1088]` "1" (`0x50bd63`, `0x82e748`): one register, two consumers
     // that must ship together. `0x50e5ec` builds it; its `0xf0000` nibble joins the trace mask of
     // all three `0x50e570` queries (reaching `0x69cc13`), and `0x50e629` tests it to lift the sweep
@@ -424,24 +548,27 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("cameraTerrainTilt", "0"),
     // Rate in deg/s (`[0xbe0fc0]`), duration bounds in seconds (`[0xbe1050]`/`[0xbe1054]`). The 3 s
     // floor always binds (20° at 7.5°/s is 2.67 s), so the camera leans rather than tracks.
-    same("cameraGroundSmoothSpeed", "7.5"),
-    same("cameraTerrainTiltTimeMin", "3"),
-    same("cameraTerrainTiltTimeMax", "10"),
+    // Their validators: `0x50c000` for the rate, `0x50bfe0` for the bounds.
+    same("cameraGroundSmoothSpeed", "7.5").checked(benilla_ui::script::check_camera_rate),
+    same("cameraTerrainTiltTimeMin", "3.0").checked(benilla_ui::script::check_camera_time),
+    same("cameraTerrainTiltTimeMax", "10.0").checked(benilla_ui::script::check_camera_time),
     // `cameraBobbing` `[0xbe10c0]` "0" (`0x50b76d`), head bob: kernel `0x511920`, gate `0x5105e0`;
     // ours is `player::camera_dynamics::HeadBob`.
     same("cameraBobbing", "0"),
     // Amplitudes in the CVar's units, scaled by 1/36 (`[0x7ff9d0]`) to yards.
     // `cameraBobbingSmoothSpeed` is the decay rate, read only in the disarm `0x51113a`, which
     // divides the largest component by it for the ramp's duration (~0.069 s at these defaults).
-    same("cameraBobbingLRAmplitude", "2"),
-    same("cameraBobbingUDAmplitude", "2"),
-    same("cameraBobbingFrequency", "0.8"),
-    same("cameraBobbingSmoothSpeed", "0.8"),
+    same("cameraBobbingLRAmplitude", "2.0"),
+    same("cameraBobbingUDAmplitude", "2.0"),
+    // Validated by `0x50bfe0` and `0x50c040`.
+    same("cameraBobbingFrequency", "0.8").checked(benilla_ui::script::check_camera_time),
+    same("cameraBobbingSmoothSpeed", "0.8").checked(benilla_ui::script::check_camera_decay),
     // `statusBarText` (`0x48fc34`, record `[0xb4d904]`, no engine reader), read by
     // `TextStatusBar.lua:47,97`: "0" shows the numbers on hover only.
     same("statusBarText", "0"),
-    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`); read
-    // only by the stock interface.
+    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`): the
+    // stock interface's binding-line gate, and `SetAction` and `SetShapeshift`'s compact spell
+    // tooltip when 0 (`0x532622`, `0x532a35`).
     same("UberTooltips", "1"),
     // Registered at `0x603280`: `ChatBubbles` "1", `ChatBubblesParty` "0".
     same("ChatBubbles", "1"),
@@ -474,10 +601,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ([`Cvars::addon_version_check`]) and live by the VM's gate.
     same("checkAddonVersion", "1"),
     // `scriptMemory` (`0x402e63`: name `0x82e81c`, "49152" `0x82e858`, category 4, record
-    // `0x882654`): the Lua heap cap in KB, shown in MB by the glue AddOns screen
-    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`). Deviation: nothing caps the heap
-    // here; the row holds what the screen's box was set to.
+    // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
+    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
+    // world (`0x495599`), [`crate::ui_memory`].
     same("scriptMemory", "49152"),
+    // `widescreen` (`0x63a74f`: name `0x837050`, "1", flags 0, record `[0xc4ec08]`): off, the
+    // resolution list is the four fixed sizes (`0x48bcac`, [`crate::video`]) and the glue's and
+    // the interface's aspect is 4/3 (`0x46ab40`, `0x4901e0`; `crate::ui_script::glue`,
+    // [`crate::portrait::GxAspect`]).
+    same("widescreen", "1"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
     // (`0x63a3c4`, `0x842a5c`). Here it reports the wgpu backend (`wgpu::Backend::to_str`), pushed
@@ -495,20 +627,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // [`crate::video::VideoConfig::vsync`], which the window's present mode follows at the
     // `RestartGx` commit. `$WOW_NOVSYNC=1` overrides it for the session.
     same("gxVSync", "1").latched(),
-    // `gxWindow` (`0x63a889`): "0" on enUS; zhCN registers "1", as it does `gxMaximize`
-    // (`0x63a8e0`), and koKR `AutoInteract` (`0x603390`). The knob is
-    // [`crate::video::VideoConfig::display`]. Deviation: "0" raises a borderless fullscreen window
-    // instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's
-    // leaves the desktop changed after a crash ([`crate::video`]).
-    same("gxWindow", "0").latched(),
-    // `gxResolution`, a string row parsed by `video::on_cvar`. Here it is only the windowed size:
-    // fullscreen is the monitor's own and no mode list is offered.
+    // `gxWindow` (`0x63a889`): "1" when the locale is zhCN (`0x63a738`, `0x63a74c`), else "0"
+    // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: "0"
+    // raises a borderless fullscreen window instead of mode-setting the display, because Wayland
+    // and macOS offer no mode-set and X11's leaves the desktop changed after a crash
+    // ([`crate::video`]).
+    same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched(),
+    // `gxResolution` (`0x63a7c1`, "640x480", flags 3, callback `0x63aa00`), a string row parsed by
+    // `video::on_cvar` into the windowed size. In fullscreen it answers the borderless window's
+    // device pixels, the size the screen runs at, over that windowed size, which is what it saves
+    // (`video::show_screen_size`).
     deviates(
         "gxResolution",
         "1600x900",
         "640x480",
-        "narrowed to the WINDOWED size only — fullscreen is the monitor's own and we expose \
-         no mode list, and 640x480 is not a window anyone would ship a client at",
+        "the saved value is the WINDOWED size, as fullscreen is the borderless window over the \
+         monitor, whose size the row answers while it holds; and 640x480 is not a window anyone \
+         would ship a client at",
     )
     .latched(),
     // benilla's own: a body pane's doll renders at half the frame rate while the pane is open; the
@@ -561,13 +696,24 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // Not one of `hwDetect`'s sixteen (`[0x639a60, 0x639b80)` never reads `0xc7f2e4`), so the
     // registered "1", off, stands.
-    same("anisotropic", "1"),
+    same("anisotropic", "1").checked(benilla_ui::script::check_anisotropic),
     // The four video CVars the stock window's verbs read and write (`benilla_ui` `video_pairs`);
     // benilla has no mechanism behind any of them. `shadowLevel` (`0x6885bc`, "1", flags 1,
     // callback `0x688c10`, record `[0xc7f350]`) is behind `Get/SetTerrainMip` as `1 − level`: the
     // callback refuses above 1 and prints "Shadow mip level changed upon restart.", and the
     // terrain's shadow-map mip (`0x66f877`) reads it at load. `hwDetect` leaves it at 1.
-    same("shadowLevel", "1"),
+    same("shadowLevel", "1").checked(benilla_ui::script::check_shadow_level),
+    // `shadowLOD` (`0x6d8157`, "1", record `[0x86f5b4]`, handler `0x6d8450`): the blob-shadow entry
+    // `0x6d78f0` draws only at 1. The handler refuses outside 0..=1 and says "Shadow LOD set to %d".
+    same("shadowLOD", "1").checked(benilla_ui::script::check_shadow_lod),
+    // `shadowBias` (`0x6d817d`, "0.1", record `[0xcea620]`, handler `0x6d8530`): the decal draw
+    // `0x6d7480` (the selection ring and the blob shadow) biases depth by `2 * bias / 32767` while
+    // it is nonzero. The handler refuses outside 0..=1 and says "Shadow bias set to %f".
+    same("shadowBias", "0.1").checked(benilla_ui::script::check_shadow_bias),
+    // `violenceLevel` (`0x6c5ae1`, flags 0, record `[0xce8534]`): registered at the locale's cap
+    // from the table `0x86c3f8` (`0x6c5aa0`), "2" but koKR's "1". The callback `0x6c5af0` stores
+    // the level clamped to the cap; the blood spurt indexes `UnitBloodLevels` by it (`0x60a39d`).
+    same_by_locale("violenceLevel", "2", &[(KO_KR, "1")]),
     // `doodadAnim` (`0x6884d8`, "1", flags 1, callback `0x688a10`, record `[0xc7f354]`), behind
     // `Get/SetDoodadAnim`: the callback toggles bit `0x8000` of `[0xc7b2a4]` and calls `0x6953d0`,
     // a bare `ret`, so no animation reads it. `hwDetect` sets 0 or 1 by CPU tier.
@@ -575,12 +721,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `texLodBias` (`0x6885e2`, "0.0" at `0x84fad4`, flags 1, callback `0x688c90`, record
     // `[0xc7f2f8]`), behind `Get/SetTexLodBias`: the callback refuses outside [-1.0, 1.0] and its
     // sink `0x672640` is `ret 4`.
-    same("texLodBias", "0.0"),
+    same("texLodBias", "0.0").checked(benilla_ui::script::check_tex_lod_bias),
     // `baseMip` (`0x6887aa`, "0", flags 1, callback `0x689090`, record `[0xc7f2f0]`), behind
     // `Get/SetBaseMip` as `1 − level`: the callback refuses outside [0, 1] ("BaseMip must be 0 or
-    // 1") and sets the device's first uploaded mip level (`0x589bf0`, read at `0x59f6ce`). benilla
-    // uploads every level; the write is kept and has no effect. `hwDetect` leaves it at 0.
-    same("baseMip", "0"),
+    // 1") and sets the device's first uploaded mip level (`0x589bf0`, read at `0x59f6d1`, on
+    // Direct3D `0x5a08fc`). benilla uploads every level; the write is kept and has no effect.
+    // `hwDetect` leaves it at 0.
+    same("baseMip", "0").checked(benilla_ui::script::check_base_mip),
     // `spellEffectLevel` (`0x688900`: name `0x869324`, default `0x843068` "2", flags 1, callback
     // `0x689510`, record `[0xc7f2a4]`), the Spell Detail slider (`OptionsFrame.lua:32`). The
     // callback's two effects here: the particle emission scalar ([`crate::video::on_cvar`]) and
@@ -602,15 +749,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
          `SET weatherDensity \"3\"` (K = 1.0) — so 3 is the value a benilla-vs-reference \
          side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against \
          the only client we compare with. The slider is how a player takes it back down",
-    ),
+    )
+    .checked(benilla_ui::script::check_weather_density),
     // `gamma` (`0x402d70`: name `0x82e924` "Gamma", default `0x82e92c` "1.0", flags 0, callback
     // `0x4034d0`). The reference uploads `pow(i/255, gamma)` (`0x591680`) through
     // `SetDeviceGammaRamp`, except when windowed (`byte[dev+0x20b]`). Deviation: benilla, which
     // has no exclusive mode, applies the same curve in the composite pass
     // ([`crate::ui_gamma::DisplayGamma`]), because the skipped upload would make a slider that
-    // moves no pixel. Spelled "1.000000" because `SetGamma 0x4891f0` formats with `"%f"`, and
-    // Restore Defaults must compare equal to the default; [`sync_cvars`] seeds it the same way.
-    same("gamma", "1.000000"),
+    // moves no pixel. `SetGamma 0x4891f0` writes `"%f"` ("1.000000"), which `SaveConfig`
+    // (`0x63da4a`) keeps as a diff against the default "1.0", as the reference does.
+    same("gamma", "1.0"),
     // `DesktopGamma` (`0x402d4d`: name `0x82e930`, default "0" `0x82e570`, flags 0, callback
     // `0x403500`, record `[0x8826d4]`), the stock window's Use Desktop Gamma box, which it also
     // sets whenever Windowed Mode is ticked (`OptionsFrame.lua:399-408`). On 1 the callback puts
@@ -622,16 +770,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ── The stock Video Options window's other boxes (`OptionsFrame.lua:5-22`) ───────────────────
     //
     // `ffx` (`0x6ccfe3`: name `0x86f2ac`, record `[0xce8a04]`), `ffxGlow` (`0x6cc17d`, name
-    // `0x86f200`) and `ffxDeath` (`0x6cc6d1`, name `0x86f238`): each "1", flags 1, with the echo stub
-    // `0x6cde30` as callback, and each record's integer read every frame. The FFX begin/end pair
+    // `0x86f200`) and `ffxDeath` (`0x6cc6d1`, name `0x86f238`): each "1", flags 1, with the echo
+    // callback `0x6cde30` ([`benilla_ui::script::check_ffx_echo`]), and each record's integer read
+    // every frame. The FFX begin/end pair
     // (`0x6cd890`/`0x6cda70`) runs the active pass only while `ffx` (`0x6cd8a6`), `pixelShaders`
     // (`0x6cd8b6`) and that pass's own enable hold: `CFFXGlow` (`0x6cc5a0`) reads `ffxGlow` at
     // `0x6cc5a8`, `CFFXDeath` (`0x6cded0`) reads `ffxDeath` at `0x6cdf10`. The stock Okay writes
     // `ffx` as Enable All Shaders (`OptionsFrame.lua:202-204`). The knob is
     // [`benilla_world::ffx_glow::FfxSwitches`].
-    same("ffx", "1"),
-    same("ffxGlow", "1"),
-    same("ffxDeath", "1"),
+    same("ffx", "1").checked(benilla_ui::script::check_ffx_echo),
+    same("ffxGlow", "1").checked(benilla_ui::script::check_ffx_echo),
+    same("ffxDeath", "1").checked(benilla_ui::script::check_ffx_echo),
     // `pixelShaders` (`0x688712`: name `0x869560`, "0", flags 1, callback `0x688f40`, record
     // `[0xc7f360]`) and `specular` (`0x6886a0`: name `0x8695d8`, "0", flags 1, callback `0x688e20`,
     // record `[0xc7f2cc]`), Enable All Shaders and Terrain Highlights. Both callbacks act only on a
@@ -665,9 +814,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // World LOD: bit 2 of `[0xc7b2a4]`, which gates the doodad LOD distance test at `0x6afb11`. No
     // effect here: benilla has no doodad LOD swap, as `lodDist` above has no row.
     same("lod", "1"),
+    // `movie` (`0x402bf5`: name `0x82e74c`, "1", flags 0, record `[0x8826e0]`), Show movie on
+    // startup: the startup puts the intro movies up while it is 1, setting it to "0"
+    // (`0x402b3b`-`0x402b65`, `ui_script::glue::startup_screen`).
+    same("movie", "1"),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
-    // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
-    // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.
+    // Subtitles: the pre-rendered movies' subtitles, which the glue's `GetMovieSubtitles`
+    // (`0x46dbc0`) hands the movie frame's `EnableSubtitles` (`MovieFrame.lua:35`).
     same("movieSubtitle", "0"),
     // `useWeatherShaders` (`0x67b81d`: name `0x868598`, "1", flags 0, no callback, record
     // `[0xc7b588]`), Weather Shaders: read in each precipitation effect's constructor (`0x67480f`,
@@ -679,16 +832,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The latched `gx*` rows the stock window's boxes and refresh dropdown write (flags 3, committed
     // by `RestartGx`), each callback storing one field of the device-format record `0xc4eb98`.
     //
-    // `gxMaximize` (`0x63a8e0`: name `0x864edc`, "0", "1" on zhCN like `gxWindow`, callback
-    // `0x63b1f0` → `+0x09` `[0xc4eba1]`): the window rebuild `0x58cf10` makes a windowed, maximized
+    // `gxMaximize` (`0x63a8e0`: name `0x864edc`, "0" but "1" on zhCN like `gxWindow`
+    // (`0x63a8b9`-`0x63a8c3`), callback `0x63b1f0` → `+0x09` `[0xc4eba1]`): the window rebuild `0x58cf10` makes a windowed, maximized
     // window a borderless popup (style `0x90000000`) at the screen's full size (`GetSystemMetrics`
     // 0 and 1). The knob is [`crate::video::VideoConfig::maximize`].
-    same("gxMaximize", "0").latched(),
+    same_by_locale("gxMaximize", "0", &[(ZH_CN, "1")]).latched(),
     // `gxTripleBuffer` (`0x63a80d`: name `0x864f88`, "0", callback `0x63afe0` → `+0x18`), whose
-    // callback refuses any value but 0 or 1 ("TripleBuffer must be 0 or 1", `0x8650b8`), a range
-    // this registry has no way to refuse with. No effect here: wgpu's present modes offer no
-    // triple-buffer choice.
-    same("gxTripleBuffer", "0").latched(),
+    // callback refuses any value but 0 or 1 ("TripleBuffer must be 0 or 1", `0x8650b8`). No effect
+    // here: wgpu's present modes offer no triple-buffer choice.
+    same("gxTripleBuffer", "0")
+        .latched()
+        .checked(benilla_ui::script::check_triple_buffer),
     // `gxCursor` (`0x63a906`: name `0x864eb8`, "1", callback `0x63b220` → `+0x05` `[0xc4eb9d]`),
     // Hardware Cursor. No effect here: benilla always draws the OS cursor (`crate::cursor`) and has
     // no software cursor to fall back to.
@@ -700,9 +854,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("gxFixLag", "1").latched(),
     // `gxRefresh` (`0x63a7e7`: name `0x864fa8`, "75", callback `0x63aed0` → `+0x28`), the refresh
     // dropdown (`OptionsFrame.lua:242-245`, `:300`); the callback accepts only the eleven rates at
-    // `0x8645e0` (60 to 200). No effect here: fullscreen is borderless at the monitor's own rate,
-    // and `GetRefreshRates` answers the reference's no-rates sentinel, which disables the dropdown.
-    same("gxRefresh", "75").latched(),
+    // `0x8645e0` (60 to 200) and refuses the rest. No effect here: fullscreen is borderless at the
+    // monitor's own rate, and `GetRefreshRates` answers no values, which leaves the dropdown
+    // enabled and empty (the stock frame disables it only on a single 0, `OptionsFrame.lua:311`).
+    same("gxRefresh", "75")
+        .latched()
+        .checked(benilla_ui::script::check_refresh),
     // benilla's own: the world renders at `window × this` while the UI stays native. The knob is
     // [`crate::world_backdrop::RenderScale`], clamped to `RENDER_SCALE_RANGE`; at "1" nothing is
     // resampled. `$WOW_RENDER_SCALE` overrides it for the session.
@@ -723,8 +880,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // `lastCharacterIndex` (`0x402d93`, "0" `0x82e570`, category 4, handle `[0x882674]`), help
     // "Last character selected": a 0-based row (the selection cell `[0x83856c]` under `"%d"`), so
-    // "0" is the first character. It mirrors [`crate::char_select::Roster::pending_index`].
-    same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
+    // "0" is the first character. It mirrors
+    // [`crate::glue_session::roster::Roster::pending_index`].
+    same(crate::glue_session::roster::CVAR_LAST_CHARACTER, "0"),
     // The four user agreements the login screen walks (`0x402db6`, `0x402dd9`, `0x402dfc`,
     // `0x402e1f`; "0" `0x82e570`, category 4): "Status of the TOS" (`0x82e8e4`), "... the EULA"
     // (`0x82e8c8`), "... the Scanning notice" (`0x82e89c`) and "... the Contest notice"

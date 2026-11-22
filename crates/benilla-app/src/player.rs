@@ -20,7 +20,6 @@ use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, Worldpor
 use crate::ui_script::InspectMode;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::AssetSet;
-use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
 mod approach;
@@ -29,17 +28,26 @@ mod net;
 // Writes the frame onto the body we drive: pose, `MovementState`, the counter-twist gap.
 mod body_pose;
 pub(crate) mod camera;
+mod camera_axes;
 mod camera_channel;
+mod camera_clip;
 pub(crate) mod camera_dynamics;
 pub(crate) mod camera_zoom;
 mod controller;
 mod world_focus;
+#[cfg(test)]
+pub(crate) use world_focus::insert_test_room;
+/// The reload gate and the destination's residency, which a cinematic's far shot waits on as a
+/// teleport does.
+pub(crate) use world_focus::{is_far_reload, residency_reached};
+pub(crate) use world_focus::{publish_caster_outdoors, BarUnitOutdoors, PlayerOutdoors};
 // The remembered camera pose, inside `player/` to read the rig's `pub(super)` fields.
 mod camera_saved;
 mod camera_water;
 // The five named camera views, inside `player/` to write the rig's `pub(super)` fields.
 pub(crate) mod camera_view;
-mod drunk;
+pub(crate) mod drunk;
+mod edge;
 mod embody;
 mod flags;
 mod follow;
@@ -50,7 +58,10 @@ mod input;
 pub(crate) mod land;
 mod move_trace;
 mod movement_net;
+pub(crate) use movement_net::send_heartbeat;
 mod posture;
+// A movement command's press or release, run inside the frame's input records.
+mod press;
 // `pub(crate)`: a remote mover's dead-reckon (`crate::net::motion::remote`) steps through the same
 // walk resolve, as the reference runs every mover through one controller.
 pub(crate) mod mover;
@@ -63,44 +74,70 @@ mod state;
 pub(crate) mod step_probe;
 mod swim;
 mod view_subject;
+/// A far-sight pose, for a test that seats the camera on another object.
+#[cfg(test)]
+pub(crate) use view_subject::RemoteView;
+#[cfg(test)]
+mod teleport_hold_tests;
 mod walk;
 mod wire_in;
+pub(crate) use wire_in::regain_control_on_arrival;
+
+/// The net drain, whose self create gives control back ([`regain_control_on_arrival`]): every
+/// system that reads the mover's lock runs after it in the frame, so it sees the restored lock,
+/// not the lost one.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ControlRestore;
 
 // The last writer of a self body part's render alpha: `entities::apply_unit_mat_alpha` orders
 // itself before it.
 pub(crate) use camera::apply_self_model_fade;
+pub(crate) use camera_saved::{camera_at_interface_load, rebuild_camera};
 use controller::control;
+pub(crate) use controller::LookSample;
 // The private camera and `state` items are re-imported for the modules beside this one, which
 // name them `super::X`.
-pub(crate) use camera::{head_height, CameraControl, CameraPivot};
+pub(crate) use camera::{
+    head_height, CameraControl, CameraPivot, LookConfig, LookLive, LookSteps, Looked, PressGesture,
+};
 use camera::{model_pivot_height, run_look_session, FlyCam, LookButton};
-use camera_zoom::{apply_zoom_scroll, CAM_DIST_DEFAULT};
+use camera_zoom::{glide_zoom, CAM_DIST_DEFAULT};
 // `/follow`: chat sends the request, `crate::target` resolves the subject into the state, and
 // `follow` owns the motion.
+#[cfg(test)]
+pub(crate) use follow::release_owed_for_test;
 pub(crate) use follow::{FollowRequest, FollowState};
 // Click to Move: `crate::target`'s dispatchers start it and run the verb it owes on arrival.
+pub(crate) use approach::on_cvar as approach_on_cvar;
 pub(crate) use approach::{
-    can_auto_interact, cancel_move_action_on_ui_shutdown, Approach, ApproachVerb, AutoMove,
-    Refused, Subject, RANGE_STOP_FRACTION, TALK_STOP,
+    can_auto_interact, cancel_move_action_on_ui_shutdown, end_auto_move, stop_auto_move, Approach,
+    ApproachVerb, AutoMove, AutoMoveStop, Refused, Subject, RANGE_STOP_FRACTION, TALK_STOP,
+};
+/// `SetStandState` run inside a script call.
+pub(crate) use posture::{stand_up_for_attack, stand_up_refused, SheathToggle, StandSetter};
+pub(crate) use press::{CallAutorun, Called, CommandSteps, TickLegs};
+pub(crate) use state::{
+    view_is_out, MoverInput, MoverLock, OwnControlLost, Player, PlayerCapsule, StandPending,
+    CAPSULE_HEIGHT, CAPSULE_RADIUS, CREATURE_STEP_UP_HEIGHT, DEFAULT_COLLISION_HEIGHT,
+    FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT,
+    STEP_UP_HEIGHT, TERMINAL_VELOCITY,
 };
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
-    GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
-    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD,
-    TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL,
-    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
-};
-pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, CREATURE_STEP_UP_HEIGHT,
-    DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT,
-    SETTLE_TIMEOUT, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
+    GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, RUN_BACK_RATIO, SKIN_WIDTH,
+    STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD, TURN_RATE,
+    TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
+    WEDGE_STILL_FRAMES,
 };
 /// The swim boundary `0.75·h`, also the wade ceiling, for the creature swim marker and the
 /// footstep splash, which have no `Player`.
 pub(crate) use swim::{may_swim, swim_enter_depth};
+/// The camera on a followed object, for the tests of the arrows' feeds.
+#[cfg(test)]
+pub(crate) use view_subject::followed_tests::camera_on_an_eye;
 /// The camera's followed unit when not our body; [`crate::camera_shake`] takes its body frame and
 /// two suspend gates from it, as the reference does from `[cam+0x88]`.
-pub(crate) use view_subject::ViewSubject;
+pub(crate) use view_subject::{FarSight, FollowedObject, ViewSubject};
 
 /// `UNIT_FLAG_STUNNED`, the `UNIT_FIELD_FLAGS` bit that stops turning. The reference reads it off
 /// the descriptor (`[[unit+0x110]+0xa0]`, predicate `0x5145b0`, an inverted `not/shr/and` test) at
@@ -115,18 +152,57 @@ pub(crate) use view_subject::ViewSubject;
 /// cannot.
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 
-/// `IsSelfControlled` (`0x5fa550`, `test eax, 0xc00004` at `0x5fa566`): false while
-/// `DISABLE_MOVE` (`0x4`), `CONFUSED` (`0x400000`) or `FLEEING` (`0x800000`) is set; the stun and
-/// taxi bits are not in the mask. It is true for an ordinary player, so a gate on it fires in the
-/// normal case and is suppressed while feared. Its readers are the movement and collision layer
-/// and `DoEmote`.
+/// `UNIT_FIELD_FLAGS` bit 0x1, `0x5fa5dd`: the server controls the unit.
+const UNIT_FLAG_SERVER_CONTROLLED: u32 = 0x0000_0001;
+/// `UNIT_FIELD_FLAGS` bit 0x2, `0x5fa55e`: with it set the `0xc00004` test is skipped.
+const UNIT_FLAG_SKIP_CONTROL_TEST: u32 = 0x0000_0002;
+/// `UNIT_FLAG_POSSESSED`, `0x5fa582`.
+const UNIT_FLAG_POSSESSED: u32 = 0x0100_0000;
+
+/// A unit as `IsSelfControlled` reads it: its descriptor and whether it is player-type
+/// (`[[obj+8]+8] & 0x10`, `0x5fa5cd`).
+pub(crate) type ControlSubject<'a> = (&'a benilla_protocol::ObjectFields, bool);
+
+/// `IsSelfControlled` (`0x5fa550`), on the unit's `UNIT_FIELD_FLAGS` at `+0xa0`:
+/// - unless bit 0x2 is set, any of `DISABLE_MOVE` (`0x4`), `CONFUSED` (`0x400000`) or `FLEEING`
+///   (`0x800000`), the literal `0xc00004`, answers false (`0x5fa566`);
+/// - `POSSESSED` (`0x1000000`) answers with the same question of the charmer, else the creator
+///   (`UNIT_FIELD_CHARMEDBY` at `+0x10`, else `UNIT_FIELD_CREATEDBY` at `+0x20`), found among the
+///   units in view (`0x468460`, mask `0x8`); one not in view answers false (`0x5fa5c3`);
+/// - otherwise true only for a player-type object with no charmer and bit 0x1 clear.
 ///
-/// `POSSESSED` (`0x1000000`) is not handled: the reference recurses on the charmer's guid
-/// (`0x5fa582`) and answers with the charmer's flags, which needs the charmer's descriptor.
-pub(crate) fn self_controlled(unit_flags: u32) -> bool {
+/// `find` is the object manager's unit lookup by guid. The reference recurses without a bound; a
+/// charm cycle, which a server never sends, ends false here at [`MAX_CONTROL_HOPS`].
+pub(crate) fn self_controlled<'a>(
+    subject: ControlSubject<'a>,
+    find: impl Fn(u64) -> Option<ControlSubject<'a>>,
+) -> bool {
+    /// More hops than any real charm chain.
+    const MAX_CONTROL_HOPS: u32 = 16;
     /// `DISABLE_MOVE | CONFUSED | FLEEING`, the reference's literal `0xc00004`.
     const NOT_SELF_CONTROLLED: u32 = 0x0000_0004 | 0x0040_0000 | 0x0080_0000;
-    unit_flags & NOT_SELF_CONTROLLED == 0
+    let mut current = subject;
+    for _ in 0..MAX_CONTROL_HOPS {
+        let (fields, is_player) = current;
+        let flags = fields.unit_flags();
+        if flags & UNIT_FLAG_SKIP_CONTROL_TEST == 0 && flags & NOT_SELF_CONTROLLED != 0 {
+            return false;
+        }
+        if flags & UNIT_FLAG_POSSESSED != 0 {
+            let controller = fields
+                .unit_charmed_by()
+                .or_else(|| fields.unit_created_by());
+            match controller.and_then(&find) {
+                Some(next) => current = next,
+                None => return false,
+            }
+            continue;
+        }
+        return is_player
+            && fields.unit_charmed_by().is_none()
+            && flags & UNIT_FLAG_SERVER_CONTROLLED == 0;
+    }
+    false
 }
 
 /// `UNIT_FLAG_IN_COMBAT`, bit 19 of `UNIT_FIELD_FLAGS` (vmangos `UnitDefines.h:564`), read by the
@@ -140,21 +216,52 @@ pub(crate) const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
 pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
 
 /// A stand-state request for [`posture`]'s one setter, the client's `SetStandState` (`0x5ed430`:
-/// send `CMSG_STANDSTATECHANGE` and apply locally through `0x6127b0`). The posture emotes (`/sit`,
-/// `/sleep`, `/kneel`, `/stand`, `/lay`) send it, as `DoEmote`'s `EmoteSpecProc == 1` branch calls
-/// the setter the `X` key does; the server sets no posture for a state text emote
-/// (`ChatHandler.cpp:729-733`). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8 kneel.
+/// send `CMSG_STANDSTATECHANGE` and apply locally through `0x6127b0`), made where no call runs it
+/// at once: the idle sit, the approach's stand, and the attack's stand, whose packet goes out in
+/// place ([`stand_up_for_attack`]). A script call runs the setter inside the call
+/// ([`StandSetter`]). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8 kneel.
 #[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
 pub(crate) struct StandStateRequest {
     pub(crate) state: u8,
+    /// The packet went out where the request was made, past the gate: the setter owes the local
+    /// apply alone.
+    pub(crate) sent: bool,
 }
 
-/// `SMSG_STANDSTATE_UPDATE` for our body (the eat and drink sit, the stand on damage), applied by
-/// [`posture`] through the same local setter with no refusal and no packet back (`0x603e50` →
-/// `0x6127b0`).
-#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
-pub(crate) struct ServerStandState {
-    pub(crate) state: u8,
+/// The active player, whichever body is driven: what the posture verbs read and act on, as the
+/// stand-state setter `0x5ed430` and the sheathe toggle `0x5eb480` each refuse any unit but the
+/// active player (`0x5ed46c`, `0x5eb4ba`). Its entity, its driver and committed sheath state, its
+/// descriptor, its hands and whether it is the driven body; its attack target (`[+0xc48]`) and
+/// precast as the queued unit edits leave them, since the controller runs ahead of the VM pass's
+/// end, which applies them.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SelfPosture<'w, 's> {
+    me: Query<'w, 's, SelfPostureRow, (With<crate::net::SelfPlayer>, Without<FlyCam>)>,
+    edits: Option<Res<'w, crate::creature_anim::UnitEdits>>,
+}
+
+/// What [`SelfPosture`] reads off the active player's own components.
+type SelfPostureRow = (
+    Entity,
+    Option<(
+        &'static crate::creature_anim::AnimDriver,
+        &'static crate::creature_anim::CommittedSheath,
+    )>,
+    Option<&'static crate::net::ObjectStore>,
+    Option<&'static crate::creature_anim::Wielded>,
+    Has<Embodied>,
+);
+
+impl SelfPosture<'_, '_> {
+    /// The active player's row: entity, driver and committed sheath, descriptor, attacking, hands,
+    /// precast and driven.
+    pub(super) fn single(&self) -> Option<posture::SelfPostureItem<'_>> {
+        let (e, anim, store, wielded, embodied) = self.me.single().ok()?;
+        let edits = self.edits.as_deref();
+        let engaged = edits.is_some_and(|edits| edits.attacking(e));
+        let precast = edits.is_some_and(|edits| edits.precast(e).is_some());
+        Some((e, anim, store, engaged, wielded, precast, embodied))
+    }
 }
 
 /// The body we drive: our own avatar, or a possessed creature. Everything reads its pivot, speeds,
@@ -167,9 +274,12 @@ pub(super) type BodyQuery<'w, 's> = Query<
         &'static mut Transform,
         Option<&'static mut MovementState>,
         Option<&'static CameraPivot>,
-        Option<&'static crate::creature_anim::AnimDriver>,
+        // The driver and the unit's committed sheath state, which it requires.
+        Option<(
+            &'static crate::creature_anim::AnimDriver,
+            &'static crate::creature_anim::CommittedSheath,
+        )>,
         Option<&'static crate::net::ObjectStore>,
-        Has<crate::creature_anim::Engaged>,
         Option<&'static crate::net::UnitSpeeds>,
         Option<&'static mut BodyTwist>,
         // Both hands and the ranged slot, for the `Z` toggle's cycle (the reference's
@@ -181,7 +291,8 @@ pub(super) type BodyQuery<'w, 's> = Query<
     (With<Embodied>, Without<FlyCam>),
 >;
 
-/// The armed transports, for the deck carry ([`ride`]). `ColliderAabb` is for the ride trace:
+/// The armed transports, for the deck carry ([`ride`]) and its hold aboard (`TransportVolume`,
+/// `0x6173b0`). `ColliderAabb` is for the ride trace:
 /// avian refreshes it in `FixedPostUpdate`, before `tick_transports` moves the deck in `Update`, so
 /// the broad-phase box lags its deck by a frame.
 pub(super) type TransportQuery<'w, 's> = Query<
@@ -191,6 +302,7 @@ pub(super) type TransportQuery<'w, 's> = Query<
         &'static Transform,
         &'static crate::net::Guid,
         Option<&'static avian3d::prelude::ColliderAabb>,
+        Option<&'static crate::transport::TransportVolume>,
     ),
     (
         With<crate::transport::Transport>,
@@ -199,10 +311,23 @@ pub(super) type TransportQuery<'w, 's> = Query<
     ),
 >;
 
+/// The stream focus's publish and the post-snap hold's release, which write the player's settle
+/// state: a reader of it this frame runs after the set.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WorldFocusSet;
+
 /// The controller's ordering handle, for anything that writes the aim or the camera rig before
 /// `control` reads them (`capture::probe_look`, `capture::probe_cam`).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PlayerControlSet;
+
+/// The world's mouse among the frame's input records, after the UI's ([`crate::ui_script::UiInput`],
+/// whose hover and press consumption it reads) and ahead of the net drain: which buttons the world
+/// owns and the look session ([`controller::sample_look`]), as the reference's world-frame mouse
+/// handlers run in the window input (`0x423920` at `0x420d23`). The world click is the input
+/// records' own ([`crate::target::world_steps`]).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WorldMouse;
 
 /// The player and camera: spawns the camera and avatar resources, and runs the controller.
 pub(crate) struct PlayerPlugin;
@@ -212,43 +337,62 @@ impl Plugin for PlayerPlugin {
         net::register(app);
         follow::plugin(app);
         approach::plugin(app);
+        camera_clip::plugin(app);
         camera_saved::plugin(app);
         camera_view::plugin(app);
         // The stream focus is published after `control`'s teleport snap and before the stream
         // stage, and the post-snap hold released after it. Both edges are needed: without
         // `.after(Input)` the focus can precede the snap, the world streams around the departure,
-        // and the hold releases at once.
+        // and the hold releases at once. Both run among the VM pass's hosts, which read the
+        // player's settle state, so a host after them reads this frame's.
         app.add_systems(
             Update,
-            (world_focus::publish_viewer, world_focus::publish_view_focus)
-                .after(benilla_world::schedule::WorldStage::Input)
-                .before(benilla_world::schedule::WorldStage::Stream),
-        )
-        .add_systems(
-            Update,
-            world_focus::release_post_snap_hold.after(benilla_world::schedule::WorldStage::Stream),
+            (
+                (world_focus::publish_viewer, world_focus::publish_view_focus)
+                    .after(benilla_world::schedule::WorldStage::Input)
+                    .before(benilla_world::schedule::WorldStage::Stream),
+                world_focus::release_post_snap_hold
+                    .after(benilla_world::schedule::WorldStage::Stream),
+            )
+                .in_set(WorldFocusSet)
+                .in_set(crate::vm_pass::VmPass::Member),
         );
-        app.add_observer(camera::on_cvar);
-        app.add_observer(camera_dynamics::on_cvar);
+        // The casters' outdoors answers, once this frame's re-place has put the body where it
+        // stands; the cast validator's place rungs read them, so it runs among the VM pass's hosts.
+        app.init_resource::<PlayerOutdoors>()
+            .init_resource::<BarUnitOutdoors>()
+            .add_systems(
+                Update,
+                publish_caster_outdoors
+                    .after(WorldFocusSet)
+                    .in_set(crate::vm_pass::VmPass::Member),
+            );
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera_zoom::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
+        app.init_resource::<OwnControlLost>();
+        app.init_resource::<MoverLock>();
+        app.init_resource::<StandPending>();
+        app.init_resource::<press::CallAutorun>();
+        app.init_resource::<press::CallPitch>();
         app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight resolves `PLAYER_FARSIGHT` to a pose before `control` seats the camera: a
         // separate system, as `control` holds our `Transform` mutably and cannot read another's.
+        view_subject::register(app);
         app.init_resource::<view_subject::ViewSubject>()
+            .init_resource::<view_subject::FarSight>()
             .init_resource::<scoped_view::ScopedView>()
             .add_systems(
                 Update,
                 (
                     view_subject::publish_view_subject,
-                    // The spyglass zoom (aura 76), before `control`, which reads it to hold the
-                    // rig in first person.
+                    // The spyglass zoom (aura 76), before `control`, which takes its start and end
+                    // onto the camera.
                     scoped_view::apply_scoped_view,
                 )
                     .in_set(WorldStage::Input)
                     .before(control)
-                    .in_set(crate::char_select::InWorldGated),
+                    .in_set(crate::client_state::InWorldGated),
             );
         app.add_systems(
             Startup,
@@ -259,7 +403,11 @@ impl Plugin for PlayerPlugin {
         )
         // The world camera renders only in world or under the loading screen, whose covered
         // render compiles the world's pipelines before the first visible frame.
-        .add_systems(Update, setup::gate_world_camera)
+        // Before the VM pass, whose script calls read the cameras: the gate is settled first.
+        .add_systems(
+            Update,
+            setup::gate_world_camera.before(crate::vm_pass::VmPass::Start),
+        )
         // Off in capture mode, where the harness pins the camera, and in world only, so the glue
         // screens keep the cursor and send no movement.
         .add_systems(
@@ -268,11 +416,10 @@ impl Plugin for PlayerPlugin {
                 .in_set(PlayerControlSet)
                 .in_set(WorldStage::Input)
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         // The posture queue (the `/sit` family), which `control` alone executes.
         .add_message::<StandStateRequest>()
-        .add_message::<ServerStandState>()
         // Land-here, before `control`, so the frame that applies the teleport takes control back.
         .add_message::<land::LandHere>()
         .add_systems(
@@ -280,7 +427,7 @@ impl Plugin for PlayerPlugin {
             land::land_here
                 .in_set(WorldStage::Input)
                 .before(control)
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         // A server spline driving us (Charge, knockback, taxi) is mirrored into `Player` before
         // `control` reads `pos`; gated as `control` is.
@@ -290,7 +437,7 @@ impl Plugin for PlayerPlugin {
                 .in_set(WorldStage::Input)
                 .before(control)
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         // A session end (a `/logout` or a lost session) drops `active`, re-arming the take-control
         // latch for the next login; ungated, as the message lands while the state flips.
@@ -323,28 +470,55 @@ impl Plugin for PlayerPlugin {
                 // Off in capture mode, where the camera is pinned.
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
         )
-        // Which mouse buttons the world owns, decoded ahead of its three readers: `/follow`'s
-        // both-button cancel, the look session and the camera's command word. Not in `control`:
-        // `steer_follow` runs before it and would read the latch a frame late.
+        // The cast bar's self-cancel inside the press, between its verdict and its tick, so
+        // `CMSG_CANCEL_CAST` goes out ahead of the start (`0x51512a` before `0x5151a0`).
+        .configure_sets(
+            Update,
+            crate::spell::LocalCancel
+                .after(press::press_commands)
+                .before(press::press_tick),
+        )
+        // The world's mouse input records, after the UI's and ahead of the packets.
+        .configure_sets(
+            Update,
+            WorldMouse
+                .after(crate::ui_script::UiInput)
+                .before(WorldStage::Net),
+        )
+        .init_resource::<LookSample>()
+        // Which mouse buttons the world owns, decoded ahead of its readers: the look session,
+        // `/follow`'s both-button cancel and the camera's command word.
         .add_systems(
             Update,
             camera::latch_world_mouse
-                .in_set(WorldStage::Input)
-                .before(control)
-                .before(follow::steer_follow)
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(WorldMouse)
+                .in_set(crate::client_state::InWorldGated),
         )
-        // The world's right mouse-down, off that latch and ahead of `control`, the button's
-        // binding, as `0x483c40` runs its hook before `ExecuteBinding`; off in capture mode, like
+        // The look calls the packets' handlers made, after their events and ahead of the tick and
+        // the controller.
+        .add_systems(
+            Update,
+            camera::apply_late_look_calls
+                .in_set(crate::lanes::UiLanes)
+                .after(crate::lanes::fire_in_order)
+                .in_set(crate::client_state::InWorldGated),
+        )
+        // The look session, off that latch, and the tick the frame's command presses and releases
+        // run (`0x515090` → `0x514640`), after the press's hand-off; off in capture mode, like
         // `control`.
         .add_systems(
             Update,
-            camera::send_world_right_press
-                .in_set(WorldStage::Input)
+            (
+                controller::sample_look,
+                camera::focus_on_look_edges,
+                press::press_commands,
+                press::press_tick,
+            )
+                .chain()
+                .in_set(WorldMouse)
                 .after(camera::latch_world_mouse)
-                .before(control)
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         // `/follow` and Click to Move steer before `control`, so the player's own turn input
         // lands after them and wins over their steering.
@@ -354,7 +528,7 @@ impl Plugin for PlayerPlugin {
                 .chain()
                 .in_set(WorldStage::Input)
                 .before(control)
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         // The self-avatar fade shares the `MeshTag` and material channel with the interior
         // classifier and the appear and despawn fades, and writes `Visibility` for the

@@ -5,16 +5,15 @@
 //! `UNIT_FIELD_PETNUMBER`, is ours, and our class byte is Hunter, so a warlock's imp answers
 //! nothing. `UnitCreatureFamily("pet")` (`0x51a310`) has no class test, so the imp still shows
 //! "Imp", while `GetPetFoodTypes()` (`0x4bea10`) shares the `0x6116e0` gate, so a non-hunter's pet
-//! has no diet even when its family row has a food mask.
+//! has no diet even when its family row has a food mask. Each reads the pet at the call through
+//! the host (`crate::ui_pet::PetLive`).
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{PetStats, ScriptValue, UiScript};
+use benilla_ui::script::PetStats;
 
 use crate::names::NameCache;
-use crate::net::{NetCommands, ObjectStore};
-use crate::ui_pet::{PetBar, PetUnit};
-use crate::ui_unit::UnitFeed;
+use crate::net::ObjectStore;
 
 /// `UNIT_FIELD_BYTES_0` byte 1, Hunter: the class the stat gate tests (`0x611752`). The enum is
 /// pinned by `GetComboPoints` (`0x51a190`), which tests 4 and 0xB, Rogue and Druid, on that byte.
@@ -40,38 +39,48 @@ pub(crate) struct PetFamilyTables {
     pub(crate) foods: benilla_formats::PetFoodNames,
 }
 
-/// The pet snapshot's push; anything that fires a pet event orders after it. `fire_event` runs Lua
-/// handlers synchronously and `PetTab_Update` tests only `HasPetUI()`, so a `UNIT_PET` fired
-/// before the push keeps the Pet tab hidden for the session.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PetSnapshot;
+/// The bucket and its two tooltip figures, the `UNIT_HAPPINESS` key.
+type Happiness = (Option<u32>, u32, u32);
 
-pub(crate) struct UiPetStatsPlugin;
+/// The happiness the stat block reads off the raw power `raw`: `GetPetHappiness`'s bucket and its
+/// damage and loyalty figures, the binding's gate-failure numbers and a nil bucket with no DBC.
+fn happiness_of(tables: Option<&PetStatTables>, raw: u32) -> (Option<u32>, f32, f32) {
+    tables
+        .and_then(|t| t.personalities.for_pet(None))
+        .map(|p| {
+            let h = p.happiness(raw);
+            (Some(h.bucket), h.damage_percentage, h.loyalty_rate)
+        })
+        .unwrap_or((None, 100.0, 0.0))
+}
 
-impl Plugin for UiPetStatsPlugin {
-    fn build(&self, app: &mut App) {
-        // In the unit feed, so the pet frame repaints in the pass that pushes its health.
-        app.add_systems(Update, feed_pet_stats.in_set(UnitFeed).in_set(PetSnapshot));
-    }
+/// Whether the happiness watch's run signals `UNIT_HAPPINESS` (`0x515e7a`) for a change of the
+/// happiness field from `old` to `new`. Deviation: only when the bucket or its two tooltip figures
+/// change, not on every change of the field as in the reference, because no stock consumer reads
+/// the raw value.
+pub(crate) fn happiness_moved(tables: Option<&PetStatTables>, old: u32, new: u32) -> bool {
+    let key = |raw| {
+        let (bucket, damage, loyalty) = happiness_of(tables, raw);
+        (bucket, damage.to_bits(), loyalty.to_bits())
+    };
+    let (was, is): (Happiness, Happiness) = (key(old), key(new));
+    was != is
 }
 
 /// The pet's family word, icon and diet, from its cached creature template. The template entry is
 /// the descriptor's `OBJECT_FIELD_ENTRY`, not the guid's entry slot, which holds the pet number
-/// (vmangos `Pet::Create`); `Creature::InitEntry` writes the real entry (`Creature.cpp:376`). A
-/// miss sends the ask-once creature query and answers all-absent until it lands. The icon is
-/// `CreatureFamily.dbc`'s own column: `GetPetIcon`'s answer and the stable's slot art.
-fn family_for(
+/// (vmangos `Pet::Create`); `Creature::InitEntry` writes the real entry (`Creature.cpp:376`). The
+/// record is only read, as `GetPetIcon` and `GetPetFoodTypes` read the unit's (`0x4beb10`,
+/// `0x4bea10`), which the unit's create asked for; a miss answers all-absent until it lands. The
+/// icon is `CreatureFamily.dbc`'s own column: `GetPetIcon`'s answer and the stable's slot art.
+pub(crate) fn family_for(
     pet: Option<&ObjectStore>,
     names: &NameCache,
-    commands: &NetCommands,
     tables: Option<&PetFamilyTables>,
 ) -> (Option<String>, Option<String>, Vec<String>) {
     let Some(entry) = pet.and_then(|s| s.0.object_entry()).filter(|&e| e != 0) else {
         return (None, None, Vec::new());
     };
-    // vmangos answers a creature query off the entry alone (`HandleCreatureQueryOpcode`), so the
-    // guid is 0.
-    let _ = names.resolve_creature(entry, 0, commands);
     let Some(tables) = tables else {
         return (None, None, Vec::new());
     };
@@ -94,13 +103,13 @@ fn family_for(
 }
 
 /// The whole stat block for the current pet, or [`PetStats::default`] with none.
-fn stats_for(
+pub(crate) fn stats_for(
     pet: Option<&ObjectStore>,
     self_store: Option<&ObjectStore>,
     tables: Option<&PetStatTables>,
     family: (Option<String>, Option<String>, Vec<String>),
 ) -> (bool, PetStats) {
-    let (family, icon, food_types) = family;
+    let (_, icon, food_types) = family;
     let Some(fields) = pet.map(|s| &s.0) else {
         return (false, PetStats::default());
     };
@@ -113,26 +122,19 @@ fn stats_for(
         && self_store.map(|s| ((s.0.unit_bytes_0().unwrap_or(0) >> 8) & 0xff) as u8)
             == Some(CLASS_HUNTER);
     if !hunter {
-        // The family word passes the gate and the diet does not (module doc): a mind-controlled
-        // boar under a non-hunter (family 5, food mask 63) gets "Boar" and no diet.
+        // The icon passes the gate and the diet does not (module doc): a mind-controlled boar
+        // under a non-hunter (family 5, food mask 63) gets no diet.
         return (
             has_ui,
             PetStats {
-                family,
-                // The icon passes with the word; whether the reference gates it is untraced.
+                // Whether the reference gates the icon is untraced.
                 icon,
                 ..PetStats::default()
             },
         );
     }
-    let (happiness, damage_percentage, loyalty_rate) = tables
-        .and_then(|t| t.personalities.for_pet(None))
-        .map(|p| {
-            let h = p.happiness(fields.unit_power(POWER_HAPPINESS).unwrap_or(0));
-            (Some(h.bucket), h.damage_percentage, h.loyalty_rate)
-        })
-        // No DBC: the binding's gate-failure numbers and a nil bucket.
-        .unwrap_or((None, 100.0, 0.0));
+    let (happiness, damage_percentage, loyalty_rate) =
+        happiness_of(tables, fields.unit_power(POWER_HAPPINESS).unwrap_or(0));
     (
         has_ui,
         PetStats {
@@ -147,87 +149,10 @@ fn stats_for(
             }),
             training_points: fields.unit_training_points(),
             experience: fields.unit_pet_experience(),
-            family,
             icon,
             food_types,
         },
     )
-}
-
-fn feed_pet_stats(
-    script: Option<NonSendMut<UiScript>>,
-    bar: Res<PetBar>,
-    pet: PetUnit,
-    self_store: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
-    tables: Option<Res<PetStatTables>>,
-    family_tables: Option<Res<PetFamilyTables>>,
-    names: Res<NameCache>,
-    commands: Res<NetCommands>,
-    mut last: Local<crate::ui_script::VmMemo<Option<(bool, PetStats)>>>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let last = last.get(&script);
-    let store = pet.store(bar.spells.pet_guid);
-    let family = family_for(store, &names, &commands, family_tables.as_deref());
-    let fresh = stats_for(store, self_store.iter().next(), tables.as_deref(), family);
-    if last.as_ref() == Some(&fresh) {
-        return;
-    }
-    // `UNIT_HAPPINESS`, the pet frame's icon repaint (`PetFrame.lua:63`). Deviation: fired when
-    // the bucket or its two tooltip figures change, not on every change of the happiness field as
-    // in the reference, because no stock consumer reads the raw value.
-    let happiness_moved = last.as_ref().map(|(_, s)| {
-        (
-            s.happiness,
-            s.damage_percentage.to_bits(),
-            s.loyalty_rate.to_bits(),
-        )
-    }) != Some((
-        fresh.1.happiness,
-        fresh.1.damage_percentage.to_bits(),
-        fresh.1.loyalty_rate.to_bits(),
-    ));
-    // The pet page's other repaint events (`PetPaperDollFrame.lua:9,21`), each fired off its own
-    // values so happiness drift leaves them alone; `UNIT_PET_EXPERIENCE` repaints only the XP bar.
-    let xp_moved = last.as_ref().map(|(_, s)| s.experience) != Some(fresh.1.experience);
-    let training_moved =
-        last.as_ref().map(|(_, s)| s.training_points) != Some(fresh.1.training_points);
-    if happiness_moved {
-        debug!(
-            "ui_pet_stats: happiness {:?} ({}% damage), loyalty {:?}",
-            fresh.1.happiness, fresh.1.damage_percentage, fresh.1.loyalty
-        );
-    }
-    // The family lands with the creature-query answer and fires nothing: the pet page registers no
-    // event known to fire then (not the reference's query event, `UNIT_CLASSIFICATION_CHANGED`).
-    // The page's `OnShow` covers an open; a page already open repaints on its next `UNIT_STATS`.
-    if last.as_ref().map(|(_, s)| &s.family) != Some(&fresh.1.family) {
-        debug!(
-            "ui_pet_stats: pet family {:?}, diet {:?}",
-            fresh.1.family, fresh.1.food_types
-        );
-    }
-    *last = Some(fresh.clone());
-    script.set_pet_stats(fresh.0, fresh.1);
-    // Push before firing: dispatch runs the Lua handlers synchronously.
-    if happiness_moved {
-        // `arg1` is the unit token, as on every 1.12 `UNIT_*` event; its handlers gate on it.
-        script.fire_event("UNIT_HAPPINESS", vec![ScriptValue::Str("pet".into())]);
-    }
-    // Fields 141/142 and 149 fire through the same token fan-out (`0x515e50`,
-    // `SignalEvent2(id, "%s", token)`); `UNIT_PET_TRAINING_POINTS` reaches the page only through
-    // its `arg1 == "pet"` arm (`PetPaperDollFrame.lua:45`).
-    if xp_moved {
-        script.fire_event("UNIT_PET_EXPERIENCE", vec![ScriptValue::Str("pet".into())]);
-    }
-    if training_moved {
-        script.fire_event(
-            "UNIT_PET_TRAINING_POINTS",
-            vec![ScriptValue::Str("pet".into())],
-        );
-    }
 }
 
 #[cfg(test)]
@@ -310,20 +235,13 @@ mod tests {
                 pet_family,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
             }),
         );
         names
-    }
-
-    fn commands() -> (
-        NetCommands,
-        crossbeam_channel::Receiver<crate::net::ClientCommand>,
-    ) {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        (NetCommands(tx), rx)
     }
 
     /// On the real DBC data: the training-point word order, the loyalty byte, and a maxed pet's
@@ -455,40 +373,31 @@ mod tests {
     #[test]
     fn the_pets_family_resolves_off_its_descriptor_entry() {
         let Some(t) = family_tables() else { return };
-        let (cmds, rx) = commands();
 
         // 1. No pet.
         let names = NameCache::default();
-        assert_eq!(family_for(None, &names, &cmds, Some(&t)), no_family());
-        assert!(rx.try_recv().is_err(), "nothing to ask about");
+        assert_eq!(family_for(None, &names, Some(&t)), no_family());
 
-        // 2. Unanswered: nil, and the ask goes out once.
+        // 2. Unanswered: nil. Nothing is asked here: the record is the unit's, which its create
+        // looked up (`0x60b15b`).
         let pet = ObjectStore(ObjectFields::from_pairs(&[
             (ENTRY, IMP_ENTRY),
             (PETNUMBER, 7),
         ]));
         assert_eq!(
-            family_for(Some(&pet), &names, &cmds, Some(&t)),
+            family_for(Some(&pet), &names, Some(&t)),
             no_family(),
             "un-queried is nil, not a guess"
         );
-        assert!(
-            matches!(
-                rx.try_recv(),
-                Ok(crate::net::ClientCommand::CreatureQuery { entry, .. }) if entry == IMP_ENTRY
-            ),
-            "the pet's DESCRIPTOR entry is what gets queried"
-        );
-        assert!(rx.try_recv().is_err(), "ask-once");
 
         // 3. Family 0, a template with no family: nil.
         let names = cache_with(IMP_ENTRY, 0);
-        assert_eq!(family_for(Some(&pet), &names, &cmds, Some(&t)), no_family());
+        assert_eq!(family_for(Some(&pet), &names, Some(&t)), no_family());
 
         // 4. The Imp's family 23: a word and an empty diet, food mask 0 in the shipped DBC.
         let names = cache_with(IMP_ENTRY, 23);
         assert_eq!(
-            family_for(Some(&pet), &names, &cmds, Some(&t)),
+            family_for(Some(&pet), &names, Some(&t)),
             (
                 Some("Imp".into()),
                 // Rows 15 (Felhunter) and 23 (Imp) ship this placeholder; the stable, the
@@ -500,7 +409,7 @@ mod tests {
 
         // 5. A boar (family 5): the word and six diets, in bit order.
         let names = cache_with(BOAR_ENTRY, 5);
-        let (name, icon, diet) = family_for(Some(&boar()), &names, &cmds, Some(&t));
+        let (name, icon, diet) = family_for(Some(&boar()), &names, Some(&t));
         assert_eq!(name.as_deref(), Some("Boar"));
         assert_eq!(
             icon.as_deref(),
@@ -510,7 +419,7 @@ mod tests {
 
         // 6. No DBC tables: nil.
         let names = cache_with(BOAR_ENTRY, 5);
-        assert_eq!(family_for(Some(&boar()), &names, &cmds, None), no_family());
+        assert_eq!(family_for(Some(&boar()), &names, None), no_family());
     }
 
     /// A boar under a non-hunter (family 5, food mask 63) is the one case that shows the split, as
@@ -528,7 +437,6 @@ mod tests {
             (Some("Boar".into()), None, boar_diet.clone()),
         );
         assert!(!s.hunter_pet);
-        assert_eq!(s.family.as_deref(), Some("Boar"), "the word is ungated");
         assert!(
             s.food_types.is_empty(),
             "…but the diet shares 0x6116e0 with the stats"
@@ -543,7 +451,6 @@ mod tests {
             Some(&t),
             (Some("Boar".into()), None, boar_diet.clone()),
         );
-        assert_eq!(s.family.as_deref(), Some("Boar"));
         assert_eq!(s.food_types, boar_diet);
     }
 
@@ -555,75 +462,6 @@ mod tests {
             None,
             (Some("Imp".into()), None, vec![]),
         );
-        assert_eq!(s.family, None);
         assert!(s.food_types.is_empty());
-    }
-
-    /// `UNIT_PET` must reach Lua with `HasPetUI()` already answering, as `PetTab_Update` reads it;
-    /// only a real schedule orders the feeds, so this runs one `app.update()` on a cold pet.
-    #[test]
-    fn unit_pet_reaches_lua_with_has_pet_ui_already_true() {
-        use crate::char_select::ClientState;
-        use crate::net::GuidIndex;
-        use crate::ui_pet::UiPetPlugin;
-
-        const PET_GUID: u64 = 0xf140_0000_0000_002a;
-
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(ClientState::InWorld)
-            .init_resource::<NameCache>()
-            .init_resource::<GuidIndex>()
-            .init_resource::<crate::target::Selection>()
-            .init_resource::<crate::net::SelfGuid>()
-            .init_resource::<crate::ui_script::UiClock>()
-            .init_resource::<crate::ui_action::UiErrorKeys>()
-            .init_resource::<crate::net::Reputations>()
-            .init_resource::<crate::spell::QueuedMeleeSpell>()
-            .init_resource::<crate::spell::AutoRepeatActive>()
-            .init_resource::<crate::ui_loot::LootState>()
-            .init_resource::<crate::ui_loot::LootLatch>()
-            .add_message::<crate::creature_anim::SheathRequest>()
-            .add_message::<crate::net::FieldChanged>()
-            .insert_resource(NetCommands(tx))
-            .add_plugins((UiPetStatsPlugin, UiPetPlugin));
-
-        // The pet is in the world when the bar's guid lands: a cold summon.
-        let pet = app.world_mut().spawn(boar()).id();
-        app.world_mut()
-            .resource_mut::<GuidIndex>()
-            .0
-            .insert(PET_GUID, pet);
-        app.world_mut().resource_mut::<PetBar>().spells.pet_guid = PET_GUID;
-
-        // A frame standing in for the pet page records what `HasPetUI()` answers at dispatch.
-        let script = UiScript::new().unwrap();
-        script
-            .run(
-                r#"
-                BENILLA_SAW = "never fired"
-                local f = CreateFrame("Frame")
-                f:RegisterEvent("UNIT_PET")
-                f:SetScript("OnEvent", function()
-                    BENILLA_SAW = HasPetUI() and "has pet UI" or "no pet UI"
-                end)
-                "#,
-            )
-            .unwrap();
-        app.insert_non_send_resource(script);
-
-        app.update();
-
-        let saw: String = app
-            .world_mut()
-            .non_send_resource::<UiScript>()
-            .eval("return BENILLA_SAW")
-            .unwrap();
-        assert_eq!(
-            saw, "has pet UI",
-            "UNIT_PET must not reach Lua ahead of the snapshot its handlers read — unordered, \
-             this answered \"no pet UI\" and the Pet tab stayed down for the session"
-        );
     }
 }

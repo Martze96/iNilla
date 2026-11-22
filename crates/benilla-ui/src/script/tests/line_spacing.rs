@@ -36,7 +36,7 @@ fn spacing(s: &UiScript, obj: &str) -> f32 {
         .unwrap_or_else(|e| panic!("{obj}:GetSpacing raised {e}"))
 }
 
-/// Every table carries the pair (`reference/1.12-shapes.tsv`, the `SetSpacing` rows), starting at
+/// Every table carries the pair (`reference/bindings.tsv`, the `SetSpacing` rows), starting at
 /// the constructors' 0 (`0x783a81`, `0x770d89`), and a number round-trips.
 #[test]
 fn every_text_table_round_trips_its_spacing() {
@@ -237,10 +237,11 @@ fn a_scrolling_frame_steps_its_messages_and_rows_by_the_spacing() {
         .collect();
     s.set_message_line_rows(&answers);
     let got = bands(&s);
+    // Farthest displayed line first, the scrolling class's emit order.
     let want = [
-        ("new", 90.0, 104.0),
-        ("wrapped", 108.0, 140.0),
         ("old", 144.0, 158.0),
+        ("wrapped", 108.0, 140.0),
+        ("new", 90.0, 104.0),
     ];
     assert_eq!(got.len(), want.len(), "{got:?}");
     for ((t, b, top), (wt, wb, wtop)) in got.iter().zip(want) {
@@ -308,7 +309,7 @@ fn simplehtml_keeps_a_negative_spacing_but_steps_its_blocks_by_zero() {
         .get(crate::layout::Point::TopLeft)
         .expect("the TOPLEFT anchor")
         .y_off;
-    assert_eq!(y, 0.0, "the step is the clamped spacing");
+    assert_eq!(y.raw(), 0.0, "the step is the clamped spacing");
 }
 
 /// How many messages a plain frame keeps after a tick: its capacity.
@@ -397,7 +398,8 @@ fn a_plain_message_frames_slots_step_by_the_raw_pitch() {
 }
 
 /// A scrolling frame charges each message its height plus the line string's spacing rounded up to
-/// a whole pixel (`0x78899e` → `0x766750`), and a wrapped message's inner gap likewise.
+/// a whole pixel (`0x78899e` → `0x766750`), and a wrapped message's inner gap likewise
+/// (`0x5c2143`-`0x5c215c`).
 #[test]
 fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
     let mut s = script();
@@ -422,10 +424,11 @@ fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
         .collect();
     s.set_message_line_rows(&answers);
     let got = bands(&s);
+    // Farthest displayed line first, the scrolling class's emit order.
     let want = [
-        ("new", 90.0, 104.0),
-        ("wrapped", 107.0, 138.0),
         ("old", 141.0, 155.0),
+        ("wrapped", 107.0, 138.0),
+        ("new", 90.0, 104.0),
     ];
     assert_eq!(got.len(), want.len(), "{got:?}");
     for ((t, b, top), (wt, wb, wtop)) in got.iter().zip(want) {
@@ -437,16 +440,90 @@ fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
     }
 }
 
-/// `spacing=` is read with `atof` (`0x64aaa0`): the numeric prefix, 0 for none.
+/// A scrolling frame at `scale`, spacing `spacing`, `height` tall, holding 'old', 'wrapped' (two
+/// rows) and 'new', as `(text, bottom, top)` in draw order.
+fn spaced_bands(scale: f32, spacing: f32, height: f32) -> Vec<(String, f32, f32)> {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(&format!(
+        "local f = CreateFrame('ScrollingMessageFrame', 'GapChat3')\n\
+         f:SetPoint('BOTTOMLEFT', 0, 90)\n\
+         f:SetWidth(400)\n\
+         f:SetHeight({height})\n\
+         f:SetScale({scale})\n\
+         f:SetFont('Fonts\\\\FRIZQT__.TTF', 14)\n\
+         f:SetSpacing({spacing})\n\
+         f:AddMessage('old', 1, 1, 1)\n\
+         f:AddMessage('wrapped', 1, 1, 1)\n\
+         f:AddMessage('new', 1, 1, 1)"
+    ))
+    .unwrap();
+    s.resolve();
+    let answers: Vec<(u32, u32, u16, u64)> = s
+        .message_lines_needing_measure()
+        .iter()
+        .map(|r| (r.frame, r.index, if r.index == 1 { 2 } else { 1 }, r.key))
+        .collect();
+    s.set_message_line_rows(&answers);
+    bands(&s)
+}
+
+/// The gap between messages is the unscaled spacing snapped, then scaled (`0x788954`-`0x788975`);
+/// the gap between the rows of one message is the spacing times the scale snapped up to a whole
+/// pixel (`0x5c2143`-`0x5c215c`). At 0.75 with spacing 1, that is 0.75 between messages and 1
+/// between rows, where snapping the scaled value for both gives 1 and 1.
 #[test]
-fn the_spacing_attribute_is_read_with_atof() {
+fn a_scrolling_frames_gaps_scale_rather_than_snap_scaled() {
+    let got = spaced_bands(0.75, 1.0, 100.0);
+    assert_eq!(got.len(), 3, "{got:?}");
+    let by = |t: &str| got.iter().find(|g| g.0 == t).expect(t).clone();
+    let (old, wrapped, new) = (by("old"), by("wrapped"), by("new"));
+    // 14 px type at 0.75 is 10.5 px a row: two rows and the snapped gap make 22.
+    assert!((wrapped.2 - wrapped.1 - 22.0).abs() < 0.01, "{wrapped:?}");
+    assert!(
+        (wrapped.1 - new.1 - 11.25).abs() < 0.01,
+        "{new:?} {wrapped:?}"
+    );
+    assert!(
+        (old.1 - wrapped.1 - 22.75).abs() < 0.01,
+        "{wrapped:?} {old:?}"
+    );
+}
+
+/// The fit is per message: each takes its own block height and the gap after it from what is left
+/// (`0x7889a3`-`0x7889be`). At 0.75 with spacing 1 a message costs 10.5 + 0.75 and a wrapped one
+/// 21 + 1 + 0.75, 34 together. A count of equal rows of 11.25 would hold 'wrapped' in 33.9 px, and
+/// per message it does not; in 34.2 px both do.
+#[test]
+fn a_scrolling_frames_fit_is_per_message() {
+    let texts = |height_px: f32| -> Vec<String> {
+        // The frame is at 0.75, so its set height is the screen height over the scale.
+        spaced_bands(0.75, 1.0, height_px / 0.75)
+            .into_iter()
+            .map(|g| g.0)
+            .collect()
+    };
+    assert_eq!(texts(33.9), ["new"]);
+    assert_eq!(texts(34.2), ["wrapped", "new"]);
+}
+
+/// `spacing=` is read with `SStrToFloat` (`0x783ef6`, `0x77126d`): the numeric prefix, with no
+/// whitespace skip and an exponent's optional `+` (`0x64aaa0`), 0 for none.
+#[test]
+fn the_spacing_attribute_is_read_with_s_str_to_float() {
     let s = script();
     let doc = crate::framexml::parse(
         r#"<Ui>
-             <Font name="AtofFont" font="Fonts\FRIZQT__.TTF" spacing=" 3px"/>
+             <Font name="AtofFont" font="Fonts\FRIZQT__.TTF" spacing=" 3px">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Font name="ExpFont" font="Fonts\FRIZQT__.TTF" spacing="1e+-1">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
              <Frame name="AtofHost">
                <Layers><Layer level="ARTWORK">
                  <FontString name="AtofOwn" spacing="2.5em"/>
+                 <FontString name="AtofPlus" spacing="+2"/>
                </Layer></Layers>
              </Frame>
            </Ui>"#,
@@ -454,6 +531,8 @@ fn the_spacing_attribute_is_read_with_atof() {
     .expect("valid FrameXML");
     let report = crate::loader::load(&s, &doc, &|_| None);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!(spacing(&s, "AtofFont"), 3.0);
+    assert_eq!(spacing(&s, "AtofFont"), 0.0, "no whitespace skip");
+    assert!((spacing(&s, "ExpFont") - 0.1).abs() < 1e-6, "1e+-1 is 0.1");
     assert_eq!(spacing(&s, "AtofOwn"), 2.5);
+    assert_eq!(spacing(&s, "AtofPlus"), 0.0, "no leading plus");
 }

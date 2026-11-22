@@ -1,11 +1,11 @@
-//! The glue screens' Lua surface (`reference/1.12-glue-surface.tsv`) held to its source, the shapes
+//! The glue screens' Lua surface (`reference/glue_surface.tsv`) held to its source, the shapes
 //! table, and the glue VM ([`UiScript::new_glue`]) held to the surface: every function it puts in
 //! `_G` is a glue-state one, and every glue-state function is there or on [`NOT_YET`]. Then the glue
 //! state's frame types and event table.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::script::{UiScript, GLUE_EVENTS};
+use crate::script::{glue_events, UiScript};
 use crate::widget::KindState;
 
 /// A vendored `reference/` table's data rows, split on tabs, the header row dropped.
@@ -13,7 +13,7 @@ fn reference_rows(file: &str, header: &str) -> Vec<Vec<String>> {
     let path = format!("{}/../../reference/{file}", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     text.lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
+        .filter(|l| !l.is_empty())
         .map(|l| l.split('\t').map(str::to_string).collect::<Vec<_>>())
         .filter(|f| f[0] != header)
         .collect()
@@ -28,13 +28,13 @@ pub(super) struct GlueRow {
     pub arity: String,
 }
 
-/// `reference/1.12-glue-surface.tsv`.
+/// `reference/glue_surface.tsv`.
 pub(super) fn glue_surface() -> Vec<GlueRow> {
-    let rows: Vec<GlueRow> = reference_rows("1.12-glue-surface.tsv", "scope")
+    let rows: Vec<GlueRow> = reference_rows("glue_surface.tsv", "name")
         .into_iter()
         .map(|f| GlueRow {
-            scope: f[0].clone(),
-            name: f[2].clone(),
+            name: f[0].clone(),
+            scope: f[1].clone(),
             fn_va: f[3].clone(),
             table_va: f[4].clone(),
             arity: f[5].clone(),
@@ -42,8 +42,7 @@ pub(super) fn glue_surface() -> Vec<GlueRow> {
         .collect();
     assert!(
         rows.len() > 150,
-        "the glue surface table looks truncated ({} rows) — regenerate it with \
-         scripts/gen-reference-glue-surface.py",
+        "the glue surface table looks truncated ({} rows)",
         rows.len()
     );
     rows
@@ -68,7 +67,7 @@ const GLUE_TABLES: [(&str, usize); 8] = [
 fn the_glue_surface_matches_the_shapes_table() {
     // (table_va, name) -> (fn, arity): a name is not a key in the shapes table.
     let shapes: BTreeMap<(String, String), (String, String)> =
-        reference_rows("1.12-shapes.tsv", "name")
+        reference_rows("bindings.tsv", "name")
             .into_iter()
             .map(|f| ((f[3].clone(), f[0].clone()), (f[1].clone(), f[7].clone())))
             .collect();
@@ -100,7 +99,7 @@ fn the_glue_surface_matches_the_shapes_table() {
         if r.fn_va == "lua" {
             continue;
         }
-        if r.table_va == "-" {
+        if r.table_va.is_empty() {
             // `__pow`, set by `luaopen_math` outside any table.
             assert_eq!(r.name, "__pow", "{} has no table", r.name);
             continue;
@@ -130,32 +129,9 @@ fn the_glue_surface_matches_the_shapes_table() {
     }
 }
 
-/// Glue-state functions the glue VM does not answer yet, by registrar table, each with why. The
-/// list only shrinks: a verb is absent until built, never stubbed.
-const NOT_YET: &[(&str, &[&str])] = &[
-    (
-        "0x51bb20's file trio, each only `luaL_error(\"Access Denied\")`; unbuilt in the in-game \
-         VM too, tracked by #338",
-        &["ReadFile", "DeleteFile", "AppendToFile"],
-    ),
-    (
-        "the glue core (0x46ddf0, table 0x8373b8): the movie's setter, the \
-         patch and survey and the billing; each a binding of its own, the ones \
-         with an in-game namesake included",
-        &[
-            "GetBillingPlan",
-            "GetBillingTimeRemaining",
-            "GetBillingTimeRested",
-            "PINEntered",
-            "PatchDownloadApply",
-            "PatchDownloadCancel",
-            "PatchDownloadProgress",
-            "Screenshot",
-            "SetMovieSubtitles",
-            "SurveyNotificationDone",
-        ],
-    ),
-];
+/// Glue-state functions the glue VM does not answer yet, by registrar table, each with why: none
+/// today. The list only shrinks: a verb is absent until built, never stubbed.
+const NOT_YET: &[(&str, &[&str])] = &[];
 
 /// The glue VM's globals by Lua type name.
 fn glue_globals() -> BTreeMap<String, String> {
@@ -219,9 +195,8 @@ fn the_glue_vm_answers_the_glue_surface() {
     );
 }
 
-/// Past its functions the glue `_G` holds the four library tables, the frame metatable
-/// `0x7039e0` publishes, and the compat chunk's `PI`; `_G` itself is benilla's, as in-game
-/// (`reference_surface::BEYOND_1_12`).
+/// Past its functions the glue globals hold the four library tables, the frame metatable
+/// `0x7039e0` publishes, and the compat chunk's `PI`.
 #[test]
 fn the_glue_vm_holds_no_other_global() {
     let others: BTreeMap<String, String> = glue_globals()
@@ -231,7 +206,6 @@ fn the_glue_vm_holds_no_other_global() {
     let want: BTreeMap<String, String> = [
         ("PI", "number"),
         ("__framescript_meta", "table"),
-        ("_G", "table"),
         ("bit", "table"),
         ("math", "table"),
         ("string", "table"),
@@ -243,14 +217,16 @@ fn the_glue_vm_holds_no_other_global() {
     assert_eq!(others, want);
 }
 
-/// The glue event table in code is `reference/1.12-glue-events.tsv`, by id.
+/// The glue event table the VM matches against is `reference/glue_events.tsv`, by id.
 #[test]
 fn the_glue_event_table_matches_the_reference() {
-    let rows = reference_rows("1.12-glue-events.tsv", "id");
-    assert_eq!(rows.len(), GLUE_EVENTS.len());
+    let rows = reference_rows("glue_events.tsv", "id");
+    // 1.12.1's glue screens name 26 events; a PIN bump that changes the count is read here.
+    assert_eq!(glue_events().len(), 26);
+    assert_eq!(rows.len(), glue_events().len());
     for (id, row) in rows.iter().enumerate() {
         assert_eq!(row[0], id.to_string(), "ids run 0..26 in order");
-        assert_eq!(row[1], GLUE_EVENTS[id], "event {id}");
+        assert_eq!(row[1], glue_events()[id], "event {id}");
     }
 }
 
@@ -289,6 +265,68 @@ fn glue_events_register_by_the_glue_table() {
     assert_eq!(
         s.eval::<Vec<String>>("return heard").unwrap(),
         ["all:SET_GLUE_SCREEN"]
+    );
+}
+
+/// `Screenshot` (`0x46d3d0`, table `0x8373b8`) arms a capture, and its callback `0x46c520` answers
+/// with glue event 14 on success and 15 on failure, the glue table's own names
+/// (`reference/glue_events.tsv`); the in-game pair would reach no glue frame.
+#[test]
+fn the_glue_screenshot_arms_a_capture_and_is_answered_with_the_glue_events() {
+    let mut s = UiScript::new_glue().unwrap();
+    assert_eq!(glue_events()[14], "GLUE_SCREENSHOT_SUCCEEDED");
+    assert_eq!(glue_events()[15], "GLUE_SCREENSHOT_FAILED");
+    s.run(
+        r#"
+        heard = {}
+        f = CreateFrame("Frame")
+        f:SetScript("OnEvent", function() table.insert(heard, event) end)
+        f:RegisterEvent("GLUE_SCREENSHOT_SUCCEEDED")
+        f:RegisterEvent("GLUE_SCREENSHOT_FAILED")
+        f:RegisterEvent("SCREENSHOT_SUCCEEDED")
+        Screenshot()
+        "#,
+    )
+    .expect("the glue VM binds Screenshot");
+    assert_eq!(s.take_screenshot_asks(), 1, "one call, one capture");
+    assert_eq!(s.take_screenshot_asks(), 0, "and the ask is spent");
+    assert!(
+        s.eval::<Vec<String>>("return heard").unwrap().is_empty(),
+        "the call itself answers nothing"
+    );
+    let e = s.screenshot_event(true);
+    s.fire_event(e, vec![]);
+    let e = s.screenshot_event(false);
+    s.fire_event(e, vec![]);
+    s.fire_event("SCREENSHOT_SUCCEEDED", vec![]);
+    assert_eq!(
+        s.eval::<Vec<String>>("return heard").unwrap(),
+        ["GLUE_SCREENSHOT_SUCCEEDED", "GLUE_SCREENSHOT_FAILED"],
+        "the glue names, and neither in-game one"
+    );
+}
+
+/// The in-game state answers with its own names.
+#[test]
+fn the_in_game_screenshot_is_answered_with_the_in_game_events() {
+    let mut s = UiScript::new().unwrap();
+    s.run(
+        r#"
+        heard = {}
+        f = CreateFrame("Frame")
+        f:SetScript("OnEvent", function() table.insert(heard, event) end)
+        f:RegisterEvent("SCREENSHOT_SUCCEEDED")
+        f:RegisterEvent("SCREENSHOT_FAILED")
+        "#,
+    )
+    .unwrap();
+    let e = s.screenshot_event(true);
+    s.fire_event(e, vec![]);
+    let e = s.screenshot_event(false);
+    s.fire_event(e, vec![]);
+    assert_eq!(
+        s.eval::<Vec<String>>("return heard").unwrap(),
+        ["SCREENSHOT_SUCCEEDED", "SCREENSHOT_FAILED"]
     );
 }
 
@@ -349,7 +387,7 @@ fn the_glue_vm_makes_the_startup_frame_types_only() {
             .run(&format!(r#"CreateFrame("{t}")"#))
             .expect_err(t)
             .to_string();
-        assert!(e.contains(&format!("unknown frame type '{t}'")), "{t}: {e}");
+        assert!(e.contains(&format!("Unknown frame type '{t}'")), "{t}: {e}");
         world.run(&format!(r#"CreateFrame("{t}")"#)).unwrap();
     }
 }

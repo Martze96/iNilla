@@ -26,8 +26,12 @@ use crate::net::{CharRequest, ClientCommand, ParkRequest, ParkSender, RealmReque
 pub(crate) const USER: &str = "empty";
 pub(crate) const PASS: &str = "secret";
 const SALT: [u8; 32] = [0x5a; 32];
-/// Every wait in the tests: long enough for a loaded machine, short of a hung gate.
-pub(crate) const WAIT: Duration = Duration::from_secs(20);
+/// The PIN a realmd of [`servers_with_pin`] asks [`USER`] for, until [`Realmd::set_pin`].
+pub(crate) const PIN: u32 = 2590;
+const PIN_SALT: [u8; 16] = [0x6b; 16];
+/// Every wait in the tests, a bound on a hang and never on a pass: the gates run the workspace at
+/// background priority beside other work, where one glue frame can take seconds.
+pub(crate) const WAIT: Duration = Duration::from_secs(120);
 
 /// A session key, realmd to the world server.
 type Key = [u8; SESSION_KEY_LENGTH];
@@ -94,30 +98,46 @@ pub(crate) struct Realmd {
     lists: Arc<AtomicUsize>,
     open: Arc<AtomicUsize>,
     links: Arc<Mutex<Vec<TcpStream>>>,
+    /// The PIN the account asks for now.
+    pin: Arc<AtomicU64>,
+    /// Connections taken, and proofs refused for their PIN.
+    dials: Arc<AtomicUsize>,
+    refusals: Arc<AtomicUsize>,
 }
 
 impl Realmd {
     /// Listen on loopback; each session key goes to `keys`, for the world server's header cipher.
     pub(crate) fn start(realms: Vec<FakeRealm>, keys: Sender<Key>) -> Realmd {
+        Self::start_with(realms, keys, false)
+    }
+
+    /// [`Self::start`], asking for [`PIN`] when `pin`.
+    fn start_with(realms: Vec<FakeRealm>, keys: Sender<Key>, asks_pin: bool) -> Realmd {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let logons = Arc::new(AtomicUsize::new(0));
         let lists = Arc::new(AtomicUsize::new(0));
         let open = Arc::new(AtomicUsize::new(0));
         let links = Arc::new(Mutex::new(Vec::new()));
+        let pin = Arc::new(AtomicU64::new(u64::from(PIN)));
+        let dials = Arc::new(AtomicUsize::new(0));
+        let refusals = Arc::new(AtomicUsize::new(0));
         let (l, n, o) = (logons.clone(), lists.clone(), open.clone());
+        let (p, d, r) = (pin.clone(), dials.clone(), refusals.clone());
         let held = links.clone();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(s) = stream else { return };
+                d.fetch_add(1, Ordering::SeqCst);
                 if let Ok(c) = s.try_clone() {
                     held.lock().unwrap().push(c);
                 }
                 let (realms, keys) = (realms.clone(), keys.clone());
                 let (l, n, o) = (l.clone(), n.clone(), o.clone());
+                let ask = asks_pin.then(|| (p.clone(), r.clone()));
                 thread::spawn(move || {
                     o.fetch_add(1, Ordering::SeqCst);
-                    serve_realmd(s, &realms, &keys, &l, &n);
+                    serve_realmd(s, &realms, &keys, &l, &n, ask);
                     o.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -128,7 +148,25 @@ impl Realmd {
             lists,
             open,
             links,
+            pin,
+            dials,
+            refusals,
         }
+    }
+
+    /// Change the PIN the account asks for, as a TOTP code moves on.
+    pub(crate) fn set_pin(&self, pin: u32) {
+        self.pin.store(u64::from(pin), Ordering::SeqCst);
+    }
+
+    /// Connections taken so far.
+    pub(crate) fn dials(&self) -> usize {
+        self.dials.load(Ordering::SeqCst)
+    }
+
+    /// Proofs refused for their PIN so far.
+    pub(crate) fn refusals(&self) -> usize {
+        self.refusals.load(Ordering::SeqCst)
     }
 
     /// Close every link from the server's side, as vmangos does at `MaxSessionDuration`.
@@ -154,13 +192,39 @@ impl Realmd {
     }
 }
 
-/// One realmd connection: the logon, then the realm list for every request until EOF.
+/// vmangos's `AuthSocket::VerifyPinData` (`AuthSocket.cpp:1204`): `pin` pressed on the grid
+/// `seed` builds, as ASCII positions, under `SHA1(client salt ‖ SHA1(server salt ‖ text))`.
+fn pin_verifies(seed: u32, pin: u32, data: &[u8]) -> bool {
+    let mut grid: Vec<u8> = (0..10).collect();
+    let mut remapped = Vec::new();
+    let mut s = seed;
+    for i in (1..=10u32).rev() {
+        let r = (s % i) as usize;
+        s /= i;
+        remapped.push(grid.remove(r));
+    }
+    let text: Vec<u8> = pin
+        .to_string()
+        .bytes()
+        .map(|b| remapped.iter().position(|&g| g == b - b'0').unwrap() as u8 + 0x30)
+        .collect();
+    sha1(&[&data[..16], &sha1(&[&PIN_SALT, &text])]) == data[16..36]
+}
+
+/// The grid seeds the PIN realmd sends, one per challenge, so each logon's grid differs.
+static PIN_SEEDS: AtomicU64 = AtomicU64::new(0x1234_5678);
+
+/// One realmd connection: the logon, then the realm list for every request until EOF. With `pin`
+/// (the PIN asked for now and the refusal count) the challenge asks for it as vmangos does for a
+/// PIN-locked account (`AuthSocket.cpp:509`-`519`), and a proof whose PIN does not verify is
+/// refused `0x04` (`:854`).
 fn serve_realmd(
     mut s: TcpStream,
     realms: &[FakeRealm],
     keys: &Sender<Key>,
     logons: &AtomicUsize,
     lists: &AtomicUsize,
+    pin: Option<(Arc<AtomicU64>, Arc<AtomicUsize>)>,
 ) {
     let n = BigUint::from_bytes_le(&LARGE_SAFE_PRIME_LITTLE_ENDIAN);
     let g = BigUint::from(GENERATOR);
@@ -194,15 +258,35 @@ fn serve_realmd(
     reply.extend_from_slice(&LARGE_SAFE_PRIME_LITTLE_ENDIAN);
     reply.extend_from_slice(&SALT);
     reply.extend_from_slice(&[0u8; 16]); // crc_salt
-    reply.push(0); // security_flag
+    let seed = PIN_SEEDS.fetch_add(0x0101_0101, Ordering::SeqCst) as u32;
+    if pin.is_some() {
+        reply.push(1); // security_flag: PIN
+        reply.extend_from_slice(&seed.to_le_bytes());
+        reply.extend_from_slice(&PIN_SALT);
+    } else {
+        reply.push(0); // security_flag
+    }
     if s.write_all(&reply).is_err() {
         return;
     }
 
-    // CMD_AUTH_LOGON_PROOF_Client: opcode, A, M1, crc_hash, key count, security flag.
+    // CMD_AUTH_LOGON_PROOF_Client: opcode, A, M1, crc_hash, key count, security flag, and with a
+    // PIN its salt and hash.
     let mut proof = [0u8; 75];
     if s.read_exact(&mut proof).is_err() {
         return;
+    }
+    if let Some((pin, refusals)) = &pin {
+        let mut data = [0u8; 36];
+        if s.read_exact(&mut data).is_err() {
+            return;
+        }
+        let pin = pin.load(Ordering::SeqCst) as u32;
+        if proof[74] != 1 || !pin_verifies(seed, pin, &data) {
+            refusals.fetch_add(1, Ordering::SeqCst);
+            let _ = s.write_all(&[0x01, 0x04]);
+            return;
+        }
     }
     let (a_pub, m1) = (&proof[1..33], &proof[33..53]);
     let u = BigUint::from_bytes_le(&sha1(&[a_pub, &b_pub]));
@@ -212,11 +296,14 @@ fn serve_realmd(
     let mut reply = vec![0x01, 0x00];
     reply.extend_from_slice(&sha1(&[a_pub, m1, &key]));
     reply.extend_from_slice(&0u32.to_le_bytes()); // hardware_survey_id
+
+    // The key handed on and the logon counted before the client can see the proof, so neither
+    // reads behind what it has seen.
+    let _ = keys.send(key);
+    logons.fetch_add(1, Ordering::SeqCst);
     if s.write_all(&reply).is_err() {
         return;
     }
-    let _ = keys.send(key);
-    logons.fetch_add(1, Ordering::SeqCst);
 
     // CMD_REALM_LIST_Client (0x10 and a u32), answered every time, until the client closes the
     // link.
@@ -238,10 +325,11 @@ fn serve_realmd(
         list.extend_from_slice(&records);
         // vmangos's trailer (`AuthSocket.cpp:1088`).
         list.extend_from_slice(&0x0002u16.to_le_bytes());
+        // Counted before the write, so the count never reads behind a list the client has.
+        lists.fetch_add(1, Ordering::SeqCst);
         if s.write_all(&list).is_err() {
             return;
         }
-        lists.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -295,14 +383,15 @@ pub(crate) fn char_enum_body(characters: &[benilla_protocol::Character]) -> Vec<
             c.hair_style,
             c.hair_color,
             c.facial_hair,
-            c.level,
+            // The parse stores a wire level of 0 as level 1 and the new-character byte.
+            if c.new_character { 0 } else { c.level },
         ]);
         b.extend_from_slice(&c.zone.to_le_bytes());
         b.extend_from_slice(&c.map.to_le_bytes());
         for v in [c.position.x, c.position.y, c.position.z] {
             b.extend_from_slice(&v.to_le_bytes());
         }
-        b.extend_from_slice(&0u32.to_le_bytes()); // guild
+        b.extend_from_slice(&c.guild_id.to_le_bytes());
         b.extend_from_slice(&c.flags.to_le_bytes());
         b.push(0); // first login
         for v in [c.pet_display_id, c.pet_level, c.pet_family] {
@@ -348,7 +437,9 @@ pub(crate) struct World {
     creates: Arc<Mutex<u8>>,
     /// How long a `CMSG_CHAR_ENUM` waits before its answer.
     enum_delay: Arc<Mutex<Duration>>,
-    /// Answer `CMSG_CHAR_ENUM` with `SMSG_WARDEN_DATA`, as a server does that wants Warden.
+    /// The body a `CMSG_CHAR_ENUM` is answered with in place of the roster's, while set.
+    enum_body: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Send `SMSG_WARDEN_DATA` behind the authentication answer, as vmangos does with Warden on.
     warden: Arc<AtomicBool>,
     /// Close the socket on `CMSG_CHAR_ENUM` instead of answering.
     cut: Arc<AtomicBool>,
@@ -362,6 +453,8 @@ pub(crate) struct World {
     /// answer (vmangos builds it in the auth handler, so it leads: `WorldSocket.cpp:447`).
     addon_info: AddonReply,
     open: Arc<AtomicUsize>,
+    /// Every session's socket, for [`World::drop_links`].
+    links: Arc<Mutex<Vec<TcpStream>>>,
 }
 
 impl World {
@@ -403,9 +496,27 @@ impl World {
             .collect()
     }
 
-    /// Have the server demand Warden in place of the roster from now on.
-    pub(crate) fn demand_warden(&self) {
+    /// Ask every session from now on for Warden as vmangos does with it on: the session starts
+    /// Warden right behind `AUTH_OK` (`World.cpp:333-338`) and its thread sends the first request
+    /// within a second (`Anticheat.cpp:111-127`, `WardenWin.cpp:1403-1405`). No handler waits on
+    /// the answer, so the roster and the world entry are served as ever; a client that never
+    /// answers is kicked later by the server's own clock (`Warden.cpp:686-691`), which this
+    /// server leaves to [`World::drop_links`].
+    pub(crate) fn ask_warden(&self) {
         self.warden.store(true, Ordering::SeqCst);
+    }
+
+    /// Close every session's socket from the server's side, as vmangos does for a session idle at
+    /// character select (`CharacterScreenMaxIdleTime`).
+    pub(crate) fn drop_links(&self) {
+        for s in self.links.lock().unwrap().drain(..) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// Answer every `CMSG_CHAR_ENUM` with `body` from now on, or with the roster again for `None`.
+    pub(crate) fn answer_roster_asks(&self, body: Option<Vec<u8>>) {
+        *self.enum_body.lock().unwrap() = body;
     }
 
     /// Have the server cut the connection on the next roster ask.
@@ -538,6 +649,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let session_log = Arc::clone(&session_packets);
     let enum_delay = Arc::new(Mutex::new(Duration::ZERO));
     let enum_wait = Arc::clone(&enum_delay);
+    let enum_body = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let enum_answer = Arc::clone(&enum_body);
     let warden = Arc::new(AtomicBool::new(false));
     let warden_flag = Arc::clone(&warden);
     let cut = Arc::new(AtomicBool::new(false));
@@ -552,6 +665,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let addon_reply = Arc::clone(&addon_info);
     let open = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::clone(&open);
+    let links = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
+    let link_log = Arc::clone(&links);
     thread::spawn(move || {
         let mut last: Option<Key> = None;
         for stream in listener.incoming() {
@@ -576,6 +691,18 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             let Some(key) = last else {
                 return;
             };
+            // Held, counted and logged before the client can see the session open, so a drop never
+            // misses it and neither `open` nor `authentications` reads behind its authentication.
+            if let Ok(link) = s.try_clone() {
+                link_log.lock().unwrap().push(link);
+            }
+            let sessions = Arc::clone(&sessions);
+            sessions.fetch_add(1, Ordering::SeqCst);
+            let index = {
+                let mut all = session_log.lock().unwrap();
+                all.push(Vec::new());
+                all.len() - 1
+            };
             let mut crypto = HeaderCrypto::from_session_key(key);
             let reply = addon_reply.lock().unwrap().clone();
             if let Some((body, false)) = &reply {
@@ -590,6 +717,16 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             if let Some((body, true)) = &reply {
                 send(&mut s, Some(&mut crypto), opcode::SMSG_ADDON_INFO, body);
             }
+            // An opaque body: the client hands it to its Warden module and reads none of it
+            // (`0x6ca5c0`).
+            if warden_flag.load(Ordering::SeqCst) {
+                send(
+                    &mut s,
+                    Some(&mut crypto),
+                    opcode::SMSG_WARDEN_DATA,
+                    &[0x02; 21],
+                );
+            }
             let log = Arc::clone(&log);
             let packet_log = Arc::clone(&packet_log);
             let roster_bodies = Arc::clone(&roster_bodies);
@@ -597,18 +734,11 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             let create_answer = Arc::clone(&create_answer);
             let session_log = Arc::clone(&session_log);
             let enum_wait = Arc::clone(&enum_wait);
-            let warden_flag = Arc::clone(&warden_flag);
+            let enum_answer = Arc::clone(&enum_answer);
             let cut_flag = Arc::clone(&cut_flag);
             let refuse_flag = Arc::clone(&refuse_flag);
             let refuse_wait = Arc::clone(&refuse_wait);
             let trailing = Arc::clone(&trailing);
-            let index = {
-                let mut all = session_log.lock().unwrap();
-                all.push(Vec::new());
-                all.len() - 1
-            };
-            let sessions = Arc::clone(&sessions);
-            sessions.fetch_add(1, Ordering::SeqCst);
             thread::spawn(move || {
                 while let Some(packet) = recv_packet(&mut s, Some(&mut crypto)) {
                     let op = u16::from_le_bytes([packet[2], packet[3]]);
@@ -621,14 +751,11 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                                 let all = roster_bodies.lock().unwrap();
                                 char_enum_body(&all[index.min(all.len() - 1)])
                             };
+                            let body = enum_answer.lock().unwrap().clone().unwrap_or(body);
                             let wait = *enum_wait.lock().unwrap();
                             thread::sleep(wait);
                             if cut_flag.load(Ordering::SeqCst) {
                                 break;
-                            }
-                            if warden_flag.load(Ordering::SeqCst) {
-                                send(&mut s, Some(&mut crypto), opcode::SMSG_WARDEN_DATA, &[]);
-                                continue;
                             }
                             send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_ENUM, &body);
                         }
@@ -642,7 +769,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                                 let b = &body[end + 1..];
                                 for roster in roster_bodies.lock().unwrap().iter_mut() {
                                     let guid = roster.iter().map(|c| c.guid).max().unwrap_or(0) + 1;
-                                    let mut c = crate::char_select::test_character(guid, &name);
+                                    let mut c =
+                                        crate::glue_session::roster::test_character(guid, &name);
                                     (c.race, c.class, c.gender, c.skin, c.face) =
                                         (b[0], b[1], b[2], b[3], b[4]);
                                     (c.hair_style, c.hair_color, c.facial_hair) =
@@ -706,6 +834,22 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                                 &[1],
                             );
                         }
+                        // Every guild it is asked for exists, with no ranks and these five tabard
+                        // fields (`Server/Packets/Guild.cpp:118-131`).
+                        opcode::CMSG_GUILD_QUERY => {
+                            let mut body = packet[6..10].to_vec();
+                            body.extend_from_slice(b"Probe Guild\0");
+                            body.extend_from_slice(&[0u8; 10]);
+                            for field in [1i32, 2, 3, 4, 5] {
+                                body.extend_from_slice(&field.to_le_bytes());
+                            }
+                            send(
+                                &mut s,
+                                Some(&mut crypto),
+                                opcode::SMSG_GUILD_QUERY_RESPONSE,
+                                &body,
+                            );
+                        }
                         opcode::CMSG_LOGOUT_REQUEST => {
                             send(&mut s, Some(&mut crypto), opcode::SMSG_LOGOUT_COMPLETE, &[]);
                             for (op, body) in trailing.lock().unwrap().clone() {
@@ -727,6 +871,7 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
         results,
         creates,
         enum_delay,
+        enum_body,
         warden,
         cut,
         refuse,
@@ -734,6 +879,7 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
         trail,
         addon_info,
         open,
+        links,
     }
 }
 
@@ -745,6 +891,23 @@ pub(crate) fn servers(realms: impl FnOnce(&str) -> Vec<FakeRealm>) -> (Realmd, W
     let (keys_tx, keys_rx) = crossbeam_channel::unbounded();
     let sent = world(world_listener, keys_rx);
     (Realmd::start(realms(&addr), keys_tx), sent)
+}
+
+/// [`servers`] whose realmd asks for [`PIN`].
+pub(crate) fn servers_with_pin(realms: impl FnOnce(&str) -> Vec<FakeRealm>) -> (Realmd, World) {
+    let world_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = world_listener.local_addr().unwrap().to_string();
+    let (keys_tx, keys_rx) = crossbeam_channel::unbounded();
+    let sent = world(world_listener, keys_rx);
+    (Realmd::start_with(realms(&addr), keys_tx, true), sent)
+}
+
+/// The keys a player presses for `pin` on `grid`.
+pub(crate) fn press(grid: &[u8; 10], pin: u32) -> Vec<u8> {
+    pin.to_string()
+        .bytes()
+        .map(|b| grid.iter().position(|&g| g == b - b'0').unwrap() as u8)
+        .collect()
 }
 
 /// An address nothing answers on: a port bound and released.
@@ -764,18 +927,8 @@ pub(crate) struct Cycles {
     pub(crate) abandon: Arc<AtomicU64>,
 }
 
-/// The read thread's cycle loop and the write thread, as [`super::spawn_net`] runs them: the native
-/// screens' policy, the IO thread enumerating on reaching the character park.
+/// The read thread's cycle loop and the write thread, as [`super::spawn_net`] runs them.
 pub(crate) fn spawn_cycles() -> Cycles {
-    spawn_cycles_for(false)
-}
-
-/// [`spawn_cycles`] under the stock screen's policy: the roster comes only when it is asked for.
-pub(crate) fn spawn_cycles_asking() -> Cycles {
-    spawn_cycles_for(true)
-}
-
-fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let (events_tx, events) = crossbeam_channel::unbounded();
     let (commands, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
     let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
@@ -785,11 +938,7 @@ fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let abandon = Arc::new(AtomicU64::new(0));
     let thread_abandon = Arc::clone(&abandon);
     thread::spawn(move || {
-        let parks = Parks {
-            login_rx,
-            park_rx,
-            screen_asks_roster: Arc::new(std::sync::atomic::AtomicBool::new(screen_asks_roster)),
-        };
+        let parks = Parks { login_rx, park_rx };
         let clock = Mutex::new(PingClock::default());
         let mut tails = Default::default();
         loop {
@@ -835,6 +984,7 @@ pub(crate) fn login(cycles: &Cycles, host: &str) {
             user: USER.into(),
             pass: PASS.into(),
             host: host.into(),
+            locale: benilla_protocol::auth::LOCALE_TAG_EN_US,
             generation: cycles.abandon.load(Ordering::SeqCst),
         })
         .unwrap();

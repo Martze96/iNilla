@@ -61,19 +61,37 @@ fn mail_send_bodies_golden() {
     assert_eq!(messages::mail_return_to_sender(MAILBOX, 77), golden);
     assert_eq!(messages::mail_delete(MAILBOX, 77), golden);
 
-    // CMSG_MAIL_CREATE_TEXT_ITEM: the shared shape, then `u32` mailTemplateId 0 (vmangos
-    // `MailCreateTextItem::ReadFromWorldPacket`).
+    // CMSG_MAIL_CREATE_TEXT_ITEM: the shared shape, then the mail's `u32` template id
+    // (`0x4afb4a`; vmangos `MailCreateTextItem::ReadFromWorldPacket`).
     assert_eq!(
-        messages::mail_create_text_item(MAILBOX, 77),
+        messages::mail_create_text_item(MAILBOX, 77, 0),
         hx("420000000010f1004d00000000000000"),
         "CMSG_MAIL_CREATE_TEXT_ITEM body"
     );
-
-    // CMSG_ITEM_TEXT_QUERY: u32 textId, u32 mailId, u32 unk(0).
     assert_eq!(
-        messages::item_text_query(1234, 77),
-        hx("d20400004d00000000000000"),
-        "CMSG_ITEM_TEXT_QUERY body"
+        messages::mail_create_text_item(MAILBOX, 77, 87),
+        hx("420000000010f1004d00000057000000"),
+        "CMSG_MAIL_CREATE_TEXT_ITEM body, a template letter"
+    );
+
+    // CMSG_ITEM_TEXT_QUERY: u32 textId, then the u64 key (`0x569a99`-`0x569aad`).
+    // GetInboxText: the mail id, high dword 0x70000000 (`0x4af19d`, `0x4af1a2`).
+    assert_eq!(
+        messages::item_text_query(1234, messages::mail_text_key(77)),
+        hx("d20400004d00000000000070"),
+        "CMSG_ITEM_TEXT_QUERY body, a mail's"
+    );
+    // An item's text window: the item's guid (`0x4e343e`, `0x4e3629`).
+    assert_eq!(
+        messages::item_text_query(1234, 0x4000_0000_0000_0ABC),
+        hx("d2040000bc0a000000000040"),
+        "CMSG_ITEM_TEXT_QUERY body, an item's"
+    );
+    // The invoice prefetch: 0 (`0x4af3f4`).
+    assert_eq!(
+        messages::item_text_query(1234, 0),
+        hx("d20400000000000000000000"),
+        "CMSG_ITEM_TEXT_QUERY body, the invoice's"
     );
 }
 

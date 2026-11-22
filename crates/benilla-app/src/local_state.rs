@@ -8,7 +8,9 @@
 //!    under the system temp folder, so a probe neither reads the player's settings nor writes back
 //!    over them.
 //! 3. `<project folder>/benilla-config/`, dev builds only ([`benilla_formats::project_folder`], the
-//!    launcher's): a shipped binary must not carry the build machine's source tree.
+//!    launcher's): a shipped binary must not carry the build machine's source tree. A linked
+//!    worktree resolves to its primary checkout's folder, unless it declares its own probe account
+//!    ([`shared_root`]).
 //! 4. `<exe dir>/benilla-config/`.
 //!
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
@@ -77,11 +79,13 @@ fn dev_project_root() -> Option<PathBuf> {
 }
 
 /// `here`, or for a linked worktree its primary checkout, whichever worktree built the binary, so
-/// every worktree shares one settings folder. Anything unexpected keeps `here`.
+/// a developer's worktrees share one settings folder. A worktree that declares an account of its
+/// own in `.probe-identity` is a probe's checkout and keeps its own folder, so no run from it,
+/// attended or not, reads or writes the player's settings. Anything unexpected keeps `here`.
 fn shared_root(here: &Path) -> PathBuf {
     let dot_git = here.join(".git");
     // A linked worktree: `.git` is a file pointing at `<primary>/.git/worktrees/<name>`.
-    if dot_git.is_file() {
+    if dot_git.is_file() && !here.join(".probe-identity").exists() {
         if let Some(gitdir) = std::fs::read_to_string(&dot_git).ok().and_then(|s| {
             s.trim()
                 .strip_prefix("gitdir:")
@@ -130,8 +134,40 @@ pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<Pa
     character_path(CharacterFile::Bindings, realm, character)
 }
 
+/// `benilla-config/cache.md5`: the eight account-data sections' digests as they stood when each
+/// last agreed with the server, 16 bytes each in section order, the reference's
+/// `WTF\Account\<account>\cache.md5` (`0x5af880`, `0x5af9c0`). One file, as the account-wide
+/// files here are one set whatever the account.
+pub(crate) fn account_data_digests_path() -> Option<PathBuf> {
+    home().map(|h| h.join("cache.md5"))
+}
+
+/// `benilla-config/config-cache/account.wtf`: account-data section 0, the reference's account-wide
+/// `config-cache.wtf`, kept as the server sends it; nothing reads it.
+pub(crate) fn config_cache_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("config-cache/account.wtf"))
+}
+
+/// `benilla-config/config-cache/<realm>-<character>.wtf`: account-data section 1, the reference's
+/// per-character `config-cache.wtf`, kept as the server sends it; nothing reads it.
+pub(crate) fn config_cache_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    character_path(CharacterFile::ConfigCache, realm, character)
+}
+
+/// `benilla-config/bindings/account.wtf`: account-data section 2 as the reference's
+/// `bindings-cache.wtf` holds it, the whole table, kept beside the diff the set is loaded from.
+pub(crate) fn bindings_cache_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("bindings/account.wtf"))
+}
+
+/// `benilla-config/bindings/<realm>-<character>.wtf`: account-data section 3 as the reference's
+/// per-character `bindings-cache.wtf` holds it, empty while the account set is in use.
+pub(crate) fn bindings_cache_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    character_path(CharacterFile::BindingsCache, realm, character)
+}
+
 /// `benilla-config/saved-variables.lua`: the flat channel our FrameXML saves through
-/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, run at UI load.
+/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, read at UI load.
 pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
@@ -240,14 +276,16 @@ pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<Path
     character_path(CharacterFile::Camera, realm, character)
 }
 
-/// `benilla-config/account`: the account name the login screen remembers
-/// (`GetSavedAccountName`/`SetSavedAccountName`; the reference's is `Config.wtf`'s `accountName`).
-pub(crate) fn saved_account_path() -> Option<PathBuf> {
+/// `benilla-config/account`, where earlier builds kept the account name the login screen
+/// remembers. It is now the `accountName` CVar in `config.toml`, as the reference's is in
+/// `Config.wtf`: [`crate::cvars`] reads this file once into it and deletes it after the save.
+pub(crate) fn legacy_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("account"))
 }
 
-/// `benilla-config/chat/<realm>-<character>.txt`: the chat windows' tint, alpha, font size and
-/// lock, the four the reference keeps in its per-character `chat-cache.txt`.
+/// `benilla-config/chat/<realm>-<character>.txt`: the chat setup, the whole record of the
+/// reference's per-character `chat-cache.txt` (its channels, colours and windows), in its grammar;
+/// [`crate::ui_chat`] owns the shape.
 pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBuf> {
     character_path(CharacterFile::Chat, realm, character)
 }
@@ -279,10 +317,14 @@ pub(crate) enum CharacterFile {
     Chat,
     /// [`layout_character_path`].
     Layout,
+    /// [`config_cache_character_path`].
+    ConfigCache,
+    /// [`bindings_cache_character_path`].
+    BindingsCache,
 }
 
 impl CharacterFile {
-    pub(crate) const ALL: [CharacterFile; 7] = [
+    pub(crate) const ALL: [CharacterFile; 9] = [
         CharacterFile::AddonState,
         CharacterFile::Macros,
         CharacterFile::Bindings,
@@ -290,6 +332,8 @@ impl CharacterFile {
         CharacterFile::Camera,
         CharacterFile::Chat,
         CharacterFile::Layout,
+        CharacterFile::ConfigCache,
+        CharacterFile::BindingsCache,
     ];
 
     /// The folder under the home, and the suffix of the key (none for a folder).
@@ -302,6 +346,8 @@ impl CharacterFile {
             CharacterFile::Camera => ("camera", ".txt"),
             CharacterFile::Chat => ("chat", ".txt"),
             CharacterFile::Layout => ("layout", ".txt"),
+            CharacterFile::ConfigCache => ("config-cache", ".wtf"),
+            CharacterFile::BindingsCache => ("bindings", ".wtf"),
         }
     }
 }
@@ -349,12 +395,21 @@ pub(crate) fn move_character_state(realm: &str, old: &str, new: &str) {
     }
 }
 
-/// `benilla-config/cache/<realm>.tsv`: the player, creature and pet names the server has answered,
-/// one file for the reference's `WDB/namecache.wdb`, `creaturecache.wdb` and `petnamecache.wdb`.
-///
-/// Realm-scoped, where the reference's is not: guids, creature entries and pet numbers are
-/// realm-local, so one shared file would serve a realm another realm's names.
-pub(crate) fn name_cache_path(realm: &str) -> Option<PathBuf> {
+/// `benilla-config/cache/<realm>/<store>.bin`: one saved template store ([`crate::wdb`]), the
+/// reference's `WDB/<store>.wdb`. Realm-scoped, where the reference's is not: a template key is
+/// the server's, so another realm may hold another template under it.
+pub(crate) fn template_cache_path(realm: &str, store: &str) -> Option<PathBuf> {
+    Some(
+        home()?
+            .join("cache")
+            .join(file_token(realm))
+            .join(format!("{store}.bin")),
+    )
+}
+
+/// `benilla-config/cache/<realm>.tsv`: the creature names an earlier build kept, which the
+/// realm's saved stores replace; [`crate::wdb`] removes it.
+pub(crate) fn retired_name_cache_path(realm: &str) -> Option<PathBuf> {
     Some(
         home()?
             .join("cache")
@@ -375,8 +430,8 @@ pub(crate) fn shots_path() -> Option<PathBuf> {
 /// `benilla-config/Screenshots/`: where the print-screen key writes, each image once, not through
 /// [`write_atomic`].
 ///
-/// Deviation: the reference writes `Screenshots\\` inside the install, which benilla never writes
-/// to; the folder keeps the reference's name.
+/// Deviation: the reference writes `Screenshots\\` inside the install; benilla keeps the folder in
+/// its own state because it never writes to the install; the folder keeps the reference's name.
 pub(crate) fn screenshots_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Screenshots"))
 }
@@ -503,6 +558,8 @@ mod tests {
                 camera_character_path(realm, character),
                 chat_character_path(realm, character),
                 layout_character_path(realm, character),
+                config_cache_character_path(realm, character),
+                bindings_cache_character_path(realm, character),
             ]
             .map(Option::unwrap)
         };
@@ -608,7 +665,7 @@ mod tests {
         );
 
         assert_eq!(
-            saved_account_path(),
+            legacy_account_path(),
             Some(tmp.join("benilla-config/account"))
         );
         assert_eq!(shots_path(), Some(tmp.join("benilla-config/shots.txt")));
@@ -621,7 +678,7 @@ mod tests {
         let _c2 = EnvGuard::set("WOW_CAPTURE", "ui-options");
         assert_eq!(home(), None);
         assert_eq!(
-            saved_account_path(),
+            legacy_account_path(),
             None,
             "a capture reads no saved account"
         );
@@ -717,7 +774,7 @@ mod tests {
     }
 
     /// A player build resolves beside the binary; a dev build to the primary checkout, even from a
-    /// linked worktree (whose `.git` is a file).
+    /// linked worktree (whose `.git` is a file), unless that worktree declares a probe account.
     #[test]
     fn the_state_folder_lands_where_the_build_says() {
         let _l = ENV_LOCK
@@ -739,7 +796,7 @@ mod tests {
             return;
         };
 
-        if here.join(".git").is_file() {
+        if here.join(".git").is_file() && !here.join(".probe-identity").exists() {
             assert_ne!(
                 h,
                 here.join(STATE_DIR),
@@ -756,7 +813,8 @@ mod tests {
     }
 
     /// A project folder that is a linked worktree keeps its state in the primary checkout, so every
-    /// worktree shares one; any other folder, a crate on top of benilla's included, keeps its own.
+    /// worktree shares one, unless it declares a probe account; any other folder, a crate on top of
+    /// benilla's included, keeps its own.
     #[test]
     fn the_state_root_is_the_folder_or_its_primary_checkout() {
         let tmp = std::env::temp_dir().join(format!("benilla-root-{}", std::process::id()));
@@ -769,6 +827,19 @@ mod tests {
         std::fs::write(slot.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
         assert_eq!(shared_root(&slot), primary);
         assert_eq!(shared_root(&primary), primary);
+        // A worktree that logs in as its own account never shares the player's settings.
+        std::fs::write(
+            slot.join(".probe-identity"),
+            "WOW_USER=probe3\nWOW_PASS=unused\nWOW_CHAR=Probethree\n",
+        )
+        .unwrap();
+        assert_eq!(shared_root(&slot), slot);
+        std::fs::write(primary.join(".probe-identity"), "WOW_USER=probe0\n").unwrap();
+        assert_eq!(
+            shared_root(&primary),
+            primary,
+            "the primary keeps its own either way"
+        );
         let hello_mod = tmp.join("hello-mod");
         std::fs::create_dir_all(hello_mod.join(".git")).unwrap();
         assert_eq!(shared_root(&hello_mod), hello_mod);

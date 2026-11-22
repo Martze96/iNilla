@@ -132,8 +132,8 @@ fn the_corpus_favourite_template_composes_parent_two_levels_deep() {
     let _ = s.take_errors();
 
     s.run(
-        // The stock template is a `<ScrollFrame>` with a `<ScrollChild>`, and `framexml::merge`
-        // takes the overriding node's tag, so a "Frame" would drop the scroll-only parts.
+        // The stock template is a `<ScrollFrame>` with a `<ScrollChild>`, and the part a level
+        // runs is the created frame's type's, so a "Frame" would drop the scroll-only parts.
         r#"Scroller = CreateFrame("ScrollFrame", "BenillaTemplateProbeScroll", UIParent, "FauxScrollFrameTemplate")"#,
     )
     .expect("the corpus's most-used template must not error");
@@ -166,6 +166,60 @@ fn the_corpus_favourite_template_composes_parent_two_levels_deep() {
         s.eval::<bool>(r#"return getglobal("FauxScrollFrameTemplateScrollBar") == nil"#)
             .unwrap(),
         "nothing may be published under the template's own name"
+    );
+
+    assert!(s.take_errors().is_empty());
+    assert_eq!(s.take_warnings(), Vec::<String>::new());
+}
+
+/// `BenillaScrollBarTemplate` carries the real-scroll `OnValueChanged` itself, as
+/// `UIPanelScrollBarTemplate` does (`UIPanelTemplates.xml:156-158`): a bare instance, with no
+/// handler of its own, pans its `ScrollFrame` parent and greys the arrow at the range's end.
+#[test]
+fn the_benilla_scroll_bar_template_scrolls_its_parent_by_itself() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_ui(&s);
+    let _ = s.take_warnings();
+    let _ = s.take_errors();
+
+    s.run(
+        r#"
+        BarHost = CreateFrame("ScrollFrame", "BenillaTemplateProbeHost", UIParent)
+        BarHost.updateFunc = function() UpdateCalls = (UpdateCalls or 0) + 1 end
+        Bar = CreateFrame("Slider", "BenillaTemplateProbeBar", BarHost, "BenillaScrollBarTemplate")
+        Bar:SetMinMaxValues(0, 100)
+        Bar:SetValueStep(20)
+        Bar:SetValue(40)
+        "#,
+    )
+    .expect("a bare instance of the bar template must not error");
+
+    assert_eq!(
+        s.eval::<f32>("return BarHost:GetVerticalScroll()").unwrap(),
+        40.0,
+        "the template's own OnValueChanged scrolls the parent"
+    );
+    assert!(
+        s.eval::<bool>("return BarHost.offset == nil and UpdateCalls == nil")
+            .unwrap(),
+        "a scroll is not a faux list's `offset`/`updateFunc` write on the parent"
+    );
+    assert!(
+        s.eval::<bool>(r#"return BenillaTemplateProbeBarScrollDownButton:IsEnabled() == 1"#)
+            .unwrap(),
+        "mid-range, the down arrow is live"
+    );
+    s.run("Bar:SetValue(100)").unwrap();
+    assert_eq!(
+        s.eval::<f32>("return BarHost:GetVerticalScroll()").unwrap(),
+        100.0
+    );
+    assert!(
+        s.eval::<bool>(r#"return BenillaTemplateProbeBarScrollDownButton:IsEnabled() ~= 1"#)
+            .unwrap(),
+        "at the end of the range the down arrow greys"
     );
 
     assert!(s.take_errors().is_empty());

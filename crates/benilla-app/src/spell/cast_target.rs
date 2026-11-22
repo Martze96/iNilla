@@ -6,9 +6,9 @@
 //!   target from the spell's implicit targeting.
 //! - `Attributes & 0x200`: the candidate is the equipped main hand (`0x6e5361`), bound as an item
 //!   with no cursor; an empty hand refuses with "Your weapon hand is empty" (`0x6e504b`).
-//! - otherwise the selection meets `BindTarget`'s gates ([`bind_gates`]), then each bit is cleared
-//!   by its relation check; then the player behind `autoSelfCast` (`0x6e53d7`) does the same. Only a
-//!   fully cleared word commits, as a unit guid.
+//! - otherwise the selection meets `BindTarget`'s gates ([`bind_gates`]), then its relation arms,
+//!   the first that holds clearing its bit; then the player behind `autoSelfCast` (`0x6e53d7`) does
+//!   the same. Only a word the arm leaves empty commits, as a unit guid.
 //! - a word with item, lock, GameObject or location bits enters the targeting cursor carrying
 //!   the whole word: its location (`0x6e6320`, `& 0x60`), item (`0x6e6330`, `& 0x4010`),
 //!   GameObject (`0x6e62d0`, `& 0x4800`) and unit (`0x6e6460`) predicates can hold at once, and
@@ -27,7 +27,7 @@ use super::group_relation::{GroupInputs, GroupRoster};
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid, SelfPlayer};
-use crate::target::{can_assist, can_attack, Factions, Selection};
+use crate::target::{Factions, RelUnit, Relations, Selection, UnitLookup};
 use benilla_protocol::messages::OwnerFallback;
 
 /// `TARGET_FLAG_*` bits of the client's targeting flag word (`0xcecac0`).
@@ -79,39 +79,69 @@ const TF_GAMEOBJECT: u16 = 0x0800;
 const ITEM_ARM_BITS: u16 = TF_ITEM | TF_LOCKED;
 
 /// What the wire's target block should carry for this cast.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CastWireTarget {
-    /// Word 0: mask 0, no guid; the server resolves the target implicitly.
+    /// Mask 0, no guid; the server resolves the target implicitly. Word 0 sends so (`0x6e5342`).
     SelfImplicit,
+    /// The arm's long-range leg: mask 0 on the wire, as [`Self::SelfImplicit`], with this
+    /// candidate parked in the record's target (`0xceac60`, `0x6e5454`), which the mask never
+    /// names.
+    Parked(u64),
     /// Mask `TARGET_FLAG_UNIT` (0x2) and this guid, possibly the player's own.
     Unit(u64),
+    /// `BindTarget` bound this unit on an arm that left bits in the word: the target is written
+    /// and `word` stands, nothing is sent (`0x6e60c1`), and the bind returns 1 (`0x6e60de`), so
+    /// `ArmCast` does too (`0x6e53c3`) and the attempt passes its tail's refusals and its cursor
+    /// (`0x6e503f` → `0x6e51b5`): the spell waits on the rest of its word, with no cursor mode.
+    Partial { unit: u64, word: u16 },
     /// Mask `TARGET_FLAG_ITEM` (0x10) and this item guid, sent on the press: only the main-hand
     /// imbue binds an item from the cast itself; every other item target comes from a click.
     Item(u64),
+    /// The GameObject the caller passed as `TryCast`'s guid (a lock opener), which `BindTarget`'s
+    /// GameObject arm binds (`0x6e5f5a`).
+    Object(u64),
     /// No send yet: enter the targeting cursor with this flag word (reference: word != 0 is
     /// `IsTargeting 0x6e48a0`). Each click seam tests the word with its own mask, so one word can
     /// serve several: Opening and Pick Lock take a bag item or a world GameObject.
     Targeting(u16),
     /// Do not send; show this client error.
     Refused(u8),
-    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`).
+    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`):
+    /// the empty weapon hand's (`0x6e504b`) and the standing enemy word's (`0x6e507b`).
     /// That tail runs after the requirement validator `0x6094f0`, so it fires at the cursor-entry
     /// point in [`super::send_spell_cast`], not at the resolver's return.
     RefusedAtArm(u8),
 }
 
 /// Where `ArmCast 0x6e5250` takes its candidate guid from (`0x6e5361`-`0x6e539f`). The main hand
-/// is taken instead of the selection, never before it; `caster` is the separate `autoSelfCast`
+/// is taken instead of the selection, never before it; `auto_self` is the separate `autoSelfCast`
 /// fallback (`0x6e53d7`).
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct CastCandidates {
-    /// The current selection (the client's `0xb4e2d8`); benilla never passes an explicit guid.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CastCandidates<'a> {
+    /// The candidate: `TryCast`'s guid, else the selection (the client's `0xb4e2d8`).
     pub(crate) selection: Option<u64>,
+    /// Whether anything is selected, which the tail's refusal reads (`0x6e5084`).
+    pub(crate) selected: bool,
+    /// Whether the object manager holds the selection's object: the arm looks the candidate up
+    /// (`0x468460` at `0x6e53bc`) and `BindTarget` binds no null object (`0x6e5b5e`).
+    pub(crate) selection_held: bool,
+    /// The caster, which a gate tests the candidate against.
     pub(crate) caster: Option<u64>,
+    /// The `autoSelfCast` fallback's candidate, the active player whoever casts (`0x6e53e3`-
+    /// `0x6e5400`: `0x468550`, typemask `0x10`), and its store, `None` until it streams.
+    pub(crate) auto_self: Option<u64>,
+    pub(crate) auto_self_store: Option<&'a ObjectStore>,
     /// The equipped main hand's item guid (`[player+0x1d3c][15]`), only when it resolves to a
     /// streamed item object (`0x468460` at `0x6e53bc`).
     pub(crate) main_hand_item: Option<u64>,
+    /// Whether the spell's maximum range, `GetMinMaxRange` with no unit target (`0x6e543f`), is
+    /// above [`LONG_RANGE`] (`0x6e5447`), which the arm's last leg tests.
+    pub(crate) long_range: bool,
 }
+
+/// `[0x806b10]`, 100.0: a maximum range above it lets the arm send at a candidate with no object
+/// (`0x6e5447`).
+pub(crate) const LONG_RANGE: f32 = 100.0;
 
 /// What the binder's gates and relation checks read: the selected unit's store and the player's.
 #[derive(Clone, Copy)]
@@ -140,35 +170,82 @@ pub(super) fn owner_store<'a>(
 }
 
 impl TargetRelations<'_> {
-    /// `CanAssist 0x6066f0` toward the candidate, which the caster always is for himself. The
+    /// `CanAssist 0x6066f0(caster, candidate)`, which the caster always is for himself. The
     /// binder's assist arm and the world pick's relation leg both ask it.
     pub(super) fn assistable(&self, is_self: bool) -> bool {
         is_self
-            || can_assist(
-                self.target_store,
-                self.factions,
-                self.reputations,
-                self.self_store,
-                |_| self.target_owner_store.cloned(),
-            )
+            || self
+                .pair()
+                .is_some_and(|(me, target)| self.relations().can_assist(&me, &target))
     }
 
-    /// `CanAttack 0x606980` toward the candidate, never the caster. The binder's enemy arm and the
+    /// `CanAttack 0x606980(caster, candidate)`, never the caster. The binder's enemy arm and the
     /// world pick's relation leg both ask it.
     pub(super) fn attackable(&self, is_self: bool) -> bool {
         !is_self
-            && can_attack(
-                self.target_store,
-                self.factions,
-                self.reputations,
-                self.self_store,
-            )
+            && self
+                .pair()
+                .is_some_and(|(me, target)| self.relations().can_attack(&me, &target))
+    }
+
+    /// The relation functions over the binder's units: the caster, the candidate and their owners.
+    pub(super) fn relations(&self) -> Relations<'_> {
+        Relations {
+            factions: self.factions,
+            reputations: self.reputations,
+            me: self.group.self_guid,
+            roster: self.group.roster,
+            units: self,
+        }
+    }
+
+    /// The caster and the candidate as the relation functions read them; `None` until both
+    /// have streamed and their guids are known.
+    pub(super) fn pair(&self) -> Option<(RelUnit, RelUnit)> {
+        Some((
+            self.unit_of(self.group.self_guid?, self.self_store?),
+            self.unit_of(self.group.target_guid?, self.target_store?),
+        ))
+    }
+
+    fn unit_of(&self, guid: u64, store: &ObjectStore) -> RelUnit {
+        let unit = RelUnit::of(guid, store);
+        match self.types.names {
+            Some(names) => unit.with_record(store, names),
+            None => unit,
+        }
+    }
+}
+
+/// The object manager as the binder holds it: the caster, the candidate and the charmer or
+/// creator of each, whichever have streamed.
+impl UnitLookup for TargetRelations<'_> {
+    fn unit(&self, guid: u64) -> Option<RelUnit> {
+        let owner = |s: Option<&ObjectStore>| s?.0.unit_owner(OwnerFallback::CreatedBy);
+        let held = [
+            (self.group.self_guid, self.self_store),
+            (self.group.target_guid, self.target_store),
+            (owner(self.self_store), self.group.self_owner_store),
+            (owner(self.target_store), self.target_owner_store),
+        ];
+        let store = held
+            .into_iter()
+            .find_map(|(g, store)| store.filter(|_| guid != 0 && g == Some(guid)))?;
+        store.is_unit().then(|| self.unit_of(guid, store))
     }
 }
 
 /// The targeting inputs [`super::send_spell_cast`] resolves with, built by both cast callers.
 pub(crate) struct CastContext<'a> {
+    /// Where the arm's candidate comes from, so the arm can read it again past its signal.
+    pub(crate) candidate: ArmCandidate,
+    /// Whether anything is selected (`0xb4e2d8`), whatever the candidate: `TryCast`'s tail picks
+    /// its refusal by it (`0x6e5084`).
+    pub(crate) selected: bool,
     pub(crate) selection_guid: Option<u64>,
+    /// Whether the object manager holds [`Self::selection_guid`]'s object, which the bind needs
+    /// (`0x6e53bc`, `0x6e5b5e`).
+    pub(crate) selection_held: bool,
     pub(crate) self_guid: Option<u64>,
     pub(crate) auto_self_cast: bool,
     pub(crate) rel: TargetRelations<'a>,
@@ -180,16 +257,58 @@ pub(crate) struct CastContext<'a> {
     /// The caster's movement flags (the client's `[unit+0x9e8]`), read by the requirement
     /// validator's moving gate.
     pub(crate) self_move_flags: u32,
+    /// The caster's stand state as `GetStandState 0x5ed570` reads it for the active player, the
+    /// validator's standing rung's input (`0x609cad`).
+    pub(crate) self_stand_state: u8,
+    /// The caster's sheathe state `[unit+0xd40]`, the validator's unsheathed rung's input
+    /// (`0x609ba9`).
+    pub(crate) self_sheathe_state: u8,
+    /// `IsDaytime 0x60a050` on the game clock, the validator's day and night rungs' input.
+    pub(crate) daytime: bool,
+    /// `0x612cc0`, the caster's answer to the entity outdoors test `0x6706f0`, the validator's
+    /// place rungs' input.
+    pub(crate) self_outdoors: bool,
+    /// `[0xb4b3e4]` is clear: the start of melee the cast's tail makes returns at it
+    /// (`0x5ecbc0`).
+    pub(crate) self_control_lost: bool,
+}
+
+/// Where `ArmCast 0x6e5250` takes its candidate: `TryCast`'s guid argument when it has one
+/// (`0x6e5393`), else the selection, read as the arm reaches it (`0x6e539f`), after its signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArmCandidate {
+    /// The selection.
+    Selection,
+    /// The active player, the self-cast modifier's guid ([`CastContext::self_bound`]).
+    OnSelf,
+    /// A guid the caller passed ([`CastTargeting::context_at_guid`]).
+    Guid(u64),
+    /// A unit caster's press at its target ([`CastTargeting::context_for_caster`]).
+    Unit { caster: u64, guid: Option<u64> },
 }
 
 impl CastContext<'_> {
+    /// The selection, as read here, passed as `TryCast`'s guid: an item use's (`0x4fa163`,
+    /// `0x4c8e1d`, through `CGItem::Use` `0x5d9249` → `0x6e5a90`) and the attack pick's write
+    /// (`0x6e4efb`). The arm then takes the guid (`0x6e5393`) and never reads the selection again;
+    /// with nothing selected the guid is 0, and the arm reads the selection where it reaches it
+    /// (`0x6e539f`).
+    pub(crate) fn selection_passed(mut self) -> Self {
+        if let (ArmCandidate::Selection, Some(guid)) = (self.candidate, self.selection_guid) {
+            self.candidate = ArmCandidate::Guid(guid);
+        }
+        self
+    }
+
     /// Applies the self-cast modifier, `onSelf`: the caster replaces the selection as the bind
     /// candidate, guid and store both, the pair the autoSelfCast fallback swaps (`0x6e53d7`). It
     /// is the explicit guid `CastSpell` and `CastSpellByName` hand `ArmCast 0x6e5250` (`0x4b4345`,
     /// `0x4b4afa`, bound at `0x6e5393`); where `UseAction 0x4e5ee0` applies its own is untraced.
     pub(crate) fn self_bound(mut self, on_self: bool) -> Self {
         if on_self {
+            self.candidate = ArmCandidate::OnSelf;
             self.selection_guid = self.self_guid;
+            self.selection_held = true;
             self.rel.target_store = self.rel.self_store;
             self.rel.group.target_guid = self.self_guid;
         }
@@ -251,7 +370,8 @@ pub(crate) struct CastTargeting<'w, 's> {
     auto_self_cast: Res<'w, AutoSelfCast>,
     factions: Option<Res<'w, Factions>>,
     reputations: Res<'w, Reputations>,
-    /// The party slots and raid roster as the frame began; a harness without them has no group.
+    /// The party slots and raid roster as the feed last published them; a harness without them has
+    /// no group.
     roster: Option<Res<'w, GroupRoster>>,
     /// The creature-type gate's template cache and form table; a harness without them resolves
     /// no type.
@@ -262,18 +382,154 @@ pub(crate) struct CastTargeting<'w, 's> {
     /// `Option`: the body exists only in world, and the cast-result handler must fetch this param
     /// anywhere. With no body the moving gate passes and the server decides.
     player: Option<Res<'w, crate::player::Player>>,
+    /// The predicted stand state `GetStandState` reads (`0x5ed570`).
+    stand_pending: Option<Res<'w, crate::player::StandPending>>,
+    /// `[0xb4b3e4]`, for the cast tail's start of melee.
+    own_control: Option<Res<'w, crate::player::OwnControlLost>>,
     /// The caster's and the selection's reach and motion, for the range gate.
     range_units: super::RangeUnits<'w, 's>,
+    /// The caster's committed sheathe state, which its animation driver keeps.
+    self_sheath: Query<'w, 's, &'static crate::creature_anim::CommittedSheath, With<SelfPlayer>>,
+    /// The game clock the day and night rungs read; absent in a harness without one.
+    clock: Option<Res<'w, crate::net::ServerTime>>,
+    /// The player's answer to the entity outdoors test, which the place rungs read; absent
+    /// outside the world.
+    outdoors: Option<Res<'w, crate::player::PlayerOutdoors>>,
+    /// The pet bar's unit's answer, which a unit caster's place rungs read; absent outside the
+    /// world.
+    bar_unit_outdoors: Option<Res<'w, crate::player::BarUnitOutdoors>>,
+    /// The item cache the range's ranged-slot scale reads ([`super::with_ranged_slot`]).
+    items: Option<Res<'w, crate::items::Items>>,
 }
 
 impl CastTargeting<'_, '_> {
     /// This frame's [`CastContext`].
     pub(crate) fn context(&self) -> CastContext<'_> {
-        let target_store = self.selection.target.and_then(|e| self.stores.get(e).ok());
+        self.context_on(self.selection.target, self.selection.guid)
+    }
+
+    /// The context for an attempt passed a unit's guid (`0x6e4b60`'s last argument, as
+    /// `InteractWithSpell 0x5f05e0` passes the body's): the range test (`0x6e4f26` → `0x6e4440`)
+    /// and the arm's candidate (`0x6e5393`) take it in the selection's place. The arm's refusal of
+    /// an enemy word with nothing bound still picks its line off the selection itself (`0x6e5084`,
+    /// [`CastContext::selected`]).
+    pub(crate) fn context_at(&self, entity: Entity, guid: u64) -> CastContext<'_> {
+        CastContext {
+            candidate: ArmCandidate::Guid(guid),
+            ..self.context_on(Some(entity), Some(guid))
+        }
+    }
+
+    /// [`Self::context_at`] for an explicit guid (`0x6e5a90`'s, as `CastDuelSpell 0x4d4810` passes
+    /// it), on the guid's object, or on the guid alone when the object manager holds none: the
+    /// range test passes it (`0x6e4482`) and the bind binds nothing (`0x6e5b5e`).
+    pub(crate) fn context_at_guid(&self, guid: u64) -> CastContext<'_> {
+        let target = self.index.as_deref().and_then(|i| i.0.get(&guid).copied());
+        CastContext {
+            candidate: ArmCandidate::Guid(guid),
+            ..self.context_on(target, Some(guid))
+        }
+    }
+
+    /// The context `candidate` names, built again as it stands now: `None` for a unit caster no
+    /// longer streamed.
+    pub(crate) fn context_for(&self, candidate: ArmCandidate) -> Option<CastContext<'_>> {
+        match candidate {
+            ArmCandidate::Selection => Some(self.context()),
+            ArmCandidate::OnSelf => Some(self.context().self_bound(true)),
+            ArmCandidate::Guid(guid) => Some(self.context_at_guid(guid)),
+            ArmCandidate::Unit { caster, guid } => self.context_for_caster(caster, guid),
+        }
+    }
+
+    /// The context for an attempt whose caster is a unit other than the active player, the pet
+    /// bar's client-targeted and possessed presses (`0x4bd385`: `0x6e4b60(unit, spell, 0, guid)`),
+    /// at `guid`, the press's target. The attempt reads that caster wherever it reads one: the dead
+    /// rung (`0x6e4c49`), the range test (`0x6e4f26` → `0x6e4440`), the relations the bind asks
+    /// (`CanAssist 0x6066f0`, `CanAttack 0x606980`) and the validator's state rungs (`0x6094f0`,
+    /// called on the caster at `0x6e4f3b`), its place rungs asking where that caster stands. A
+    /// unit caster has no main hand to bind (`0x6e5361`), and its movement is its own unit's.
+    /// `None` while the caster is not streamed.
+    pub(crate) fn context_for_caster(
+        &self,
+        caster_guid: u64,
+        guid: Option<u64>,
+    ) -> Option<CastContext<'_>> {
+        let index = self.index.as_deref()?;
+        let caster = *index.0.get(&caster_guid)?;
+        let self_store = self.stores.get(caster).ok()?;
+        let target = guid.and_then(|g| index.0.get(&g).copied());
+        let target_store = target.and_then(|e| self.stores.get(e).ok());
+        let owner_store = |store| owner_store(store, Some(index), &self.stores);
+        let caster_unit = self.range_units.unit(caster);
+        Some(CastContext {
+            candidate: ArmCandidate::Unit {
+                caster: caster_guid,
+                guid,
+            },
+            selected: self.selection.guid.is_some(),
+            selection_guid: guid,
+            selection_held: target.is_some(),
+            self_guid: Some(caster_guid),
+            auto_self_cast: self.auto_self_cast.0,
+            rel: TargetRelations {
+                target_store,
+                target_owner_store: owner_store(target_store),
+                self_store: Some(self_store),
+                factions: self.factions.as_deref(),
+                reputations: &self.reputations,
+                types: CreatureTypeSources {
+                    names: self.names.as_deref(),
+                    forms: self.spells.as_deref().map(|s| &s.forms),
+                    ..Default::default()
+                },
+                group: GroupInputs {
+                    self_guid: Some(caster_guid),
+                    target_guid: guid,
+                    self_owner_store: owner_store(Some(self_store)),
+                    roster: self.roster.as_deref(),
+                },
+            },
+            range: RangeInputs {
+                self_pos: self.transforms.get(caster).ok().map(|t| t.translation),
+                target_pos: target
+                    .and_then(|e| self.transforms.get(e).ok())
+                    .map(|t| t.translation),
+                caster: caster_unit
+                    .unwrap_or(benilla_formats::RangeUnit::still(super::DEFAULT_REACH)),
+                target: target.and_then(|e| self.range_units.unit(e)),
+            },
+            main_hand_item: None,
+            self_move_flags: caster_unit.map_or(0, |u| u.motion.flags),
+            // A unit's `GetStandState`, its vtable slot 41 (`0x60be50`), reads its descriptor's
+            // `UNIT_FIELD_BYTES_1` byte 0; only the active player's (`0x5ed570`) keeps a local state.
+            self_stand_state: self_store.0.unit_stand_state(),
+            // `[unit+0xd40]`, which only the active player's setter `0x611cf0` moves ahead of the
+            // echo: a unit's is its descriptor's `UNIT_FIELD_BYTES_2` byte 0.
+            self_sheathe_state: self_store.0.unit_sheath_state().unwrap_or(0),
+            daytime: self.clock.as_deref().is_some_and(|c| c.0.is_daytime()),
+            // `0x612cc0` asks the caster's own node (`[unit+0xe0]` → `0x6706f0`), never the
+            // player's; with no answer for it, it reads outdoors, as a null entity does
+            // (`0x6706fa`).
+            self_outdoors: self
+                .bar_unit_outdoors
+                .as_deref()
+                .and_then(|o| o.0)
+                .filter(|&(guid, _)| guid == caster_guid)
+                .is_none_or(|(_, outdoors)| outdoors),
+            self_control_lost: self.own_control.as_deref().is_some_and(|c| c.0),
+        })
+    }
+
+    fn context_on(&self, target: Option<Entity>, guid: Option<u64>) -> CastContext<'_> {
+        let target_store = target.and_then(|e| self.stores.get(e).ok());
         let owner_store = |store| owner_store(store, self.index.as_deref(), &self.stores);
         let self_store = self.self_store.iter().next();
         CastContext {
-            selection_guid: self.selection.guid,
+            candidate: ArmCandidate::Selection,
+            selected: self.selection.guid.is_some(),
+            selection_guid: guid,
+            selection_held: target.is_some(),
             self_guid: self.self_guid.0,
             auto_self_cast: self.auto_self_cast.0,
             rel: TargetRelations {
@@ -285,23 +541,30 @@ impl CastTargeting<'_, '_> {
                 types: CreatureTypeSources {
                     names: self.names.as_deref(),
                     forms: self.spells.as_deref().map(|s| &s.forms),
+                    ..Default::default()
                 },
                 group: GroupInputs {
                     self_guid: self.self_guid.0,
-                    target_guid: self.selection.guid,
+                    target_guid: guid,
                     self_owner_store: owner_store(self_store),
                     roster: self.roster.as_deref(),
                 },
             },
             range: RangeInputs {
                 self_pos: self.self_transform.iter().next().map(|t| t.translation),
-                target_pos: self
-                    .selection
-                    .target
+                target_pos: target
                     .and_then(|e| self.transforms.get(e).ok())
                     .map(|t| t.translation),
-                caster: self.range_units.caster(),
-                target: self.selection.target.and_then(|e| self.range_units.unit(e)),
+                caster: super::with_ranged_slot(
+                    self.range_units.caster(),
+                    self_store.map(|s| &s.0),
+                    |g| {
+                        let e = *self.index.as_deref()?.0.get(&g)?;
+                        self.stores.get(e).ok().map(|s| &s.0)
+                    },
+                    self.items.as_deref(),
+                ),
+                target: target.and_then(|e| self.range_units.unit(e)),
             },
             main_hand_item: self
                 .self_store
@@ -310,6 +573,24 @@ impl CastTargeting<'_, '_> {
                 .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND))
                 .filter(|&g| g != 0),
             self_move_flags: self.player.as_deref().map_or(0, |p| p.move_flags()),
+            self_stand_state: {
+                let byte = self_store.map_or(0, |s| s.0.unit_stand_state());
+                self.stand_pending
+                    .as_deref()
+                    .map_or(byte, |p| p.stand_state(byte))
+            },
+            // The cached state, seeded from `UNIT_FIELD_BYTES_2` byte 0 and moved by the local
+            // setter `0x611cf0` ahead of its echo; the descriptor's byte until it is driven.
+            self_sheathe_state: self
+                .self_sheath
+                .iter()
+                .next()
+                .and_then(|c| c.state())
+                .or_else(|| self_store.and_then(|s| s.0.unit_sheath_state()))
+                .unwrap_or(0),
+            daytime: self.clock.as_deref().is_some_and(|c| c.0.is_daytime()),
+            self_outdoors: self.outdoors.as_deref().is_none_or(|o| o.0),
+            self_control_lost: self.own_control.as_deref().is_some_and(|c| c.0),
         }
     }
 }
@@ -322,7 +603,10 @@ const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 pub(crate) struct AutoSelfCast(pub(crate) bool);
 
 /// `autoSelfCast`'s change callback: a flag.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut auto: ResMut<AutoSelfCast>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut auto: bevy::prelude::Mut<'_, AutoSelfCast>,
+) {
     if ev.is("autoSelfCast") {
         auto.0 = ev.flag();
     }
@@ -349,72 +633,107 @@ pub(crate) fn cast_target_mask(def: &SpellDisplay) -> u16 {
     word
 }
 
-/// `BindTarget 0x6e5b40`'s unit branch past the gates: clear every flag-word bit the candidate
-/// satisfies.
+/// `UNIT_FIELD_FLAGS & 0x100` (vmangos `UNIT_FLAG_IMMUNE_TO_PLAYER`, `UnitDefines.h:553`), which
+/// refuses the `0x2` arm (`0x6e5df2`-`0x6e5e03`).
+const UNIT_FLAG_IMMUNE_TO_PLAYER: u32 = 0x0000_0100;
+
+/// `BindTarget 0x6e5b40`'s unit branch past the gates, one else-if chain (`0x6e5cad`-`0x6e5ee7`)
+/// that `SpellCanTargetObject 0x6e6460` asks in the same order (`0x6e65b1`-`0x6e66dc`). The first
+/// arm whose test holds clears its own bit, and on a dead unit `0x400`, or `0x8600` for the `0x2`
+/// arm, and the word left is returned; `None` when no arm holds, and when the `0x8000` arm's
+/// `CanAssist` refuses, which ends the walk (`0x6e5e7f`).
 ///
-/// The assist bit asks `CanAssist 0x6066f0`: selectable, friendly or better, and an NPC's owner
-/// (or the NPC itself) PvP-enabled. This keeps friendly ambient NPCs and critters unbindable.
-/// The enemy bit asks `CanAttack` (`0x606980`). The party bit needs `0x606c20` and then `CanAssist`
-/// (`6e5cad`-`6e5cec`): the player, a member of his party, or a unit that answers to one. The raid
-/// bit needs `0x606d20` and `CanAssist` (`6e5cf1`-`6e5d2f`): the same, with the raid roster
-/// counting as well as the party slots. The corpse check (`0x6067d0`) is assistable with health 0
-/// here.
-fn clear_satisfied_bits(word: u16, is_self: bool, rel: &TargetRelations) -> u16 {
-    let mut word = word;
-    let assist = rel.assistable(is_self);
-    let dead = rel.target_store.is_some_and(|s| !unit_alive(&s.0));
-    if word & TF_UNIT_PARTY != 0 && assist && rel.in_party(is_self) {
-        word &= !TF_UNIT_PARTY;
+/// | order | bit | the arm's test |
+/// |---|---|---|
+/// | 1 | `0x8` | `0x606c20`, then `CanAssist 0x6066f0` |
+/// | 2 | `0x4` | `0x606d20`, then `CanAssist` |
+/// | 3 | `0x100` | `CanAssist` |
+/// | 4 | `0x80` | `CanAttack 0x606980` |
+/// | 5 | `0x2` | [`UNIT_FLAG_IMMUNE_TO_PLAYER`] clear |
+/// | 6 | `0x8000` | dead, and a player or `UNIT_FIELD_PETNUMBER` set; then `CanAssist` |
+/// | 7 | `0x200` | dead, a player, and `CanAssist` refused |
+///
+/// `CanAssist` asks selectable, friendly or better, and an NPC's owner (or the NPC itself)
+/// PvP-enabled, which keeps friendly ambient NPCs and critters unbindable. The party test is the
+/// player, a member of his party or a unit that answers to one; the raid test counts the raid
+/// roster as well as the party slots. A unit with no streamed descriptor reads alive, no player
+/// and no flags.
+fn bind_arm(word: u16, is_self: bool, rel: &TargetRelations) -> Option<u16> {
+    let fields = rel.target_store.map(|s| &s.0);
+    let dead = fields.is_some_and(|f| !unit_alive(f));
+    let player = fields
+        .is_some_and(|f| f.object_type() == Some(benilla_protocol::messages::ObjectType::Player));
+    let pet = fields.is_some_and(|f| f.unit_pet_number() != 0);
+    let flags = fields.map_or(0, |f| f.unit_flags());
+    // Arms 1 to 4 clear `0x400` beside their bit on a dead unit (`0x6e5ddb`, `0x6e5d89`).
+    let bind = |bit: u16| Some(word & !(if dead { bit | TF_EXPLICIT_GATE } else { bit }));
+    if word & TF_UNIT_PARTY != 0 && rel.in_party(is_self) && rel.assistable(is_self) {
+        return bind(TF_UNIT_PARTY);
     }
-    if word & TF_UNIT_RAID != 0 && assist && rel.in_group(is_self) {
-        word &= !TF_UNIT_RAID;
+    if word & TF_UNIT_RAID != 0 && rel.in_group(is_self) && rel.assistable(is_self) {
+        return bind(TF_UNIT_RAID);
     }
-    if word & TF_UNIT_ASSIST != 0 && assist {
-        word &= !TF_UNIT_ASSIST;
+    if word & TF_UNIT_ASSIST != 0 && rel.assistable(is_self) {
+        return bind(TF_UNIT_ASSIST);
     }
     if word & TF_UNIT_ENEMY != 0 && rel.attackable(is_self) {
-        word &= !TF_UNIT_ENEMY;
+        return bind(TF_UNIT_ENEMY);
     }
-    // Bit 1 has no relation check: any unit binds. A dead unit's bind clears bit 10 (`6e5d89`,
-    // `6e5ddb`); the gate refuses a living unit under that word before it gets here.
-    if word & TF_UNIT != 0 {
-        word &= !TF_UNIT;
+    if word & TF_UNIT != 0 && flags & UNIT_FLAG_IMMUNE_TO_PLAYER == 0 {
+        return Some(
+            word & !(if dead {
+                TF_UNIT | CORPSE_WORD_BITS
+            } else {
+                TF_UNIT
+            }),
+        );
     }
-    if word & TF_EXPLICIT_GATE != 0 && dead {
-        word &= !TF_EXPLICIT_GATE;
+    if word & TF_CORPSE_ALLY != 0 && dead && (player || pet) {
+        return rel.assistable(is_self).then_some(word & !TF_CORPSE_ALLY);
     }
-    if word & TF_CORPSE_ALLY != 0 && assist && dead {
-        word &= !TF_CORPSE_ALLY;
+    if word & TF_CORPSE_ENEMY != 0 && dead && player && !rel.assistable(is_self) {
+        return Some(word & !TF_CORPSE_ENEMY);
     }
-    if word & TF_CORPSE_ENEMY != 0 && !is_self && dead {
-        word &= !TF_CORPSE_ENEMY;
-    }
-    word
+    None
 }
 
-/// Whether the unit arm's relation checks clear the whole standing word for this unit.
-fn unit_word_binds(word: u16, is_self: bool, rel: &TargetRelations) -> bool {
-    word & UNIT_BITS != 0 && clear_satisfied_bits(word, is_self, rel) == 0
+/// `BindTarget 0x6e5b40`'s unit branch under the standing word: the gates ([`bind_gates`]), then
+/// the relation checks, and the word the arm that bound leaves; `None` binds nothing. The bind
+/// returns 1 for any arm that binds (`0x6e60de`) and sends only a word it emptied (`0x6e60c1`).
+/// The initial selection, the `autoSelfCast` fallback, a world click and `SpellTargetUnit` all ask
+/// this one walk; the hover verdict asks [`unit_can_target`]. An unknown spell has no row to gate
+/// on and leaves the relation checks alone.
+pub(super) fn unit_bind(
+    def: Option<&SpellDisplay>,
+    word: u16,
+    is_self: bool,
+    rel: &TargetRelations,
+) -> Option<u16> {
+    if !def.is_none_or(|def| bind_gates(def, word, is_self, rel)) {
+        return None;
+    }
+    bind_arm(word, is_self, rel)
 }
 
-/// Whether `BindTarget 0x6e5b40`'s unit branch binds this unit under the standing word: the gates
-/// ([`bind_gates`]), then the relation checks. The initial selection, the `autoSelfCast` fallback,
-/// a world click, `SpellTargetUnit` and the hover verdict all ask this one predicate. An unknown
-/// spell has no row to gate on and leaves the relation checks alone.
-pub(super) fn unit_binds(
+/// Whether `SpellCanTargetObject 0x6e6460` passes this unit (before its range test): the same
+/// gates, then the first arm that holds returns at once (`0x6e668c`), as the bind returns 1 for it
+/// (`0x6e60de`). Revive's `0x8002` at a live unit passes the `0x2` arm here, and the bind binds it
+/// there with `0x8000` left in the word.
+pub(super) fn unit_can_target(
     def: Option<&SpellDisplay>,
     word: u16,
     is_self: bool,
     rel: &TargetRelations,
 ) -> bool {
-    def.is_none_or(|def| bind_gates(def, word, is_self, rel)) && unit_word_binds(word, is_self, rel)
+    def.is_none_or(|def| bind_gates(def, word, is_self, rel))
+        && bind_arm(word, is_self, rel).is_some()
 }
 
 /// The wire target for casting `def`. An unknown spell sends the selection as is, or no target
 /// without one, and the server validates.
 pub(crate) fn resolve_cast_target(
     def: Option<&SpellDisplay>,
-    cand: &CastCandidates,
+    cand: &CastCandidates<'_>,
     auto_self_cast: bool,
     rel: &TargetRelations,
 ) -> CastWireTarget {
@@ -428,29 +747,63 @@ pub(crate) fn resolve_cast_target(
     if word == 0 {
         return CastWireTarget::SelfImplicit;
     }
+    bind_leg(Some(def), word, Some(def), cand, auto_self_cast, rel, true)
+}
+
+/// `ArmCast`'s leg for a nonzero `word` (`0x6e5359`-`0x6e5477`), and `TryCast`'s tail when it
+/// returns false (`0x6e5045`-`0x6e50ab`). `arm` is the attempt's own spell, whose implicit target,
+/// `Attributes` and range the leg and the tail read (`0x6e5359`, `0x6e536e`, `0x6e543f`,
+/// `0x6e504b`); the word and `record`, the spell whose gates `BindTarget` asks (`0x6e5bab`), are
+/// whatever stands at the word test (`0x6e5338`), a listener's cursor's included. `binds` is
+/// whether the record names a caster, without which `BindTarget` binds nothing (`0x6e5b93`).
+pub(crate) fn bind_leg(
+    arm: Option<&SpellDisplay>,
+    word: u16,
+    record: Option<&SpellDisplay>,
+    cand: &CastCandidates<'_>,
+    auto_self_cast: bool,
+    rel: &TargetRelations,
+    binds: bool,
+) -> CastWireTarget {
+    let main_hand = arm.is_some_and(|d| d.targets_main_hand_item());
     // Implicit target 16 enters the cursor before any candidate bind (`0x6e535b`), but after the
-    // word-0 commit above (`0x6e5338` comes first).
-    if def.implicit_target_a1 == 16 {
+    // word-0 commit (`0x6e5338` comes first).
+    if arm.is_some_and(|d| d.implicit_target_a1 == 16) {
         // The reference flags this outside the word; the click seams read only the word, so the
         // DEST bit carries it (shipped arm-16 rows already have it in `Targets`).
         return CastWireTarget::Targeting(word | TF_DEST_LOCATION);
     }
     // `Attributes & 0x200` takes the main hand as the candidate (`0x6e5361`-`0x6e5391`). This
     // must precede the non-unit cursor defer below: an item candidate clears bit 4.
-    if def.targets_main_hand_item() {
-        match cand.main_hand_item {
+    if main_hand {
+        match cand.main_hand_item.filter(|_| binds) {
             // `BindTarget`'s item arm clears bits 4 and 14 (`0x6e5f35`) and the cleared word
             // commits at once (`0x6e60c1`).
             Some(item) if word & ITEM_ARM_BITS != 0 && word & !ITEM_ARM_BITS == 0 => {
                 return CastWireTarget::Item(item)
             }
-            // Empty hand: not a cursor. The cast tail re-tests the attribute (`0x6e504b`), clears
-            // the word (`0x6e5057`) and raises 0x2d, jumping over the cursor arm (`0x6e50ab`).
+            // Empty hand, or nothing bound: not a cursor. The cast tail re-tests the attribute
+            // (`0x6e504b`), clears the word (`0x6e5057`) and raises 0x2d, jumping over the cursor
+            // arm (`0x6e50ab`).
             None => return CastWireTarget::RefusedAtArm(ERR_MAINHAND_EMPTY),
             // A residual the item arm cannot clear waits at the cursor in the reference; no
             // shipped row has one (all 22 carry `Targets == 0x10`).
             Some(_) => {}
         }
+    }
+    // `ArmCast`'s last leg (`0x6e540e`-`0x6e5467`), reached once the candidate binds nothing and
+    // `autoSelfCast` is off (`0x6e53e1`): a candidate the object manager does not hold
+    // (`0x6e5425`), for a spell whose maximum range is above 100, is parked in the pending block
+    // (`0xceac60`) and sent at once. The block's mask holds no unit bit, so the packet names no
+    // target. A candidate with no object binds nothing under any word (`0x6e5b5e`), so a location
+    // word reaches the leg as a unit word does. The main hand is the candidate instead of the
+    // selection for the attribute above (`0x6e536e`).
+    if let Some(guid) = cand
+        .selection
+        .filter(|_| !auto_self_cast && cand.long_range && !cand.selection_held)
+        .filter(|_| !main_hand)
+    {
+        return CastWireTarget::Parked(guid);
     }
     // A non-unit bit enters the cursor with the whole word. The reference only reaches the cursor
     // after the unit walk fails (`0x6e50c8`), so deferring first matches it only because no unit
@@ -464,19 +817,20 @@ pub(crate) fn resolve_cast_target(
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
-    // The selection (`0xb4e2d8`, `0x6e539f`). A unit the gates or the relation checks refuse binds
-    // nothing, so the fallback below gets its turn.
-    if let Some(guid) = cand.selection {
+    // The selection (`0xb4e2d8`, `0x6e539f`). A guid with no object (`0x6e5b5e`), or a unit the
+    // gates or the relation checks refuse, binds nothing, so the fallback below gets its turn.
+    if let Some(guid) = cand.selection.filter(|_| cand.selection_held && binds) {
         let is_self = cand.caster == Some(guid);
-        if unit_binds(Some(def), word, is_self, rel) {
-            return CastWireTarget::Unit(guid);
+        if let Some(rest) = unit_bind(record, word, is_self, rel) {
+            return bound_unit(guid, rest);
         }
     }
-    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast, through the same gates.
-    if auto_self_cast {
-        if let Some(guid) = cand.caster {
+    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast, through the same gates,
+    // which test it against the caster: a unit caster's binds the player, not itself.
+    if auto_self_cast && binds {
+        if let Some(guid) = cand.auto_self {
             let self_rel = TargetRelations {
-                target_store: rel.self_store,
+                target_store: cand.auto_self_store,
                 target_owner_store: None,
                 group: GroupInputs {
                     target_guid: Some(guid),
@@ -484,15 +838,17 @@ pub(crate) fn resolve_cast_target(
                 },
                 ..*rel
             };
-            if unit_binds(Some(def), word, true, &self_rel) {
-                return CastWireTarget::Unit(guid);
+            if let Some(rest) = unit_bind(record, word, cand.caster == Some(guid), &self_rel) {
+                return bound_unit(guid, rest);
             }
         }
     }
-    // A standing enemy word refuses locally. Every other residual unit word proceeds to
-    // `BindTarget`'s hand cursor.
+    // A standing enemy word is refused by the attempt's tail once the arm returns false
+    // (`0x6e507b`-`0x6e50a9`): "Invalid target" with anything selected (`0x6e5084`), whatever the
+    // candidate was, else "You have no target", with the spell in flight. Every other residual
+    // unit word proceeds to `BindTarget`'s hand cursor.
     if word & TF_UNIT_ENEMY != 0 {
-        CastWireTarget::Refused(if cand.selection.is_some() {
+        CastWireTarget::RefusedAtArm(if cand.selected {
             ERR_INVALID_TARGET
         } else {
             ERR_NO_TARGET
@@ -502,16 +858,37 @@ pub(crate) fn resolve_cast_target(
     }
 }
 
+/// A unit `BindTarget` bound with `rest` left in the word: an empty word sends (`0x6e60c1`), any
+/// other stands ([`CastWireTarget::Partial`]).
+fn bound_unit(unit: u64, rest: u16) -> CastWireTarget {
+    if rest == 0 {
+        CastWireTarget::Unit(unit)
+    } else {
+        CastWireTarget::Partial { unit, word: rest }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Selection and caster candidates, with an empty main hand.
-    fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates {
+    /// Whether an arm binds this unit and leaves the standing word empty, which sends the cast
+    /// (`0x6e60c1`).
+    fn unit_word_binds(word: u16, is_self: bool, rel: &TargetRelations) -> bool {
+        bind_arm(word, is_self, rel) == Some(0)
+    }
+
+    /// Selection and caster candidates, the caster the active player, with an empty main hand.
+    fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates<'static> {
         CastCandidates {
             selection,
+            selected: selection.is_some(),
+            selection_held: true,
             caster,
+            auto_self: caster,
+            auto_self_store: None,
             main_hand_item: None,
+            long_range: false,
         }
     }
 
@@ -573,7 +950,11 @@ mod tests {
             factions: None,
             reputations: &Reputations::default(),
             types: Default::default(),
-            group: Default::default(),
+            group: GroupInputs {
+                self_guid: Some(1),
+                target_guid: Some(42),
+                ..Default::default()
+            },
         };
         let ice_armor = spell(0, 1);
         assert_eq!(
@@ -584,8 +965,8 @@ mod tests {
         let fireball = spell(0, 6);
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), true, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET),
-            "enemy words retain the no-target refusal"
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET),
+            "enemy words retain the no-target refusal, the arm's"
         );
         // Neutral (3) is attackable by the mixed arm's `< 4` and not assistable by `>= 4`.
         assert_eq!(
@@ -615,7 +996,7 @@ mod tests {
         // A hostile-required cast never self-binds.
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), false, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET)
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET)
         );
         // Unknown spell: the selection passes through.
         assert_eq!(
@@ -645,7 +1026,11 @@ mod tests {
             factions: Some(&factions),
             reputations: &reputations,
             types: Default::default(),
-            group: Default::default(),
+            group: GroupInputs {
+                self_guid: Some(1),
+                target_guid: Some(2),
+                ..Default::default()
+            },
         };
 
         assert!(
@@ -775,9 +1160,8 @@ mod tests {
         assert!(rockbiter.targets_main_hand_item());
         const WEAPON: u64 = 0xdead_beef;
         let armed = CastCandidates {
-            selection: Some(42),
-            caster: Some(1),
             main_hand_item: Some(WEAPON),
+            ..cands(Some(42), Some(1))
         };
         assert_eq!(
             resolve_cast_target(Some(&rockbiter), &armed, true, &rel_none()),
@@ -848,14 +1232,271 @@ mod tests {
         }
     }
 
+    /// The validator's caster reads: the stand state through `GetStandState 0x5ed570`, which with no
+    /// local state is the descriptor's byte; the sheathe state `[unit+0xd40]` (`0x609ba9`), the
+    /// descriptor's until the driver holds one; and `IsDaytime 0x60a050`, night with no clock.
+    #[test]
+    fn the_context_reads_the_posture_the_sheathe_and_the_clock() {
+        use bevy::ecs::system::RunSystemOnce;
+        let read = |stand: u32, sheathe: u32, hour: Option<i32>| {
+            let mut world = World::new();
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            if let Some(hour) = hour {
+                let mut clock = crate::net::GameTime::new(0);
+                let time = benilla_protocol::WowTime {
+                    minute: 0,
+                    hour,
+                    weekday: 0,
+                    day: 17,
+                    month: 9,
+                    year: 26,
+                    spare: 0,
+                };
+                clock.set(time, 0);
+                world.insert_resource(crate::net::ServerTime(clock));
+            }
+            // `UNIT_FIELD_BYTES_1` (138) byte 0 and `UNIT_FIELD_BYTES_2` (164) byte 0.
+            let fields =
+                benilla_protocol::ObjectFields::from_pairs(&[(138, stand), (164, sheathe)]);
+            world.spawn((SelfPlayer, ObjectStore(fields)));
+            world
+                .run_system_once(|targeting: CastTargeting| {
+                    let c = targeting.context();
+                    (c.self_stand_state, c.self_sheathe_state, c.daytime)
+                })
+                .expect("the context builds")
+        };
+        assert_eq!(read(1, 0, Some(12)), (1, 0, true));
+        assert_eq!(read(0, 2, Some(3)), (0, 2, false));
+        assert_eq!(read(8, 1, None), (8, 1, false), "no clock reads night");
+    }
+
+    /// The place rungs' input is the player's answer to `0x6706f0`
+    /// ([`crate::player::PlayerOutdoors`]); a world without it reads outdoors, as a null entity
+    /// does (`0x6706fa`).
+    #[test]
+    fn the_context_reads_the_players_outdoors_answer() {
+        use bevy::ecs::system::RunSystemOnce;
+        let read = |outdoors: Option<bool>| {
+            let mut world = World::new();
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            if let Some(o) = outdoors {
+                world.insert_resource(crate::player::PlayerOutdoors(o));
+            }
+            world.spawn((SelfPlayer, ObjectStore(Default::default())));
+            world
+                .run_system_once(|targeting: CastTargeting| targeting.context().self_outdoors)
+                .expect("the context builds")
+        };
+        assert!(!read(Some(false)));
+        assert!(read(Some(true)));
+        assert!(read(None));
+    }
+
+    /// A unit caster's context reads that caster, never the player: its stand and sheathe states
+    /// are its descriptor's bytes (its `GetStandState 0x60be50`), and the place rungs' `0x612cc0`
+    /// asks the node where it stands (`[unit+0xe0]` → `0x6706f0`), as the outdoors publisher
+    /// answers for the pet bar's unit. A pet in a room's interior group is indoors while the
+    /// player stands off the building, outdoors off it while the player is in the room, and
+    /// outdoors in an `EXTERIOR` (0x8) group.
+    #[test]
+    fn a_unit_casters_context_reads_its_own_posture_and_place() {
+        use benilla_assets::coords::wow_to_bevy;
+        use benilla_protocol::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+        const PET: u64 = 0x2a;
+        let (inside, outside) = (
+            wow_to_bevy([1.0, 2.0, 30.0]),
+            wow_to_bevy([40.0, 2.0, 30.0]),
+        );
+        let read = |flags: u32, player_at: Vec3, pet_at: Vec3| {
+            let mut world = World::new();
+            crate::player::insert_test_room(&mut world, flags);
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            let mut body = crate::player::Player::default();
+            (body.active, body.pos) = (true, player_at);
+            world.insert_resource(body);
+            world.init_resource::<crate::player::PlayerOutdoors>();
+            world.init_resource::<crate::player::BarUnitOutdoors>();
+            world.init_resource::<crate::ui_pet::PetBar>();
+            world
+                .resource_mut::<crate::ui_pet::PetBar>()
+                .spells
+                .pet_guid = PET;
+            // `UNIT_FIELD_BYTES_1` (138) byte 0 and `UNIT_FIELD_BYTES_2` (164) byte 0: the player
+            // sits with its weapon away, the pet stands with its drawn.
+            let me = ObjectFields::from_pairs(&[(138, 1), (164, 0)]);
+            world.spawn((SelfPlayer, ObjectStore(me)));
+            let pet = world
+                .spawn((
+                    ObjectStore(ObjectFields::from_pairs(&[(138, 0), (164, 1)])),
+                    Transform::from_translation(pet_at),
+                    GlobalTransform::from_translation(pet_at),
+                ))
+                .id();
+            world.insert_resource(GuidIndex([(PET, pet)].into()));
+            world
+                .run_system_once(crate::player::publish_caster_outdoors)
+                .expect("the answers publish");
+            world
+                .run_system_once(|targeting: CastTargeting| {
+                    let me = targeting.context();
+                    let pet = targeting
+                        .context_for_caster(PET, None)
+                        .expect("the pet is streamed");
+                    (
+                        (me.self_outdoors, me.self_stand_state, me.self_sheathe_state),
+                        (
+                            pet.self_outdoors,
+                            pet.self_stand_state,
+                            pet.self_sheathe_state,
+                        ),
+                    )
+                })
+                .expect("the context builds")
+        };
+        assert_eq!(
+            read(0, outside, inside),
+            ((true, 1, 0), (false, 0, 1)),
+            "the pet in the room"
+        );
+        assert_eq!(
+            read(0, inside, outside),
+            ((false, 1, 0), (true, 0, 1)),
+            "the player in the room"
+        );
+        assert_eq!(
+            read(0x8, outside, inside).1,
+            (true, 0, 1),
+            "the pet in an exterior group"
+        );
+    }
+
+    /// `BindTarget`'s unit branch is one else-if chain (`0x6e5cad`-`0x6e5ee7`): the first arm whose
+    /// test holds clears its own bit, and on a dead unit `0x400`, or `0x8600` for the `0x2` arm;
+    /// with none holding the unit binds nothing (`0x6e60dc`).
+    #[test]
+    fn the_unit_branch_binds_through_the_first_arm_that_holds() {
+        use benilla_protocol::ObjectFields;
+        // Fields 2 `OBJECT_FIELD_TYPE` (0x19, a player), 22 health, 46 `UNIT_FIELD_FLAGS`, 139
+        // `UNIT_FIELD_PETNUMBER`.
+        let unit = |pairs: &[(u16, u32)]| ObjectStore(ObjectFields::from_pairs(pairs));
+        let rel = |target| TargetRelations {
+            target_store: Some(target),
+            ..rel_none()
+        };
+        // The 0x2 arm: `UNIT_FLAG_IMMUNE_TO_PLAYER` refuses it (`0x6e5e03`), Dispel Magic at a
+        // companion pet.
+        let immune = unit(&[(22, 100), (46, 0x100)]);
+        let plain = unit(&[(22, 100)]);
+        assert!(!unit_word_binds(0x2, false, &rel(&immune)));
+        assert!(unit_word_binds(0x2, false, &rel(&plain)));
+        // Its dead leg clears 0x8600 (`0x6e5e33`): Revive's 0x8002 on a corpse nobody assists.
+        let corpse = unit(&[(22, 0)]);
+        assert!(unit_word_binds(0x8002, false, &rel(&corpse)));
+        // A bare 0x400 has no arm.
+        assert!(!unit_word_binds(0x400, false, &rel(&corpse)));
+        // 0x8000: dead, and a player or a pet (`0x6e5e5c`-`0x6e5e72`), then `CanAssist`, so
+        // Resurrection binds no dead guard.
+        let dead_player = unit(&[(2, 0x19), (22, 0)]);
+        let dead_pet = unit(&[(22, 0), (139, 3)]);
+        assert!(!unit_word_binds(0x8000, true, &rel(&corpse)), "a creature");
+        assert!(unit_word_binds(0x8000, true, &rel(&dead_player)));
+        assert!(unit_word_binds(0x8000, true, &rel(&dead_pet)));
+        // 0x200: dead, a player, and `CanAssist` refused (`0x6e5ead`-`0x6e5ee7`).
+        assert!(unit_word_binds(0x200, false, &rel(&dead_player)));
+        assert!(
+            !unit_word_binds(0x200, false, &rel(&corpse)),
+            "not a player"
+        );
+        assert!(
+            !unit_word_binds(0x200, true, &rel(&dead_player)),
+            "assistable"
+        );
+        // The 0x8000 arm's refusal ends the walk before 0x200 (`0x6e5e7f`).
+        assert!(!unit_word_binds(0x8200, false, &rel(&dead_player)));
+        // The first arm wins: the assist arm binds and leaves 0x2 standing, so nothing commits.
+        let me = unit(&[(2, 0x19), (22, 100)]);
+        assert_eq!(bind_arm(0x0102, true, &rel(&me)), Some(0x0002));
+        assert!(!unit_word_binds(0x0102, true, &rel(&me)));
+        // Revive's 0x8002 at a live unit binds on the 0x2 arm with 0x8000 left, so it sends
+        // nothing (`0x6e60c1`), and `SpellCanTargetObject` passes on that arm (`0x6e668c`).
+        assert!(!unit_word_binds(0x8002, false, &rel(&plain)));
+        assert_eq!(unit_bind(None, 0x8002, false, &rel(&plain)), Some(0x8000));
+        assert!(unit_can_target(None, 0x8002, false, &rel(&plain)));
+        assert!(unit_can_target(None, 0x0102, true, &rel(&me)));
+        // No arm holds: neither answers yes.
+        assert!(!unit_can_target(None, 0x2, false, &rel(&immune)));
+        assert!(!unit_can_target(None, 0x400, false, &rel(&corpse)));
+    }
+
+    /// `BindTarget` returns 1 for any arm that binds (`0x6e60de`), so `ArmCast` returns at the first
+    /// candidate it binds (`0x6e53c3`): Revive's `0x8002` at a live selection binds it with `0x8000`
+    /// left, and the player behind `autoSelfCast` is never tried (`0x6e53d7`). A selection no arm
+    /// takes falls to the player, who binds the same way; with the fallback off, the cursor comes
+    /// up on the whole word.
+    #[test]
+    fn a_bind_that_leaves_bits_holds_at_the_press() {
+        use benilla_protocol::ObjectFields;
+        const ME: u64 = 0x10;
+        const ALLY: u64 = 0x20;
+        let revive = spell(0x8002, 0);
+        // Fields 2 `OBJECT_FIELD_TYPE` (a player), 22 health, 46 `UNIT_FIELD_FLAGS`.
+        let live = ObjectStore(ObjectFields::from_pairs(&[(2, 0x19), (22, 100)]));
+        let immune = ObjectStore(ObjectFields::from_pairs(&[
+            (2, 0x19),
+            (22, 100),
+            (46, 0x100),
+        ]));
+        let press = |selection: &ObjectStore, auto: bool| {
+            let rel = TargetRelations {
+                target_store: Some(selection),
+                self_store: Some(&live),
+                ..rel_none()
+            };
+            let cand = CastCandidates {
+                auto_self_store: Some(&live),
+                ..cands(Some(ALLY), Some(ME))
+            };
+            resolve_cast_target(Some(&revive), &cand, auto, &rel)
+        };
+        for auto in [false, true] {
+            assert_eq!(
+                press(&live, auto),
+                CastWireTarget::Partial {
+                    unit: ALLY,
+                    word: 0x8000
+                },
+                "the selection, autoSelfCast {auto}"
+            );
+        }
+        assert_eq!(
+            press(&immune, true),
+            CastWireTarget::Partial {
+                unit: ME,
+                word: 0x8000
+            },
+            "the fallback"
+        );
+        assert_eq!(press(&immune, false), CastWireTarget::Targeting(0x8002));
+    }
+
     fn rel_none() -> TargetRelations<'static> {
-        static EMPTY: Reputations = Reputations::from_slots(Vec::new());
         TargetRelations {
             target_store: None,
             target_owner_store: None,
             self_store: None,
             factions: None,
-            reputations: &EMPTY,
+            reputations: Reputations::empty(),
             types: Default::default(),
             group: Default::default(),
         }

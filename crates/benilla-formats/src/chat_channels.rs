@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::chain::Chain;
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{loc_str, parse, u32_at};
 
 const CHAT_CHANNELS: &str = "DBFilesClient\\ChatChannels.dbc";
 
@@ -40,9 +40,9 @@ pub struct ChatChannelRow {
     pub id: u32,
     /// Bits from [`flags`].
     pub flags: u32,
-    /// The enUS name pattern, `%s` intact ("General - %s").
+    /// The name pattern in the locale's column, `%s` intact ("General - %s").
     pub pattern: String,
-    /// The enUS shortcut ("General"), the name without number or zone.
+    /// The shortcut in the locale's column ("General"), the name without number or zone.
     pub shortcut: String,
 }
 
@@ -69,24 +69,19 @@ impl ChatChannelRow {
         self.flags & flags::GUILD_REQ != 0
     }
 
-    /// Whether the `%s` takes the city word, not the zone's name: `CITY_ONLY2`, tested apart from
-    /// [`Self::is_city_only`] (`0x49a308`/`0x49a4ea`) though 1.12 rows set both bits or neither.
+    /// Whether the `%s` takes the city word in a capital, not the zone's name: `CITY_ONLY2`,
+    /// tested apart from [`Self::is_city_only`] (`0x49a2d0`, `0x49a4af`, `0x49ecc3`) though 1.12
+    /// rows set both bits or neither. The area test is the caller's: the word applies only in an
+    /// `AreaTable.dbc` row with `0x100` (`0x49a2df`).
     pub fn takes_city_name(&self) -> bool {
         self.flags & flags::CITY_ONLY2 != 0
     }
 
-    /// The joinable name in `zone_name`, or with `city_name` on a city-named row ("Trade - City").
-    /// The city word is data: `0x4985fd` stores at `0xb4e4f0` the name of the one `AreaTable.dbc`
-    /// row with `Flags & 0x200` (id 3459, "City").
-    pub fn joinable_name(&self, zone_name: &str, city_name: &str) -> String {
-        if !self.is_zone_dependent() {
-            return self.pattern.clone();
-        }
-        let subject = if self.takes_city_name() {
-            city_name
-        } else {
-            zone_name
-        };
+    /// The pattern with `subject` in its `%s` (`SStrPrintf 0x64a7f0` at `0x49a308`, `0x49a4ea`,
+    /// `0x49ed14`): the zone's name, or for a city-named row in a capital the city word ("Trade -
+    /// City"), the name of the one `AreaTable.dbc` row with `Flags & 0x200` (id 3459), which
+    /// `0x4985fd` caches at `0xb4e4f0`. A pattern with no `%s` is itself.
+    pub fn joinable_name(&self, subject: &str) -> String {
         self.pattern.replacen("%s", subject, 1)
     }
 }
@@ -114,6 +109,12 @@ impl ChatChannelsCatalog {
     /// The rows the client joins by itself, in table order.
     pub fn auto_join_rows(&self) -> impl Iterator<Item = &ChatChannelRow> {
         self.rows.iter().filter(|r| r.is_auto_join())
+    }
+
+    /// The row of ChannelID `id`, the client's id map (`0xc0df1c`), through which a slot's `+0x94`
+    /// names its row (`0x49a2bf`, `0x4a0338`).
+    pub fn row(&self, id: u32) -> Option<&ChatChannelRow> {
+        self.rows.iter().find(|r| r.id == id)
     }
 
     /// The row a composed name belongs to, matched as the server does: the name contains the
@@ -150,10 +151,11 @@ pub fn load_chat_channels_catalog(chain: &mut Chain) -> Result<ChatChannelsCatal
         .read_file(CHAT_CHANNELS)
         .context("reading ChatChannels.dbc")?;
     let rs = parse(&bytes, schema(), "ChatChannels")?;
+    let locale = chain.locale();
     let mut rows = Vec::with_capacity(rs.records().len());
     for r in rs.records() {
         let (Some(id), Some(flags), Some(pattern)) =
-            (u32_at(r, 0), u32_at(r, 1), str_at(&rs, r, 3))
+            (u32_at(r, 0), u32_at(r, 1), loc_str(&rs, r, 3, locale))
         else {
             continue;
         };
@@ -161,7 +163,7 @@ pub fn load_chat_channels_catalog(chain: &mut Chain) -> Result<ChatChannelsCatal
             id,
             flags,
             pattern,
-            shortcut: str_at(&rs, r, 12).unwrap_or_default(),
+            shortcut: loc_str(&rs, r, 12, locale).unwrap_or_default(),
         });
     }
     Ok(ChatChannelsCatalog { rows })
@@ -212,24 +214,19 @@ mod tests {
         };
 
         assert_eq!(
-            row(1).joinable_name("Elwynn Forest", "City"),
+            row(1).joinable_name("Elwynn Forest"),
             "General - Elwynn Forest"
         );
         assert_eq!(
-            row(22).joinable_name("Elwynn Forest", "City"),
+            row(22).joinable_name("Elwynn Forest"),
             "LocalDefense - Elwynn Forest"
         );
-        // City-named: one channel for every capital, not one per capital.
-        assert_eq!(
-            row(2).joinable_name("Stormwind City", "City"),
-            "Trade - City"
-        );
-        assert_eq!(row(2).joinable_name("Orgrimmar", "City"), "Trade - City");
-        // A pattern with no `%s` ignores both.
-        assert_eq!(
-            row(23).joinable_name("Elwynn Forest", "City"),
-            "WorldDefense"
-        );
+        // City-named: in a capital its subject is the city word, one channel for every capital.
+        assert!(row(2).takes_city_name() && row(25).takes_city_name());
+        assert!(!row(1).takes_city_name() && !row(22).takes_city_name());
+        assert_eq!(row(2).joinable_name("City"), "Trade - City");
+        // A pattern with no `%s` is itself.
+        assert_eq!(row(23).joinable_name("Elwynn Forest"), "WorldDefense");
 
         assert_eq!(cat.zone_channel_id("General - Elwynn Forest"), 1);
         assert_eq!(cat.zone_channel_id("Trade - City"), 2);

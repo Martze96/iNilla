@@ -5,9 +5,13 @@
 //! - [`body_frame`]: a `<PlayerModel>` pane, raw `cameras[1]` verbatim, else the client's fixed
 //!   rig (`0x505890`).
 
+use std::sync::Arc;
+
 use bevy::camera::{CameraProjection, PerspectiveProjection, Projection, SubCameraView};
 use bevy::math::Vec3A;
 use bevy::prelude::*;
+
+use benilla_ui::widget::CopyCamera;
 
 /// Vertical FOV (radians, about 29°) of the heuristic camera for a camera-less model.
 pub(super) const PORTRAIT_FOV: f32 = 0.5;
@@ -23,49 +27,6 @@ pub(super) const PORTRAIT_ASPECT: f32 = 1.0;
 /// number: [`PORTRAIT_ASPECT`] for the round bake, the pane's own rect for a `<PlayerModel>`.
 pub(super) fn diag_to_vert(fov: f32, aspect: f32) -> f32 {
     fov / (aspect * aspect + 1.0).sqrt()
-}
-
-/// The authored aspect of every 1.12 glue composition, 4/3: the Lua screen is `768a × 768`
-/// (`GetScreenWidth 0x48b480`, `GetScreenHeight 0x48b4d0`), so the design space is 1024×768.
-pub(super) use benilla_formats::{ArtExtent, GLUE_AUTHORED_ASPECT};
-
-/// The glue scene's vertical opening angle.
-///
-/// The reference's glue `<ModelFFX>` fills the screen, so `0x5c3cc0`'s aspect is the display's
-/// (`0x76d42d`) and the diagonal angle is the invariant: `0.600·fov` at 4:3, `0.492·fov` at 16:9,
-/// `0.386·fov` at 21:9, where the character's head and feet leave the frame.
-///
-/// Deviation: the authored 4:3 box is held instead, because the reference's diagonal law crops
-/// the character on wide panels and the GlueXML chrome holds its height at every width. From 4/3
-/// up the vertical opening holds and the width grows up to [`GLUE_BOX_ASPECT`], then the width
-/// holds and the vertical closes down to [`glue_zoom_floor`], the reference's own 16:9 opening;
-/// past that the scene is pillarboxed ([`glue_box_aspect`]). No scene's art is drawn wider than
-/// about 3:2. Below 4/3 the authored horizontal extent holds and the view opens upward, up to the
-/// art's `half_h` but never inside the authored box. Continuous at 4/3, where both legs give
-/// `0.6·fov`. A `<PlayerModel>` pane is not the window and keeps its verbatim crop.
-///
-/// The Deviation is the native glue screens' alone. Under the stock screens `GlueParent` caps
-/// every glue screen at 16:9 (`GlueParent.lua:78-84`), so the crop it answers cannot arise, and
-/// the scene is framed as the reference frames it ([`stock_pane_view`]).
-pub(super) fn glue_scene_framing(fov: f32, window_aspect: f32, art: Option<ArtExtent>) -> f32 {
-    let authored = diag_to_vert(fov, GLUE_AUTHORED_ASPECT);
-    if window_aspect <= 0.0 {
-        return authored; // a degenerate (mid-resize) window: the authored opening, finite
-    }
-    let t0 = (authored * 0.5).tan(); // the authored vertical half-extent
-    let h0 = t0 * GLUE_AUTHORED_ASPECT; // …and horizontal
-    if window_aspect >= GLUE_AUTHORED_ASPECT {
-        // Hor+ up to the box's width, then the vertical closes to the 16:9 floor; wider still is
-        // boxed by `glue_box_aspect`.
-        let floor = glue_zoom_floor(fov);
-        let half_w = (t0 * window_aspect).min(GLUE_BOX_ASPECT * floor);
-        2.0 * (half_w / window_aspect).max(floor).atan()
-    } else {
-        // Hold the authored half-width and open upward to the art's edge; past it the sides crop,
-        // so no floor and no bars.
-        let ceiling = art.map_or(f32::INFINITY, |a| a.half_h.max(t0));
-        2.0 * (h0 / window_aspect).min(ceiling).atan()
-    }
 }
 
 /// A stock glue `ModelFFX` pane's view of its scene, in the booth's window-sized target.
@@ -98,64 +59,6 @@ pub(super) fn stock_pane_view(full_w: u32, full_h: u32, pane: [f32; 4]) -> Optio
     })
 }
 
-/// The pillarbox aspect for a window: `Some(GLUE_BOX_ASPECT)` when the window is wider, else
-/// `None`. It depends on the window alone, so the booth viewport and the chrome's canvas
-/// ([`crate::glue::GlueCanvas`]) hold still when the selected race changes the stage.
-pub(crate) fn glue_box_aspect(window_aspect: f32) -> Option<f32> {
-    (window_aspect > GLUE_BOX_ASPECT).then_some(GLUE_BOX_ASPECT)
-}
-
-/// The one glue frame, 1.672:1: the max over the seven shipped scenes of authored 4:3 half-width
-/// over the [`glue_zoom_floor`], so no scene's authored composition is cropped (`UI_MainMenu`, 86°,
-/// sits exactly on it). Pinned by [`tests::the_glue_frame_is_the_narrowest_box_no_scene_pays_for`].
-pub(super) const GLUE_BOX_ASPECT: f32 = 1.672_042_7;
-
-/// 16:9, the panel whose reference framing is the glue zoom floor.
-pub(super) const REFERENCE_PANEL: f32 = 16.0 / 9.0;
-
-/// The vertical half-extent (tan units) a glue scene is never framed tighter than: the
-/// reference's opening at [`REFERENCE_PANEL`].
-pub(super) fn glue_zoom_floor(fov: f32) -> f32 {
-    (diag_to_vert(fov, REFERENCE_PANEL) * 0.5).tan()
-}
-
-/// The pillarbox in physical pixels, `(x, width)` of the centred box. The booth viewport
-/// (`super::glue_booth::pillarbox_glue_scene`) and the chrome's canvas both read it, so they
-/// agree to the pixel.
-pub(crate) fn glue_box_physical(
-    full_w: u32,
-    full_h: u32,
-    viewport_aspect: Option<f32>,
-) -> Option<(u32, u32)> {
-    let aspect = viewport_aspect?;
-    let (full_w, full_h) = (full_w.max(1), full_h.max(1));
-    // A NaN or negative aspect saturates to 0 through `as u32` and clamps to 1, never a panic.
-    let box_w = ((full_h as f32 * aspect).round() as u32).clamp(1, full_w);
-    Some(((full_w - box_w) / 2, box_w))
-}
-
-/// The pillarbox's left and right bars in logical px, the glue chrome canvas's inset. Two numbers,
-/// not one halved: an odd leftover puts the box a pixel off centre. Measured in physical pixels
-/// and divided by the scale factor, so they cannot round differently from the camera viewport.
-pub(crate) fn glue_canvas_bars(
-    window: Option<&Window>,
-    viewport_aspect: Option<f32>,
-) -> (f32, f32) {
-    let Some(w) = window else {
-        return (0.0, 0.0);
-    };
-    let full_w = w.physical_width().max(1);
-    let Some((x, box_w)) = glue_box_physical(full_w, w.physical_height(), viewport_aspect) else {
-        return (0.0, 0.0);
-    };
-    let sf = if w.scale_factor() > 0.0 {
-        w.scale_factor()
-    } else {
-        1.0
-    };
-    (x as f32 / sf, full_w.saturating_sub(x + box_w) as f32 / sf)
-}
-
 /// The client's portrait and model projection, `0x5c3cc0`: a diagonal-FOV perspective with
 /// half-angle `θ = (fov/2)/√(aspect²+1)`, `m11 = 1/tan θ`, `m00 = m11/aspect`.
 ///
@@ -164,7 +67,7 @@ pub(crate) fn glue_canvas_bars(
 /// custom [`CameraProjection`] because Bevy re-derives `aspect_ratio` from the square render
 /// target on every write; `update` is a no-op, as the client's bake emits the same matrix at any
 /// window size.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WowPortraitProjection {
     /// The M2 record's fov (radians), a diagonal angle, not fovy.
     pub(super) fov: f32,
@@ -222,11 +125,13 @@ impl CameraProjection for WowPortraitProjection {
 
 /// A display id's framing inputs ([`Creatures::display_anchors`]), model-local at scale 1: the
 /// reference bakes with the root scale reset (`0x47a230`).
+#[derive(Clone)]
 pub(crate) struct PortraitAnchors {
     /// The round portrait's authored camera, `cameraLookup[0]`; `None` uses the heuristic fields.
     pub(crate) camera: Option<benilla_assets::PortraitCamera>,
-    /// The body pane's authored camera, raw index 1; `None` uses [`body_frame`]'s fixed rig.
-    pub(crate) pane_camera: Option<benilla_assets::PortraitCamera>,
+    /// The model's camera table by raw index, each record at rest: index 1 is the body pane's own
+    /// camera (`0x505890`), else [`body_frame`]'s fixed rig; `SetCamera(n)` names any.
+    pub(crate) cameras: Arc<[benilla_assets::PortraitCamera]>,
     /// The MD20 header bbox centre, the fixed pane camera's look-at target.
     pub(crate) bbox_center: Vec3,
     /// The bind-pose head anchor ([`head_anchor`]) the heuristic framing aims at.
@@ -235,6 +140,13 @@ pub(crate) struct PortraitAnchors {
     pub(crate) pivot_height: f32,
     /// Footprint radius, a size hint for the heuristic standoff.
     pub(crate) ground_radius: f32,
+}
+
+impl PortraitAnchors {
+    /// Raw camera `idx` of the table (`0x713590`), not through `cameraLookup`.
+    pub(crate) fn raw_camera(&self, idx: u32) -> Option<benilla_assets::PortraitCamera> {
+        self.cameras.get(usize::try_from(idx).ok()?).copied()
+    }
 }
 
 /// A bone's bind-pose position in Bevy space: the rest skeleton is pure translations, so summing
@@ -375,7 +287,7 @@ pub(super) fn body_frame(a: &PortraitAnchors, aspect: f32) -> (Transform, Projec
 /// re-latches it without a re-bake. 1.0 with an authored camera, where [`pane_model_scale`]
 /// cancels.
 pub(super) fn pane_root_scale(a: &PortraitAnchors, display_aspect: f32) -> f32 {
-    if a.pane_camera.is_some() {
+    if a.raw_camera(1).is_some() {
         1.0
     } else {
         pane_model_scale(display_aspect)
@@ -384,7 +296,7 @@ pub(super) fn pane_root_scale(a: &PortraitAnchors, display_aspect: f32) -> f32 {
 
 /// The camera a body pane renders through: authored `cameras[1]`, else the fixed rig.
 pub(super) fn pane_camera(a: &PortraitAnchors) -> benilla_assets::PortraitCamera {
-    a.pane_camera.unwrap_or(benilla_assets::PortraitCamera {
+    a.raw_camera(1).unwrap_or(benilla_assets::PortraitCamera {
         eye: benilla_assets::coords::wow_to_bevy(PANE_FIXED_EYE_WOW),
         target: a.bbox_center,
         roll: 0.0,
@@ -408,6 +320,115 @@ pub(crate) fn pane_projection(
         near: cam.near,
         far: cam.far,
         aspect,
+    }
+}
+
+/// A body pane's model-unit ladder, the tile's own (`crate::ui_models::TileRequest`): where the
+/// live and orthographic legs put the root (`0x76d1a0`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PaneUnits {
+    /// The orthographic leg's device px per model unit, `1280 · modelScale · layoutScale`.
+    pub(crate) px_per_unit: f32,
+    /// Device px per `SetPosition` unit, `768 · √(a²+1) · layoutScale`.
+    pub(crate) pos_px_per_unit: f32,
+    /// Device px per model unit of a particle's half-extent, `768 · √(a²+1)` FrameXML units: eye
+    /// space, carrying neither model scale nor layout scale (`0x7b2a50`).
+    pub(crate) star_px_per_unit: f32,
+    /// `SetPosition`, layout units.
+    pub(crate) position: Vec3,
+    /// The perspective root's scale, `G48 · (5/3) · modelScale · layoutScale`.
+    pub(crate) root_scale: f32,
+    /// The perspective root's translation, `SetPosition · layoutScale`, model units.
+    pub(crate) root_pos: Vec3,
+}
+
+/// What a body pane's camera projects through.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum BodyProjection {
+    Perspective(WowPortraitProjection),
+    /// The orthographic leg over a target this many pixels wide and high.
+    Ortho(Vec2),
+}
+
+/// A body pane's root and camera, as the booth applies them.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct BodyView {
+    pub(super) root: Transform,
+    pub(super) camera: Transform,
+    pub(super) projection: BodyProjection,
+    /// The particles' half-extent unit: device px per model unit on the orthographic leg, where a
+    /// quad's eye-space extent is the pane's pixels (`0x7b2a50`), and 1.0 under a perspective.
+    pub(super) star: f32,
+}
+
+impl BodyView {
+    pub(super) fn bevy_projection(&self) -> Projection {
+        match &self.projection {
+            BodyProjection::Perspective(p) => Projection::custom(p.clone()),
+            BodyProjection::Ortho(size) => crate::ui_models::ortho_camera(*size).1,
+        }
+    }
+}
+
+/// A body pane's view through the camera its copy holds (`+0x31c`), the paint's leg (`0x76d5f0`):
+///
+/// - the pane's own ([`CopyCamera::Pane`]): [`body_frame`], frozen in the model's unrotated
+///   frame, so the facing turns the figure, and the root takes [`pane_root_scale`];
+/// - a raw camera the table holds: live, its eye and target riding the root
+///   ([`crate::ui_models::live_camera_rig`]), so facing, `SetModelScale` and `SetPosition` cancel;
+/// - an index past the table: no camera, the orthographic leg over the `target`-pixel target,
+///   at `scale` target pixels per device pixel.
+///
+/// The perspective legs run at the target's aspect, the pane's own.
+pub(super) fn body_view(
+    a: &PortraitAnchors,
+    camera: CopyCamera,
+    facing: f32,
+    display_aspect: f32,
+    units: &PaneUnits,
+    target: Vec2,
+    scale: f32,
+) -> BodyView {
+    let aspect = target.x / target.y;
+    match camera {
+        CopyCamera::Pane => {
+            let (camera, _) = body_frame(a, aspect);
+            BodyView {
+                root: Transform::from_rotation(Quat::from_rotation_y(facing))
+                    .with_scale(Vec3::splat(pane_root_scale(a, display_aspect))),
+                camera,
+                projection: BodyProjection::Perspective(pane_projection(&pane_camera(a), aspect)),
+                star: 1.0,
+            }
+        }
+        CopyCamera::Raw(idx) => match a.raw_camera(idx) {
+            Some(record) => {
+                let root =
+                    crate::ui_models::perspective_root(units.root_pos, facing, units.root_scale);
+                let rig = crate::ui_models::live_camera_rig(&record, root, aspect);
+                BodyView {
+                    root: rig.root,
+                    camera: rig.camera,
+                    projection: BodyProjection::Perspective(rig.projection),
+                    star: 1.0,
+                }
+            }
+            None => {
+                let (camera, _) = crate::ui_models::ortho_camera(target);
+                BodyView {
+                    root: crate::ui_models::ortho_root(
+                        Vec2::ZERO,
+                        units.position,
+                        units.pos_px_per_unit * scale,
+                        facing,
+                        units.px_per_unit * scale,
+                    ),
+                    camera,
+                    projection: BodyProjection::Ortho(target),
+                    star: units.star_px_per_unit * scale,
+                }
+            }
+        },
     }
 }
 
@@ -441,6 +462,11 @@ mod tests {
         pane_camera: Option<benilla_assets::PortraitCamera>,
         bbox_center: Vec3,
     ) -> PortraitAnchors {
+        // Camera 0 is a portrait record a pane rig must not read in place of camera 1.
+        let cameras: Arc<[_]> = match pane_camera {
+            Some(c) => vec![cam([1.0, 0.0, 1.7], [0.0, 0.0, 1.7], 0.6), c].into(),
+            None => Arc::new([]),
+        };
         PortraitAnchors {
             // The heuristic fields are populated so a pane rig that reads them fails these tests.
             camera: Some(cam(
@@ -448,7 +474,7 @@ mod tests {
                 [0.0627, 0.0343, 1.8636],
                 0.785,
             )),
-            pane_camera,
+            cameras,
             bbox_center,
             head: Some(Vec3::new(0.0, 1.75, 0.0)),
             pivot_height: 1.90,
@@ -594,6 +620,138 @@ mod tests {
         }
     }
 
+    /// The clip-space position of model-local `p` through a body view.
+    fn view_ndc(v: &BodyView, p: Vec3) -> Vec2 {
+        let BodyProjection::Perspective(proj) = &v.projection else {
+            panic!("not a perspective leg");
+        };
+        let clip = proj.get_clip_from_view()
+            * v.camera.to_matrix().inverse()
+            * v.root.to_matrix()
+            * p.extend(1.0);
+        Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    }
+
+    /// `SetCamera(0)` on a body pane installs raw camera 0 live (`0x76cec0` → `0x713590`): the
+    /// picture is camera 0's, and the facing, `SetModelScale` and `SetPosition` cancel in it
+    /// (`0x718960`), where the pane's own frozen camera 1 shows the facing.
+    #[test]
+    fn a_raw_camera_frames_the_pane_live_and_the_root_cancels() {
+        let human = cam([3.6585, 0.0338, 0.9227], [-0.3644, 0.0291, 0.9873], 0.97991);
+        let a = anchors_with(Some(human), Vec3::ZERO);
+        let head = cam([1.0, 0.0, 1.7], [0.0, 0.0, 1.7], 0.6);
+        let target = Vec2::new(233.0, 224.0);
+        let units = |scale: f32, pos: Vec3| PaneUnits {
+            root_scale: scale,
+            root_pos: pos,
+            ..PaneUnits::default()
+        };
+        let view = |camera, facing, u: &PaneUnits| {
+            body_view(&a, camera, facing, 16.0 / 9.0, u, target, 1.0)
+        };
+        let probes = [Vec3::new(0.0, 1.7, 0.0), Vec3::new(0.2, 1.5, 0.1)];
+
+        let base = view(CopyCamera::Raw(0), 0.0, &units(1.0, Vec3::ZERO));
+        assert!(
+            base.camera.translation.distance(head.eye) < 1e-5,
+            "through camera 0's eye, not camera 1's: {:?}",
+            base.camera.translation
+        );
+        assert_eq!(
+            base.projection,
+            BodyProjection::Perspective(pane_projection(&head, target.x / target.y))
+        );
+        for (facing, u) in [
+            (1.1, units(1.0, Vec3::ZERO)),
+            (-0.4, units(0.817_102, Vec3::ZERO)),
+            (0.7, units(2.5, Vec3::new(0.3, -0.2, 0.5))),
+        ] {
+            let moved = view(CopyCamera::Raw(0), facing, &u);
+            for p in probes {
+                let (a, b) = (view_ndc(&base, p), view_ndc(&moved, p));
+                assert!(
+                    a.distance(b) < 1e-4,
+                    "facing {facing}, root {:?} moved the picture: {a} vs {b}",
+                    u.root_pos
+                );
+            }
+        }
+
+        // The pane's own camera is frozen: the facing turns the figure in it.
+        let own = view(CopyCamera::Pane, 0.0, &units(1.0, Vec3::ZERO));
+        let turned = view(CopyCamera::Pane, 1.1, &units(1.0, Vec3::ZERO));
+        assert_eq!(
+            (own.camera, own.root.scale),
+            (body_frame(&a, target.x / target.y).0, Vec3::ONE)
+        );
+        assert!(view_ndc(&own, probes[1]).distance(view_ndc(&turned, probes[1])) > 1e-3);
+    }
+
+    /// An index at or past the camera count installs no camera (`0x76ceeb` → `0x76ce80(NULL)`),
+    /// so the pane takes the orthographic leg (`0x76d5f0`): `1280 · modelScale · layoutScale`
+    /// units per model unit, from the pane's bottom-left plus `SetPosition`.
+    #[test]
+    fn a_camera_past_the_table_draws_the_orthographic_leg() {
+        let human = cam([3.6585, 0.0338, 0.9227], [-0.3644, 0.0291, 0.9873], 0.97991);
+        let units = PaneUnits {
+            px_per_unit: 1280.0,
+            pos_px_per_unit: 1280.0,
+            star_px_per_unit: 2000.0,
+            position: Vec3::new(0.01, 0.02, 0.0),
+            root_scale: 1.0,
+            root_pos: Vec3::ZERO,
+        };
+        let target = Vec2::new(233.0, 224.0);
+        for a in [
+            anchors_with(Some(human), Vec3::ZERO),
+            anchors_with(None, Vec3::ZERO),
+        ] {
+            for idx in [2, 99, u32::MAX] {
+                let v = body_view(
+                    &a,
+                    CopyCamera::Raw(idx),
+                    0.3,
+                    4.0 / 3.0,
+                    &units,
+                    target,
+                    0.5,
+                );
+                assert_eq!(v.projection, BodyProjection::Ortho(target), "camera {idx}");
+                assert_eq!(
+                    v.star, 1000.0,
+                    "particles at the ladder's px per unit, scaled"
+                );
+                assert_eq!(
+                    v.root.scale,
+                    Vec3::splat(640.0),
+                    "the ladder at the target's pixels"
+                );
+                assert!(v.root.translation.distance(Vec3::new(6.4, 12.8, 0.0)) < 1e-4);
+                assert_eq!(v.camera.translation, Vec3::new(116.5, 112.0, 1000.0));
+            }
+        }
+        // A model with no camera 0 has none to name either.
+        let none = anchors_with(None, Vec3::ZERO);
+        let v = body_view(
+            &none,
+            CopyCamera::Raw(0),
+            0.0,
+            4.0 / 3.0,
+            &units,
+            target,
+            1.0,
+        );
+        assert_eq!(v.projection, BodyProjection::Ortho(target));
+        assert_eq!(v.star, 2000.0);
+
+        // Under a perspective the half-extent is in model units.
+        let a = anchors_with(Some(human), Vec3::ZERO);
+        for camera in [CopyCamera::Pane, CopyCamera::Raw(0)] {
+            let v = body_view(&a, camera, 0.0, 4.0 / 3.0, &units, target, 0.5);
+            assert_eq!(v.star, 1.0, "{camera:?}");
+        }
+    }
+
     /// The pet pane (318×224), the character pane (233×224) and the round portrait (1:1).
     #[test]
     fn the_diagonal_crop_follows_the_aspect() {
@@ -605,286 +763,6 @@ mod tests {
             diag_to_vert(1.0, PORTRAIT_ASPECT),
             std::f32::consts::FRAC_1_SQRT_2
         ));
-    }
-
-    /// A 3440×1440 window gets the 16:9 opening, `0.490·fov`, where the reference's law gives
-    /// `0.386·fov`.
-    #[test]
-    fn the_glue_scene_is_never_framed_tighter_than_the_reference_at_16_9() {
-        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
-        let authored = diag_to_vert(1.0, GLUE_AUTHORED_ASPECT);
-        assert!(
-            close(authored, 0.6),
-            "the authored 4:3 opening is the 0.6 legend"
-        );
-        // 4:3 itself: the authored opening, unboxed.
-        assert!(close(
-            glue_scene_framing(1.0, GLUE_AUTHORED_ASPECT, None),
-            authored
-        ));
-        assert!(glue_box_aspect(GLUE_AUTHORED_ASPECT).is_none());
-        // Between 4:3 and the frame the opening closes, monotonically, and the window still fills.
-        let mut last = authored;
-        for a in [1.4, 16.0 / 10.0, GLUE_BOX_ASPECT] {
-            let vert = glue_scene_framing(1.0, a, None);
-            assert!(vert <= last + 1e-6, "a{a}: {vert} > {last}");
-            assert!(glue_box_aspect(a).is_none(), "a{a} fills the window");
-            last = vert;
-        }
-        // At and past the frame: the reference's 16:9 opening, exactly.
-        let reference_16_9 = diag_to_vert(1.0, REFERENCE_PANEL);
-        assert!(close(reference_16_9, 0.490_26));
-        for wide in [REFERENCE_PANEL, 3440.0 / 1440.0, 32.0 / 9.0] {
-            let vert = glue_scene_framing(1.0, wide, None);
-            assert!(close(vert, reference_16_9), "a{wide}: {vert}");
-            assert_eq!(glue_box_aspect(wide), Some(GLUE_BOX_ASPECT));
-        }
-        // The reference's own opening at 3440×1440.
-        assert!(close(diag_to_vert(1.0, 3440.0 / 1440.0), 0.386_14));
-    }
-
-    #[test]
-    fn a_narrow_glue_window_holds_its_authored_width_instead() {
-        let half_width = |vert: f32, a: f32| (vert * 0.5).tan() * a;
-        let authored = half_width(
-            diag_to_vert(1.0, GLUE_AUTHORED_ASPECT),
-            GLUE_AUTHORED_ASPECT,
-        );
-        for narrow in [5.0 / 4.0, 1.0, 3.0 / 4.0] {
-            let got = half_width(glue_scene_framing(1.0, narrow, None), narrow);
-            assert!(
-                (got - authored).abs() < 5e-4,
-                "a{narrow}: authored half-width {authored} vs {got}"
-            );
-        }
-        // A tall window sees more, never less.
-        assert!(
-            glue_scene_framing(1.0, 1.0, None)
-                > glue_scene_framing(1.0, GLUE_AUTHORED_ASPECT, None)
-        );
-        // A degenerate mid-resize window must not produce a NaN fov.
-        assert!(glue_scene_framing(1.0, 0.0, None).is_finite());
-    }
-
-    #[test]
-    fn every_glue_scene_is_framed_in_the_same_box() {
-        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
-        let half_width = |vert: f32, a: f32| (vert * 0.5).tan() * a;
-        // The shipped fovs span 60° to 86°; plus the unit fov.
-        let deg = std::f32::consts::PI / 180.0;
-        for fov in [1.0_f32, 60.0 * deg, 65.0 * deg, 80.0 * deg, 86.0 * deg] {
-            let authored = diag_to_vert(fov, GLUE_AUTHORED_ASPECT);
-            let t0 = (authored * 0.5).tan();
-            let floor = glue_zoom_floor(fov);
-            assert!(close(
-                floor,
-                (diag_to_vert(fov, REFERENCE_PANEL) * 0.5).tan()
-            ));
-            // 4:3: the authored opening, filling the window.
-            assert!(close(
-                glue_scene_framing(fov, GLUE_AUTHORED_ASPECT, None),
-                authored
-            ));
-            // Between 4:3 and the frame: the width is the box's and the vertical closes.
-            for a in [1.5, 1.6, GLUE_BOX_ASPECT] {
-                let vert = glue_scene_framing(fov, a, None);
-                assert!(
-                    close(half_width(vert, a), GLUE_BOX_ASPECT * floor),
-                    "fov {fov} a{a}: half-width {}",
-                    half_width(vert, a)
-                );
-                assert!(vert < authored && vert >= 2.0 * floor.atan() - 1e-6);
-            }
-            // Past it: the floor holds the opening and the box is the frame.
-            for a in [REFERENCE_PANEL, 3440.0 / 1440.0, 32.0 / 9.0] {
-                let vert = glue_scene_framing(fov, a, None);
-                assert!(
-                    close((vert * 0.5).tan(), floor),
-                    "fov {fov} a{a} off the floor"
-                );
-                assert_eq!(glue_box_aspect(a), Some(GLUE_BOX_ASPECT));
-                assert!(
-                    close(half_width(vert, GLUE_BOX_ASPECT), GLUE_BOX_ASPECT * floor),
-                    "fov {fov} a{a}: the box ends where the width does"
-                );
-            }
-            // The wide leg ignores the art; only the narrow leg reads `half_h`.
-            for art in [
-                Some(ArtExtent {
-                    half_w: t0 * 1.31,
-                    half_h: 10.0,
-                }),
-                Some(ArtExtent {
-                    half_w: t0 * 4.0,
-                    half_h: 10.0,
-                }),
-            ] {
-                for a in [1.5, REFERENCE_PANEL, 3440.0 / 1440.0] {
-                    assert_eq!(
-                        glue_scene_framing(fov, a, art),
-                        glue_scene_framing(fov, a, None),
-                        "fov {fov} a{a}: the wide leg read the art"
-                    );
-                }
-            }
-        }
-    }
-
-    /// No scene's art runs out inside the frame, except the night elves' sky card, which ends just
-    /// inside its own authored box.
-    #[test]
-    fn the_glue_frame_is_the_narrowest_box_no_scene_pays_for() {
-        use benilla_formats::{authored_half_height, SHIPPED_GLUE_SCENES};
-        let mut widest = 0.0_f32;
-        for scene in SHIPPED_GLUE_SCENES {
-            let t0 = authored_half_height(scene.fov);
-            let h0 = t0 * GLUE_AUTHORED_ASPECT;
-            let floor = glue_zoom_floor(scene.fov);
-            // No scene gives up its authored width: the frame reaches at least h0.
-            assert!(
-                GLUE_BOX_ASPECT * floor >= h0 - 1e-4,
-                "UI_{}: the frame stops at {} inside the authored {h0}",
-                scene.token,
-                GLUE_BOX_ASPECT * floor
-            );
-            // The night elf frame runs about 1.3% past its sky card, into black.
-            if scene.token == "NightElf" {
-                assert!(scene.art.half_w < h0, "the night elf exception closed?");
-                assert!(
-                    GLUE_BOX_ASPECT * floor <= h0 * 1.015,
-                    "UI_NightElf: the frame reaches {} past the authored {h0}",
-                    GLUE_BOX_ASPECT * floor
-                );
-            } else {
-                assert!(
-                    GLUE_BOX_ASPECT * floor <= scene.art.half_w,
-                    "UI_{}: the frame reaches {} past the art's {}",
-                    scene.token,
-                    GLUE_BOX_ASPECT * floor,
-                    scene.art.half_w
-                );
-            }
-            widest = widest.max(h0 / floor);
-        }
-        // The narrowest such box: the widest-fov scene sits exactly on it.
-        assert!(
-            (GLUE_BOX_ASPECT - widest).abs() < 5e-4,
-            "the frame is {GLUE_BOX_ASPECT}, the narrowest box no scene pays for is {widest}"
-        );
-    }
-
-    /// The 1.93 aspect gives an odd leftover at 3440×1440 (`330 | 2779 | 331`), the case the two
-    /// bars exist for.
-    #[test]
-    fn the_chrome_canvas_is_the_cameras_own_box() {
-        use bevy::window::WindowResolution;
-
-        // The real frame at 3440×1440.
-        assert_eq!(
-            glue_box_physical(3440, 1440, glue_box_aspect(3440.0 / 1440.0)),
-            Some((516, 2408))
-        );
-
-        let (x, box_w) = glue_box_physical(3440, 1440, Some(1.93)).expect("21:9 boxes the gate");
-        assert_eq!((x, box_w), (330, 2779));
-        assert_eq!(
-            3440 - (x + box_w),
-            331,
-            "an odd leftover leaves the box one pixel off centre — the canvas follows it"
-        );
-
-        let win = |sf: Option<f32>| Window {
-            resolution: match sf {
-                Some(sf) => WindowResolution::new(3440, 1440).with_scale_factor_override(sf),
-                None => WindowResolution::new(3440, 1440),
-            },
-            ..default()
-        };
-        assert_eq!(
-            glue_canvas_bars(Some(&win(None)), Some(1.93)),
-            (330.0, 331.0),
-            "at scale 1 the logical bars are the physical ones"
-        );
-        assert_eq!(
-            glue_canvas_bars(Some(&win(Some(2.0))), Some(1.93)),
-            (165.0, 165.5),
-            "on a 2x display Val::Px is logical: half the physical bar"
-        );
-        // Unboxed, and no window at all: no inset.
-        assert_eq!(glue_canvas_bars(Some(&win(None)), None), (0.0, 0.0));
-        assert_eq!(glue_canvas_bars(None, Some(1.93)), (0.0, 0.0));
-        // A degenerate aspect boxes to a 1 px scene rather than panicking or wrapping.
-        assert_eq!(
-            glue_box_physical(3440, 1440, Some(f32::NAN)),
-            Some((1719, 1))
-        );
-        assert_eq!(glue_box_physical(0, 0, Some(1.93)), Some((0, 1)));
-    }
-
-    #[test]
-    fn the_box_the_camera_renders_is_the_box_the_chrome_lays_out_in() {
-        for (w, h) in [(3440, 1440), (2560, 1080), (5120, 1440), (3439, 1440)] {
-            let boxed =
-                glue_box_aspect(w as f32 / h as f32).expect("every window past the frame is boxed");
-            let (x, box_w) = glue_box_physical(w, h, Some(boxed)).expect("boxed");
-            let (left, right) = glue_canvas_bars(
-                Some(&Window {
-                    resolution: bevy::window::WindowResolution::new(w, h),
-                    ..default()
-                }),
-                Some(boxed),
-            );
-            assert_eq!((left as u32, right as u32), (x, w - x - box_w), "{w}x{h}");
-            assert!(
-                left + right > 0.0 && (box_w as f32) < w as f32,
-                "{w}x{h}: the bars are real"
-            );
-            assert_eq!(
-                x + box_w + (right as u32),
-                w,
-                "{w}x{h}: no pixel unaccounted"
-            );
-        }
-    }
-
-    #[test]
-    fn art_inside_the_authored_box_never_zooms_past_the_composition() {
-        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
-        let authored = diag_to_vert(1.0, GLUE_AUTHORED_ASPECT);
-        let none = Some(ArtExtent {
-            half_w: 0.0,
-            half_h: 0.0,
-        });
-        assert!(close(
-            glue_scene_framing(1.0, GLUE_AUTHORED_ASPECT, none),
-            authored
-        ));
-        assert!(close(glue_scene_framing(1.0, 1.0, none), authored));
-        // At the frame's aspect the vertical is on the floor and the width still covers 4:3.
-        let t0 = (authored * 0.5).tan();
-        let floor = glue_zoom_floor(1.0);
-        let v = glue_scene_framing(1.0, GLUE_BOX_ASPECT, none);
-        assert!(close((v * 0.5).tan(), floor));
-        assert!(
-            (v * 0.5).tan() * GLUE_BOX_ASPECT >= t0 * GLUE_AUTHORED_ASPECT - 1e-4,
-            "the frame stopped inside the authored width"
-        );
-        // 16:10 still fills the window: it is narrower than the frame.
-        assert!(glue_box_aspect(1.6).is_none());
-        // A narrow window with bounded art height holds that height, cropping the sides.
-        let short = Some(ArtExtent {
-            half_w: 10.0,
-            half_h: t0 * 1.1,
-        });
-        let v = glue_scene_framing(1.0, 0.75, short);
-        assert!(
-            close((v * 0.5).tan(), t0 * 1.1),
-            "height held at the art's edge"
-        );
-        assert!(
-            glue_scene_framing(1.0, 0.75, None) > v,
-            "…below the unbounded law's"
-        );
     }
 
     /// The 1.12 client's GL stream uploads the same bake matrix for HumanMale's `cameraLookup[0]`

@@ -1,18 +1,14 @@
 //! The item dispatcher's control gate exemption (`0x5d8ec0`-`0x5d8f6a`): without control of the
 //! character, an item still goes if its on-use spell grants immunity to the aura that took the
-//! control, so a trinket breaks fear and a charm. The VM judges the gate in the call
-//! ([`benilla_ui::script::UiScript::set_control_bypass`]); this feed hands it the spells that pass.
+//! control, so a trinket breaks fear and a charm. The VM judges the gate in the call, asking the
+//! host for the exemption off the caster as of the call
+//! ([`benilla_ui::script::ControlBypassQuery`], [`super::live`]).
 
+#[cfg(test)]
 use std::collections::HashSet;
 
-use bevy::prelude::*;
-
-use benilla_formats::{cc_exemption, SpellCatalog};
+use benilla_formats::{cc_exemption, SpellCatalog, SpellDisplay};
 use benilla_protocol::ObjectFields;
-use benilla_ui::script::UiScript;
-
-use crate::net::{ObjectStore, SelfPlayer};
-use crate::ui_script::VmMemo;
 
 /// `UNIT_FIELD_FLAGS` bits 22 and 23 (vmangos `UnitDefines.h`): confused and fleeing.
 const UNIT_FLAG_CONFUSED: u32 = 0x0040_0000;
@@ -20,39 +16,48 @@ const UNIT_FLAG_FLEEING: u32 = 0x0080_0000;
 
 /// `AttributesEx` bit 15, which the immunity matcher `0x6e9d70` requires of the cast spell
 /// (`0x6e9d7e`-`0x6e9d83`): without it no spell can pass, so only these are candidates.
+#[cfg(test)]
 const ATTR_EX_BIT_15: u32 = 0x0000_8000;
 
-/// The on-use spells that pass the gate now. Each helper of the reference asks its scanner
-/// (`0x6e9ca0`) about the caster's aura slots: fleeing (flag bit 23) is `0x6e9f20`, aura type 7;
-/// confused (bit 22) `0x6e9f40`, type 5; charmed (`UNIT_FIELD_CHARMEDBY` nonzero, whoever holds it)
-/// `0x6e9f60`, types 6, 177 and 2. A spell passes if any applicable arm exempts it, the arms
-/// ORed, and the scanner exempts when an aura of the type is on the caster and the spell's
-/// immunity effects cover every such effect ([`benilla_formats::grants_immunity`]).
-pub(crate) fn control_bypass_spells(
+/// Whether `cast` passes the lost-control gate for `caster`, the three arms of the item
+/// dispatcher (`0x5d8ef9`-`0x5d8f66`) and the usability predicate (`0x6e3dd0`-`0x6e3e4c`) alike.
+/// Each helper of the reference asks its scanner (`0x6e9ca0`) about the caster's aura slots:
+/// fleeing (flag bit 23) is `0x6e9f20`, aura type 7; confused (bit 22) `0x6e9f40`, type 5; charmed
+/// (`UNIT_FIELD_CHARMEDBY` nonzero, whoever holds it) `0x6e9f60`, types 6, 177 and 2. A spell
+/// passes if any applicable arm exempts it, the arms ORed, and the scanner exempts when an aura
+/// of the type is on the caster and the spell's immunity effects cover every such effect
+/// ([`benilla_formats::grants_immunity`]).
+pub(crate) fn exempts_lost_control(
+    catalog: &SpellCatalog,
+    cast: &SpellDisplay,
+    caster: &ObjectFields,
+) -> bool {
+    let flags = caster.unit_flags();
+    let scan =
+        |ty: u32| cc_exemption(cast, caster.unit_aura_ids(), ty, |id| catalog.get(id)).exempt;
+    (flags & UNIT_FLAG_FLEEING != 0 && scan(7))
+        || (flags & UNIT_FLAG_CONFUSED != 0 && scan(5))
+        || (caster.unit_charmed_by().is_some() && [6, 177, 2].into_iter().any(scan))
+}
+
+/// The on-use spells that pass the gate now ([`exempts_lost_control`]).
+#[cfg(test)]
+fn control_bypass_spells(
     catalog: &SpellCatalog,
     candidates: &[u32],
     caster: &ObjectFields,
 ) -> HashSet<u32> {
-    let flags = caster.unit_flags();
-    let charmed = caster.unit_charmed_by().is_some();
     candidates
         .iter()
         .filter_map(|&id| catalog.get(id).map(|cast| (id, cast)))
-        .filter(|(_, cast)| {
-            let scan = |ty: u32| {
-                cc_exemption(cast, caster.unit_aura_ids(), ty, |id| catalog.get(id)).exempt
-            };
-            (flags & UNIT_FLAG_FLEEING != 0 && scan(7))
-                || (flags & UNIT_FLAG_CONFUSED != 0 && scan(5))
-                || (charmed && [6, 177, 2].into_iter().any(scan))
-        })
+        .filter(|(_, cast)| exempts_lost_control(catalog, cast, caster))
         .map(|(id, _)| id)
         .collect()
 }
 
-/// The spells that can pass at all: those with `AttributesEx` bit 15, about 140 of the
-/// shipped catalog, found once per catalog and reused by every frame control is out.
-pub(crate) fn bypass_candidates(catalog: &SpellCatalog) -> Vec<u32> {
+/// The spells that can pass at all: those with `AttributesEx` bit 15.
+#[cfg(test)]
+fn bypass_candidates(catalog: &SpellCatalog) -> Vec<u32> {
     catalog
         .iter()
         .filter(|(_, d)| d.attributes_ex & ATTR_EX_BIT_15 != 0)
@@ -60,40 +65,9 @@ pub(crate) fn bypass_candidates(catalog: &SpellCatalog) -> Vec<u32> {
         .collect()
 }
 
-/// Push [`control_bypass_spells`] into the VM while control is lost, and the empty set once it is
-/// back; only a change is pushed, and a fresh VM gets it again.
-pub(super) fn feed_control_bypass(
-    script: Option<NonSendMut<UiScript>>,
-    player: Option<Res<crate::player::Player>>,
-    spells: Option<Res<crate::ui_action::Spells>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut pushed: Local<VmMemo<HashSet<u32>>>,
-    mut candidates: Local<Option<Vec<u32>>>,
-) {
-    let (Some(mut script), Some(player)) = (script, player) else {
-        return;
-    };
-    if spells.as_ref().is_some_and(|s| s.is_changed()) {
-        *candidates = None;
-    }
-    let want = match (player.own_control_lost, spells.as_deref(), self_q.single()) {
-        (true, Some(spells), Ok(store)) => {
-            let list = candidates.get_or_insert_with(|| bypass_candidates(&spells.catalog));
-            control_bypass_spells(&spells.catalog, list, &store.0)
-        }
-        _ => HashSet::new(),
-    };
-    let pushed = pushed.get(&script);
-    if *pushed != want {
-        *pushed = want.clone();
-        script.set_control_bypass(want);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_formats::SpellDisplay;
 
     const FEAR_AURA: u32 = 5782;
     const INSIGNIA: u32 = 7744;
@@ -212,23 +186,25 @@ mod tests {
         );
     }
 
-    /// The feed end to end: feared with the immunity trinket's spell on the item, the use passes
-    /// the dispatcher's control gate in the call; the fear gone, control back, the set empties.
+    /// The gate asks the host for the exemption off the caster at the call: feared, with the
+    /// immunity trinket's spell on the item, the use goes; the fear's flag and aura lifted, with
+    /// control still out, the same call is refused, with no push between.
     #[test]
-    fn the_feed_lets_the_trinket_through_while_feared() {
-        use benilla_ui::script::{ContainerSlot, ContainerState};
-        let mut app = App::new();
-        app.init_resource::<crate::player::Player>()
-            .insert_resource(crate::ui_action::Spells {
-                catalog: catalog(),
-                ..crate::ui_action::Spells::empty_for_tests()
-            })
-            .add_systems(Update, feed_control_bypass);
+    fn the_gate_reads_the_caster_at_the_call() {
+        use benilla_ui::script::{ContainerSlot, ContainerState, ScriptCall, UiScript};
+        use bevy::prelude::*;
+
+        let mut world = World::new();
+        world.init_resource::<crate::net::Reputations>();
+        world.insert_resource(crate::ui_action::Spells {
+            catalog: catalog(),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
         let mut script = UiScript::new().unwrap();
         script.set_container(
             0,
             Some(ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: 16,
                 slots: [(
                     1,
@@ -245,36 +221,26 @@ mod tests {
             }),
         );
         script.set_player_control(false);
-        app.insert_non_send_resource(script);
-        let me = app
-            .world_mut()
+        world.insert_non_send_resource(script);
+        let me = world
             .spawn((
-                SelfPlayer,
-                ObjectStore(caster(UNIT_FLAG_FLEEING, &[FEAR_AURA])),
+                crate::net::SelfPlayer,
+                crate::net::ObjectStore(caster(UNIT_FLAG_FLEEING, &[FEAR_AURA])),
             ))
             .id();
-        app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = true;
-        app.update();
-
-        let calls = |app: &mut App| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
-            s.run("UseContainerItem(0, 1)").unwrap();
-            let errors = s.take_ui_errors();
-            (s.take_script_calls().len(), errors)
+        let refused = |world: &mut World| {
+            let ((), calls) =
+                crate::ui_unit::live::eval_lent_calls::<()>(world, "UseContainerItem(0, 1)");
+            match calls.as_slice() {
+                [ScriptCall::UseContainerItem(_)] => false,
+                [ScriptCall::DisplayError("ERR_CLIENT_LOCKED_OUT")] => true,
+                other => panic!("one use or its refusal, not {other:?}"),
+            }
         };
-        assert_eq!(calls(&mut app), (1, vec![]), "the trinket breaks the fear");
-
-        // The fear aura lifts but control is still out: nothing exempts the item.
-        app.world_mut()
+        assert!(!refused(&mut world), "the trinket breaks the fear");
+        world
             .entity_mut(me)
-            .insert(ObjectStore(caster(0, &[])));
-        app.update();
-        assert_eq!(
-            calls(&mut app),
-            (0, vec!["ERR_CLIENT_LOCKED_OUT"]),
-            "the set follows the flags and auras"
-        );
+            .insert(crate::net::ObjectStore(caster(0, &[])));
+        assert!(refused(&mut world), "nothing exempts it now");
     }
 }

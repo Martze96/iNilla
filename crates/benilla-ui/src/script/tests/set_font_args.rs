@@ -47,7 +47,8 @@ fn set_font_reads_flags_only_from_a_string_or_a_number() {
     for &(obj, kind) in KINDS {
         for (arg, want) in [
             ("\"OUTLINE\"", "OUTLINE"),
-            ("\"THICKOUTLINE\"", "THICKOUTLINE"),
+            ("\"THICKOUTLINE\"", "OUTLINE, THICKOUTLINE"),
+            ("\"THICK\"", ""),
             ("false", ""),
             ("nil", ""),
             ("7", ""),
@@ -220,4 +221,98 @@ fn a_fontstrings_refused_load_changes_nothing_and_a_zero_height_frees_its_font()
             .unwrap(),
         (None, 0.0, String::new())
     );
+}
+
+/// A FontString's load hands `0x44d040` its height times its scale over `K2`, and the factory
+/// refuses a size of 0 or less, 1 or more or NaN (`0x5c1afe`, `0x5c1b0e`): `SetFont` answers nil
+/// and keeps the font for a negative, NaN or screen-tall height, where a height below the screen's
+/// 768 loads, as one at the owner's scale does.
+#[test]
+fn a_fontstring_refuses_a_negative_nan_or_screen_tall_height() {
+    let s = receivers();
+    s.run("TFS:SetFont(\"Fonts\\\\FRIZQT__.TTF\", 12)").unwrap();
+    for bad in ["-12", "-0.001", "0/0", "768", "800", "1/0"] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return TFS:SetFont(\"Fonts\\\\ARIALN.TTF\", {bad}) == nil"
+            ))
+            .unwrap(),
+            "SetFont height {bad} answered nil"
+        );
+        assert_eq!(
+            s.eval::<(Option<String>, f32, String)>("return TFS:GetFont()")
+                .unwrap(),
+            (Some("Fonts\\FRIZQT__.TTF".to_string()), 12.0, String::new()),
+            "height {bad} changed nothing"
+        );
+    }
+    assert!(s
+        .eval::<bool>("return TFS:SetFont(\"Fonts\\\\ARIALN.TTF\", 700) == 1")
+        .unwrap());
+    // The owner's scale multiplies in: 700 at scale 2 is a size past the screen.
+    s.run("THost:SetScale(2)").unwrap();
+    assert!(s
+        .eval::<bool>("return TFS:SetFont(\"Fonts\\\\FRIZQT__.TTF\", 700) == nil")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return TFS:SetFont(\"Fonts\\\\FRIZQT__.TTF\", 300) == 1")
+        .unwrap());
+}
+
+/// `0x6f1a90` ORs in every name of `0x811b10` found as a case-insensitive substring, so `THICK`
+/// alone sets nothing, and `GetFont` (`0x6f1ad0`) joins every set bit's name in table order with
+/// `", "`.
+#[test]
+fn get_font_joins_every_set_flag_in_table_order() {
+    let s = receivers();
+    for &(obj, kind) in KINDS {
+        for (arg, want) in [
+            ("MONOCHROME", "MONOCHROME"),
+            ("OUTLINE,MONOCHROME", "OUTLINE, MONOCHROME"),
+            (
+                "monochrome thickoutline",
+                "OUTLINE, THICKOUTLINE, MONOCHROME",
+            ),
+            ("THICK", ""),
+        ] {
+            s.run(&format!(
+                "{obj}:SetFont(\"Fonts\\\\FRIZQT__.TTF\", 13, \"{arg}\")"
+            ))
+            .unwrap();
+            assert_eq!(flags_of(&s, obj), want, "{kind}: {arg}");
+        }
+    }
+}
+
+/// The XML legs set the word whole (`0x771194`-`0x771204`, `0x783db1`-`0x783e14`): `THICK` is
+/// 5, both outline bits, and a non-empty `monochrome=` adds 2.
+#[test]
+fn an_xml_thick_monochrome_font_reads_back_every_flag() {
+    let s = script();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <Font name="XmlFlagsFont" font="Fonts\FRIZQT__.TTF" outline="THICK" monochrome="1"
+                  virtual="true">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+            </Font>
+            <Frame name="XmlFlagsHost">
+                <Layers><Layer>
+                    <FontString name="XmlFlagsString" font="Fonts\FRIZQT__.TTF" outline="THICK"
+                                monochrome="1">
+                        <FontHeight><AbsValue val="12"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    for obj in ["XmlFlagsFont", "XmlFlagsString"] {
+        assert_eq!(
+            flags_of(&s, obj),
+            "OUTLINE, THICKOUTLINE, MONOCHROME",
+            "{obj}"
+        );
+    }
 }

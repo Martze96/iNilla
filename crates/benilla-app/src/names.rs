@@ -1,21 +1,29 @@
 //! Unit-name resolution. Descriptors carry no names: a player's answers `CMSG_NAME_QUERY` (by
 //! guid), a creature's `CMSG_CREATURE_QUERY` (by template entry), a pet's or charm's
 //! `CMSG_PET_NAME_QUERY` (by pet number), and which one applies is read off the descriptor as the
-//! reference's `GetUnitName` (`0x609210`) reads it. Each key is asked once while in flight, and a
-//! negative answer is cached so a bad id never loops; for a player that is an empty name, which the
-//! reference evicts instead (`0x55f6f0`), so its next read asks again.
+//! reference's `GetUnitName` (`0x609210`) reads it. Each key is asked once while in flight. A
+//! refusal (a creature entry the server flagged unknown, `0x556e67`; a player's empty name,
+//! `0x55f6f0`) is not an answer: its waiters read "unknown" and the next lookup that asks asks
+//! again ([`crate::query_cache`]). The `resolve` reads ask; the `peek` reads never do, and are what
+//! a reader that runs every frame uses: the reference's per-frame readers read the unit's cached
+//! record (`[unit+0xb30]`, `0x60934b`), which only a lookup with a callback fills (`0x604660`).
 //!
-//! Creature templates persist, as the reference's `creaturecache.wdb` does; player and pet names
-//! are never written to disk and are cleared at world-session start, as the reference does.
+//! Creature templates are kept on disk, as the reference's `creaturecache.wdb` is ([`crate::wdb`]);
+//! player and pet names are never written to disk and are cleared at world entry, as the
+//! reference's stores, built with persistence off, are (`0x554cd0`, `0x555740`).
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use benilla_protocol::guid;
+use benilla_protocol::messages::ObjectFields;
 
-use crate::net::{ClientCommand, NetCommands, ObjectStore};
-use crate::query_cache::QueryCache;
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects};
+use crate::query_cache::{Ask, QueryCache};
+
+mod live;
+pub(crate) use live::NameLive;
 
 /// The creature template's `type_flags` dword from `SMSG_CREATURE_QUERY_RESPONSE`, cached by the
 /// reference at `[CGUnit+0xb30] + 0x14`. Adjacent bits mean unrelated things, and the reference
@@ -49,19 +57,31 @@ pub(crate) mod type_flags {
 /// The name cache: players by guid, creatures by template entry, pets by pet number.
 #[derive(Resource, Default)]
 pub(crate) struct NameCache {
-    /// A `None` answer is an empty wire name: the server does not know the guid.
+    /// An empty wire name is a refusal: the server does not know the guid.
     players: QueryCache<u64, String>,
     /// `(race, class, gender)` from `SMSG_NAME_QUERY_RESPONSE`, the `$`-macro expander's fallback
     /// for an unstreamed subject (`0x506f70`). Present only when the server answered: a name
     /// learned otherwise (our own, seeded at login) has no entry, never a zero triple.
     player_traits: HashMap<u64, (u8, u8, u8)>,
-    /// A `None` answer is an entry the server flagged unknown.
+    /// A refusal is an entry the server flagged unknown.
     creatures: QueryCache<u32, CreatureRecord>,
     /// No negative entry: the server answers for a live pet or says nothing.
     pets: QueryCache<u32, String>,
-    /// Bumped by every landed answer and the pet-rename eviction, never by an ask: the gated
-    /// feeds re-run when it moves.
-    generation: u64,
+    /// The callbacks a player-name lookup that missed registered (`0x55f080`), by the guid it
+    /// asked for, each once: the dedupe flag (`0x52af55`). Locked, so a build's lookup registers
+    /// through a shared read.
+    player_waits: std::sync::Mutex<Vec<(u64, NameCallback)>>,
+}
+
+/// A callback a player-name lookup registers on its miss, which the answer runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NameCallback {
+    /// The corpse plate's owner (`0x52af77` with `CGTooltip::OnCorpseOwnerName` `0x52afe0`).
+    CorpsePlate,
+    /// `UnitName` on a guid it holds no unit for, once the party pet record misses too
+    /// (`0x5171d7`-`0x5171f5`), with `0x517290`: on a found name, `NotifyUnitNameUpdate`
+    /// (`0x491a00`) over the guid, held or not.
+    UnitName,
 }
 
 /// One cached creature template head.
@@ -77,6 +97,9 @@ pub(crate) struct CreatureRecord {
     pub(crate) rank: u32,
     /// Read bit by bit through [`type_flags`].
     pub(crate) type_flags: u32,
+    /// `CreatureSpellData.dbc` id of the abilities a tamed one brings (`[record+0x28]`), 0 for
+    /// none: the studied-creature block's ability line (`0x529d56`).
+    pub(crate) pet_spell_list: u32,
     pub(crate) civilian: bool,
     /// The tooltip's LEADER line (`0x6125c0`).
     pub(crate) racial_leader: bool,
@@ -114,9 +137,18 @@ impl NameKey {
     /// With a descriptor this is `0x609210` exactly: the pet number and entry are the unit's
     /// fields, not the guid's bits (a vmangos companion pet has a `HIGHGUID_PET` guid but
     /// `PETNUMBER` 0; a charmed creature has a `HIGHGUID_UNIT` guid and a pet number). Without
-    /// one, a `HIGHGUID_PET` guid's entry slot is taken as the pet number, right only for a
-    /// permanent pet.
-    fn of(guid_val: u64, unit: Option<&ObjectStore>) -> Option<Self> {
+    /// one, the unit is not streamed: an unstreamed creature takes its entry from guid bits
+    /// 24-47 (`guid::entry`), and a `HIGHGUID_PET` guid's slot is taken as the pet number, right
+    /// only for a permanent pet.
+    ///
+    /// Deviation: for a guid it does not hold, the reference's combat-log namer (`0x6264e0`) asks
+    /// the creature cache under guid bits 32-47 (`0x6265c4`-`0x6265e0`) for every guid whose top
+    /// nibble is 0xf and whose bits 32-47 are nonzero, a game object's and a pet's included, and
+    /// never the pet-name cache (only a held unit reaches it, `0x6092c7`). Here an unstreamed
+    /// creature is keyed by its entry, a pet guid by its pet number in the pet-name cache and a
+    /// game object's asks nothing, because on the servers in use (entry at bits 24-47) the
+    /// reference's key names each after an unrelated creature.
+    fn of(guid_val: u64, unit: Option<&ObjectFields>) -> Option<Self> {
         if guid::is_player(guid_val) {
             return Some(Self::Player(guid_val));
         }
@@ -124,13 +156,9 @@ impl NameKey {
             return None;
         }
         match unit {
-            Some(unit) => match unit.0.unit_pet_number() {
-                0 => unit
-                    .0
-                    .object_entry()
-                    .filter(|&e| e != 0)
-                    .or_else(|| guid::entry(guid_val))
-                    .map(Self::Creature),
+            // An entry of 0 has no key: the cache refuses it (`0x556aad`-`0x556ab6`).
+            Some(unit) => match unit.unit_pet_number() {
+                0 => unit.object_entry().filter(|&e| e != 0).map(Self::Creature),
                 n => Some(Self::Pet(n)),
             },
             None => guid::pet_number(guid_val)
@@ -141,113 +169,200 @@ impl NameKey {
 }
 
 impl NameCache {
-    /// The name for a guid with no descriptor in hand; on a miss, asks once and returns `None`.
-    /// A caller holding the unit's [`ObjectStore`] uses [`Self::resolve_unit`]: the guid alone
-    /// cannot name a companion pet or a guardian. A game object is `None` without a query.
-    pub(crate) fn resolve(&self, guid_val: u64, commands: &NetCommands) -> Option<&str> {
-        self.resolve_unit(guid_val, None, commands)
+    /// The name for a guid; on a miss, asks once and returns `None`. The reference names a unit
+    /// from its descriptor (`0x609210` reads `[unit+8]`, and `0x60b151` keys the creature cache
+    /// by `[descriptor+0xc]`), so a streamed guid goes through [`Self::resolve_unit`] with its
+    /// store, and only a guid that is not streamed falls to its bits ([`NameKey::of`]). A game
+    /// object is `None` without a query.
+    pub(crate) fn resolve(&self, objects: &Objects, guid_val: u64, ask: Ask<'_>) -> Option<&str> {
+        self.resolve_unit(guid_val, objects.store(guid_val), ask)
     }
 
-    /// The name for a unit keyed off its descriptor, as `0x609210` keys it; asks once on a miss.
+    /// A lookup of `guid`'s name that missed registered `callback`, once (`0x55f080` with the
+    /// dedupe flag).
+    pub(crate) fn wait_for_player(&self, guid: u64, callback: NameCallback) {
+        let mut waits = self
+            .player_waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !waits.contains(&(guid, callback)) {
+            waits.push((guid, callback));
+        }
+    }
+
+    /// The answer for `guid` landed, or refused it: the callbacks waiting on it, in the order they
+    /// asked, spent either way.
+    pub(crate) fn take_player_waits(&mut self, guid: u64) -> Vec<NameCallback> {
+        let waits = self
+            .player_waits
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut taken = Vec::new();
+        waits.retain(|&(g, cb)| {
+            let hit = g == guid;
+            if hit {
+                taken.push(cb);
+            }
+            !hit
+        });
+        taken
+    }
+
+    /// The player-name cache by guid, whatever the guid is: the reference's `0x55f080` on
+    /// `0xc0e228`, which names a chat speaker (`0x49d560`), the summoner (`GetSummonConfirmSummoner`, `0x48b6a0`)
+    /// and every roster, mail, auction and petition guid the server sends as a player's. A guid
+    /// no player owns is asked and never answered. Read as `ask` says.
+    pub(crate) fn resolve_player(&self, guid_val: u64, ask: Ask<'_>) -> Option<&str> {
+        self.players
+            .read(guid_val, ask, |commands| {
+                Self::send_player(guid_val, commands)
+            })
+            .map(String::as_str)
+    }
+
+    fn send_player(guid_val: u64, commands: &NetCommands) {
+        debug!("names: asking player name (guid {guid_val})");
+        let _ = commands.0.send(ClientCommand::NameQuery { guid: guid_val });
+    }
+
+    /// The name for a unit keyed off its descriptor, as `GetUnitName` (`0x609210`) reads it: a
+    /// player's and a pet's caches are asked (`0x60925e`, `0x6092c7`), a creature's record is only
+    /// read, as `[unit+0xb30]` (`0x60934b`), which the unit's create and entry change fill
+    /// ([`Self::lookup_fields`], [`Self::resolve_creature`] with [`Ask::Event`]). A creature with no descriptor, which
+    /// `GetUnitName` never sees, is asked by its guid bits, as the combat log's namer does
+    /// (`0x6265e0`).
     pub(crate) fn resolve_unit(
         &self,
         guid_val: u64,
         unit: Option<&ObjectStore>,
-        commands: &NetCommands,
+        ask: Ask<'_>,
+    ) -> Option<&str> {
+        self.resolve_fields(guid_val, unit.map(|u| &u.0), ask)
+    }
+
+    /// [`Self::resolve_unit`] for a descriptor not yet attached to an entity, as a create block
+    /// holds it.
+    pub(crate) fn resolve_fields(
+        &self,
+        guid_val: u64,
+        unit: Option<&ObjectFields>,
+        ask: Ask<'_>,
     ) -> Option<&str> {
         match NameKey::of(guid_val, unit)? {
-            NameKey::Player(guid_val) => self
-                .players
-                .get_or_ask(guid_val, || {
-                    debug!("names: asking player name (guid {guid_val})");
-                    let _ = commands.0.send(ClientCommand::NameQuery { guid: guid_val });
-                })
-                .map(String::as_str),
-            NameKey::Pet(pet_number) => self.resolve_pet(pet_number, guid_val, commands),
-            NameKey::Creature(entry) => self.resolve_creature(entry, guid_val, commands),
+            NameKey::Player(guid_val) => self.resolve_player(guid_val, ask),
+            NameKey::Pet(pet_number) => self.resolve_pet(pet_number, guid_val, ask),
+            NameKey::Creature(entry) if unit.is_some() => {
+                self.creatures.get(entry).map(|r| r.name.as_str())
+            }
+            NameKey::Creature(entry) => self.resolve_creature(entry, guid_val, ask),
+        }
+    }
+
+    /// A unit's create (`0x5fb880`): every cache its name comes from looked up with a callback,
+    /// a player's name by `GetUnitName` right after `PostInit` (`0x5dec09`, `0x5dec12`), and the
+    /// display resolve's creature record ([`Self::ask_creature_record`]). A refusal is asked again
+    /// at once, as the reference's next lookup does.
+    pub(crate) fn lookup_fields(&self, guid_val: u64, unit: &ObjectFields, commands: &NetCommands) {
+        if let Some(NameKey::Player(_) | NameKey::Pet(_)) = NameKey::of(guid_val, Some(unit)) {
+            self.resolve_fields(guid_val, Some(unit), Ask::Event(commands));
+        }
+        self.ask_creature_record(guid_val, unit, commands);
+    }
+
+    /// The display resolve's ask (`0x60afb0`, at `0x60b15b`): the creature record by the
+    /// descriptor's entry, for a creature or a pet alone, type mask 9 (`0x60b134`), so never for a
+    /// player.
+    pub(crate) fn ask_creature_record(
+        &self,
+        guid_val: u64,
+        unit: &ObjectFields,
+        commands: &NetCommands,
+    ) {
+        // A descriptor with no mask reads 0, which is not 9: no ask.
+        if unit.object_type_mask() != Some(9) {
+            return;
+        }
+        if let Some(entry) = unit.object_entry() {
+            self.resolve_creature(entry, guid_val, Ask::Event(commands));
         }
     }
 
     /// There is no negative answer: vmangos sends nothing when the guid is not a live pet with
     /// that number (`PetHandler.cpp:190-192`).
-    fn resolve_pet(&self, pet_number: u32, guid: u64, commands: &NetCommands) -> Option<&str> {
+    fn resolve_pet(&self, pet_number: u32, guid: u64, ask: Ask<'_>) -> Option<&str> {
         self.pets
-            .get_or_ask(pet_number, || {
-                debug!("names: asking pet name (pet {pet_number})");
-                let _ = commands
-                    .0
-                    .send(ClientCommand::PetNameQuery { pet_number, guid });
+            .read(pet_number, ask, |commands| {
+                Self::send_pet(pet_number, guid, commands)
             })
             .map(String::as_str)
     }
 
+    fn send_pet(pet_number: u32, guid: u64, commands: &NetCommands) {
+        debug!("names: asking pet name (pet {pet_number})");
+        let _ = commands
+            .0
+            .send(ClientCommand::PetNameQuery { pet_number, guid });
+    }
+
     /// The name for a creature template `entry`; `guid` is 0 when no spawn is known, since the
-    /// server answers by entry alone.
-    pub(crate) fn resolve_creature(
-        &self,
-        entry: u32,
-        guid: u64,
-        commands: &NetCommands,
-    ) -> Option<&str> {
+    /// server answers by entry alone. Read as `ask` says.
+    pub(crate) fn resolve_creature(&self, entry: u32, guid: u64, ask: Ask<'_>) -> Option<&str> {
         self.creatures
-            .get_or_ask(entry, || {
-                debug!("names: asking creature name (entry {entry})");
-                let _ = commands
-                    .0
-                    .send(ClientCommand::CreatureQuery { entry, guid });
+            .read(entry, ask, |commands| {
+                Self::send_creature(entry, guid, commands)
             })
             .map(|r| r.name.as_str())
     }
 
-    /// The cached name for `guid`, with no query on a miss.
-    pub(crate) fn peek(&self, guid_val: u64) -> Option<&str> {
-        self.peek_unit(guid_val, None)
+    fn send_creature(entry: u32, guid: u64, commands: &NetCommands) {
+        debug!("names: asking creature name (entry {entry})");
+        let _ = commands
+            .0
+            .send(ClientCommand::CreatureQuery { entry, guid });
     }
 
-    /// The cached name for a unit keyed off its descriptor, with no query on a miss.
-    pub(crate) fn peek_unit(&self, guid_val: u64, unit: Option<&ObjectStore>) -> Option<&str> {
-        match NameKey::of(guid_val, unit)? {
-            NameKey::Player(guid_val) => self.players.get(guid_val).map(String::as_str),
-            NameKey::Pet(pet_number) => self.pets.get(pet_number).map(String::as_str),
-            NameKey::Creature(entry) => self.creatures.get(entry).map(|r| r.name.as_str()),
-        }
-    }
-
-    /// Record a player-name answer; an empty name is a negative answer. `traits` is `None` for a
-    /// name learned without `SMSG_NAME_QUERY_RESPONSE`, and then clears any traits filed for the
+    /// Record a player-name answer; an empty name is a refusal (`0x55f6f0`). `traits` is `None` for
+    /// a name learned without `SMSG_NAME_QUERY_RESPONSE`, and then clears any traits filed for the
     /// guid, since they belonged to the name being replaced.
     pub(crate) fn insert_player(&mut self, guid: u64, name: String, traits: Option<(u8, u8, u8)>) {
         match traits.filter(|_| !name.is_empty()) {
             Some(t) => self.player_traits.insert(guid, t),
             None => self.player_traits.remove(&guid),
         };
-        self.players
-            .insert(guid, (!name.is_empty()).then_some(name));
-        self.generation = self.generation.wrapping_add(1);
+        if name.is_empty() {
+            self.players.refuse(guid);
+        } else {
+            self.players.insert(guid, name);
+        }
     }
 
     /// The reference's world-session wipe (`0x555740`; `0x5557ad call 0x560400` for the player
     /// cache): every `DBCache` whose persistence byte `[cache+0x39]` is 0 is cleared, which is
     /// `'WNAM'` (player names, ctor `0x554cd0`), `'WGLD'`, `'WPNM'` (pet names) and `'WPTN'`.
-    /// Called at world entry, before the login seeds our own name.
+    /// Called at world entry, before the login seeds our own name. The player cache's nodes go
+    /// with their callbacks, none of them run (`0x560400`), so no wait outlives the session.
     pub(crate) fn clear_world_session(&mut self) {
         self.players.clear();
         self.player_traits.clear();
         self.pets.clear();
-        self.generation = self.generation.wrapping_add(1);
+        self.free_store_callbacks();
     }
 
-    /// Install the creature templates read off disk, replacing (not merging) the current ones and
-    /// touching nothing else: the load can land after the login has seeded our own name, which
-    /// must survive it.
-    pub(crate) fn install_persisted(&mut self, loaded: NameCache) {
-        self.creatures = loaded.creatures;
-        self.generation = self.generation.wrapping_add(1);
+    /// The teardown's free of the lookups' callbacks, running none (`0x55f990`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.player_waits
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
-    /// The landed-answer counter.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
+    /// The creature-template store, the one [`crate::wdb`] saves.
+    pub(crate) fn creature_store(&self) -> &QueryCache<u32, CreatureRecord> {
+        &self.creatures
+    }
+
+    pub(crate) fn creature_store_mut(&mut self) -> &mut QueryCache<u32, CreatureRecord> {
+        &mut self.creatures
     }
 
     /// `(race, class, gender)` for a player guid the name query has answered for.
@@ -257,21 +372,29 @@ impl NameCache {
 
     /// Record a pet-name answer, keyed by pet number.
     pub(crate) fn insert_pet(&mut self, pet_number: u32, name: String) {
-        self.pets.insert(pet_number, Some(name));
-        self.generation = self.generation.wrapping_add(1);
+        self.pets.insert(pet_number, name);
     }
 
     /// Forget a pet's name and its in-flight mark so the next resolve asks again: a rename
     /// arrives only as a bumped `UNIT_FIELD_PET_NAME_TIMESTAMP`, never as the name.
     pub(crate) fn forget_pet(&mut self, pet_number: u32) {
         self.pets.evict(pet_number);
-        self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Record a creature-name answer; `None` is an unknown entry.
+    /// Record a creature-name answer; `None` is a refusal (an entry the server flagged unknown).
     pub(crate) fn insert_creature(&mut self, entry: u32, record: Option<CreatureRecord>) {
-        self.creatures.insert(entry, record);
-        self.generation = self.generation.wrapping_add(1);
+        match record {
+            Some(record) => self.creatures.insert(entry, record),
+            None => {
+                self.creatures.refuse(entry);
+            }
+        }
+    }
+
+    /// Whether the server refused the player's name, an empty name answered for the guid, and
+    /// nothing has asked for it since.
+    pub(crate) fn player_answered_unknown(&self, guid: u64) -> bool {
+        self.players.answered_unknown(guid)
     }
 
     /// The cached subname, the title line under a creature's name.
@@ -292,131 +415,21 @@ impl NameCache {
         Some(self.creatures.get(entry)?.creature_type)
     }
 
-    /// Forget the in-flight asks a disconnect may have dropped; player and creature names stay,
-    /// pet names go with the spawns they named.
+    /// Forget the in-flight player-name asks a disconnect may have dropped; player names stay, pet
+    /// names go with the spawns they named. The creature store is saved, so [`crate::wdb`] clears
+    /// its asks.
     pub(crate) fn clear_pending(&mut self) {
         self.players.clear_pending();
-        self.creatures.clear_pending();
         self.pets.clear();
     }
 }
 
-impl crate::query_cache::AskOnce for NameCache {
-    fn clear_pending(&mut self) {
-        NameCache::clear_pending(self);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// Persistence
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/// The file's first line; any field that differs on load discards the whole file, the
-/// reference's rule for its `.wdb` header (`[FourCC | build 0x16f3 | locale | recordSize |
-/// version 1]`, no checksum, no timestamp, no TTL).
-const CACHE_MAGIC: &str = "benilla-namecache";
-/// Our record-layout version; bump it when a column changes. Version 2 holds creature records
-/// only.
-const CACHE_FORMAT: u32 = 2;
-/// The client build, the reference's `0x16f3`.
-const CACHE_BUILD: u32 = 5875;
-/// In the header as in the reference's; benilla reads DBC locale slot 0 only.
-const CACHE_LOCALE: &str = "enUS";
-
 impl NameCache {
-    /// Serialize as TSV: the header line, then one line per creature record. In-flight asks are
-    /// not written.
-    pub(crate) fn to_tsv(&self, realm: &str) -> String {
-        let mut out =
-            format!("{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{CACHE_LOCALE}\t{realm}\n");
-        for (entry, rec) in self.creatures.iter() {
-            match rec {
-                Some(r) => out.push_str(&format!(
-                    "C\t{entry}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                    r.creature_type,
-                    r.pet_family,
-                    r.rank,
-                    r.type_flags,
-                    u8::from(r.civilian),
-                    u8::from(r.racial_leader),
-                    r.display_id,
-                    r.name,
-                    r.subname.as_deref().unwrap_or("")
-                )),
-                None => out.push_str(&format!("c\t{entry}\n")),
-            }
-        }
-        out
-    }
-
-    /// Rebuild a cache from [`Self::to_tsv`]'s output, `None` when the header differs; a
-    /// malformed line is skipped.
-    pub(crate) fn from_tsv(text: &str, realm: &str) -> Option<Self> {
-        let mut lines = text.lines();
-        let header: Vec<&str> = lines.next()?.split('\t').collect();
-        if header.len() != 5
-            || header[0] != CACHE_MAGIC
-            || header[1] != CACHE_FORMAT.to_string()
-            || header[2] != CACHE_BUILD.to_string()
-            || header[3] != CACHE_LOCALE
-            || header[4] != realm
-        {
-            return None;
-        }
-        let mut cache = NameCache::default();
-        for line in lines {
-            let f: Vec<&str> = line.split('\t').collect();
-            match f.first().copied() {
-                Some("C") if f.len() >= 11 => {
-                    let Ok(entry) = f[1].parse::<u32>() else {
-                        continue;
-                    };
-                    let (Ok(creature_type), Ok(pet_family), Ok(rank), Ok(type_flags)) =
-                        (f[2].parse(), f[3].parse(), f[4].parse(), f[5].parse())
-                    else {
-                        continue;
-                    };
-                    let Ok(display_id) = f[8].parse() else {
-                        continue;
-                    };
-                    cache.creatures.insert(
-                        entry,
-                        Some(CreatureRecord {
-                            name: f[9].to_string(),
-                            // Empty is no subname, as in the wire decode.
-                            subname: (!f[10].is_empty()).then(|| f[10].to_string()),
-                            creature_type,
-                            pet_family,
-                            rank,
-                            type_flags,
-                            civilian: f[6] == "1",
-                            racial_leader: f[7] == "1",
-                            display_id,
-                        }),
-                    );
-                }
-                Some("c") if f.len() >= 2 => {
-                    if let Ok(entry) = f[1].parse::<u32>() {
-                        cache.creatures.insert(entry, None);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Some(cache)
-    }
-
     /// Drop a player's cached name and traits so the next resolve re-asks: the reference's
     /// remove-by-key for `SMSG_INVALIDATE_PLAYER` (`0x555600` into `0x560170`).
     pub(crate) fn invalidate_player(&mut self, guid: u64) {
         self.players.evict(guid);
         self.player_traits.remove(&guid);
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    /// How many records the cache holds.
-    pub(crate) fn len(&self) -> usize {
-        self.players.len() + self.creatures.len() + self.pets.len()
     }
 }
 
@@ -425,19 +438,75 @@ pub(crate) mod net {
     use benilla_protocol::{SessionEvent, SessionEventKind};
     use bevy::prelude::*;
 
-    use super::{CreatureRecord, NameCache};
-    use crate::net::NetHandlerApp;
+    use super::{CreatureRecord, NameCache, NameCallback};
+    use crate::field_watch::{id, FieldNotice, NoticeLane};
+    use crate::net::{GuidIndex, NetHandlerApp, ObjectStore};
 
-    /// Register the four handlers.
+    /// Register the four handlers. A player-name answer's goes ahead of every other subsystem's:
+    /// the cache files the record and its valid byte (`0x55f310`, `0x55f413`) before it runs any
+    /// callback waiting on it (`0x55f426`-`0x55f452`), and those read the record it filed.
     pub(crate) fn register(app: &mut App) {
         use SessionEventKind as K;
-        app.net_handler(K::PlayerName, on_player_name)
+        app.init_resource::<NoticeLane>()
+            .net_handler_ahead(K::PlayerName, on_player_name)
             .net_handler(K::PetName, on_pet_name)
             .net_handler(K::CreatureName, on_creature_name)
             .net_handler(K::InvalidatePlayer, on_invalidate_player);
     }
 
-    fn on_player_name(In(ev): In<SessionEvent>, mut names: ResMut<NameCache>) {
+    /// The units the object manager holds, which an answer's callbacks name (`0x468460` with the
+    /// unit mask, 8): the waiting units' own lookups.
+    #[derive(bevy::ecs::system::SystemParam)]
+    pub(crate) struct HeldUnits<'w, 's> {
+        index: Option<Res<'w, GuidIndex>>,
+        stores: Query<'w, 's, &'static ObjectStore>,
+    }
+
+    impl HeldUnits<'_, '_> {
+        /// Each held unit `pick` takes, in guid order.
+        fn matching(&self, pick: impl Fn(&ObjectStore) -> bool) -> Vec<u64> {
+            let Some(index) = &self.index else {
+                return Vec::new();
+            };
+            let mut out: Vec<u64> = index
+                .0
+                .iter()
+                .filter(|&(_, &e)| self.stores.get(e).is_ok_and(|s| s.is_unit() && pick(s)))
+                .map(|(&g, _)| g)
+                .collect();
+            out.sort_unstable();
+            out
+        }
+
+        fn holds(&self, guid: u64) -> bool {
+            self.index
+                .as_ref()
+                .and_then(|i| i.0.get(&guid))
+                .and_then(|&e| self.stores.get(e).ok())
+                .is_some_and(ObjectStore::is_unit)
+        }
+    }
+
+    /// The name callback `0x5fb840` of a unit the answer names: for a found name (`0x5fb84b`) of a
+    /// held unit (`0x5fb86a`), `UNIT_NAME_UPDATE` through `0x491a00`; the chat's `0x49ccc0`,
+    /// which shows the lines that waited on the name, and the trade initiate's `0x5d4080`; and the
+    /// waits a lookup registered ([`NameCallback`]). The callbacks are the lookups that missed, so
+    /// an answer for a name the cache already holds runs none.
+    fn on_player_name(
+        In(ev): In<SessionEvent>,
+        mut names: ResMut<NameCache>,
+        units: HeldUnits,
+        mut notices: ResMut<NoticeLane>,
+        chat: Option<Res<crate::ui_chat::ChatLog>>,
+        // The auction lists whose getters missed a name (`0x4cf167`, `0x4cf1c8`).
+        house: Option<ResMut<crate::ui_auction::HouseLane>>,
+        // The battleground's callbacks, which run for a refusal too.
+        mut battlefield: crate::ui_battlefield::BattlefieldNameAnswers,
+        // The meeting stone's member lines and the duel's held challenge, refusals too.
+        mut dialogs: crate::ui_dialog_verbs::DialogNameAnswers,
+        // The trade initiates' lines, which a refusal spends silently (`0x5d4080`).
+        mut trade: crate::ui_trade::TradeNameAnswers,
+    ) {
         if let SessionEvent::PlayerName {
             guid,
             name,
@@ -446,17 +515,74 @@ pub(crate) mod net {
             gender,
         } = ev
         {
+            // A guid already cached has no lookup waiting, so no callback runs.
+            let waited = names.players.get(guid).is_none();
+            let found = !name.is_empty() && waited;
+            let callbacks = names.take_player_waits(guid);
             player_name(guid, name, race, class, gender, &mut names);
+            if waited {
+                battlefield.answered(guid, &names);
+                dialogs.answered(guid, &names);
+                trade.answered(guid, &names);
+            }
+            if found {
+                if let Some(chat) = &chat {
+                    chat.answer_landed(crate::ui_chat::Answer::Player(guid));
+                }
+                if let Some(mut house) = house {
+                    house.name_landed(guid);
+                }
+            }
+            if found && units.holds(guid) {
+                notices.write_batch(name_answered(guid));
+            }
+            // The lookups' own callbacks, in the order they asked, each for a found name only.
+            for callback in callbacks.into_iter().filter(|_| found) {
+                match callback {
+                    // `0x52affc`.
+                    NameCallback::CorpsePlate => notices.write(FieldNotice::CorpsePlate),
+                    // `0x51729a` → `0x491a00`: the refresh for a unit held (`0x491a23`), the
+                    // signal to every token naming the guid whatever (`0x491a3c`).
+                    NameCallback::UnitName if units.holds(guid) => {
+                        notices.write_batch(name_update(guid));
+                    }
+                    NameCallback::UnitName => notices.write(FieldNotice::Signal {
+                        guid,
+                        id: id::UNIT_NAME_UPDATE,
+                    }),
+                }
+            }
         }
     }
 
-    fn on_pet_name(In(ev): In<SessionEvent>, mut names: ResMut<NameCache>) {
+    /// The pet name cache answers through the same callback, `0x5fb840` (`0x6092b8`,
+    /// `0x609307`), for each held unit whose `UNIT_FIELD_PETNUMBER` asked it.
+    fn on_pet_name(
+        In(ev): In<SessionEvent>,
+        mut names: ResMut<NameCache>,
+        units: HeldUnits,
+        mut notices: ResMut<NoticeLane>,
+    ) {
         if let SessionEvent::PetName { pet_number, name } = ev {
+            let found = !name.is_empty() && names.pets.get(pet_number).is_none();
             pet_name(pet_number, name, &mut names);
+            if found && pet_number != 0 {
+                for guid in units.matching(|s| s.0.unit_pet_number() == pet_number) {
+                    notices.write_batch(name_answered(guid));
+                }
+            }
         }
     }
 
-    fn on_creature_name(In(ev): In<SessionEvent>, mut names: ResMut<NameCache>) {
+    /// The creature cache's callback `0x604660`, for each held unit of the entry that missed it
+    /// (`0x60b146`, `0x604630`): for a found record (`0x60469c`), `UNIT_NAME_UPDATE` (`0x6046d1`)
+    /// then `UNIT_CLASSIFICATION_CHANGED` (`0x6046dd`).
+    fn on_creature_name(
+        In(ev): In<SessionEvent>,
+        mut names: ResMut<NameCache>,
+        units: HeldUnits,
+        mut notices: ResMut<NoticeLane>,
+    ) {
         if let SessionEvent::CreatureName {
             entry,
             name,
@@ -465,11 +591,13 @@ pub(crate) mod net {
             pet_family,
             rank,
             type_flags,
+            pet_spell_list,
             display_id,
             civilian,
             racial_leader,
         } = ev
         {
+            let found = name.is_some() && names.creatures.get(entry).is_none();
             creature_name(
                 entry,
                 name,
@@ -478,12 +606,49 @@ pub(crate) mod net {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 civilian,
                 racial_leader,
                 display_id,
                 &mut names,
             );
+            if found {
+                for guid in units.matching(|s| s.0.object_entry() == Some(entry)) {
+                    notices.write_batch(name_answered(guid));
+                    notices.write(FieldNotice::Signal {
+                        guid,
+                        id: id::UNIT_CLASSIFICATION_CHANGED,
+                    });
+                }
+            }
         }
+    }
+
+    /// `NotifyUnitNameUpdate` (`0x491a00`) on a held unit: the tooltip's refresh (`0x491a27`) and
+    /// the name's gate (`0x491a2e` → `0x607050`), then `UNIT_NAME_UPDATE` (`0x491a3c`).
+    fn name_update(guid: u64) -> [FieldNotice; 3] {
+        [
+            FieldNotice::TooltipUnit { guid },
+            FieldNotice::Plate {
+                guid,
+                call: crate::vplates::PlateCall::Gate,
+            },
+            FieldNotice::Signal {
+                guid,
+                id: id::UNIT_NAME_UPDATE,
+            },
+        ]
+    }
+
+    /// A name or creature answer's callback on a held unit (`0x5fb840`, `0x604660`): its plate
+    /// released (`0x5fb86e`, `0x6046c1`), then the name update, whose gate binds it again with the
+    /// answer's name (`0x5fb875`, `0x6046d1`).
+    fn name_answered(guid: u64) -> impl Iterator<Item = FieldNotice> {
+        std::iter::once(FieldNotice::Plate {
+            guid,
+            call: crate::vplates::PlateCall::Release,
+        })
+        .chain(name_update(guid))
     }
 
     fn on_invalidate_player(In(ev): In<SessionEvent>, mut names: ResMut<NameCache>) {
@@ -511,10 +676,44 @@ pub(crate) mod net {
 
     /// `SMSG_INVALIDATE_PLAYER`, which vmangos sends after a rename (`CharacterHandler.cpp:839`):
     /// the reference's eviction (`0x555600`) in a name cache with no TTL; its other, an empty-name
-    /// answer (`0x55f6f0`), is a cached negative here.
+    /// answer (`0x55f6f0`), is a refusal ([`NameCache::insert_player`]).
     fn invalidate_player(guid: u64, names: &mut NameCache) {
         debug!("net: invalidating cached name for player {guid:#x}");
         names.invalidate_player(guid);
+    }
+
+    /// Files a `SMSG_CREATURE_QUERY_RESPONSE` read off disk ([`crate::wdb`]), as the handler files a
+    /// live one, with no unit waiting on it.
+    pub(crate) fn file_creature(ev: SessionEvent, names: &mut NameCache) {
+        if let SessionEvent::CreatureName {
+            entry,
+            name,
+            subname,
+            creature_type,
+            pet_family,
+            rank,
+            type_flags,
+            pet_spell_list,
+            display_id,
+            civilian,
+            racial_leader,
+        } = ev
+        {
+            creature_name(
+                entry,
+                name,
+                subname,
+                creature_type,
+                pet_family,
+                rank,
+                type_flags,
+                pet_spell_list,
+                civilian,
+                racial_leader,
+                display_id,
+                names,
+            );
+        }
     }
 
     /// `SMSG_CREATURE_QUERY_RESPONSE`; a `None` name is the server's "no such entry".
@@ -526,6 +725,7 @@ pub(crate) mod net {
         pet_family: u32,
         rank: u32,
         type_flags: u32,
+        pet_spell_list: u32,
         civilian: bool,
         racial_leader: bool,
         display_id: u32,
@@ -540,11 +740,177 @@ pub(crate) mod net {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 civilian,
                 racial_leader,
                 display_id,
             }),
         );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const PLAYER: u64 = 0x42;
+        const WOLF_A: u64 = 0xF130_0000_0044_0002;
+        const WOLF_B: u64 = 0xF130_0000_0044_0001;
+        const BOAR: u64 = 0xF130_0000_0045_0003;
+        const PET: u64 = 0xF140_0000_0000_0007;
+
+        /// The units held: two wolves of entry 299, a boar of 300, a player and a pet numbered 9.
+        fn world() -> App {
+            let mut app = App::new();
+            app.init_resource::<NameCache>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<crate::field_watch::NoticeLane>();
+            for (guid, kind, pairs) in [
+                // `OBJECT_FIELD_TYPE` (2): the unit and player type masks.
+                (WOLF_A, ObjectType::Unit, vec![(2, 0x9), (3, 299)]),
+                (WOLF_B, ObjectType::Unit, vec![(2, 0x9), (3, 299)]),
+                (BOAR, ObjectType::Unit, vec![(2, 0x9), (3, 300)]),
+                (PLAYER, ObjectType::Player, vec![(2, 0x19)]),
+                (PET, ObjectType::Unit, vec![(2, 0x9), (3, 299), (139, 9)]),
+            ] {
+                let fields = ObjectFields::from_pairs(&pairs).into_created(kind);
+                let e = app.world_mut().spawn(ObjectStore(fields)).id();
+                app.world_mut()
+                    .resource_mut::<GuidIndex>()
+                    .0
+                    .insert(guid, e);
+            }
+            app
+        }
+
+        fn notices(app: &mut App) -> Vec<FieldNotice> {
+            app.world_mut()
+                .resource_mut::<crate::field_watch::NoticeLane>()
+                .drain()
+                .collect()
+        }
+
+        fn signal(guid: u64, id: u16) -> FieldNotice {
+            FieldNotice::Signal { guid, id }
+        }
+
+        /// An answer's callback on the held unit `guid`: its plate released, the tooltip's refresh
+        /// (`0x4919d0`), the plate's gate, then the name signal.
+        fn answered(guid: u64) -> [FieldNotice; 4] {
+            use crate::vplates::PlateCall::{Gate, Release};
+            [
+                FieldNotice::Plate {
+                    guid,
+                    call: Release,
+                },
+                FieldNotice::TooltipUnit { guid },
+                FieldNotice::Plate { guid, call: Gate },
+                signal(guid, 183),
+            ]
+        }
+
+        fn creature(entry: u32, name: Option<&str>) -> SessionEvent {
+            SessionEvent::CreatureName {
+                entry,
+                name: name.map(str::to_string),
+                subname: None,
+                creature_type: None,
+                pet_family: 0,
+                rank: 0,
+                type_flags: 0,
+                pet_spell_list: 0,
+                display_id: 0,
+                civilian: false,
+                racial_leader: false,
+            }
+        }
+
+        /// A creature record names each held unit of its entry, then signals its classification;
+        /// a miss signals nothing.
+        #[test]
+        fn a_creature_answer_signals_each_held_unit_of_its_entry() {
+            let mut app = world();
+            app.world_mut()
+                .run_system_once_with(on_creature_name, creature(299, Some("Wolf")))
+                .unwrap();
+            assert_eq!(
+                notices(&mut app),
+                [
+                    answered(WOLF_B).to_vec(),
+                    vec![signal(WOLF_B, 187)],
+                    answered(WOLF_A).to_vec(),
+                    vec![signal(WOLF_A, 187)],
+                    answered(PET).to_vec(),
+                    vec![signal(PET, 187)],
+                ]
+                .concat()
+            );
+            app.world_mut()
+                .run_system_once_with(on_creature_name, creature(300, None))
+                .unwrap();
+            assert!(notices(&mut app).is_empty(), "no such entry");
+            app.world_mut()
+                .run_system_once_with(on_creature_name, creature(299, Some("Wolf")))
+                .unwrap();
+            assert!(
+                notices(&mut app).is_empty(),
+                "a repeat finds no lookup waiting"
+            );
+        }
+
+        /// A found player name signals the held player alone; an empty one, or a guid not held,
+        /// nothing. A pet name signals the held unit its pet number names.
+        #[test]
+        fn a_name_answer_signals_the_held_unit_it_names() {
+            let mut app = world();
+            let player = |guid: u64, name: &str| SessionEvent::PlayerName {
+                guid,
+                name: name.into(),
+                race: 1,
+                gender: 0,
+                class: 1,
+            };
+            app.world_mut()
+                .run_system_once_with(on_player_name, player(PLAYER, "Brisca"))
+                .unwrap();
+            assert_eq!(notices(&mut app), answered(PLAYER));
+            app.world_mut()
+                .run_system_once_with(on_player_name, player(PLAYER, "Brisca"))
+                .unwrap();
+            assert!(
+                notices(&mut app).is_empty(),
+                "a repeat finds no lookup waiting"
+            );
+            app.world_mut()
+                .run_system_once_with(on_player_name, player(0x43, "Far"))
+                .unwrap();
+            app.world_mut()
+                .run_system_once_with(on_player_name, player(PLAYER, ""))
+                .unwrap();
+            assert!(notices(&mut app).is_empty());
+            app.world_mut()
+                .run_system_once_with(
+                    on_pet_name,
+                    SessionEvent::PetName {
+                        pet_number: 9,
+                        name: "Fang".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(notices(&mut app), answered(PET));
+            app.world_mut()
+                .run_system_once_with(
+                    on_pet_name,
+                    SessionEvent::PetName {
+                        pet_number: 9,
+                        name: "Fang".into(),
+                    },
+                )
+                .unwrap();
+            assert!(notices(&mut app).is_empty(), "a repeat pet name");
+        }
     }
 }
 
@@ -563,39 +929,6 @@ mod tests {
         (NetCommands(tx), rx)
     }
 
-    /// An ask must not move the counter, or an outstanding query would hold every gated feed open.
-    #[test]
-    fn the_generation_counts_landings_never_asks() {
-        let (cmds, _rx) = commands();
-        let mut cache = NameCache::default();
-        let g0 = cache.generation();
-
-        let player = compose(0, 0, 7);
-        assert_eq!(cache.resolve(player, &cmds), None);
-        assert_eq!(
-            cache.generation(),
-            g0,
-            "the miss asked, and asking is not a landing"
-        );
-
-        cache.insert_player(player, "Benilla".into(), None);
-        let landed = cache.generation();
-        assert_ne!(g0, landed, "the answer landing is the edge");
-
-        assert_eq!(cache.resolve(player, &cmds), Some("Benilla"));
-        assert_eq!(cache.generation(), landed, "a cache hit moves nothing");
-
-        cache.insert_pet(137, "Voidwalker".into());
-        let pet = cache.generation();
-        assert_ne!(landed, pet);
-        cache.forget_pet(137);
-        assert_ne!(
-            pet,
-            cache.generation(),
-            "the rename eviction is a landing-shaped edge"
-        );
-    }
-
     /// A summoned pet asks `CMSG_PET_NAME_QUERY` by the pet number in its guid; its entry slot
     /// names no creature template.
     #[test]
@@ -604,7 +937,7 @@ mod tests {
         let mut cache = NameCache::default();
         let voidwalker = compose(guid::HIGH_PET, 137, 9);
 
-        assert_eq!(cache.resolve(voidwalker, &cmds), None);
+        assert_eq!(cache.resolve_unit(voidwalker, None, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::PetNameQuery {
@@ -612,15 +945,21 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(cache.resolve(voidwalker, &cmds), None);
+        assert_eq!(cache.resolve_unit(voidwalker, None, Ask::New(&cmds)), None);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 
         cache.insert_pet(137, "Voidwalker".into());
-        assert_eq!(cache.resolve(voidwalker, &cmds), Some("Voidwalker"));
-        assert_eq!(cache.peek(voidwalker), Some("Voidwalker"));
+        assert_eq!(
+            cache.resolve_unit(voidwalker, None, Ask::New(&cmds)),
+            Some("Voidwalker")
+        );
+        assert_eq!(
+            cache.resolve_unit(voidwalker, None, Ask::Read),
+            Some("Voidwalker")
+        );
         // Pet names are per-spawn, so a disconnect drops them.
         cache.clear_pending();
-        assert_eq!(cache.peek(voidwalker), None);
+        assert_eq!(cache.resolve_unit(voidwalker, None, Ask::Read), None);
     }
 
     /// A stable list seeds the same `(pet_number, name)` pair the pet-name query answers, so an
@@ -633,7 +972,7 @@ mod tests {
         let cache = NameCache::default();
         let rex = compose(guid::HIGH_PET, 7, 42);
 
-        assert_eq!(cache.resolve(rex, &cmds), None);
+        assert_eq!(cache.resolve_unit(rex, None, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::PetNameQuery { pet_number: 7, .. })
@@ -641,104 +980,10 @@ mod tests {
 
         let mut warm = NameCache::default();
         warm.insert_pet(7, "Rex".into());
-        assert_eq!(warm.resolve(rex, &cmds), Some("Rex"));
+        assert_eq!(warm.resolve_unit(rex, None, Ask::New(&cmds)), Some("Rex"));
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Empty)),
             "a seeded pet must not re-ask"
-        );
-    }
-
-    /// The negative answer survives too, so an unknown entry is not re-asked every login.
-    #[test]
-    fn the_cache_round_trips_through_its_file_format() {
-        let mut cache = NameCache::default();
-        cache.insert_creature(
-            69,
-            Some(CreatureRecord {
-                name: "Stable Master Kitrik".into(),
-                subname: Some("Stable Master".into()),
-                creature_type: 7,
-                pet_family: 0,
-                rank: 1,
-                type_flags: 0x10,
-                civilian: true,
-                racial_leader: false,
-                display_id: 533,
-            }),
-        );
-        cache.insert_creature(1234, None); // the server flagged the entry unknown
-
-        let text = cache.to_tsv("Hydraxian Waterlords");
-        let back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header matches");
-
-        // Present-and-None, not absent.
-        assert!(back.creatures.answered(1234));
-        let rec = back.creature_record(69).expect("creature survived");
-        assert_eq!(rec.name, "Stable Master Kitrik");
-        assert_eq!(rec.subname.as_deref(), Some("Stable Master"));
-        assert_eq!((rec.creature_type, rec.rank, rec.type_flags), (7, 1, 0x10));
-        assert_eq!((rec.civilian, rec.racial_leader), (true, false));
-        assert_eq!(rec.display_id, 533, "the model a stabled pet is drawn from");
-        assert!(back.creature_record(1234).is_none());
-        assert_eq!(back.len(), 2);
-
-        // `Some("")` would paint an empty tooltip line.
-        cache.insert_creature(
-            70,
-            Some(CreatureRecord {
-                name: "Boar".into(),
-                subname: None,
-                creature_type: 1,
-                pet_family: 5,
-                rank: 0,
-                type_flags: 0,
-                civilian: false,
-                racial_leader: false,
-                display_id: 1,
-            }),
-        );
-        let back = NameCache::from_tsv(&cache.to_tsv("R"), "R").expect("header");
-        assert_eq!(back.creature_record(70).unwrap().subname, None);
-    }
-
-    /// The reference builds `'WNAM'` (ctor `0x554cd0`) and `'WPNM'` with persistence off; a 1.12
-    /// install's `WDB/` holds `creaturecache.wdb` and no `namecache.wdb`.
-    #[test]
-    fn the_file_keeps_creature_templates_and_no_identities() {
-        let mut cache = NameCache::default();
-        cache.insert_player(0x11, "Moamtester".into(), Some((1, 2, 0)));
-        cache.insert_pet(7, "Rex".into());
-        cache.insert_creature(
-            69,
-            Some(CreatureRecord {
-                name: "Stable Master Kitrik".into(),
-                subname: Some("Stable Master".into()),
-                creature_type: 7,
-                pet_family: 0,
-                rank: 1,
-                type_flags: 0x10,
-                civilian: true,
-                racial_leader: false,
-                display_id: 533,
-            }),
-        );
-
-        let text = cache.to_tsv("R");
-        assert!(
-            !text.contains("Moamtester") && !text.contains("Rex"),
-            "no guid- or spawn-keyed name may reach the disk:\n{text}"
-        );
-        let back = NameCache::from_tsv(&text, "R").expect("header matches");
-        assert_eq!(
-            back.peek(0x11),
-            None,
-            "a player name never survives the file"
-        );
-        assert_eq!(back.player_traits(0x11), None);
-        assert_eq!(
-            back.creature_record(69).map(|r| r.name.as_str()),
-            Some("Stable Master Kitrik"),
-            "the template entry is the key that keeps meaning what it meant",
         );
     }
 
@@ -750,18 +995,24 @@ mod tests {
         let mut cache = NameCache::default();
         cache.insert_player(0x11, "Moamtester".into(), Some((1, 2, 0)));
         cache.insert_pet(7, "Rex".into());
-        cache.insert_creature(69, None);
+        cache.insert_creature(69, Some(record("Stable Master")));
+        cache.wait_for_player(0x22, NameCallback::UnitName);
 
         cache.clear_world_session();
 
-        assert_eq!(cache.peek(0x11), None);
+        assert!(
+            cache.take_player_waits(0x22).is_empty(),
+            "the waits went with the cache"
+        );
+
+        assert_eq!(cache.resolve_unit(0x11, None, Ask::Read), None);
         assert_eq!(cache.player_traits(0x11), None);
         assert!(
-            cache.creatures.answered(69),
+            cache.creatures.get(69).is_some(),
             "templates outlive the world session"
         );
         // The in-flight marks went too.
-        assert_eq!(cache.resolve(0x11, &cmds), None);
+        assert_eq!(cache.resolve_unit(0x11, None, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::NameQuery { guid: 0x11 })
@@ -777,66 +1028,24 @@ mod tests {
     }
 
     #[test]
-    fn a_header_that_differs_in_any_field_discards_the_whole_file() {
-        let mut cache = NameCache::default();
-        cache.insert_creature(1234, None);
-        let good = cache.to_tsv("Hydraxian Waterlords");
-        assert!(NameCache::from_tsv(&good, "Hydraxian Waterlords").is_some());
-
-        // The realm: our field, not the reference's.
-        assert!(NameCache::from_tsv(&good, "Another Realm").is_none());
-
-        let head = good.lines().next().unwrap();
-        for (field, bad) in [
-            (0, "not-benilla"),
-            (1, "999"),  // format version
-            (2, "5876"), // client build
-            (3, "frFR"), // locale
-        ] {
-            let mut parts: Vec<&str> = head.split('\t').collect();
-            parts[field] = bad;
-            let text = format!("{}\n{}", parts.join("\t"), good.lines().nth(1).unwrap());
-            assert!(
-                NameCache::from_tsv(&text, "Hydraxian Waterlords").is_none(),
-                "header field {field} = {bad} must discard the file"
-            );
-        }
-
-        assert!(NameCache::from_tsv("", "R").is_none());
-        assert!(NameCache::from_tsv("nonsense", "R").is_none());
-        let text = format!("{}\nC\tnotanumber\t1\t2\t0\tX\nc\t1234\n", head);
-        let back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header still good");
-        assert_eq!(back.len(), 1, "the bad line is skipped, the good one kept");
-
-        // A version-1 file, which held player names, is discarded whole.
-        let v1 = format!(
-            "{CACHE_MAGIC}\t1\t{CACHE_BUILD}\t{CACHE_LOCALE}\tHydraxian Waterlords\n\
-             P\t7\t1\t1\t0\tMoamtester\n"
-        );
-        assert!(NameCache::from_tsv(&v1, "Hydraxian Waterlords").is_none());
-    }
-
-    #[test]
     fn invalidating_a_player_makes_the_next_resolve_ask_again() {
         let (cmds, rx) = commands();
         let mut cache = NameCache::default();
         cache.insert_player(0x11, "Aldric".into(), Some((1, 2, 0)));
-        assert_eq!(cache.resolve(0x11, &cmds), Some("Aldric"));
+        assert_eq!(
+            cache.resolve_unit(0x11, None, Ask::New(&cmds)),
+            Some("Aldric")
+        );
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)), "no ask");
 
-        let before = cache.generation();
         cache.invalidate_player(0x11);
-        assert!(
-            cache.generation() != before,
-            "an eviction is a landed change"
-        );
         assert_eq!(
             cache.player_traits(0x11),
             None,
             "the traits go with the name"
         );
 
-        assert_eq!(cache.resolve(0x11, &cmds), None);
+        assert_eq!(cache.resolve_unit(0x11, None, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::NameQuery { guid: 0x11 })
@@ -850,9 +1059,9 @@ mod tests {
         let wolf_a = compose(guid::HIGH_UNIT, 69, 1);
         let wolf_b = compose(guid::HIGH_UNIT, 69, 2);
 
-        assert_eq!(cache.resolve(wolf_a, &cmds), None);
+        assert_eq!(cache.resolve_unit(wolf_a, None, Ask::New(&cmds)), None);
         // Same entry, different spawn: no second query.
-        assert_eq!(cache.resolve(wolf_b, &cmds), None);
+        assert_eq!(cache.resolve_unit(wolf_b, None, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::CreatureQuery { entry: 69, .. })
@@ -868,50 +1077,138 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
             }),
         );
-        assert_eq!(cache.resolve(wolf_b, &cmds), Some("Young Wolf"));
+        assert_eq!(
+            cache.resolve_unit(wolf_b, None, Ask::New(&cmds)),
+            Some("Young Wolf")
+        );
     }
 
+    /// `0x55f6f0`: an empty name runs the callbacks with status 0 and frees the node. A reader's
+    /// ask within the window from the refusal sends nothing; the player's next create asks at
+    /// once, as the reference's next lookup with a callback does.
     #[test]
-    fn player_negative_answer_is_cached() {
+    fn an_empty_player_name_is_a_refusal_and_the_next_lookup_asks_again() {
         let (cmds, rx) = commands();
         let mut cache = NameCache::default();
         let g = compose(guid::HIGH_PLAYER, 0, 7);
+        let fields = ObjectFields::from_pairs(&[]);
 
-        assert_eq!(cache.resolve(g, &cmds), None);
+        cache.lookup_fields(g, &fields, &cmds);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::NameQuery { guid }) if guid == g
         ));
         cache.insert_player(g, String::new(), None); // server: unknown guid
-        assert_eq!(cache.resolve(g, &cmds), None);
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            cache.players.answered_unknown(g),
+            "the waiters read unknown"
+        );
+        assert_eq!(cache.resolve_unit(g, None, Ask::New(&cmds)), None);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "a reader's ask within the window does not send"
+        );
+
+        cache.lookup_fields(g, &fields, &cmds);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::NameQuery { guid }) if guid == g),
+            "the next create does"
+        );
+    }
+
+    /// `0x556e67`: a creature key with its top bit set is a refusal; the template is not kept.
+    /// A unit of it in view reads its name every frame and never asks (`[unit+0xb30]`,
+    /// `0x60934b`); the next unit of that entry created asks at once (`0x60b15b`).
+    #[test]
+    fn a_refused_creature_is_asked_again_by_the_next_unit_created_not_by_the_readers() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        let wolf_a = compose(guid::HIGH_UNIT, 1234, 1);
+        let wolf_b = compose(guid::HIGH_UNIT, 1234, 2);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 1234)]);
+
+        cache.lookup_fields(wolf_a, &store.0, &cmds);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 1234, .. })
+        ));
+        cache.insert_creature(1234, None);
+        assert!(cache.creatures.answered_unknown(1234));
+        assert!(cache.creature_record(1234).is_none());
+        for _ in 0..600 {
+            assert_eq!(
+                cache.resolve_unit(wolf_a, Some(&store), Ask::New(&cmds)),
+                None
+            );
+            assert_eq!(cache.resolve_unit(wolf_a, Some(&store), Ask::Read), None);
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "the readers of a unit in view never ask"
+        );
+
+        cache.lookup_fields(wolf_b, &store.0, &cmds);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(ClientCommand::CreatureQuery { entry: 1234, guid }) if guid == wolf_b
+            ),
+            "a new unit of the entry asks at once"
+        );
+        cache.lookup_fields(wolf_b, &store.0, &cmds);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "and never while that ask is pending"
+        );
+    }
+
+    /// `0x556ec9`: a refusal for an entry nobody asked for is no answer at all.
+    #[test]
+    fn a_refusal_nobody_asked_for_marks_nothing() {
+        let mut cache = NameCache::default();
+        cache.insert_creature(4321, None);
+        assert!(!cache.creatures.answered_unknown(4321));
+    }
+
+    /// `0x556f35` frees a valid node too.
+    #[test]
+    fn a_refusal_of_a_held_record_takes_it_away() {
+        let mut cache = NameCache::default();
+        cache.insert_creature(55, Some(record("Kobold")));
+        cache.insert_creature(55, None);
+        assert!(cache.creature_record(55).is_none());
     }
 
     #[test]
     fn clear_pending_allows_a_reconnect_reask() {
         let (cmds, rx) = commands();
         let mut cache = NameCache::default();
-        let g = compose(guid::HIGH_UNIT, 100, 1);
+        let g = compose(guid::HIGH_PLAYER, 100, 1);
 
-        assert_eq!(cache.resolve(g, &cmds), None);
+        assert_eq!(cache.resolve_player(g, Ask::New(&cmds)), None);
         let _ = rx.try_recv();
         // A disconnect dropped the answer.
         cache.clear_pending();
-        assert_eq!(cache.resolve(g, &cmds), None);
+        assert_eq!(cache.resolve_player(g, Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
-            Ok(ClientCommand::CreatureQuery { entry: 100, .. })
+            Ok(ClientCommand::NameQuery { guid }) if guid == g
         ));
     }
 
     /// `OBJECT_FIELD_ENTRY` and `UNIT_FIELD_PETNUMBER`, absolute descriptor indices.
     const ENTRY: u16 = 3;
     const PETNUMBER: u16 = 139;
+    /// `OBJECT_FIELD_TYPE` and a creature's or a pet's mask, which the display resolve's ask
+    /// needs (`0x60b134`).
+    const TYPE: u16 = 2;
+    const CREATURE: u32 = 9;
 
     fn unit(fields: &[(u16, u32)]) -> ObjectStore {
         ObjectStore(benilla_protocol::ObjectFields::from_pairs(fields))
@@ -925,6 +1222,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags: 0,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,
@@ -942,11 +1240,11 @@ mod tests {
         cache.insert_creature(2_671, Some(record("Mechanical Squirrel")));
 
         assert_eq!(
-            cache.resolve_unit(squirrel, Some(&store), &cmds),
+            cache.resolve_unit(squirrel, Some(&store), Ask::New(&cmds)),
             Some("Mechanical Squirrel")
         );
         assert_eq!(
-            cache.peek_unit(squirrel, Some(&store)),
+            cache.resolve_unit(squirrel, Some(&store), Ask::Read),
             Some("Mechanical Squirrel")
         );
         assert!(
@@ -955,19 +1253,130 @@ mod tests {
         );
     }
 
+    /// `[[unit+8]+0xc]` keys the creature cache (`0x604629`): a creature whose guid bits spell
+    /// another entry is named, and asked for, by its descriptor, and a descriptor with no entry
+    /// yet has no key (the cache refuses 0, `0x556aad`-`0x556ab6`, and `0x604646` skips the store).
     #[test]
-    fn a_cold_companion_pet_asks_the_creature_query_for_its_entry() {
+    fn a_creature_is_keyed_by_its_descriptor_entry_not_its_guid_bits() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        let wolf = compose(guid::HIGH_UNIT, 299, 4);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 2_671)]);
+        cache.insert_creature(299, Some(record("Guid Bits")));
+        cache.insert_creature(2_671, Some(record("Field Entry")));
+        assert_eq!(
+            cache.resolve_unit(wolf, Some(&store), Ask::New(&cmds)),
+            Some("Field Entry")
+        );
+
+        let cold = NameCache::default();
+        cold.lookup_fields(wolf, &store.0, &cmds);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 2_671, .. })
+        ));
+
+        let bare = unit(&[]);
+        let fresh = NameCache::default();
+        fresh.lookup_fields(wolf, &bare.0, &cmds);
+        assert_eq!(fresh.resolve_unit(wolf, Some(&bare), Ask::New(&cmds)), None);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// `resolve` finds the streamed object and names it from its descriptor (`0x609210`), so a
+    /// creature whose guid bits spell another entry is named by the field entry, and read, never
+    /// asked (`[unit+0xb30]`, `0x60934b`); only an unstreamed guid falls to its bits, and is asked.
+    #[test]
+    fn resolve_names_a_streamed_unit_by_its_descriptor_not_its_guid_bits() {
+        let (cmds, rx) = commands();
+        let wolf = compose(guid::HIGH_UNIT, 299, 4);
+        let mut objs = crate::ui_items::TestObjects::new();
+        objs.spawn_object(
+            wolf,
+            ObjectFields::from_pairs(&[(ENTRY, 2_671), (PETNUMBER, 0)]),
+        );
+        let objects = objs.get();
+
+        let cold = NameCache::default();
+        assert_eq!(cold.resolve(&objects, wolf, Ask::New(&cmds)), None);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "a streamed creature is read, not asked"
+        );
+        let stranger = compose(guid::HIGH_UNIT, 299, 5);
+        assert_eq!(cold.resolve(&objects, stranger, Ask::New(&cmds)), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 299, guid }) if guid == stranger
+        ));
+
+        let mut warm = NameCache::default();
+        warm.insert_creature(299, Some(record("Guid Bits")));
+        warm.insert_creature(2_671, Some(record("Field Entry")));
+        assert_eq!(
+            warm.resolve(&objects, wolf, Ask::New(&cmds)),
+            Some("Field Entry")
+        );
+
+        // Not streamed: the bits are all there is.
+        assert_eq!(
+            warm.resolve(&objects, stranger, Ask::New(&cmds)),
+            Some("Guid Bits")
+        );
+    }
+
+    /// `0x55f080` on `0xc0e228` takes the guid as it is: a chat speaker or summoner that is not a
+    /// player is asked of the player cache, and never of the creature cache by its bits.
+    #[test]
+    fn resolve_player_asks_the_player_cache_for_any_guid() {
+        let (cmds, rx) = commands();
+        let cache = NameCache::default();
+        let creature = compose(guid::HIGH_UNIT, 299, 4);
+        assert_eq!(cache.resolve_player(creature, Ask::New(&cmds)), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::NameQuery { guid }) if guid == creature
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// The display resolve asks only for mask 9 (`0x60b134`): a descriptor with no
+    /// `OBJECT_FIELD_TYPE` reads 0 and asks nothing, nor does a player's `0x19`.
+    #[test]
+    fn only_a_creatures_mask_asks_its_record() {
+        let (cmds, rx) = commands();
+        let cache = NameCache::default();
+        let wolf = compose(guid::HIGH_UNIT, 1234, 1);
+        cache.ask_creature_record(wolf, &unit(&[(ENTRY, 1234)]).0, &cmds);
+        cache.ask_creature_record(wolf, &unit(&[(TYPE, 0x19), (ENTRY, 1234)]).0, &cmds);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        cache.ask_creature_record(wolf, &unit(&[(TYPE, CREATURE), (ENTRY, 1234)]).0, &cmds);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 1234, .. })
+        ));
+    }
+
+    #[test]
+    fn a_cold_companion_pet_is_asked_by_the_creature_query_at_its_create() {
         let (cmds, rx) = commands();
         let cache = NameCache::default();
         let squirrel = compose(guid::HIGH_PET, 5_021, 3);
-        let store = unit(&[(ENTRY, 2_671)]);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 2_671)]);
 
-        assert_eq!(cache.resolve_unit(squirrel, Some(&store), &cmds), None);
+        cache.lookup_fields(squirrel, &store.0, &cmds);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::CreatureQuery { entry: 2_671, guid }) if guid == squirrel
         ));
-        assert_eq!(cache.resolve_unit(squirrel, Some(&store), &cmds), None);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "no pet-name query for a PETNUMBER of 0"
+        );
+        assert_eq!(
+            cache.resolve_unit(squirrel, Some(&store), Ask::New(&cmds)),
+            None
+        );
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
@@ -979,14 +1388,20 @@ mod tests {
         let store = unit(&[(ENTRY, 3_122), (PETNUMBER, 7)]);
         cache.insert_creature(3_122, Some(record("Bloodtalon Taillasher")));
 
-        assert_eq!(cache.resolve_unit(rex, Some(&store), &cmds), None);
+        assert_eq!(cache.resolve_unit(rex, Some(&store), Ask::New(&cmds)), None);
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::PetNameQuery { pet_number: 7, guid }) if guid == rex
         ));
         cache.insert_pet(7, "Rex".into());
-        assert_eq!(cache.resolve_unit(rex, Some(&store), &cmds), Some("Rex"));
-        assert_eq!(cache.peek_unit(rex, Some(&store)), Some("Rex"));
+        assert_eq!(
+            cache.resolve_unit(rex, Some(&store), Ask::New(&cmds)),
+            Some("Rex")
+        );
+        assert_eq!(
+            cache.resolve_unit(rex, Some(&store), Ask::Read),
+            Some("Rex")
+        );
     }
 
     /// A charmed creature gets a pet number (`SpellAuras.cpp:3248`) and is named under it.
@@ -997,7 +1412,10 @@ mod tests {
         let ogre = compose(guid::HIGH_UNIT, 1_000, 9);
         let store = unit(&[(ENTRY, 1_000), (PETNUMBER, 55)]);
 
-        assert_eq!(cache.resolve_unit(ogre, Some(&store), &cmds), None);
+        assert_eq!(
+            cache.resolve_unit(ogre, Some(&store), Ask::New(&cmds)),
+            None
+        );
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::PetNameQuery { pet_number: 55, .. })

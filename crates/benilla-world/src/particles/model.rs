@@ -86,9 +86,13 @@ pub(super) fn update_model_particles(
                         sub.no_depth_test,
                         sub.fog_policy,
                         sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
+                        sub.stage1.as_ref(),
+                        sub.combine,
                         // Lit like every entity M2 (`0x69e280`).
                         ShadeSel::Lit,
                         0,
+                        // A particle's model sorts as its emitter's cloud does, on its rung.
+                        None,
                         None,
                         None, // the over-life tint owns the colour, never the M2Color loop
                         None,

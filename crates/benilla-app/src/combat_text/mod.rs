@@ -4,7 +4,8 @@
 //! world-anchored: the unit's overhead anchor is snapshotted at spawn (`0x6c73f0` to `0x608640`:
 //! the PlayerName attachment, slot 18, else `feet + scale × bbox_z × 1.25`), moved `z − 1/3`, and
 //! re-projected every frame (`0x483ee0`), rising and fading per its row of `0xce8828`. Numbers
-//! are bare `"%d"`, misses localized words; at most 4 texts per unit, a hard drop (`0x6c73f0`).
+//! are bare `"%d"`, misses the `GlobalStrings.lua` words their keys read as they float
+//! ([`TextBody`]); at most 4 texts per unit, a hard drop (`0x6c73f0`).
 //! Damage over yourself is suppressed at the emitters (Gate A, `0x607140`/`0x6128b0`); the XP
 //! emitter (category 4) is self-anchored and skips it. Heals and energize never float in 1.12.
 //!
@@ -63,15 +64,26 @@ use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
 use benilla_world::view::WorldCamera;
 
 /// Spawn one floating text over `anchor`. The producer applies Gate A, so a spawn here shows
-/// unless the cap drops it.
+/// unless the cap drops it or its word has no string.
 #[derive(Message)]
 pub(crate) struct CombatTextSpawn {
     pub(crate) anchor: Entity,
-    pub(crate) text: String,
+    pub(crate) text: TextBody,
     /// Config category 0-5 ([`CATEGORIES`]).
     pub(crate) category: u8,
     /// The emitter override ([`damage_color`]); `None` is the row's default.
     pub(crate) color: Option<u32>,
+}
+
+/// What a floating text shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TextBody {
+    /// The text itself: a `"%d"` number, the XP line.
+    Literal(String),
+    /// An outcome word's `GlobalStrings.lua` key, which `0x607140` reads through
+    /// `FrameScript_GetText` as it floats the word (`0x6071f3`); a missing or empty string floats
+    /// nothing (`0x6071f8`-`0x6071ff`).
+    Word(&'static str),
 }
 
 /// One live WORLDTEXTSTRING. `pos` is a spawn-time snapshot, so a unit that walks away leaves its
@@ -147,6 +159,10 @@ pub(crate) fn float_combat_text(
     mut bucket: Local<crate::smart_rect::SmartBucket>,
     // Absent in a bare test world, which draws the default face.
     font: Option<Res<DamageTextFont>>,
+    // The globals a word is read from; with no VM a word has no string.
+    script: Option<NonSend<benilla_ui::script::UiScript>>,
+    // `widescreen`, which shapes the interface's screen the text is drawn on.
+    widescreen: Option<Res<crate::video::Widescreen>>,
 ) {
     let now = time.elapsed_secs_f64();
     // Headless there is no camera: spawns and expiry run, nothing draws.
@@ -156,6 +172,18 @@ pub(crate) fn float_combat_text(
         .map(|(c, pose)| (c, GlobalTransform::from(*pose)));
     let viewport = cam.as_ref().and_then(|(c, _)| c.logical_viewport_size());
     for spawn in spawns.read() {
+        let text = match &spawn.text {
+            TextBody::Literal(text) => text.clone(),
+            TextBody::Word(key) => {
+                match script
+                    .as_deref()
+                    .and_then(|s| crate::ui_chat::combat::global_string(s, key))
+                {
+                    Some(text) => text,
+                    None => continue,
+                }
+            }
+        };
         let Some(slot) = free_slot(&texts.0, spawn.anchor) else {
             continue; // the 4-slot hard drop
         };
@@ -173,8 +201,8 @@ pub(crate) fn float_combat_text(
             &mounts,
         );
         debug!(
-            "fct: \"{}\" (cat {}) over {:?}",
-            spawn.text, spawn.category, spawn.anchor
+            "fct: \"{text}\" (cat {}) over {:?}",
+            spawn.category, spawn.anchor
         );
         if benilla_assets::trace::enabled() {
             let via_attach = anchors
@@ -183,14 +211,8 @@ pub(crate) fn float_combat_text(
             benilla_assets::trace::line(
                 "fct",
                 &format!(
-                    "spawn \"{}\" cat={} anchor={:?} pos=({:.3},{:.3},{:.3}) attach18={}",
-                    spawn.text,
-                    spawn.category,
-                    spawn.anchor,
-                    overhead.x,
-                    overhead.y,
-                    overhead.z,
-                    via_attach
+                    "spawn \"{text}\" cat={} anchor={:?} pos=({:.3},{:.3},{:.3}) attach18={}",
+                    spawn.category, spawn.anchor, overhead.x, overhead.y, overhead.z, via_attach
                 ),
             );
         }
@@ -199,7 +221,7 @@ pub(crate) fn float_combat_text(
             anchor: spawn.anchor,
             pos,
             born: now,
-            text: spawn.text.clone(),
+            text,
             category: spawn.category,
             color: spawn
                 .color
@@ -216,9 +238,14 @@ pub(crate) fn float_combat_text(
     let (Some((cam, cam_tf)), Some(atlas)) = (cam, atlas.as_mut()) else {
         return; // headless or pre-world: age, draw nothing
     };
-    let Some(viewport) = viewport else {
+    let Some(cam_viewport) = viewport else {
         return;
     };
+    // The text is drawn on the interface's screen, 4:3 and stretched across the window with
+    // `widescreen` 0 ([`crate::ui_script::UiScreen`]), whose size the gx sizes take.
+    let ui =
+        crate::ui_script::UiScreen::of(cam_viewport, widescreen.as_deref().is_none_or(|w| w.0));
+    let viewport = ui.size;
     // The per-frame reset (`0x509500`), then seats per unit in creation order (the anchor id
     // here), slots descending (`0x6c6e00`): the newest number seats first, the older is pushed.
     bucket.clear();
@@ -234,7 +261,9 @@ pub(crate) fn float_combat_text(
         let life = elapsed_ms / cat.dur_ms;
         // The rise enters world z before projection (`6c7d29`, projected at `6c7d96`).
         let world = t.pos + Vec3::Y * (cat.rise * life);
-        let Some(screen) = crate::ui_pass::project_overlay(cam, &cam_tf, world, viewport) else {
+        let Some(screen) =
+            crate::ui_pass::project_overlay(cam, &cam_tf, world, cam_viewport).map(|p| ui.point(p))
+        else {
             culled.push(i); // behind the camera or off the viewport
             continue;
         };
@@ -242,7 +271,7 @@ pub(crate) fn float_combat_text(
         let size_value = scale_value(t.category, life);
         let target_px = text_px(size_value, viewport);
         // Deviation: the reference stretches a raster of at most 32 px; each whole-pixel size is
-        // rasterized here, so the crit pop stays crisp.
+        // rasterized here because that way the crit pop stays crisp.
         let mut e = atlas.lock();
         let mut glyphs = layout_text_quads(
             &mut e,
@@ -259,9 +288,12 @@ pub(crate) fn float_combat_text(
                 path: font.as_ref().and_then(|f| f.0.as_deref()),
                 height: Some(target_px),
                 outline: Outline::None,
+                monochrome: false,
                 spacing: 0.0, // one line
                 shadow_x: 0.0,
                 alpha_gradient: None,
+                non_space_wrap: false,
+                max_lines: 0,
             },
             // A world overlay with its own seat; the UI grid does not apply.
             crate::ui_text::TextSeat::Exact,
@@ -356,7 +388,8 @@ fn source_class(
 
 /// A travelling spell's miss word, floated when the projectile lands. `0x6e7a70` skips its inline
 /// emit when Speed (`SpellRec+0x94`) is nonzero (`0x6e7d4e`); the arrival re-resolves the record
-/// from `[missile+0x18]` and calls `0x607140`, so the word takes the spell's colour.
+/// from `[missile+0x18]` and calls `0x607140` for a record without `Attributes & 0x100`
+/// (`0x61dda3`), so the word takes the spell's colour.
 fn missile_miss_text(
     mut arrivals: MessageReader<crate::entities::MissileMiss>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
@@ -373,16 +406,18 @@ fn missile_miss_text(
         let Some(source) = source_class(arrival.caster, &self_player, &self_guid, &stores) else {
             continue; // K = other: never drawn
         };
-        let display = spells
-            .as_ref()
-            .and_then(|s| s.catalog.get(arrival.spell_id));
-        let Some(color) = damage_color(*gates, source, melee_styled(display)) else {
+        let Some(display) =
+            crate::ui_chat::combat::feedback_spell(spells.as_deref(), arrival.spell_id)
+        else {
+            continue;
+        };
+        let Some(color) = damage_color(*gates, source, melee_styled(Some(display))) else {
             continue; // the CombatDamage and Pet* gates, read inside `0x607140`
         };
-        if let Some((word, category)) = miss_word(arrival.code) {
+        if let Some((key, category)) = miss_word(arrival.code) {
             text.write(CombatTextSpawn {
                 anchor: arrival.anchor,
-                text: word.to_string(),
+                text: TextBody::Word(key),
                 category,
                 color,
             });
@@ -432,7 +467,10 @@ fn melee_impact_text(
 pub(crate) struct CombatTextPlugin;
 
 /// The damage-text rows' change callback: three flags.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gates: ResMut<DamageTextGates>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut gates: bevy::prelude::Mut<'_, DamageTextGates>,
+) {
     match ev.key().as_str() {
         "combatdamage" => gates.combat_damage = ev.flag(),
         "petmeleedamage" => gates.pet_melee = ev.flag(),
@@ -444,7 +482,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gates: ResMut<Damag
 impl Plugin for CombatTextPlugin {
     fn build(&self, app: &mut App) {
         // The Update append window ([`UiQuadAppend`]), after the camera controller.
-        app.add_observer(on_cvar);
         app.init_resource::<WorldTexts>()
             .init_resource::<DamageTextFont>()
             .init_resource::<DamageTextGates>()
@@ -478,14 +515,14 @@ mod tests {
         for i in 0..6 {
             app.world_mut().write_message(CombatTextSpawn {
                 anchor: unit,
-                text: format!("{i}"),
+                text: TextBody::Literal(format!("{i}")),
                 category: 0,
                 color: None,
             });
         }
         app.world_mut().write_message(CombatTextSpawn {
             anchor: other,
-            text: "7".into(),
+            text: TextBody::Literal("7".into()),
             category: 0,
             color: Some(COLOR_SPELL_GOLD),
         });
@@ -580,12 +617,12 @@ mod tests {
 
         assert_eq!(
             fire(FIREBALL, false, true),
-            vec![("Resist".to_string(), 3, Some(law::COLOR_SPELL_GOLD))],
+            vec![(TextBody::Word("RESIST"), 3, Some(law::COLOR_SPELL_GOLD))],
             "my Fireball's resist word is spell gold, category 3, over the victim"
         );
         assert_eq!(
             fire(AUTO_SHOT, false, true),
-            vec![("Resist".to_string(), 3, None)],
+            vec![(TextBody::Word("RESIST"), 3, None)],
             "AttributesEx3 bit 15 keeps a ranged basic shot's word melee-white"
         );
         assert!(
@@ -596,6 +633,71 @@ mod tests {
             fire(FIREBALL, false, false).is_empty(),
             "CombatDamage 0 is read inside the word emitter — it silences words too"
         );
+    }
+
+    /// `0x607140` reads the outcome's word through `FrameScript_GetText`, by its key in `0x86582c`
+    /// (`0x6071e7`-`0x6071f3`), as it floats it, and floats nothing for a missing or empty string
+    /// (`0x6071f8`-`0x6071ff`): an addon's or a locale's word is what shows.
+    #[test]
+    fn a_miss_word_is_its_global_string_and_an_empty_one_floats_nothing() {
+        use crate::entities::MissileMiss;
+        use crate::net::{ObjectStore, SelfGuid, SelfPlayer};
+        use benilla_ui::script::UiScript;
+
+        const FIREBALL: u32 = 133;
+        let float = |assign: &str| -> Vec<String> {
+            let mut app = App::new();
+            app.add_plugins(bevy::time::TimePlugin)
+                .init_resource::<UiQuads>()
+                .init_resource::<WorldTexts>()
+                .add_message::<MissileMiss>()
+                .add_message::<CombatTextSpawn>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<DamageTextGates>()
+                .insert_resource(crate::ui_action::Spells {
+                    catalog: benilla_formats::SpellCatalog::from_displays(
+                        [(
+                            FIREBALL,
+                            benilla_formats::SpellDisplay {
+                                name: "Fireball".into(),
+                                speed: 24.0,
+                                ..Default::default()
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    ..crate::ui_action::Spells::empty_for_tests()
+                })
+                .add_systems(Update, (missile_miss_text, float_combat_text).chain());
+            let script = UiScript::new().expect("VM");
+            script.run(assign).expect("assign RESIST");
+            app.insert_non_send_resource(script);
+            let me = app
+                .world_mut()
+                .spawn((SelfPlayer, ObjectStore::default(), Transform::default()))
+                .id();
+            let victim = app
+                .world_mut()
+                .spawn((ObjectStore::default(), Transform::default()))
+                .id();
+            app.world_mut().write_message(MissileMiss {
+                caster: me,
+                anchor: victim,
+                spell_id: FIREBALL,
+                code: 2, // RESIST
+            });
+            app.update();
+            app.world()
+                .resource::<WorldTexts>()
+                .0
+                .iter()
+                .map(|t| t.text.clone())
+                .collect()
+        };
+        assert_eq!(float("RESIST = 'Résiste'"), ["Résiste"]);
+        assert!(float("RESIST = ''").is_empty(), "an empty string");
+        assert!(float("RESIST = nil").is_empty(), "no string");
     }
 
     /// The cull's walk collects indices unsorted, against the list before removal.

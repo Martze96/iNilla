@@ -1,7 +1,8 @@
 //! The world map's arrow frames (`0x4a8bb0`), the seven bindings `WorldMapFrame.lua` and
 //! `Blizzard_BattlefieldMinimap.lua` call. The reference keeps two singletons per UI session, the
 //! world map's and the battlefield minimap's: stock `Model` frames made by the first `Create`,
-//! never freed, their rect the arrow file's bounding box and their facing the player's.
+//! never freed, their rect the arrow file's bounding box and their facing that of the object the
+//! camera follows.
 
 use mlua::{Lua, MultiValue, ObjectLike, Table, Value};
 
@@ -79,17 +80,30 @@ impl Arrow {
     }
 }
 
-/// `G48` (`0x832a48`), the Y half-extent of the reference's layout space: `1/√(A² + 1)` for the
-/// screen's aspect `A`, 0.6 at 4:3.
-fn g48(model: &Model) -> f32 {
-    let (w, h) = (model.screen.width(), model.screen.height());
-    let a = if h > 0.0 { w / h } else { 4.0 / 3.0 };
-    1.0 / (a * a + 1.0).sqrt()
+/// The arrow's model scale for this screen: `G48`, the cell `K2` (`0x41ae70(1.0)` reads
+/// `[0x832a48]`), times its factor (`0x4a7ad3`, `0x4a7ad8`).
+fn arrow_scale(model: &Model, which: Arrow) -> f32 {
+    model.layout_units().k2() * which.scale_over_g48()
 }
 
-/// The arrow's model scale for this screen.
-fn arrow_scale(model: &Model, which: Arrow) -> f32 {
-    g48(model) * which.scale_over_g48()
+/// Both arrows' model scale for new cells. The reference fixes it at creation, which a change of
+/// cells repeats, as the rebuilt interface runs `CreateWorldMapArrowFrame` again
+/// (`WorldMapFrame.lua:15`); a live resize sets it here instead.
+pub(super) fn rescale(model: &mut Model) {
+    for which in [Arrow::World, Arrow::Mini] {
+        let Some(id) = which.slot(model) else {
+            continue;
+        };
+        let scale = arrow_scale(model, which);
+        let Some(&h) = model.id_to_frame.get(&id) else {
+            continue;
+        };
+        if let Some(crate::widget::KindState::Model(m)) =
+            model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+        {
+            m.scale = scale;
+        }
+    }
 }
 
 /// `lua_isstring`: a string, or a number (which `lua_tostring` would print).
@@ -129,7 +143,12 @@ fn create(lua: &Lua, which: Arrow, parent: Value) -> mlua::Result<()> {
     }
     let wrapper = create_frame(
         lua,
-        ("Model".to_string(), None, Some(Value::Table(t)), None),
+        (
+            Some(Value::String(lua.create_string("Model")?)),
+            None,
+            Some(Value::Table(t)),
+            None,
+        ),
     )?;
     let id = decode_id(&wrapper)?;
     let scale = {
@@ -163,23 +182,23 @@ fn arrow_wrapper(lua: &Lua, which: Arrow) -> mlua::Result<Option<Table>> {
 }
 
 /// `UpdateWorldMapArrowFrames()` (`0x4a8d10`, `0x4a7c20`): re-centre each arrow and copy the
-/// camera-tracked object's facing, the player's; with no player the facing stays.
+/// facing of the object the camera follows (`0x4a7c7c`-`0x4a7cd5`); an object that does not
+/// resolve leaves it (`0x4a7ca2`).
 fn update(lua: &Lua) -> mlua::Result<()> {
     for which in [Arrow::World, Arrow::Mini] {
         let Some(wrapper) = arrow_wrapper(lua, which)? else {
             continue;
         };
-        let (facing, tracked, facts) = {
+        let (facing, facts) = {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             (
-                model.worldmap.player_facing,
-                model.worldmap.player_uv.is_some(),
+                model.worldmap.followed_facing,
                 model.model_facts_for(ARROW_MODEL),
             )
         };
         super::modelframe::with_model(lua, &wrapper, |m| {
             m.position = centre_of(facts.as_deref());
-            if tracked {
+            if let Some(facing) = facing {
                 m.facing = facing;
             }
         })?;
@@ -483,18 +502,25 @@ mod tests {
         s.run("ShowWorldMapArrowFrame(1)").unwrap();
         assert!(s.eval::<bool>("return arrow:IsShown()").unwrap());
 
-        s.set_world_map_feed(None, Some((0.5, 0.5)), 1.25, None, Vec::new(), Vec::new());
-        s.run("UpdateWorldMapArrowFrames()").unwrap();
-        let facing = s.eval::<f32>("return arrow:GetFacing()").unwrap();
-        assert!(
-            (facing - 1.25).abs() < 1e-6,
-            "the tracked object's facing: {facing}"
+        let turned_to = |s: &mut UiScript, uv, followed| {
+            s.set_world_map_feed(None, uv, followed);
+            s.run("UpdateWorldMapArrowFrames()").unwrap();
+            s.eval::<f32>("return arrow:GetFacing()").unwrap()
+        };
+        assert_eq!(
+            turned_to(&mut s, Some((0.5, 0.5)), Some(1.25)),
+            1.25,
+            "the followed object's facing"
         );
-        s.set_world_map_feed(None, None, 2.0, None, Vec::new(), Vec::new());
-        s.run("UpdateWorldMapArrowFrames()").unwrap();
-        assert!(
-            (s.eval::<f32>("return arrow:GetFacing()").unwrap() - 1.25).abs() < 1e-6,
-            "no tracked object: the facing does not move"
+        assert_eq!(
+            turned_to(&mut s, None, Some(2.0)),
+            2.0,
+            "off the displayed map: `0x4a7c20` reads no position"
+        );
+        assert_eq!(
+            turned_to(&mut s, Some((0.5, 0.5)), None),
+            2.0,
+            "an object that does not resolve: the facing does not move"
         );
     }
 }

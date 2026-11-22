@@ -96,15 +96,16 @@ pub(super) struct EntityPart {
 }
 
 impl EntityPart {
-    /// The four texture-transform channels as the engine's lanes take them, the one place a spawner
-    /// reads them. Ask `UvLoops::animates`: a scale-only transform or a dead slot-0 translation is
-    /// `None` on the channel you would check first.
+    /// The texture-transform channels of both stages as the engine's lanes take them, the one place
+    /// a spawner reads them. Ask `UvLoops::animates`: a scale-only transform or a dead slot-0
+    /// translation is `None` on the channel you would check first.
     pub(super) fn uv_loops(&self) -> benilla_world::doodad_anim::UvLoops {
         benilla_world::doodad_anim::UvLoops {
             seqs: self.uv_seq.clone(),
             single: self.uv_anim.clone(),
             rot: self.uv_rot_seq.clone(),
             scale: self.uv_scale_seq.clone(),
+            stage1: benilla_world::doodad_anim::Stage1Loops::of(&self.geometry),
         }
     }
 }
@@ -155,9 +156,10 @@ pub(crate) struct DisplayModel {
     pub(super) ground_radius_local: f32,
     /// The authored portrait camera the portrait booth frames through (`0x713540`).
     pub(super) portrait_camera: Option<benilla_assets::PortraitCamera>,
-    /// Camera-table index 1, the rig a `<PlayerModel>` widget renders through (`0x505890`); without
-    /// it the reference uses its fixed fallback camera.
-    pub(super) pane_camera: Option<benilla_assets::PortraitCamera>,
+    /// The camera table by raw index, each record at rest: index 1 is the rig a `<PlayerModel>`
+    /// widget renders through (`0x505890`), else the reference's fixed fallback camera, and
+    /// `SetCamera(n)` names any (`0x76cec0`).
+    pub(super) cameras: std::sync::Arc<[benilla_assets::PortraitCamera]>,
     /// A bow's `$WTT`/`$WTB` string anchors (`0x611ff0`), `[top, bottom]` as
     /// `(bone, model-local Bevy position)`.
     pub(super) string_anchors: Option<[(u16, Vec3); 2]>,
@@ -182,6 +184,25 @@ pub(crate) struct DisplayModel {
 }
 
 impl DisplayModel {
+    /// Whether an emitter rides a bone the idle poses: the Corrupted Ashbringer's glow bones carry
+    /// constant turns that set the plane of its XY quads.
+    pub(super) fn poses_emitters(&self) -> bool {
+        !self.skeleton.joints.is_empty()
+            && self.animations.is_some()
+            && self.emitters.iter().any(|e| e.billboard.is_none())
+    }
+
+    /// The skeleton and idle a booth poses this model's emitters with, if they need one.
+    pub(super) fn emitter_rig(&self) -> Option<crate::portrait::EffectRig> {
+        if !self.poses_emitters() {
+            return None;
+        }
+        Some(crate::portrait::EffectRig {
+            skeleton: self.skeleton.clone(),
+            animations: self.animations.clone()?,
+        })
+    }
+
     /// Whether a built part is welded to a billboard bone: it has no rigid placement (the reference
     /// blends it per vertex), so even the item lane must rig for it (seven shoulder models).
     pub(super) fn welds_billboard(&self) -> bool {
@@ -265,7 +286,7 @@ pub(crate) fn empty_shell() -> DisplayModel {
         swim_pivot_drop_local: 0.0,
         ground_radius_local: 0.0,
         portrait_camera: None,
-        pane_camera: None,
+        cameras: std::sync::Arc::new([]),
         bbox_z_local: 0.0,
         stand_box_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
@@ -317,7 +338,7 @@ pub(super) fn build_parts(
     let mut swim_pivot_drop_local = 0.0;
     let mut ground_radius_local = 0.0;
     let mut portrait_camera = None;
-    let mut pane_camera = None;
+    let mut cameras: std::sync::Arc<[benilla_assets::PortraitCamera]> = std::sync::Arc::new([]);
     let mut bbox_z_local = 0.0;
     let mut stand_box_z_local = 0.0;
     let mut bake_center_local = Vec3::ZERO;
@@ -366,7 +387,7 @@ pub(super) fn build_parts(
             animations = model.animations.clone();
             first_seq_span = model.first_seq_span;
             portrait_camera = model.portrait_camera;
-            pane_camera = model.pane_camera;
+            cameras = model.cameras.iter().map(|c| c.still).collect();
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
@@ -384,8 +405,8 @@ pub(super) fn build_parts(
                         dm.object_texture.as_deref(),
                         asset_server,
                     );
-                    // The authored batch order (index + 1) biases the transparent sort, so coplanar
-                    // transparent batches draw in file order instead of flipping a tie each frame.
+                    // The authored batch order (index + 1) keys the batch's own material; the
+                    // transparent order sorts it (`benilla_world::model_render::order`).
                     let order = u16::try_from(pi + 1).unwrap_or(u16::MAX);
                     let v = mats.entity_variants(sub, texture, order, uv);
                     let v = v.expect("light buffer checked at entry");
@@ -494,7 +515,7 @@ pub(super) fn build_parts(
     dm.swim_pivot_drop_local = swim_pivot_drop_local;
     dm.ground_radius_local = ground_radius_local;
     dm.portrait_camera = portrait_camera;
-    dm.pane_camera = pane_camera;
+    dm.cameras = cameras;
     dm.bbox_z_local = bbox_z_local;
     dm.stand_box_z_local = stand_box_z_local;
     dm.bake_center_local = bake_center_local;
@@ -552,6 +573,62 @@ fn model_dir(model_path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CreatureDisplayInfo` 4 names `CrystalSpider.mdx`, which does not ship: the model load
+    /// stands `Spells\ErrorCube.mdx` (`0x707350`, `0x70737f`) rather than drawing nothing.
+    #[test]
+    fn a_display_whose_model_file_is_missing_resolves_to_the_error_cube() {
+        use benilla_assets::{
+            m2_url, register_asset_loaders, register_mpq_source, M2Model, ERROR_CUBE,
+        };
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalog = benilla_formats::load_creature_catalog(&mut chain).expect("creatures");
+        let path = catalog.model(4).expect("display 4").model_path;
+        assert!(
+            path.to_ascii_lowercase().contains("crystalspider"),
+            "{path}"
+        );
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        register_mpq_source(&mut app, &data).expect("register mpq source");
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.init_asset::<Mesh>();
+        app.init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>();
+        app.init_asset::<bevy::animation::AnimationClip>();
+        app.init_asset::<bevy::animation::graph::AnimationGraph>();
+        register_asset_loaders(&mut app);
+        let server = app.world().resource::<AssetServer>().clone();
+        let display = new_creature_display(&catalog, 4, &server);
+        assert!(display.names_a_model());
+        let ModelHandle::M2(handle) = display.handle else {
+            panic!("display 4 names an M2");
+        };
+        let cube: Handle<M2Model> = server.load(m2_url(ERROR_CUBE));
+        let shape = |app: &App, h: &Handle<M2Model>| {
+            app.world().resource::<Assets<M2Model>>().get(h).map(|m| {
+                m.submeshes
+                    .iter()
+                    .map(|s| s.geometry.positions.len())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let mut got = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            app.update();
+            if let (Some(a), Some(b)) = (shape(&app, &handle), shape(&app, &cube)) {
+                got = Some((a, b));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (spider, cube) = got.expect("both load");
+        assert!(!cube.is_empty(), "the cube has geometry");
+        assert_eq!(spider, cube, "the missing model is the cube");
+    }
 
     /// Both kinds carry the same empty `parts` once built, so only the handle tells a display that
     /// named no model from one whose model draws nothing.

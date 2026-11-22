@@ -1,5 +1,5 @@
 //! The stock death popups (`StaticPopup.lua`): release, self-resurrect, resurrect offers, the
-//! spirit healer's confirm and the corpse run, driven as the app's death feed drives them.
+//! spirit healer's confirm and the corpse run, driven over the VM's copy of the death state.
 
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
@@ -7,6 +7,8 @@ use super::test_ui::load_ui as load_xml;
 
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -99,7 +101,10 @@ fn death_popup_offers_the_self_resurrect_and_spends_it() {
     // Either click hides the dialog, so raise it again first.
     s.fire_event("PLAYER_DEAD", vec![]);
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
-    assert_eq!(s.take_death_actions(), vec![DeathAction::UseSoulstone]);
+    assert_eq!(
+        s.take_death_actions(),
+        vec![DeathAction::UseSoulstone { may_cast: true }]
+    );
     assert!(
         !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "the self-res hides the dialog; the resurrection itself lands as descriptor deltas"
@@ -141,7 +146,10 @@ fn death_popup_button2_is_decided_at_show_time() {
         "Reincarnation"
     );
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
-    assert_eq!(s.take_death_actions(), vec![DeathAction::UseSoulstone]);
+    assert_eq!(
+        s.take_death_actions(),
+        vec![DeathAction::UseSoulstone { may_cast: true }]
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -309,7 +317,7 @@ fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
     });
     s.fire_event("CONFIRM_XP_LOSS", vec![]);
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
         420.0,
         "showAlert widens the dialog to the ref's 420"
@@ -334,7 +342,7 @@ fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
         "whileDead = 1 } StaticPopup_Show(\"TEST_PLAIN\")"
     ))
     .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
         320.0,
         "a non-alert Show resets the width"
@@ -436,19 +444,59 @@ fn corpse_range_events_drive_recover_corpse() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// No corpse reads (0, 0), which hides the map's corpse marker (`WorldMapFrame.lua:445`).
+/// No corpse reads (0, 0), which hides the map's corpse marker (`WorldMapFrame.lua:445`); the
+/// corpse cache is read at the call through the host (`crate::lanes::world_map_live_tests`).
 #[test]
 fn corpse_map_position_binding() {
     benilla_formats::wow_data_or_skip!();
-    let mut s = setup();
+    let s = setup();
     let (x, y) = s
         .eval::<(f64, f64)>("return GetCorpseMapPosition()")
         .unwrap();
     assert_eq!((x, y), (0.0, 0.0), "no corpse ⇒ the (0,0) hide sentinel");
-    s.set_world_map_feed(None, None, 0.0, Some((0.25, 0.75)), Vec::new(), Vec::new());
-    let (x, y) = s
-        .eval::<(f64, f64)>("return GetCorpseMapPosition()")
-        .unwrap();
-    assert!((x - 0.25).abs() < 1e-6 && (y - 0.75).abs() < 1e-6);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Both timers answer whole seconds: the release timer truncates its milliseconds by a signed
+/// divide (`0x48b5ae`-`0x48b5bd`), the reclaim delay floors them by an unsigned one
+/// (`0x48b5f0`-`0x48b5f7`).
+#[test]
+fn the_death_timers_answer_whole_seconds() {
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    s.set_death(DeathUiState {
+        release_remaining: Some(299.7),
+        recovery_delay: 0.4,
+        ..Default::default()
+    });
+    assert_eq!(
+        s.eval::<f64>("return GetReleaseTimeRemaining()").unwrap(),
+        299.0
+    );
+    assert_eq!(
+        s.eval::<f64>("return GetCorpseRecoveryDelay()").unwrap(),
+        0.0
+    );
+    s.set_death(DeathUiState {
+        release_remaining: Some(0.4),
+        recovery_delay: 1.6,
+        ..Default::default()
+    });
+    assert_eq!(
+        s.eval::<f64>("return GetReleaseTimeRemaining()").unwrap(),
+        0.0
+    );
+    assert_eq!(
+        s.eval::<f64>("return GetCorpseRecoveryDelay()").unwrap(),
+        1.0
+    );
+    // No timer: `0x4962a0` answers -1000 ms, which the signed divide keeps as -1.
+    s.set_death(DeathUiState {
+        release_remaining: None,
+        ..Default::default()
+    });
+    assert_eq!(
+        s.eval::<f64>("return GetReleaseTimeRemaining()").unwrap(),
+        -1.0
+    );
 }

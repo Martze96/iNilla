@@ -228,20 +228,23 @@ pub(super) fn read_environmental_damage_log(
 pub struct SpellLogMiss {
     pub spell_id: u32,
     pub caster: u64,
+    /// The packet's extended byte: set, each entry carries two floats, and the client hands them
+    /// to a hook and emits nothing (`0x5e7ec1`-`0x5e7f09`). vmangos never sets it.
+    pub extended: bool,
     pub misses: Vec<(u64, u8)>,
 }
 
 pub(super) fn read_spell_log_miss(r: &mut impl Read) -> io::Result<SpellLogMiss> {
     let spell_id = read_u32_le(r)?;
     let caster = read_u64_le(r)?;
-    let use_extended = read_u8(r)?;
+    let extended = read_u8(r)? != 0;
     let count = read_u32_le(r)?;
-    // vmangos never sends this opcode (misses ride `SMSG_SPELL_GO`), so 64 is an arbitrary cap.
+    // vmangos sends one entry at a time (`SpellCaster.cpp:663-673`), so 64 is an arbitrary cap.
     let mut misses = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         let target = read_u64_le(r)?;
         let miss_info = read_u8(r)?;
-        if use_extended != 0 {
+        if extended {
             let _arg1 = read_f32_le(r)?;
             let _arg2 = read_f32_le(r)?;
         }
@@ -250,6 +253,7 @@ pub(super) fn read_spell_log_miss(r: &mut impl Read) -> io::Result<SpellLogMiss>
     Ok(SpellLogMiss {
         spell_id,
         caster,
+        extended,
         misses,
     })
 }
@@ -357,14 +361,19 @@ pub(super) fn read_dispel_failed(r: &mut impl Read) -> io::Result<DispelFailed> 
     })
 }
 
-/// `SMSG_ENCHANTMENTLOG`, an enchant landing on or fading from an item
-/// (`Server/Packets/Item.cpp:235-242`); a zero `caster` means it faded.
+/// `SMSG_ENCHANTMENTLOG`, an enchant landing on or fading from an item. `0x628ea0` hands its first
+/// guid on as the owner and its second as the caster (`0x628f23`-`0x628f29`), the other way round
+/// from vmangos's names (`Server/Packets/Item.cpp:237-238`); a zero `caster` means it faded
+/// (`0x628fac`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnchantmentLog {
-    pub caster: u64,
+    /// The target of either line (`0x628fd2`, `0x6291f4`).
     pub owner: u64,
+    pub caster: u64,
     pub item_entry: u32,
-    pub spell_id: u32,
+    /// A `SpellItemEnchantment.dbc` row, though vmangos names it `spellId`: every caller passes
+    /// the item's enchantment id (`Objects/Item.cpp:1040`, `:1043`, `:1079`).
+    pub enchant_id: u32,
     /// False on the owner's copy, true on everyone else's; the 1.12 client picks the
     /// enchant-added message by it.
     pub show_affiliation: bool,
@@ -372,10 +381,10 @@ pub struct EnchantmentLog {
 
 pub(super) fn read_enchantment_log(r: &mut impl Read) -> io::Result<EnchantmentLog> {
     Ok(EnchantmentLog {
-        caster: read_u64_le(r)?,
         owner: read_u64_le(r)?,
+        caster: read_u64_le(r)?,
         item_entry: read_u32_le(r)?,
-        spell_id: read_u32_le(r)?,
+        enchant_id: read_u32_le(r)?,
         show_affiliation: read_u8(r)? != 0,
     })
 }

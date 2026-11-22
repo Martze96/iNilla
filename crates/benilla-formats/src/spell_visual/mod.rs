@@ -38,7 +38,8 @@ pub const MISSILE_ATTACH_TABLE: [u16; 11] = [
     0x14, 0x22, 0x13, 0x15, 0x16, 0x11, 0x17, 0x18, 0x19, 0xf, 0x10,
 ];
 
-/// The data writes "no value" in an id column as 0 or as this, inconsistently; both read `None`.
+/// The data writes "no value" in an id column as 0 or as this, inconsistently; both read `None`
+/// through [`some_unless_none`], except where 0 is a real id (a kit's animation, [`kit_anim_id`]).
 const NONE_SENTINEL: u32 = u32::MAX;
 
 /// `CharProc` slots per kit; the dispatcher (`0x60d7c0`) walks exactly four.
@@ -178,8 +179,7 @@ pub struct VisualStages {
     pub state: u32,
     pub channel: u32,
     /// Field 7: the missile's `SpellVisualEffectName` id; 0 flies the ammo or weapon model, and an
-    /// id with no row the client's `Spells\ErrorCube.mdx` (`0x60a3d0`). A missile exists whenever
-    /// `Spell.dbc` Speed > 0, whatever this holds.
+    /// id with no row the client's `Spells\ErrorCube.mdx` (`0x60a3d0`).
     pub missile_model: u32,
     /// Field 9: the index into [`MISSILE_ATTACH_TABLE`].
     pub missile_attach: u32,
@@ -189,8 +189,9 @@ pub struct VisualStages {
     /// Field 14: the `SoundEntries.dbc` id the `$TRD` anim event plays at a craft's strike frame
     /// (`0x62faa0`), such as mining's pick clang, sound 1143.
     pub strike_sound: Option<u32>,
-    /// Field 6: `SMSG_SPELL_GO` spawns the dest one-shot at the packet's dest only when this is 0
-    /// and [`Self::area_effect`] is set (`0x6e8088`); the missile spawn ignores it.
+    /// Field 6: a travelling spell's GO launches missiles only when this is nonzero or the wire
+    /// carries an ammo display id (`0x6e8a7f`, `0x6e8a88`), and spawns the dest one-shot at the
+    /// packet's dest only when this is 0 and [`Self::area_effect`] is set (`0x6e8088`).
     pub missile_gate: u32,
     /// Field 11: a DynamicObject shows its own model only when this is nonzero (`0x5d57c0`).
     pub area_gate: u32,
@@ -200,6 +201,9 @@ pub struct VisualStages {
     /// Field 13: a DynamicObject's kit, for its emitters (`0x5d55c0` scans it for CharProc type 9)
     /// and its looping sound.
     pub area_kit: u32,
+    /// Field 15: bit 0 lets a GO whose target mask carries a point (`0x60`) still fly one missile
+    /// per listed unit (`0x6e8aab`); clear, such a GO flies one missile at the point.
+    pub flags: u32,
 }
 
 impl VisualStages {
@@ -231,7 +235,8 @@ impl VisualStages {
 // No `Eq`: the `CharProc` params are floats.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VisualKit {
-    /// Field 2: the `AnimationData.dbc` id played on the unit.
+    /// Field 2: the `AnimationData.dbc` id played on the unit. 0 (Stand) is an id; only a negative
+    /// field reads `None` ([`kit_anim_id`]).
     pub anim_id: Option<u16>,
     /// Field 13: the `SoundEntries.dbc` id.
     pub sound: Option<u32>,
@@ -252,6 +257,13 @@ pub struct VisualKit {
 }
 
 impl VisualKit {
+    /// The animation id where the client tests it above 0, not only against negative: the hold
+    /// resolver (`0x612a08 test; 0x612a0a jle`), the missile release gate (`0x6e8295 jg`) and the
+    /// stationary pin (`0x5fdeb5 cmp …,0; jle`). A kit naming 0 (Stand) passes none of them.
+    pub fn positive_anim(&self) -> Option<u16> {
+        self.anim_id.filter(|&a| a > 0)
+    }
+
     /// The filled `CharProc` slots, in slot order.
     pub fn char_procs(&self) -> impl Iterator<Item = CharProc> + '_ {
         self.char_proc_slots.iter().flatten().copied()
@@ -460,6 +472,38 @@ fn some_unless_none(v: u32) -> Option<u32> {
     (v != 0 && v != NONE_SENTINEL).then_some(v)
 }
 
+/// Kit field 2 (`+0x8`), the `AnimationData.dbc` id the kit plays. The client skips the animation
+/// block only for a negative id (`0x60f361 test eax,eax; 0x60f366 jl`), so 0 (Stand) is an id like
+/// any other: a state kit naming it still recomputes the base animation (`0x60f383`-`0x60f399`).
+/// An id past `u16` matches no animation and reads as none.
+fn kit_anim_id(v: u32) -> Option<u16> {
+    u16::try_from(v).ok()
+}
+
+/// One `SpellVisualKit.dbc` row. Effect, world-effect, sound and shake ids keep 0 as none: the
+/// effect slots and the world effect test only for a negative id (`0x60efe4 jl`, `0x60f022 jl`)
+/// but then index `SpellVisualEffectName` and drop a null row (`0x60eff9 je`, `0x60f042 je`), and
+/// that table has no row 0, so 0 resolves to nothing either way; the sound tests `je` on 0
+/// (`0x60f442`) and the shake `jle` (`0x60f4cd`).
+fn kit_from_record(r: &benilla_dbc::Record) -> VisualKit {
+    let mut effect_slots = [None; 9];
+    for (i, slot) in effect_slots.iter_mut().enumerate() {
+        *slot = u32_at(r, 3 + i).and_then(some_unless_none);
+    }
+    let mut char_proc_slots = [None; KIT_CHAR_PROCS];
+    for (i, slot) in char_proc_slots.iter_mut().enumerate() {
+        *slot = char_proc_slot(r, i);
+    }
+    VisualKit {
+        anim_id: u32_at(r, 2).and_then(kit_anim_id),
+        sound: u32_at(r, 13).and_then(some_unless_none),
+        effect_slots,
+        world_effect: u32_at(r, 12).and_then(some_unless_none),
+        shake: u32_at(r, 14).and_then(some_unless_none),
+        char_proc_slots,
+    }
+}
+
 /// Read the four spell visual tables off the patch chain.
 pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog> {
     let sv_bytes = chain
@@ -490,6 +534,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
                 area_gate: g(11),
                 area_effect: g(12),
                 area_kit: g(13),
+                flags: g(15),
             },
         );
     }
@@ -501,27 +546,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
     let mut kits = HashMap::with_capacity(svk_set.records().len());
     for r in svk_set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
-        let anim_id = u32_at(r, 2).and_then(some_unless_none).map(|a| a as u16);
-        let sound = u32_at(r, 13).and_then(some_unless_none);
-        let mut effect_slots = [None; 9];
-        for (i, slot) in effect_slots.iter_mut().enumerate() {
-            *slot = u32_at(r, 3 + i).and_then(some_unless_none);
-        }
-        let mut char_proc_slots = [None; KIT_CHAR_PROCS];
-        for (i, slot) in char_proc_slots.iter_mut().enumerate() {
-            *slot = char_proc_slot(r, i);
-        }
-        kits.insert(
-            id,
-            VisualKit {
-                anim_id,
-                sound,
-                effect_slots,
-                world_effect: u32_at(r, 12).and_then(some_unless_none),
-                shake: u32_at(r, 14).and_then(some_unless_none),
-                char_proc_slots,
-            },
-        );
+        kits.insert(id, kit_from_record(r));
     }
 
     let sven_bytes = chain

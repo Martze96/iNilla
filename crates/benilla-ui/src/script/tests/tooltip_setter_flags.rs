@@ -18,7 +18,7 @@ fn view(recovery_ms: u32, chance: Option<&str>) -> SpellTooltipView {
         name: "Shield Wall".into(),
         cast_time: Some("Instant".into()),
         recovery_ms,
-        chance: chance.map(str::to_string),
+        chance: chance.map(Into::into),
         ..Default::default()
     }
 }
@@ -38,7 +38,7 @@ fn fixture() -> UiScript {
         r#"
         CreateFrame("Button", "FL"):SetPoint("CENTER", 0, 0)
         FL:SetWidth(10) FL:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
     "#,
     )
     .unwrap();
@@ -165,6 +165,9 @@ fn set_shapeshift_and_set_pet_action_answer_the_same_flag() {
         ("TT:SetShapeshift(3)", "1:nil:nil"),
         ("TT:SetShapeshift(4)", "1:number:1"),
         ("TT:SetShapeshift(9)", "1:nil:nil"),
+        // `index - 1` against the count, unsigned (`0x5329fe`, `0x532a01`): 0 is past the list,
+        // not the running first entry.
+        ("TT:SetShapeshift(0)", "1:nil:nil"),
         ("TT:SetPetAction(1)", "1:number:1"),
         ("TT:SetPetAction(2)", "1:nil:nil"),
         ("TT:SetPetAction(3)", "1:nil:nil"),
@@ -191,13 +194,13 @@ fn set_action_answers_the_builders_flag_by_kind() {
             ..Default::default()
         },
     );
-    s.set_macros(MacroState {
-        account: vec![MacroView {
+    s.set_macros(MacroState::from_scopes(
+        vec![MacroView {
             name: "spawn".into(),
             ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     let put = |s: &mut UiScript, id: u32, kind: u8, action: u32, cooldown| {
         s.set_action(
             id,
@@ -222,7 +225,7 @@ fn set_action_answers_the_builders_flag_by_kind() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([(
                 1,
@@ -300,7 +303,7 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
         name: Some("Linen Cloth".into()),
         ..Default::default()
     });
-    s.set_auction(Some(auction));
+    s.set_auction(auction);
     {
         let mut model = s.model_mut();
         let item = CursorItem {
@@ -329,6 +332,12 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
         assert_eq!(call(&s, c), "1:nil:nil", "{c} filled");
         assert!(s.eval::<bool>("return TT:IsShown()").unwrap(), "{c} drew");
     }
+    // Row `ftol(n) - 1` compared unsigned, so 0 names none (`0x5355ce`, `0x535933`).
+    for c in ["TT:SetInboxItem(0)", "TT:SetAuctionItem('list', 0)"] {
+        s.run("TT:Hide()").unwrap();
+        assert_eq!(call(&s, c), "1:nil:nil", "{c}");
+        assert!(!s.eval::<bool>("return TT:IsShown()").unwrap(), "{c} drew");
+    }
     assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }
 
@@ -337,8 +346,13 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
 #[test]
 fn live_objects_and_blocks_reach_the_flag() {
     let mut s = fixture();
+    s.keep_calls();
     s.run(r#"ITEM_DURATION_HOURS = "[DURATION %d h]" LOCKED = "[LOCKED]""#)
         .unwrap();
+    s.set_lock_rows(std::collections::HashMap::from([
+        (7, Vec::new()),
+        (9, Vec::new()),
+    ]));
     s.set_item_template(
         8300,
         ItemTemplateView {
@@ -354,8 +368,9 @@ fn live_objects_and_blocks_reach_the_flag() {
             ..Default::default()
         },
     );
-    let held = |item_id, flags, duration_ms| ContainerSlot {
+    let held = |item_id, guid, flags, duration_ms| ContainerSlot {
         item_id,
+        guid,
         count: 1,
         flags,
         duration_ms,
@@ -364,13 +379,13 @@ fn live_objects_and_blocks_reach_the_flag() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([
-                (1, held(8300, 0, None)),
-                (2, held(8300, 0x4, None)),
-                (3, held(8301, 0, Some(3_600_000))),
-                (4, held(8301, 0, None)),
+                (1, held(8300, 0x831, 0, None)),
+                (2, held(8300, 0x832, 0x4, None)),
+                (3, held(8301, 0x833, 0, Some(3_600_000))),
+                (4, held(8301, 0x834, 0, None)),
             ]),
         }),
     );
@@ -438,18 +453,12 @@ fn live_objects_and_blocks_reach_the_flag() {
             ..Default::default()
         });
     }
-    // The player's slots are live item objects: the flags decide LOCKED (`0x5342ed`), and the
-    // block's lock id is zeroed (`0x534341`).
-    for (i, flags) in [(0, Some(0)), (1, Some(0x4)), (2, None)] {
-        st.player.slots[i] = Some(TradeSlotItem {
-            item_id: 8300,
-            name: Some("Strongbox".into()),
-            count: 1,
-            object_flags: flags,
-            ..Default::default()
-        });
-    }
+    // The player's slots are the live item objects their guids name (`0x5342ed`): the flags
+    // decide LOCKED, and the block's lock id is zeroed (`0x534341`).
+    s.open_trade_window(0x7);
     s.set_trade(Some(st));
+    s.run("PickupContainerItem(0, 1) ClickTradeButton(1) PickupContainerItem(0, 2) ClickTradeButton(2)")
+        .unwrap();
     let locked = |s: &UiScript, call: &str| {
         s.eval::<bool>(&format!(
             "TT:SetOwner(FL, 'ANCHOR_RIGHT') {call} \
@@ -468,7 +477,7 @@ fn live_objects_and_blocks_reach_the_flag() {
     assert!(!locked(&s, "TT:SetTradePlayerItem(2)"), "UNLOCKED");
     assert!(
         !locked(&s, "TT:SetTradePlayerItem(3)"),
-        "no object, no block lock"
+        "an empty slot builds nothing"
     );
 }
 
@@ -566,4 +575,80 @@ fn the_action_bar_item_word_walks_the_references_order() {
     s.set_container(0, None);
     s.set_container(-2, bag(vec![(1, timed(0, None))]));
     assert_eq!(ask(&mut s), "1:number:1", "the keyring is walked");
+}
+
+/// ITEM_COOLDOWN_TIME on the spell tooltip (`0x52f537..0x52f577`): drawn only while the setter
+/// passes a running cooldown and the larger modified recovery is a minute or more, between the
+/// reagents and the chance line, counting what is left rounded up (`0x52fa50`). The recovery
+/// gates the line; the time shown is the remainder, so a minute-long spell with 30 s left reads
+/// seconds.
+#[test]
+fn the_spell_cooldown_line_needs_a_minute_of_recovery_and_sits_before_the_chance() {
+    let mut s = fixture();
+    s.run(
+        r#"
+        ITEM_COOLDOWN_TIME_MIN = "[CD %d m]"
+        ITEM_COOLDOWN_TIME_SEC = "[CD %d s]"
+    "#,
+    )
+    .unwrap();
+    let full = |recovery_ms| SpellTooltipView {
+        reagents: Some("Reagents: Feather".into()),
+        description: "Does a thing.".into(),
+        ..view(recovery_ms, Some("5.00% chance to parry"))
+    };
+    s.set_spell_tooltip(871, full(1_800_000));
+    s.set_spell_tooltip(872, full(60_000));
+    s.set_spell_tooltip(873, full(59_999));
+    s.set_spellbook(SpellBookState {
+        tabs: Vec::new(),
+        slots: vec![
+            // 29.99 min left of a half-hour recovery.
+            slot(871, RUNNING_30_MIN),
+            // A minute's recovery with 30 s left: the floor is met, the unit is seconds.
+            slot(872, Some((9_400, 30_600, true))),
+            // One millisecond under the floor.
+            slot(873, RUNNING_30_MIN),
+            // No cooldown running.
+            slot(871, None),
+        ],
+    });
+    let lines = |s: &UiScript, index: u32| -> Vec<String> {
+        s.eval::<Vec<String>>(&format!(
+            "TT:SetOwner(FL, 'ANCHOR_RIGHT') TT:SetSpell({index}, 'spell') \
+             local t = {{}} for i = 1, TT:NumLines() do \
+               t[i] = getglobal('TTTextLeft' .. i):GetText() end return t"
+        ))
+        .unwrap()
+    };
+    let name_to_chance = |l: Vec<String>| l[1..l.len() - 1].to_vec();
+    assert_eq!(
+        name_to_chance(lines(&s, 1)),
+        [
+            "Instant",
+            "Reagents: Feather",
+            "[CD 30 m]",
+            "5.00% chance to parry"
+        ]
+    );
+    assert_eq!(
+        name_to_chance(lines(&s, 2)),
+        [
+            "Instant",
+            "Reagents: Feather",
+            "[CD 30 s]",
+            "5.00% chance to parry"
+        ]
+    );
+    assert_eq!(
+        name_to_chance(lines(&s, 3)),
+        ["Instant", "Reagents: Feather", "5.00% chance to parry"],
+        "under a minute of recovery, only the recast cell shows it"
+    );
+    assert_eq!(
+        name_to_chance(lines(&s, 4)),
+        ["Instant", "Reagents: Feather", "5.00% chance to parry"],
+        "no cooldown running"
+    );
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }

@@ -108,7 +108,8 @@ fn cmsg_bodies_golden() {
     );
 
     // MSG_RAID_TARGET_UPDATE (Group.cpp:77-82): icon and guid set or clear one icon; a lone 0xFF
-    // requests the current set.
+    // requests the current set, the bytes the client's raid roster writer sends (`0x4bac01` puts
+    // the opcode, `0x4bac20` the 0xFF, nothing after).
     assert_eq!(
         messages::raid_target_set(3, guid),
         hx(concat!("03", "f0debc9a78563412")),
@@ -132,14 +133,19 @@ fn cmsg_bodies_golden() {
         "ready_check_start body"
     );
     assert_eq!(
-        messages::ready_check_answer(true),
+        messages::ready_check_answer(1),
         hx("01"),
-        "ready_check_answer(true) body"
+        "ready_check_answer(1) body"
     );
     assert_eq!(
-        messages::ready_check_answer(false),
+        messages::ready_check_answer(0),
         hx("00"),
-        "ready_check_answer(false) body"
+        "ready_check_answer(0) body"
+    );
+    assert_eq!(
+        messages::ready_check_answer(0xff),
+        hx("ff"),
+        "any status byte goes out as given (`0x4bc0e4`)"
     );
 }
 
@@ -166,6 +172,13 @@ fn group_notification_smsg_wire() {
         [SessionEvent::GroupDecline { name }] => assert_eq!(name, "Alice"),
         other => panic!("group decline decode: {other:?}"),
     }
+
+    // SMSG_GROUP_CANCEL (0x5e6770): a name is read and dropped; the event carries nothing.
+    let (p, tail) =
+        messages::parse_server_with_tail(opcode::SMSG_GROUP_CANCEL, &hx("426f6200")).unwrap();
+    assert_eq!(tail, 0, "the name is read");
+    assert!(matches!(p, ServerPacket::GroupCancel));
+    assert!(matches!(decode(p).as_slice(), [SessionEvent::GroupCancel]));
 
     // SMSG_GROUP_SET_LEADER (Group.cpp:150-153): one cstring, the new leader's name.
     let p = messages::parse_server(opcode::SMSG_GROUP_SET_LEADER, &hx("426f6200")).unwrap();
@@ -329,6 +342,36 @@ fn group_list_raid_with_assistant_flag() {
             );
         }
         other => panic!("expected GroupList, got {}", other.name()),
+    }
+}
+
+/// A list whose loot tail ends at the threshold, as MaNGOS Zero sends it, still applies: 1.12.1's
+/// read of the unused fourth byte fails silently on a short body (`0x5e6e3d`, `0x418cb0`).
+#[test]
+fn group_list_without_the_difficulty_byte_applies() {
+    let mut body = vec![0u8, 0x00];
+    body.extend_from_slice(&1u32.to_le_bytes()); // memberCount
+    body.extend_from_slice(b"Erin\0");
+    body.extend_from_slice(&0x5555u64.to_le_bytes());
+    body.push(member_status::ONLINE);
+    body.push(0x00);
+    body.extend_from_slice(&0x5555u64.to_le_bytes()); // leaderGuid
+    body.push(0); // lootMethod: free for all
+    body.extend_from_slice(&0u64.to_le_bytes()); // looterGuid
+    body.push(2); // lootThreshold, and no byte after it
+
+    let p = messages::parse_server(opcode::SMSG_GROUP_LIST, &body).unwrap();
+    match decode(p).as_slice() {
+        [SessionEvent::GroupList {
+            members,
+            leader: 0x5555,
+            loot: Some(loot),
+            ..
+        }] => {
+            assert_eq!(members.len(), 1);
+            assert_eq!(loot.threshold, 2);
+        }
+        other => panic!("group list decode: {other:?}"),
     }
 }
 

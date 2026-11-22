@@ -70,12 +70,12 @@ const INSTALLED: &[&str] = &[
 enum Seat {
     /// The app's order: the roster row goes in ahead of `load_ingame_ui`.
     BeforeAddons,
-    /// Nothing writes `"player"` until `ui_unit::feed_units` sees the self descriptor.
+    /// Nothing writes `"player"` until the self descriptor is seen.
     AfterAddons,
 }
 
 /// A roster with a pending pick, for [`super::seat_from_roster`] itself to seat.
-fn roster() -> crate::char_select::Roster {
+fn roster() -> crate::glue_session::roster::Roster {
     let row = benilla_protocol::Character {
         guid: 7,
         name: "Harness".into(),
@@ -83,6 +83,7 @@ fn roster() -> crate::char_select::Roster {
         class: 1, // Warrior
         gender: 0,
         level: 60,
+        new_character: false,
         skin: 0,
         face: 0,
         hair_style: 0,
@@ -95,16 +96,17 @@ fn roster() -> crate::char_select::Roster {
             y: 0.0,
             z: 0.0,
         },
+        guild_id: 0,
         flags: 0,
         equipment: [benilla_protocol::CharEnumItem::default(); 19],
         pet_display_id: 0,
         pet_level: 0,
         pet_family: 0,
     };
-    crate::char_select::Roster::with_pending_pick(vec![row], 7)
+    crate::glue_session::roster::Roster::with_pending_pick(vec![row], 7)
 }
 
-/// The `"player"` snapshot the self descriptor builds, as `ui_unit::feed_units` pushes it: the
+/// The `"player"` snapshot the self descriptor builds, as the host reads it: the
 /// roster seat plus what only the descriptor says (the unit exists, its level, health, a live
 /// object). The seat leaves those nil and 0, as the reference answers before the object exists.
 fn descriptor_snapshot(seat: &benilla_ui::script::UnitState) -> benilla_ui::script::UnitState {
@@ -125,6 +127,7 @@ fn descriptor_snapshot(seat: &benilla_ui::script::UnitState) -> benilla_ui::scri
 /// A session's VM: the whole interface, `INSTALLED` walked in dependency order, a real backpack.
 fn seat(root: &Path, seat: Seat) -> UiScript {
     let mut s = UiScript::new().expect("VM");
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
 
     let mut registry: Vec<AddOnInfo> = INSTALLED
@@ -133,7 +136,8 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
         .collect();
     s.register_addons(registry.clone(), Some(root.to_path_buf()), None, None);
     s.set_realm_name("Harness");
-    let player = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
+    let player = super::seat_from_roster(&roster(), crate::ui_unit::TestNames::english().names())
+        .expect("a pending pick seats a player");
     if seat == Seat::BeforeAddons {
         // A `"player"` push with a name also seeds the player record, as the entry load does, so
         // `UnitName("player")` answers at addon file scope and Bagnon reads the live bags.
@@ -162,7 +166,7 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -423,7 +427,7 @@ fn the_item_button_helpers_paint_a_slots_icon_and_count() {
         .expect("GetVertexColor");
     assert_eq!(
         &tint[..3],
-        &[0.5, 0.5, 0.5],
+        &[benilla_ui::color::quant::read32(0.5); 3],
         "a locked item keeps the caller's 0.5 grey (ref: with a shader, r, g, b stay as passed)"
     );
 
@@ -440,7 +444,8 @@ fn the_item_button_helpers_paint_a_slots_icon_and_count() {
 /// What the roster seat puts in the VM, and `None` with no pick, so a capture loads unchanged.
 #[test]
 fn the_roster_seat_names_the_character_the_addons_will_meet() {
-    let seat = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
+    let seat = super::seat_from_roster(&roster(), crate::ui_unit::TestNames::english().names())
+        .expect("a pending pick seats a player");
     assert_eq!(seat.name.as_deref(), Some("Harness"));
     // 0, not 60: `UnitLevel` (`0x517fc0`) has no `"player"` fast path, so with no object it pushes
     // the number 0 (`0x51813e`). The level arrives with the descriptor.
@@ -461,7 +466,11 @@ fn the_roster_seat_names_the_character_the_addons_will_meet() {
     assert_eq!((seat.health, seat.max_health), (0, 0));
 
     assert!(
-        super::seat_from_roster(&crate::char_select::Roster::default()).is_none(),
+        super::seat_from_roster(
+            &crate::glue_session::roster::Roster::default(),
+            Default::default(),
+        )
+        .is_none(),
         "no pick, no seat — a capture must load exactly as it did before"
     );
 }
@@ -657,16 +666,17 @@ fn a_button_reports_its_own_label_width() {
         .expect("the label asks to be measured");
     s.set_measured_text_unwrapped(&[(req.id, 61.0, 12.0, req.key)]);
 
+    // Through the getter steps, `G(S(v))` at 4:3.
     assert_eq!(
         s.eval::<f64>("return ProbeWidthButton:GetTextWidth()")
             .expect("Button:GetTextWidth"),
-        61.0,
+        benilla_ui::test_support::law43(61.0),
         "the Button reports its LABEL's natural extent"
     );
     assert_eq!(
         s.eval::<f64>("return ProbeWidthButton:GetTextHeight()")
             .expect("Button:GetTextHeight"),
-        12.0
+        benilla_ui::test_support::law43(12.0)
     );
     // A Button with no label answers 0; the reference reads a FontString pointer that a bare
     // `CreateFrame("Button")` leaves null, and what it does then is untraced.
@@ -838,7 +848,7 @@ fn open_bagnon_stacked(root: &Path) -> UiScript {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -945,7 +955,10 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
         unreachable!("filtered to Texture above")
     };
     // VERTICAL, MinColor (0,0,0,0.9) on the bottom pair and MaxColor (0.2,0.2,0.2,0.9) on the top.
-    let (min, max) = ([0.0, 0.0, 0.0, 0.9], [0.2, 0.2, 0.2, 0.9]);
+    let (min, max) = (
+        benilla_ui::color::quant::drawn([0.0, 0.0, 0.0, 0.9]),
+        benilla_ui::color::quant::drawn([0.2, 0.2, 0.2, 0.9]),
+    );
     assert_eq!(color, None, "the art carries no one-colour tint");
     assert_eq!(
         gradient,
@@ -1045,7 +1058,8 @@ fn a_fontheight_with_no_font_attr_beside_it_is_never_read() {
     let s = open_bagnon_stacked(&root);
     assert_eq!(
         resolved_font(&s, "AutoFollowStatusText"),
-        ("Fonts\\FRIZQT__.TTF".into(), "12".into()),
+        // 12 through the getter steps, `G(S(12))` at 4:3.
+        ("Fonts\\FRIZQT__.TTF".into(), "12.000000298023".into()),
         "AutoFollowStatusText inherits GameFontNormal (12) and declares <FontHeight val=20> with \
          no font= — the 20 is dead XML in the reference, so 20 here means we are reading an \
          attribute the client never reaches"
@@ -1134,9 +1148,9 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         "the login scan records the occupied slot's short link"
     );
 
-    // An equipped bag: the inventory slot (20) first, then the container and its `BAG_UPDATE`,
-    // the order `feed_char.before(feed_containers)` holds. The size row reads the bag item's own
-    // count and link, so the other order records the bag without its link.
+    // An equipped bag: the inventory slot (20) and the container pushed, then its `BAG_UPDATE`,
+    // which the lanes' drain fires after every push. The size row reads the bag item's own count
+    // and link, so an event ahead of the inventory push records the bag without its link.
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
         item_id: 4497,
@@ -1166,15 +1180,7 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         "an equipped bag's size row carries its own count and short link"
     );
 
-    // The logout boundary: the despawn frame (no self store), then the shutdown events.
-    let mut memory = crate::ui_items::feed::FeedMemory::default();
-    crate::ui_items::feed::apply_container_source(
-        &mut s,
-        &mut memory,
-        None,
-        Default::default(),
-        Vec::new(),
-    );
+    // The logout boundary: the shutdown events, which fire no `BAG_UPDATE`, so the records stand.
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
     s.fire_event("PLAYER_LOGOUT", Vec::new());
     let (size, item) = s

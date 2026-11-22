@@ -78,6 +78,13 @@ fn item_query_wire() {
         hx("ff18001000c3cdab50f1")
     );
 
+    // A trade-slot target (an oil used on the partner's non-traded slot): TARGET_FLAG_TRADE_ITEM
+    // (0x1000) and the slot as a packed guid, as the trade bind `0x6e6900` writes it.
+    assert_eq!(
+        messages::use_item(255, 24, 0, messages::UseItemTarget::TradeItem(6)),
+        hx("ff180000100106")
+    );
+
     // A corpse target (Goblin Jumper Cables' Defibrillate, `Targets 0x8000`): the corpse bit and
     // the packed guid, the block `cast_spell_corpse` writes; vmangos reads the guid for either
     // corpse bit (`SpellCastTargetsInfo.cpp:156-157`). 0xF101_0000_0000_002A packs to mask 0xC1.
@@ -537,5 +544,35 @@ fn item_query_response_miss() {
             assert_eq!((entry, info), (1234, None));
         }
         _ => panic!("item query miss event"),
+    }
+}
+
+/// `CMSG_ITEM_NAME_QUERY` is the entry and the asker's guid; the answer is the entry and the
+/// name, and a top-bit entry refuses.
+#[test]
+fn item_name_query_wire() {
+    assert_eq!(
+        messages::item_name_query(2589, 0),
+        hx("1d0a00000000000000000000")
+    );
+    let hit = messages::parse_server(
+        messages::opcode::SMSG_ITEM_NAME_QUERY_RESPONSE,
+        &hx("1d0a00004c696e656e20436c6f746800"),
+    )
+    .unwrap();
+    match decode(hit).pop().unwrap() {
+        SessionEvent::ItemName { entry, name } => {
+            assert_eq!((entry, name.as_deref()), (2589, Some("Linen Cloth")));
+        }
+        _ => panic!("item name event"),
+    }
+    let miss = messages::parse_server(
+        messages::opcode::SMSG_ITEM_NAME_QUERY_RESPONSE,
+        &hx("1d0a0080"),
+    )
+    .unwrap();
+    match decode(miss).pop().unwrap() {
+        SessionEvent::ItemName { entry, name } => assert_eq!((entry, name), (2589, None)),
+        _ => panic!("item name refusal event"),
     }
 }

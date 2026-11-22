@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::loading_screen::LoadingScreen;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::model_render::MaterialCache;
@@ -38,7 +38,7 @@ pub(crate) struct PipeShared {
     pub(crate) created: AtomicUsize,
     /// Of those, how many are `Ok` or a non-retryable `Err`; a retryable one reads as pending.
     pub(crate) settled: AtomicUsize,
-    /// An opaque cover hides the frame: the loading screen, or not `InWorld`.
+    /// An opaque cover hides the frame: the loading screen, a held frame, or not `InWorld`.
     pub(crate) covered: AtomicBool,
 }
 
@@ -100,8 +100,11 @@ fn publish_cover(
     watch: Res<PipeWatch>,
     loading: Res<LoadingScreen>,
     state: Res<State<ClientState>>,
+    hold: Option<Res<crate::loading_screen::hold::PresentHold>>,
 ) {
-    let covered = loading.covering() || *state.get() != ClientState::InWorld;
+    // A frame the teleport hold keeps from the window hides its compiles as the cover does.
+    let held = hold.is_some_and(|h| h.held());
+    let covered = loading.covering() || held || *state.get() != ClientState::InWorld;
     watch.0.covered.store(covered, Ordering::Relaxed);
 }
 
@@ -275,6 +278,15 @@ impl WarmPass {
     /// Cover-lift gate: false while the menagerie still has pipelines in flight.
     pub(crate) fn satisfied(&self) -> bool {
         self.done
+    }
+
+    /// A pass with its warm work done, for the cover's tests.
+    #[cfg(test)]
+    pub(crate) fn done_for_test() -> Self {
+        Self {
+            done: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -586,17 +598,25 @@ fn despawn_rigs(commands: &mut Commands, rigs: &Query<(Entity, Option<&ChildOf>)
     }
 }
 
-/// One invisible HUD quad per warm frame, so its batch-mesh pipeline (POSITION + UV_0 + COLOR)
-/// compiles under the cover. The minimap composite's `Rectangle` layout is a rig in [`menagerie`].
+/// Invisible HUD quads per warm frame, so the batch-mesh pipelines (POSITION + UV_0 + COLOR)
+/// compile under the cover: the premultiplied one every mode but `MOD` draws through, and
+/// `MOD`'s multiply ([`crate::ui_pass::UiQuadKey`]), whose zero-alpha texel discards. The minimap
+/// composite's `Rectangle` layout is a rig in [`menagerie`].
 fn warm_ui_quad_lane(warm: Res<WarmPass>, mut quads: ResMut<crate::ui_pass::UiQuads>) {
     if warm.spawned_at.is_none() || warm.done {
         return;
     }
-    quads.overlays.push(crate::ui_pass::UiQuad {
-        rect: Rect::new(0.0, 0.0, 1.0, 1.0),
-        color: [0.0, 0.0, 0.0, 0.0],
-        ..default()
-    });
+    for blend in [
+        benilla_ui::script::BlendMode::Blend,
+        benilla_ui::script::BlendMode::Mod,
+    ] {
+        quads.overlays.push(crate::ui_pass::UiQuad {
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            color: [0.0, 0.0, 0.0, 0.0],
+            blend,
+            ..default()
+        });
+    }
 }
 
 /// Push one degenerate draw per reachable [`EffectPipelineKey`] through the production stream,
@@ -765,5 +785,38 @@ mod census_tests {
         let without = view_class(Some(&perspective()), Some(&Msaa::Off), false);
         assert_ne!(with, without);
         assert!(!warm_set_without_an_orthographic_arm().contains(&without));
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+    use crate::loading_screen::hold::PresentHold;
+
+    fn covered(hold: PresentHold) -> bool {
+        let watch = PipeWatch(Arc::new(PipeShared {
+            created: AtomicUsize::new(0),
+            settled: AtomicUsize::new(0),
+            covered: AtomicBool::new(false),
+        }));
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .insert_state(ClientState::InWorld)
+            .init_resource::<LoadingScreen>()
+            .insert_resource(hold)
+            .insert_resource(watch.clone())
+            .add_systems(Last, publish_cover);
+        app.update();
+        watch.0.covered.load(Ordering::Relaxed)
+    }
+
+    /// A held frame never reaches the window, so a pipeline compiled under it is hidden.
+    #[test]
+    fn a_held_frame_covers_its_compiles() {
+        assert!(
+            !covered(PresentHold::default()),
+            "a live frame is uncovered"
+        );
+        assert!(covered(PresentHold::holding()), "a held one is covered");
     }
 }

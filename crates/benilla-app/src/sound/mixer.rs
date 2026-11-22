@@ -121,7 +121,10 @@ impl Mixer {
             master,
             output,
             audio_pos,
+            tap_writers,
         } = main_track(&level, &limiter_on, sample_rate, probe_dir);
+        // A live run's taps write on until the process ends: their writers detach.
+        drop(tap_writers);
         let settings = AudioManagerSettings::<OutputBackend> {
             backend_settings,
             main_track_builder,
@@ -341,11 +344,18 @@ fn main_track(
     meter::install(&mut main, level);
     // A probing run brackets the limiter with two taps.
     let probe = probe_dir.zip(sample_rate);
+    let mut tap_writers = Vec::new();
     let audio_pos = probe
-        .and_then(|(dir, rate)| super::mix_tap::install_at(&mut main, &dir.join("pre.wav"), rate));
+        .and_then(|(dir, rate)| super::mix_tap::install_at(&mut main, &dir.join("pre.wav"), rate))
+        .map(|(frames, writer)| {
+            tap_writers.push(writer);
+            frames
+        });
     limiter::install(&mut main, level, limiter_on);
     if let Some((dir, rate)) = probe {
-        super::mix_tap::install_at(&mut main, &dir.join("post.wav"), rate);
+        tap_writers.extend(
+            super::mix_tap::install_at(&mut main, &dir.join("post.wav"), rate).map(|(_, w)| w),
+        );
     }
     let mut main = super::mix_tap::install(main, sample_rate);
     let output = main.add_effect(VolumeControlBuilder::new(Decibels::IDENTITY));
@@ -354,6 +364,7 @@ fn main_track(
         master,
         output,
         audio_pos,
+        tap_writers,
     }
 }
 
@@ -364,6 +375,8 @@ struct MainChain {
     master: VolumeControlHandle,
     output: VolumeControlHandle,
     audio_pos: Option<Arc<AtomicU64>>,
+    /// The probe taps' writer threads, which end once the chain is dropped and each file is whole.
+    tap_writers: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// `SoundBufferSize`, the mix-ahead in ms, read once from the stored config at sound init, as
@@ -777,6 +790,17 @@ impl StreamWatch {
 pub(super) mod tests {
     use super::*;
 
+    /// `SoundBufferSize` ships the depth the ring runs at when the config holds none
+    /// (`output::MIX_AHEAD_MS`), so `GetCVar` never answers a depth the mixer is not at.
+    #[test]
+    fn the_cvars_default_is_the_depth_the_mixer_falls_back_to() {
+        let row = crate::cvars::REGISTERED
+            .iter()
+            .find(|r| r.name == "SoundBufferSize")
+            .expect("the row");
+        assert_eq!(row.default, output::MIX_AHEAD_MS.to_string());
+    }
+
     fn preset(decay: f32, hf_ratio: f32, room: i32, room_hf: i32, reverb: i32) -> SoundProvider {
         SoundProvider {
             id: 0,
@@ -1062,11 +1086,13 @@ pub(super) mod tests {
 
         let wav = full_scale_tone(RATE);
 
+        let writers;
         {
             let level = Arc::new(MixLevel::default());
             let limiter_on = Arc::new(AtomicBool::new(true));
             let chain = main_track(&level, &limiter_on, Some(RATE), Some(&dir));
             let (main, audio_pos) = (chain.builder, chain.audio_pos);
+            writers = chain.tap_writers;
             let audio_pos = audio_pos.expect("the pre-tap publishes a frame clock");
             let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
                 backend_settings: MockBackendSettings { sample_rate: RATE },
@@ -1091,8 +1117,10 @@ pub(super) mod tests {
             );
         } // manager dropped: the tap producers abandon, the writers do their final flush.
 
-        // The writers wake on a 250 ms cadence; give them room to drain and exit.
-        std::thread::sleep(std::time::Duration::from_millis(900));
+        // Each writer drains, patches its header and ends once its tap is gone.
+        for w in writers {
+            w.join().expect("a tap writer");
+        }
 
         let peak = |name: &str| -> (f32, u64) {
             let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -1584,14 +1612,25 @@ pub(super) mod tests {
             r.process(&mut out, 2);
             out.iter().step_by(2).copied().collect()
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut lead = render(1);
-        while lead[0] == 0.0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            lead = render(1);
+        // kira renders in 128-frame chunks and, while its decode ring is short, zero-fills a whole
+        // chunk without advancing the stream (`StreamingSound::process`), so an all-silent chunk
+        // is the decode thread behind, never a gap in the loop: skip it and render on. A loop that
+        // stops at its end never sounds again and fails at the deadline, a bound on a hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut heard = Vec::new();
+        while heard.len() < FRAMES * 5 / 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the loop stopped sounding"
+            );
+            let chunk = render(128);
+            if chunk.iter().all(|v| v.abs() < 1e-4) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            heard.extend(chunk);
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let heard = render(FRAMES * 5 / 2);
+        heard.truncate(FRAMES * 5 / 2);
 
         let frame_of = |v: f32| ((v * 32768.0 - 1000.0) / f32::from(STEP)).round() as i64;
         let silent = heard.iter().filter(|v| v.abs() < 1e-4).count();
@@ -1682,12 +1721,13 @@ pub(super) mod tests {
         mp3
     }
 
-    /// Pump `h` on a mock device until it stops, for at most 5 s; whether it did.
+    /// Pump `h` on a mock device until it stops, for at most 120 s (a bound on a hang); whether
+    /// it did.
     pub(in crate::sound) fn plays_out(
         manager: &mut AudioManager<kira::backend::mock::MockBackend>,
         h: &StreamingSoundHandle<FromFileError>,
     ) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let backend = manager.backend_mut();
         while h.state() != kira::sound::PlaybackState::Stopped
             && std::time::Instant::now() < deadline

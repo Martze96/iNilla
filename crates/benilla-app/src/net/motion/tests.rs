@@ -13,7 +13,7 @@ use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
 use super::facing::resolve_facing;
 use super::relay::RelayChain;
-use super::remote::{facing_lerp, fall_arc_step, jump_seed, reconcile_lerp};
+use super::remote::{facing_lerp, fall_arc_step, jump_seed, reconcile_lerp, FallHeight};
 use super::spline::monster_move_spline;
 use super::{RemoteMotion, Spline};
 
@@ -28,20 +28,96 @@ fn speeds() -> MoveSpeeds {
     }
 }
 
+/// A pose at world height `z`, off any transport.
+fn at(z: f32) -> FallHeight {
+    FallHeight {
+        world_z: z,
+        aboard: None,
+    }
+}
+
 #[test]
 fn remote_fall_arc_reports_height_only_on_the_landing_edge() {
-    assert_eq!(fall_arc_step(false, true, None, 100.0), (Some(100.0), None));
     assert_eq!(
-        fall_arc_step(true, true, Some(100.0), 80.0),
-        (Some(100.0), None)
+        fall_arc_step(false, true, None, at(100.0)),
+        (Some(at(100.0)), None)
+    );
+    // Each airborne packet re-derives the start (`0x7c6490`).
+    assert_eq!(
+        fall_arc_step(true, true, Some(at(100.0)), at(80.0)),
+        (Some(at(80.0)), None)
     );
     assert_eq!(
-        fall_arc_step(true, false, Some(100.0), 70.0),
+        fall_arc_step(true, false, Some(at(100.0)), at(70.0)),
         (None, Some(30.0))
     );
     // Entered view mid-fall: no takeoff, no prediction.
-    assert_eq!(fall_arc_step(true, false, None, 70.0), (None, None));
-    assert_eq!(fall_arc_step(false, false, None, 70.0), (None, None));
+    assert_eq!(fall_arc_step(true, false, None, at(70.0)), (None, None));
+    assert_eq!(fall_arc_step(false, false, None, at(70.0)), (None, None));
+}
+
+/// A remote's flat jump on Undercity's lift car 20652, descending 28.95 yd/s for the 0.825 s
+/// arc: the deck-local heights measure it, not the world's 23.9 yd.
+#[test]
+fn a_remote_jump_on_a_descending_lift_lands_with_no_fall_height() {
+    const LIFT: u64 = 0x1fc0_0000_0000_0001;
+    let aboard = |world_z: f32| FallHeight {
+        world_z,
+        aboard: Some((LIFT, 0.4)),
+    };
+    let (start, _) = fall_arc_step(false, true, None, aboard(100.0));
+    let (_, descent) = fall_arc_step(true, false, start, aboard(100.0 - 28.95 * 0.825));
+    let descent = descent.expect("a takeoff seen, a landing reported");
+    assert!(
+        descent.abs() < 1e-6,
+        "no deck-frame drop, not the deck's {descent} yd"
+    );
+    // Boarding at the landing, a jump from the world onto the deck measures in the world.
+    let (start, _) = fall_arc_step(false, true, None, at(120.0));
+    assert_eq!(
+        fall_arc_step(true, false, start, aboard(100.0)),
+        (None, Some(20.0))
+    );
+}
+
+/// An airborne status's start height is its height plus the arc's drop over its fall time
+/// (`0x7c6490` → `0x7c5f30`), in the world and on the deck: a second into a fall from rest is
+/// g/2, 9.6455 yd, and under feather fall the 7.0 cap takes over at 0.3629 s, 5.7300 yd.
+#[test]
+fn an_airborne_status_starts_its_arc_its_drop_above_it() {
+    const DECK: u64 = 0x1fc0_0000_0000_0002;
+    let rest = Some(JumpInfo::default());
+    let tail = benilla_protocol::TransportPose {
+        guid: DECK,
+        pos: benilla_protocol::wire::Vector3d {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0,
+        },
+        orientation: 0.0,
+    };
+    let start = FallHeight::airborne([0.0, 0.0, 50.0], Some(&tail), rest, 1000, false);
+    assert!(
+        (start.world_z - 59.6455).abs() < 1e-3,
+        "{} yd",
+        start.world_z
+    );
+    let deck = start.aboard.expect("aboard").1;
+    assert!((deck - 11.6455).abs() < 1e-3, "{deck} yd on the deck");
+    let feather = FallHeight::airborne([0.0, 0.0, 50.0], None, rest, 1000, true);
+    assert!(
+        (feather.world_z - 55.73).abs() < 1e-3,
+        "{} yd",
+        feather.world_z
+    );
+    // Through the relay's apply: a mover first seen a second into its fall lands 19.6455 yd
+    // below where its arc began, not 10.
+    let mut falling = observed(move_flags::FALLING, [0.0, 0.0, 50.0], RelayVerb::Pose);
+    falling.fall_time = 1000;
+    falling.jump = rest;
+    let airborne = apply_observed(motion(0, 0.0), &falling);
+    let start = airborne.fall_start.expect("a fall start").world_z;
+    assert!((start - 59.6455).abs() < 1e-3, "{start} yd");
 }
 
 fn motion(flags: u32, orientation: f32) -> RemoteMotion {
@@ -54,10 +130,11 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
         speed: 0.0,
         vertical_velocity: 0.0,
         jump_xy_vel: [0.0, 0.0],
-        fall_start_z: None,
+        fall_start: None,
         relay: Default::default(),
         last_apply_ms: 0.0,
         last_apply_pos: [0.0, 0.0, 0.0],
+        fired_at_ms: None,
     }
 }
 
@@ -206,8 +283,8 @@ fn resolve_facing_angle_spot_and_target() {
             [0.0, 0.0, 0.0],
             none
         ),
-        None,
-        "a point directly above (no horizontal delta) is degenerate"
+        Some(std::f32::consts::FRAC_PI_2),
+        "a point directly above takes `0x47f220`'s fixed 0.5π"
     );
 }
 
@@ -385,6 +462,7 @@ fn spline_interpolates_constant_speed_and_faces_travel() {
     let start = Instant::now();
     let s = Spline {
         deck: None,
+        final_facing: benilla_protocol::MonsterMoveFacing::None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
         start,
         duration: Duration::from_secs(4),
@@ -425,6 +503,7 @@ fn spline_travel_pitch_is_the_segment_climb_angle() {
     let start = Instant::now();
     let s = Spline {
         deck: None,
+        final_facing: benilla_protocol::MonsterMoveFacing::None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 10.0]],
         start,
         duration: Duration::from_secs(4),
@@ -448,8 +527,17 @@ fn monster_move_carries_every_waypoint() {
         [10.0, 10.0, 0.0],
         [10.0, 10.0, 5.0],
     ];
-    let s = monster_move_spline(path.clone(), 42, false, 2000, false, true, None)
-        .expect("a moving monster-move yields a spline");
+    let s = monster_move_spline(
+        path.clone(),
+        42,
+        false,
+        2000,
+        false,
+        true,
+        MonsterMoveFacing::None,
+        None,
+    )
+    .expect("a moving monster-move yields a spline");
     assert_eq!(
         s.points, path,
         "every waypoint survives, not just the endpoint"
@@ -515,6 +603,7 @@ fn monster_move_flying_spline_is_not_grounded() {
         2000,
         true,
         true,
+        MonsterMoveFacing::None,
         None,
     )
     .expect("a flying monster-move still yields a spline");
@@ -534,6 +623,7 @@ fn monster_move_stop_clears_the_spline() {
             2000,
             false,
             true,
+            MonsterMoveFacing::None,
             None
         )
         .is_none(),
@@ -551,6 +641,7 @@ fn monster_move_zero_duration_clears_the_spline() {
             0,
             false,
             true,
+            MonsterMoveFacing::None,
             None
         )
         .is_none(),
@@ -561,7 +652,17 @@ fn monster_move_zero_duration_clears_the_spline() {
 #[test]
 fn monster_move_without_a_travelable_path_clears_the_spline() {
     assert!(
-        monster_move_spline(vec![[1.0, 2.0, 3.0]], 0, false, 2000, false, true, None).is_none(),
+        monster_move_spline(
+            vec![[1.0, 2.0, 3.0]],
+            0,
+            false,
+            2000,
+            false,
+            true,
+            MonsterMoveFacing::None,
+            None
+        )
+        .is_none(),
         "a single point is nowhere to travel — no spline"
     );
 }
@@ -773,11 +874,13 @@ fn facing_lerp_turns_the_short_way_and_lands_at_fire_time() {
     assert_eq!(held, 1.0, "dead-zone: negligible turn skipped");
 }
 
-/// The frame loop as [`crate::net`] chains it, arrival before drain on one clock; returns the
-/// applied order by `fall_time` and the final flags.
+/// The frame loop as [`crate::net`] chains it: each arrival due by the clock the last frame's
+/// drain stamped, then this frame's drain; returns the applied order by `fall_time` and the final
+/// flags.
 fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
     use super::relay::{PendingMove, RelayMove};
     let mut rm = motion(MOVING, 0.0);
+    let mut tick = None;
     let mut applied = Vec::new();
     let apply = |rm: &mut RemoteMotion, mv: &RelayMove, applied: &mut Vec<u32>| {
         rm.flags = mv.flags; // the one part of `apply_move` the ordering needs
@@ -798,7 +901,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
         };
         let (live, empty) = (rm.flags, rm.pending.is_empty());
         let fire_ms = rm.relay.schedule(wire_ms, now, live, empty);
-        if rm.fires_at_arrival(fire_ms, now) {
+        if rm.fires_at_arrival(fire_ms, tick) {
             apply(&mut rm, &mv, &mut applied);
         } else {
             rm.pending.push_back(PendingMove { fire_ms, mv });
@@ -807,6 +910,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
             let ev = rm.pending.pop_front().expect("front checked");
             apply(&mut rm, &ev.mv, &mut applied);
         }
+        tick = Some(now);
     }
     (applied, rm.flags)
 }
@@ -816,11 +920,11 @@ fn a_due_arrival_never_jumps_the_queue() {
     // A 60 Hz burst builds a one-deep queue, then the Stop lands at 96 ms with its fire-time (64)
     // already past while the FORWARD packet 3 is still queued.
     let script: [(u32, f64, u32); 5] = [
-        (1000, 0.0, MOVING),  // 0: seeds, fires at arrival
+        (1000, 0.0, MOVING),  // 0: seeds, fire 0, for the frame's drain
         (1016, 0.0, MOVING),  // 1: fire 16, queued
         (1032, 16.0, MOVING), // 2: fire 32, queued; the drain releases 1
         (1048, 32.0, MOVING), // 3: fire 48, queued; the drain releases 2
-        (1064, 96.0, 0),      // 4: the Stop, fire 64, due; 3 still queued
+        (1064, 96.0, 0),      // 4: the Stop, fire 64, past this arrival; 3 still queued
     ];
     let (order, flags) = replay_frames(&script);
     assert_eq!(

@@ -2,17 +2,31 @@
 
 use mlua::{Lua, Table, Value, Variadic};
 
-use crate::layout::{Anchor, Anchors, Point};
-use crate::script::binding_abi::optional_string;
+use crate::script::binding_abi::{self, optional_string, string_arg};
 use crate::script::object::frame_handle_of;
-use crate::script::region::region_handle_of;
 use crate::script::Model;
-use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
+use crate::widget::{KindState, TooltipAnchor};
 
 use super::{
     append_line, clear, color_num, parse_line_color, parse_line_tail, set_owner_core, set_shown,
-    text_of, tip_mut, with_tip, wrap_arg, write_cell, REG_TOOLTIP_METHODS,
+    text_of, with_tip, wrap_arg, REG_TOOLTIP_METHODS,
 };
+
+/// An owner argument's `[0]` as the reference reads it: `lua_gettable` of key 0 (`0x53119b`,
+/// `0x531077`), so a non-table raises the VM's index error, then `lua_touserdata`, `None` for
+/// anything but a non-NULL light userdata. The pointer is the object's id.
+fn owner_id(v: &Value) -> mlua::Result<Option<crate::layout::Handle>> {
+    let Value::Table(t) = v else {
+        return Err(mlua::Error::runtime(format!(
+            "attempt to index a {} value",
+            v.type_name()
+        )));
+    };
+    Ok(match t.get::<Value>(0)? {
+        Value::LightUserData(l) if !l.0.is_null() => Some(l.0 as usize as u32),
+        _ => None,
+    })
+}
 
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
@@ -28,13 +42,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetOwner",
         lua.create_function(
-            |lua, (this, owner, anchor, x, y): (Table, Value, Value, Option<f32>, Option<f32>)| {
+            |lua, (this, owner, anchor, x, y): (Table, Value, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
                 set_shown(lua, h, false);
                 // The owner is read after the hide (`0x531189`), so a bad one raises on a
-                // hidden tooltip.
-                let owner: Table = lua.unpack(owner)?;
-                let owner_h = frame_handle_of(lua, &owner)?;
+                // hidden tooltip: its `[0]` with no type test, so a texture or a font string
+                // owns it too; a NULL raises `%s:SetOwner(): Couldn't find 'this' in owner
+                // object`, naming the tooltip (`0x5311bb`, `0x855150`). Deviation: the reference
+                // anchors a Font object through its +0x24 with no type test (`0x5313c9`); benilla
+                // raises the owner line because the result there is undefined.
+                let owner_h = owner_id(&owner)?
+                    .filter(|id| {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id)
+                    })
+                    .ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "{}:SetOwner(): Couldn't find 'this' in owner object",
+                            binding_abi::name_of(lua, &this)
+                        ))
+                    })?;
                 // The gate is `lua_isstring` (`0x6f3510`): a string or number is read, and any
                 // other type counts as absent rather than raising.
                 let anchor = optional_string(lua, &anchor);
@@ -65,14 +92,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         TooltipAnchor::Left
                     }
                 };
-                set_owner_core(
-                    lua,
-                    h,
-                    Some(owner_h),
-                    anchor,
-                    x.unwrap_or(0.0),
-                    y.unwrap_or(0.0),
-                );
+                // Each offset has its own `lua_isnumber` gate (`0x53134f`, `0x531388`), a miss
+                // keeping 0.
+                let offset = |v| binding_abi::is_number(lua, v).map_or(0.0, |n| n as f32);
+                set_owner_core(lua, h, Some(owner_h), anchor, offset(x), offset(y));
                 Ok(())
             },
         )?,
@@ -89,18 +112,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     // IsOwned(frame) (`0x530fe0`): 1 (`0x5310ad`) or nil (`0x5310c0`), the hover loop's OnUpdate
     // gate (`ContainerFrame.lua:657`); the owner drops on hide, so a stale OnUpdate never brings a
-    // hidden tooltip back.
+    // hidden tooltip back. It compares the argument's `[0]` with the owner (`0x531065`..`0x5310ab`)
+    // and tests no type, so a table without one matches an unowned tooltip.
     m.set(
         "IsOwned",
-        lua.create_function(|lua, (this, frame): (Table, Table)| {
+        lua.create_function(|lua, (this, frame): (Table, Value)| {
             let owner = with_tip(lua, &this, |t| t.owner)?;
-            let fh = frame_handle_of(lua, &frame)?;
-            Ok(crate::script::binding_abi::flag(owner == Some(fh)))
+            Ok(crate::script::binding_abi::flag(owner == owner_id(&frame)?))
         })?,
     )?;
 
     // SetText(text, r, g, b, alpha, wrap) (`0x531b90`): alpha has its own number gate, default 1,
-    // and a text that is neither string nor number raises the binding's usage error. It clears,
+    // read only with a numeric r, and a text that is neither string nor number raises the binding's usage error. It clears,
     // writes line 1 and shows: the empty-slot hover calls no Show after it
     // (PaperDollFrame.lua:747).
     m.set(
@@ -115,42 +138,56 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     "Usage: SetText(\"text\" [, color])".into(),
                 ));
             }
-            let text = text_of(args.first());
-            let [r, g, b, _] = parse_line_color(lua, args.get(1), args.get(2), args.get(3));
-            // The alpha is its own `lua_isnumber` gate (`0x531ddc`'s neighbour at idx 6), so a
+            let text = text_of(lua, args.first());
+            let mut color = parse_line_color(lua, args.get(1), args.get(2), args.get(3));
+            // The alpha is read only past the r gate, which skips it with the colour
+            // (`0x531c58`), and has its own `lua_isnumber` gate (`0x531d23`), default 1, so a
             // numeric string counts.
-            let a = color_num(lua, args.get(4)).unwrap_or(1.0);
+            if color_num(lua, args.get(1)).is_some() {
+                color[3] = color_num(lua, args.get(4)).unwrap_or(1.0);
+            }
             let wrap = wrap_arg(args.get(5));
             clear(lua, h);
-            append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
+            append_line(lua, &this, (text, color), None, wrap)?;
             set_shown(lua, h, true);
             Ok(())
         })?,
     )?;
-    // AppendText(text) (`0x531e30`): appends to line 1's left cell in place, keeping its colour,
-    // and does nothing with no lines, as the reference's body does (`0x5305b0`, line 1 at
-    // `0x5305cc`). The bag tooltips hang a keybinding on their SetText title with it
-    // (ContainerFrame.xml:198, MainMenuBarBagButtons.lua:91).
+    // AppendText(text) (`0x531e30`): a `lua_isstring` value (`0x531ebc`), a number as its
+    // `%.14g` text, else `Usage: AppendText("text")` (`0x8551a8`). Its helper (`0x5305b0`) does
+    // nothing with no lines (`0x5305c4`); otherwise it prints line 1's left text and the argument
+    // through `%s%s` (`0x82e424`) into 256 bytes, an empty or unset text printing as `(null)`
+    // (`0x5305d4`-`0x5305dd`, the CRT's NULL `%s`), and the result cut at 255 bytes (`0x64a865`).
+    // That goes to the cell's `SetText` alone (`0x53060e`), its colour and shown bit untouched,
+    // and the tooltip is sized again (`0x530615`). The bag tooltips hang a keybinding on their
+    // SetText title with it (ContainerFrame.xml:198, MainMenuBarBagButtons.lua:91).
     m.set(
         "AppendText",
         lua.create_function(|lua, (this, text): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
-            let extra = text_of(Some(&text));
+            let extra = string_arg(lua, text, r#"Usage: AppendText("text")"#)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let lh = match model.arena.frame(h).map(|f| &f.kind_state) {
                 Some(KindState::Tooltip(t)) if t.num_lines > 0 => t.left_lines[0],
                 Some(KindState::Tooltip(_)) => return Ok(()),
-                _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+                _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
             };
-            let (current, color) = match model.region_data.get(&lh) {
-                Some(d) => (
-                    d.text.clone().unwrap_or_default(),
-                    d.vertex_color.unwrap_or([1.0, 1.0, 1.0, 1.0]),
-                ),
-                None => (String::new(), [1.0, 1.0, 1.0, 1.0]),
-            };
-            write_cell(&mut model, lh, &(current + &extra), color);
-            super::owe_relayout(&mut model, h);
+            let current = model
+                .region_data
+                .get(&lh)
+                .and_then(|d| d.text.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "(null)".to_string());
+            let mut joined = current + &extra;
+            // A cut inside a UTF-8 sequence drops its partial bytes, which the reference's decoder
+            // reads as one malformed code point (`0x41aab0`) that neither draws nor measures.
+            let mut cut = joined.len().min(255);
+            while !joined.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            joined.truncate(cut);
+            super::set_cell_text(&mut model, lh, &joined);
+            super::size_tooltip(&mut model, h);
             Ok(())
         })?,
     )?;
@@ -159,7 +196,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "AddLine",
         lua.create_function(|lua, (this, args): (Table, Variadic<Value>)| {
-            let text = text_of(args.first());
+            let text = text_of(lua, args.first());
             let (color, wrap) = parse_line_tail(lua, &args[1.min(args.len())..]);
             append_line(lua, &this, (text, color), None, wrap)
         })?,
@@ -172,14 +209,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             |lua, (this, tl, tr, cl): (Table, Value, Value, Variadic<Value>)| {
                 let left_color = parse_line_color(lua, cl.first(), cl.get(1), cl.get(2));
                 let right_color = parse_line_color(lua, cl.get(3), cl.get(4), cl.get(5));
-                let right = text_of(Some(&tr));
-                // The line core (`0x530270`) clears the flag when the right text is non-empty
-                // (`0x530284`), so only a double line with an empty right side can wrap.
-                let wrap = right.is_empty() && wrap_arg(cl.get(6));
+                let right = text_of(lua, Some(&tr));
+                let wrap = wrap_arg(cl.get(6));
                 append_line(
                     lua,
                     &this,
-                    (text_of(Some(&tl)), left_color),
+                    (text_of(lua, Some(&tl)), left_color),
                     Some((right, right_color)),
                     wrap,
                 )
@@ -198,79 +233,42 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "NumLines",
         lua.create_function(|lua, this: Table| with_tip(lua, &this, |t| t.num_lines as i64))?,
     )?;
-    // AddFontStrings(left, right) (`0x530c40`): adopts two caller-made FontStrings as the next
-    // line pair, placed like an engine-grown pair but keeping the caller's fonts.
+    // AddFontStrings(left, right) (`0x530c40`): the caller's FontStrings become the next line
+    // pair and raise the line limit by one (`0x529940`), keeping the caller's fonts.
     m.set(
         "AddFontStrings",
-        lua.create_function(|lua, (this, left, right): (Table, Table, Table)| {
-            let h = frame_handle_of(lua, &this)?;
-            let lh = region_handle_of(lua, &left)?;
-            let rh = region_handle_of(lua, &right)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let frame_id = model.frame_id(h);
-            let prev_left = match model.arena.frame(h).map(|f| &f.kind_state) {
-                Some(KindState::Tooltip(t)) => t.left_lines.last().copied(),
-                _ => return Err(mlua::Error::runtime("not a GameTooltip")),
-            };
-            let anchor = match prev_left {
-                None => Anchor::new(
-                    Point::TopLeft,
-                    frame_id,
-                    Point::TopLeft,
-                    TOOLTIP_PAD,
-                    -TOOLTIP_PAD,
-                ),
-                Some(prev) => {
-                    let prev_id = model.region_id(prev);
-                    Anchor::new(
-                        Point::TopLeft,
-                        prev_id,
-                        Point::BottomLeft,
-                        0.0,
-                        -TOOLTIP_LINE_GAP,
-                    )
-                }
-            };
-            let left_id = model.region_id(lh);
-            let (left_drew, right_drew) = (model.region_draws(lh), model.region_draws(rh));
-            {
-                let d = model.region_data.entry(lh).or_default();
-                d.hidden = true;
-                d.justify.set_h(crate::script::JustifyH::Left);
-                d.anchors = Anchors::from([anchor]);
-            }
-            {
-                let d = model.region_data.entry(rh).or_default();
-                d.hidden = true;
-                d.justify.set_h(crate::script::JustifyH::Right);
-                d.anchors =
-                    Anchors::from([Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)]);
-            }
-            model.note_region_draw(lh, left_drew);
-            model.note_region_draw(rh, right_drew);
-            // Two line rows, their points set with the invalidate flag.
-            model.invalidate_region(lh, true);
-            model.invalidate_region(rh, true);
-            let t = tip_mut(&mut model, h)?;
-            t.left_lines.push(lh);
-            t.right_lines.push(rh);
-            Ok(())
+        lua.create_function(|lua, (this, left, right): (Table, Value, Value)| {
+            let lh = font_string_arg(lua, &this, &left)?;
+            let rh = font_string_arg(lua, &this, &right)?;
+            super::add_font_strings(lua, &this, lh, rh)
         })?,
     )?;
-    // SetMinimumWidth(w): a floor on the auto-sized width (`SetTooltipMoney` passes the money
-    // row's, GameTooltip.lua:91).
+    // SetMinimumWidth(width) (`0x530e50`): the sizer's floor (`SetTooltipMoney` passes the money
+    // row's, GameTooltip.lua:91), stored as given (`0x530f05`) and read at the next sizing. A
+    // width `lua_isnumber` refuses raises the usage error (`0x530edc`, `0x8550a0`).
     m.set(
         "SetMinimumWidth",
-        lua.create_function(|lua, (this, w): (Table, f32)| {
-            with_tip(lua, &this, |t| t.min_width = w.max(0.0))
+        lua.create_function(|lua, (this, w): (Table, Value)| {
+            let Some(w) = lua.coerce_number(w).ok().flatten() else {
+                return Err(mlua::Error::RuntimeError(
+                    "Usage: SetMinimumWidth(width)".into(),
+                ));
+            };
+            with_tip(lua, &this, |t| t.min_width = w as f32)
         })?,
     )?;
-    // SetPadding(w): extra auto-size width that survives a content clear (ItemRefTooltip's 16
-    // keeps its close button off the text, ItemRef.xml:40).
+    // SetPadding(width) (`0x530f10`): extra plate width that survives a clear (ItemRefTooltip's 16
+    // keeps its close button off the text, ItemRef.xml:40), read by `lua_tonumber` with no type
+    // test, so a non-number is 0 (`0x530fa0`), stored in layout units (`0x530fba`, `0x530630`)
+    // and read at the next sizing.
     m.set(
         "SetPadding",
-        lua.create_function(|lua, (this, w): (Table, f32)| {
-            with_tip(lua, &this, |t| t.padding = w.max(0.0))
+        lua.create_function(|lua, (this, w): (Table, Value)| {
+            let w = lua.coerce_number(w).ok().flatten().unwrap_or(0.0);
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let stored = model.layout_units().store(w as f32);
+            super::tip_mut(&mut model, h).map(|t| t.padding = stored)
         })?,
     )?;
     // FadeOut() (`0x531f00`): the fade request ([`super::fade_out`]).
@@ -285,9 +283,44 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // The content methods: items, spells and auras, talents, units.
     crate::script::tooltip_item::install_methods(lua, &m)?;
     crate::script::tooltip_spell::install_methods(lua, &m)?;
+    crate::script::tooltip_aura::install_methods(lua, &m)?;
     crate::script::talent::install_tooltip_method(lua, &m)?;
     crate::script::tooltip_unit::install_methods(lua, &m)?;
 
     lua.set_named_registry_value(REG_TOOLTIP_METHODS, m)?;
     Ok(())
+}
+
+/// One of `AddFontStrings`' two strings (`0x530cf6`-`0x530d4d`, arguments 2 then 3): a non-table
+/// raises the usage line (`0x85506c`), a table with no object `0x855034`'s, and an object that
+/// fails the FontString test `[0xcf2ccc]` `0x854ff8`'s, each naming the tooltip or `<unnamed>`.
+fn font_string_arg(
+    lua: &Lua,
+    this: &Table,
+    arg: &Value,
+) -> mlua::Result<crate::widget::RegionHandle> {
+    let who = binding_abi::name_of(lua, this);
+    let Value::Table(t) = arg else {
+        return Err(mlua::Error::runtime(format!(
+            "Usage: {who}:AddFontStrings(leftstring, rightstring)"
+        )));
+    };
+    let Ok(id) = crate::script::object::decode_id(t) else {
+        return Err(mlua::Error::runtime(format!(
+            "{who}:AddFontStrings(): Couldn't find 'this' in fontstring"
+        )));
+    };
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    model
+        .id_to_region
+        .get(&id)
+        .copied()
+        .filter(|&rh| {
+            model.arena.region(rh).map(|r| r.kind) == Some(crate::widget::RegionKind::FontString)
+        })
+        .ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "{who}:AddFontStrings(): Wrong object type, expected fontstring"
+            ))
+        })
 }

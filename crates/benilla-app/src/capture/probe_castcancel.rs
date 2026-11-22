@@ -2,8 +2,9 @@
 //! 10 s cast), then 2 s into the bar presses `W` through `ButtonInput<KeyCode>`, the controller
 //! path a player's key takes to `spell::local_self_cancel` and `CMSG_CANCEL_CAST`.
 //!
-//! With `WOW_CAST_TRACE=1` the `LOCAL self-cancel` line must land frames after the `SEND move
-//! StartForward` line, and the server's `RECV CAST_RESULT failure` must follow without repainting.
+//! With `WOW_CAST_TRACE=1` the `LOCAL self-cancel` line must land just before the `SEND move
+//! StartForward` line, in the same frame, as the press cancels before its tick (`0x51512a` before
+//! `0x5151a0`), and the server's `RECV CAST_RESULT failure` must follow without repainting.
 //! Every bar phase change is logged ([`bar_timeline`]) so the hold, burst and fade are measured
 //! from timestamps. Non-combat: a failed cancel only hearths the character home. The switches are
 //! `docs/CONTRIBUTING.md`, "Running it unattended".
@@ -93,48 +94,56 @@ fn cast_cancel_probe(
     time: ProbeClock,
     mut probe: ResMut<ProbeCastCancel>,
     self_player: Query<(), With<SelfPlayer>>,
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    // The keys, which the call host's click reads: pressed once the host is back.
+    mut vm: crate::script_calls::VmWith<ResMut<'static, ButtonInput<KeyCode>>>,
 ) {
-    if self_player.is_empty() {
-        return;
-    }
-    let entered = *probe.entered.get_or_insert(time.elapsed_secs());
-    let t = time.elapsed_secs() - entered;
-    match probe.phase {
-        0 if t >= 3.0 => {
-            let Some(script) = script else {
-                probe.phase = 99;
-                error!("castcancel probe: no UI VM — cannot use the Hearthstone");
-                return;
-            };
-            match script.eval::<bool>(USE_HEARTH_CHUNK) {
-                Ok(true) => {
-                    probe.phase = 1;
-                    probe.used_at = Some(t);
-                    info!("castcancel probe: using the Hearthstone (10 s cast opens the bar)");
-                }
-                Ok(false) if t >= 10.0 => {
+    let mut w = None;
+    vm.run(|script| {
+        if self_player.is_empty() {
+            return;
+        }
+        let entered = *probe.entered.get_or_insert(time.elapsed_secs());
+        let t = time.elapsed_secs() - entered;
+        match probe.phase {
+            0 if t >= 3.0 => {
+                let Some(script) = script else {
                     probe.phase = 99;
-                    error!("castcancel probe: no Hearthstone link resolved by t+10 s");
-                }
-                Ok(false) => {} // still resolving, retry next frame
-                Err(e) => {
-                    probe.phase = 99;
-                    error!("castcancel probe: {e}");
+                    error!("castcancel probe: no UI VM — cannot use the Hearthstone");
+                    return;
+                };
+                match script.eval::<bool>(USE_HEARTH_CHUNK) {
+                    Ok(true) => {
+                        probe.phase = 1;
+                        probe.used_at = Some(t);
+                        info!("castcancel probe: using the Hearthstone (10 s cast opens the bar)");
+                    }
+                    Ok(false) if t >= 10.0 => {
+                        probe.phase = 99;
+                        error!("castcancel probe: no Hearthstone link resolved by t+10 s");
+                    }
+                    Ok(false) => {} // still resolving, retry next frame
+                    Err(e) => {
+                        probe.phase = 99;
+                        error!("castcancel probe: {e}");
+                    }
                 }
             }
+            1 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.0 => {
+                probe.phase = 2;
+                info!("castcancel probe: pressing W mid-cast — the local cancel should fire NOW");
+                w = Some(true);
+            }
+            2 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.3 => {
+                probe.phase = 3;
+                info!("castcancel probe: releasing W — read the cast-trace for the verdict");
+                w = Some(false);
+            }
+            _ => {}
         }
-        1 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.0 => {
-            probe.phase = 2;
-            info!("castcancel probe: pressing W mid-cast — the local cancel should fire NOW");
-            keys.press(KeyCode::KeyW);
-        }
-        2 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.3 => {
-            probe.phase = 3;
-            info!("castcancel probe: releasing W — read the cast-trace for the verdict");
-            keys.release(KeyCode::KeyW);
-        }
-        _ => {}
+    });
+    match w {
+        Some(true) => vm.own().press(KeyCode::KeyW),
+        Some(false) => vm.own().release(KeyCode::KeyW),
+        None => {}
     }
 }

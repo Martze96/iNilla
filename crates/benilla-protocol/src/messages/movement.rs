@@ -174,9 +174,10 @@ impl SplineMode {
     }
 }
 
-/// What a relayed move's opcode means beyond its pose. The 23 `[packed guid][MovementInfo]` relays
-/// share one reference handler (`0x603bb0`, `0x601580`), and for most the opcode adds nothing the
-/// flags word does not say. The variants beyond `Pose` name the opcodes a receiver tells apart.
+/// What a relayed move's opcode means beyond its pose. The reference binds 30
+/// `[packed guid][MovementInfo]` relays to one handler (`0x603bb0`, its cases in `0x601580`), the
+/// 28 parsed here among them, and for most the opcode adds nothing the flags word does not say.
+/// The variants beyond `Pose` name the opcodes a receiver tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RelayVerb {
     /// Every other relay (start, stop, strafe, jump, turn, swim, land, facing, modes, knockback).
@@ -193,6 +194,10 @@ pub enum RelayVerb {
     /// decides. The client then runs `SetRoot` (`0x7c7340`, also wiping motion) or `ClearRoot`
     /// (`0x7c7370`) unconditionally; vmangos's flags already agree (`MovementHandler.cpp:1064`).
     Root(bool),
+    /// `MSG_MOVE_SET_*_SPEED`'s pose, a plain one: the speed relays' own handler reads the status,
+    /// then the new speed (`0x6010e0`, `0x60112e`, `0x601140`), which decodes as the event after
+    /// this one, so the packet goes on past the pose. It is none of the 30 relays.
+    Speed,
 }
 
 impl RelayVerb {
@@ -351,6 +356,46 @@ mod tests {
         assert_eq!((t.pos.x, t.pos.y, t.pos.z), (-5.5, 2.25, 8.0));
         assert_eq!(t.orientation, 1.5);
         assert_eq!(back.fall_time, 42, "fall_time lands after the tail");
+    }
+
+    /// The body of `MSG_MOVE_START_PITCH_UP` (0xbf), byte for byte: the movement block with
+    /// `SWIMMING | PITCH_UP` (`0x200040`) and its pitch tail. vmangos refuses a pitch start whose
+    /// flags lack the bit (`MovementAnticheat.cpp:1038-1041`).
+    #[test]
+    fn a_pitch_start_body_golden() {
+        let mut bytes = Vec::new();
+        info(MOVEMENT_FLAG_SWIMMING | 0x40).write(&mut bytes);
+        let golden: [u8; 32] = [
+            0x40, 0x00, 0x20, 0x00, // flags
+            0x39, 0x30, 0x00, 0x00, // time 12345
+            0x00, 0x00, 0x80, 0x3f, // x 1.0
+            0x00, 0x00, 0x00, 0x40, // y 2.0
+            0x00, 0x00, 0x40, 0x40, // z 3.0
+            0x00, 0x00, 0x00, 0x3f, // orientation 0.5
+            0x33, 0x33, 0x33, 0xbf, // pitch -0.7
+            0x2a, 0x00, 0x00, 0x00, // fall time 42
+        ];
+        assert_eq!(bytes, golden);
+    }
+
+    /// The body of `MSG_MOVE_SET_PITCH` (0xdb), byte for byte: the movement block of a swimmer,
+    /// `SWIMMING` (`0x200000`) with its pitch tail, which `0x615bc0` sends from a mouse-look pitch
+    /// set only while swimming (`0x60e0d4`).
+    #[test]
+    fn a_set_pitch_body_golden() {
+        let mut bytes = Vec::new();
+        info(MOVEMENT_FLAG_SWIMMING).write(&mut bytes);
+        let golden: [u8; 32] = [
+            0x00, 0x00, 0x20, 0x00, // flags
+            0x39, 0x30, 0x00, 0x00, // time 12345
+            0x00, 0x00, 0x80, 0x3f, // x 1.0
+            0x00, 0x00, 0x00, 0x40, // y 2.0
+            0x00, 0x00, 0x40, 0x40, // z 3.0
+            0x00, 0x00, 0x00, 0x3f, // orientation 0.5
+            0x33, 0x33, 0x33, 0xbf, // pitch -0.7
+            0x2a, 0x00, 0x00, 0x00, // fall time 42
+        ];
+        assert_eq!(bytes, golden);
     }
 
     #[test]

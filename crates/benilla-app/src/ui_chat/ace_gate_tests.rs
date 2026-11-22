@@ -25,6 +25,7 @@ const ACE_CHAIN: &[&str] = &[
 /// A VM with our FrameXML and the corpus's Ace2 chain, past `PLAYER_LOGIN`.
 fn ace_vm(root: &Path) -> UiScript {
     let mut script = UiScript::new().expect("VM");
+    script.keep_calls();
     script.set_screen_size(1024.0, 768.0);
     // Ace calls `CreateFrame`, `GetTime` and `ChatTypeInfo`, so the whole interface loads first.
     let failures = crate::ui_script::load_default_ui(&script);
@@ -133,14 +134,16 @@ fn the_auto_join_walk_names_the_channels_the_server_resolves() {
         "the 0x200 sentinel row names the channel"
     );
 
+    // Each zone's own `AreaTable.dbc` flags: Elwynn Forest (12) and Stormwind City (1519).
+    let flags = |id: u32| areas.get(id).expect("a shipped zone").flags;
     let out_in_the_world =
-        super::channels::wanted_channels(&cat, 0x0020_0003, "Elwynn Forest", false, city);
+        super::channels::wanted_channels(&cat, 0x0020_0003, "Elwynn Forest", flags(12), city);
     assert_eq!(
         out_in_the_world,
         vec!["General - Elwynn Forest", "LocalDefense - Elwynn Forest"]
     );
     let in_a_capital =
-        super::channels::wanted_channels(&cat, 0x0020_0003, "Stormwind City", true, city);
+        super::channels::wanted_channels(&cat, 0x0020_0003, "Stormwind City", flags(1519), city);
     assert_eq!(
         in_a_capital,
         vec![

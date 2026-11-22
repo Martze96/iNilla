@@ -72,7 +72,8 @@ fn a_declared_font_is_published_as_a_global_object() {
     let (r, g, b, _) = s
         .eval::<(f32, f32, f32, f32)>("return GameFontNormal:GetTextColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 0.82, 0.0));
+    let read = crate::color::quant::read32;
+    assert_eq!((r, g, b), (read(1.0), read(0.82), 0.0));
     assert_eq!(
         s.eval::<(f32, f32)>("return GameFontNormal:GetShadowOffset()")
             .unwrap(),
@@ -81,7 +82,7 @@ fn a_declared_font_is_published_as_a_global_object() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return GameFontNormal:GetShadowColor()")
             .unwrap(),
-        (0.0, 0.0, 0.0, 1.0)
+        (0.0, 0.0, 0.0, read(1.0))
     );
     assert_eq!(
         s.eval::<String>("return GameFontNormal:GetJustifyH()")
@@ -100,7 +101,7 @@ fn tablet_reads_the_tooltip_header_size_off_the_global() {
              <Font name="GameTooltipText" font="Fonts\FRIZQT__.TTF">
                <FontHeight><AbsValue val="12"/></FontHeight>
              </Font>
-             <Font name="GameTooltipHeaderText" inherits="GameTooltipText">
+             <Font name="GameTooltipHeaderText" inherits="GameTooltipText" font="Fonts\FRIZQT__.TTF">
                <FontHeight><AbsValue val="14"/></FontHeight>
              </Font>
            </Ui>"#,
@@ -126,10 +127,10 @@ fn tablet_reads_the_tooltip_header_size_off_the_global() {
     assert_eq!((header, normal), (14.0, 12.0));
 }
 
-/// `inherits=` is flattened once, at load, where the reference links it live (`0x770c60`), and
-/// the published object carries the flattened values.
+/// `inherits=` links the font to its parent (`0x783ce6`), and the published object's block holds
+/// the parent's groups merged under its own.
 #[test]
-fn an_inheriting_font_still_flattens_to_the_same_values() {
+fn an_inheriting_font_holds_its_parents_groups_under_its_own() {
     let s = script();
     load(
         &s,
@@ -139,17 +140,20 @@ fn an_inheriting_font_still_flattens_to_the_same_values() {
                <Color r="1" g="1" b="1"/>
                <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
              </Font>
-             <Font name="DerivedFont" inherits="MasterFont" outline="NORMAL">
+             <Font name="DerivedFont" inherits="MasterFont" font="Fonts\FRIZQT__.TTF" outline="NORMAL">
                <FontHeight><AbsValue val="18"/></FontHeight>
              </Font>
            </Ui>"#,
     );
     let derived = s.font_object("DerivedFont").expect("registered");
     assert_eq!(derived.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-    assert_eq!(derived.height, Some(18.0));
-    assert_eq!(derived.color, Some([1.0, 1.0, 1.0, 1.0]));
+    assert_eq!(derived.height, Some(crate::layout::Len::Script(18.0)));
+    assert_eq!(
+        derived.color,
+        Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0]))
+    );
     assert_eq!(derived.outline, Outline::Normal);
-    assert_eq!(derived.justify_h, Some(JustifyH::Center));
+    assert_eq!(derived.justify.map(|j| j.name_h()), Some("CENTER"));
     assert!(derived.shadow.is_some(), "the shadow inherits too");
     assert_eq!(
         s.eval::<(String, f32, String)>("return DerivedFont:GetFont()")
@@ -207,6 +211,16 @@ fn gratuity_builds_its_thirty_line_scan_tooltip() {
     );
     // Gratuity's next call: `ClearLines` over the grown line stack.
     s.run("vars.tooltip:ClearLines()").unwrap();
+    // Each `AddFontStrings` raised the line limit by one (`0x529940`): a bare tooltip holds the 30
+    // pairs it was given, in the order given.
+    s.run(
+        r#"
+        for i = 1, 35 do vars.tooltip:AddLine("line " .. i) end
+        assert(vars.tooltip:NumLines() == 30, vars.tooltip:NumLines())
+        assert(vars.Llines[1]:GetText() == "line 1" and vars.Llines[30]:GetText() == "line 30")
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -217,11 +231,11 @@ fn set_font_object_takes_the_object_or_the_name() {
         "GameFontHighlightSmall",
         FontObject {
             font: Some("Fonts\\ARIALN.TTF".into()),
-            height: Some(11.0),
-            color: Some([0.25, 0.5, 0.75, 1.0]),
+            height: Some(crate::layout::Len::Script(11.0)),
+            color: Some(crate::color::Rgba8::from_f32([0.25, 0.5, 0.75, 1.0])),
             outline: Outline::Thick,
-            justify_h: None,
-            justify_v: None,
+            monochrome: false,
+            justify: None,
             shadow: None,
             spacing: None,
         },
@@ -231,11 +245,11 @@ fn set_font_object_takes_the_object_or_the_name() {
         f = CreateFrame("Frame", "TwoWays")
         f:SetWidth(200); f:SetHeight(40); f:SetPoint("CENTER", 0, 0)
         byObject = f:CreateFontString(nil, "ARTWORK")
-        byObject:SetText("obj")
         byObject:SetFontObject(GameFontHighlightSmall)
+        byObject:SetText("obj")
         byName = f:CreateFontString(nil, "ARTWORK")
-        byName:SetText("str")
         byName:SetFontObject("GameFontHighlightSmall")
+        byName:SetText("str")
     "#,
     )
     .unwrap();
@@ -246,7 +260,7 @@ fn set_font_object_takes_the_object_or_the_name() {
         (
             Some("Fonts\\ARIALN.TTF".into()),
             Some(11.0),
-            Some([0.25, 0.5, 0.75, 1.0])
+            Some(crate::color::quant::drawn([0.25, 0.5, 0.75, 1.0]))
         )
     );
     assert!(s
@@ -278,11 +292,11 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
         "GameFontHighlightSmall",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(10.0),
-            color: Some([1.0, 1.0, 1.0, 1.0]),
+            height: Some(crate::layout::Len::Script(10.0)),
+            color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
             outline: Outline::None,
-            justify_h: None,
-            justify_v: None,
+            monochrome: false,
+            justify: None,
             shadow: None,
             spacing: None,
         },
@@ -292,8 +306,8 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
         f = CreateFrame("Frame", "DdRow")
         f:SetWidth(120); f:SetHeight(16); f:SetPoint("CENTER", 0, 0)
         button = { text = f:CreateFontString(nil, "ARTWORK") }
-        button.text:SetText("row")
         button.text:SetFontObject(GameFontHighlightSmall)
+        button.text:SetText("row")
         button.text:SetTextColor(button.text:GetFontObject():GetTextColor())
     "#,
     )
@@ -314,11 +328,11 @@ fn mutating_a_font_object_repaints_everything_that_inherits_it() {
         "ThemeFont",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
-            color: Some([1.0, 1.0, 1.0, 1.0]),
+            height: Some(crate::layout::Len::Script(12.0)),
+            color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
             outline: Outline::None,
-            justify_h: None,
-            justify_v: None,
+            monochrome: false,
+            justify: None,
             shadow: None,
             spacing: None,
         },
@@ -327,10 +341,10 @@ fn mutating_a_font_object_repaints_everything_that_inherits_it() {
         r#"
         f = CreateFrame("Frame", "ThemeHost")
         f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
-        a = f:CreateFontString(nil, "ARTWORK"); a:SetText("inherited")
-        a:SetFontObject(ThemeFont)
-        b = f:CreateFontString(nil, "ARTWORK"); b:SetText("overridden")
-        b:SetFontObject(ThemeFont)
+        a = f:CreateFontString(nil, "ARTWORK"); a:SetFontObject(ThemeFont)
+        a:SetText("inherited")
+        b = f:CreateFontString(nil, "ARTWORK"); b:SetFontObject(ThemeFont)
+        b:SetText("overridden")
         b:SetTextColor(1, 0, 0)
     "#,
     )
@@ -392,8 +406,8 @@ fn propagation_is_scoped_to_the_object_that_changed() {
             name,
             FontObject {
                 font: Some(face.into()),
-                height: Some(12.0),
-                color: Some([1.0, 1.0, 1.0, 1.0]),
+                height: Some(crate::layout::Len::Script(12.0)),
+                color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
                 ..FontObject::default()
             },
         );
@@ -402,8 +416,8 @@ fn propagation_is_scoped_to_the_object_that_changed() {
         r#"
         f = CreateFrame("Frame", "ScopeHost")
         f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
-        one = f:CreateFontString(nil, "ARTWORK"); one:SetText("one"); one:SetFontObject(FontOne)
-        two = f:CreateFontString(nil, "ARTWORK"); two:SetText("two"); two:SetFontObject(FontTwo)
+        one = f:CreateFontString(nil, "ARTWORK"); one:SetFontObject(FontOne); one:SetText("one")
+        two = f:CreateFontString(nil, "ARTWORK"); two:SetFontObject(FontTwo); two:SetText("two")
         FontOne:SetFont("Fonts\\CHANGED.TTF", 30)
     "#,
     )
@@ -431,8 +445,8 @@ fn create_font_mints_publishes_and_paints() {
         f = CreateFrame("Frame", "PlateHost")
         f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         Name = f:CreateFontString(nil, "ARTWORK")
-        Name:SetText("plate")
         Name:SetFontObject(Nameplate.Font)
+        Name:SetText("plate")
     "#,
     )
     .expect("_Nameplates' font setup must not raise");
@@ -442,7 +456,7 @@ fn create_font_mints_publishes_and_paints() {
         (
             Some("Fonts\\SKURRI.TTF".into()),
             Some(10.0),
-            Some([0.0, 0.5, 1.0, 1.0])
+            Some(crate::color::quant::drawn([0.0, 0.5, 1.0, 1.0]))
         )
     );
 
@@ -496,16 +510,21 @@ fn create_font_mints_publishes_and_paints() {
 /// The sequence at `FonzAppraiser/mods/gui/gui.lua:27-30`.
 #[test]
 fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
+    let read = crate::color::quant::read32;
     let s = script();
     s.register_font_object(
         "GameFontHighlightSmall",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(10.0),
-            color: Some([1.0, 1.0, 1.0, 1.0]),
+            height: Some(crate::layout::Len::Script(10.0)),
+            color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
             outline: Outline::None,
-            justify_h: Some(JustifyH::Right),
-            justify_v: None,
+            monochrome: false,
+            justify: Some({
+                let mut j = crate::justify::Justify::default();
+                j.set_h(JustifyH::Right);
+                j
+            }),
             shadow: None,
             spacing: None,
         },
@@ -526,7 +545,7 @@ fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return small_number_font:GetTextColor()")
             .unwrap(),
-        (1.0, 1.0, 1.0, 1.0)
+        (read(1.0), read(1.0), read(1.0), read(1.0))
     );
     assert_eq!(
         s.eval::<String>("return small_number_font:GetJustifyH()")
@@ -564,8 +583,8 @@ fn button_state_fonts_take_the_object_and_follow_its_mutation() {
         "GameFontNormal",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
-            color: Some([1.0, 0.82, 0.0, 1.0]),
+            height: Some(crate::layout::Len::Script(12.0)),
+            color: Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0])),
             ..FontObject::default()
         },
     );
@@ -589,7 +608,7 @@ fn button_state_fonts_take_the_object_and_follow_its_mutation() {
         (
             Some("Fonts\\MORPHEUS.TTF".into()),
             Some(22.0),
-            Some([1.0, 0.82, 0.0, 1.0])
+            Some(crate::color::quant::drawn([1.0, 0.82, 0.0, 1.0]))
         )
     );
 
@@ -606,8 +625,8 @@ fn an_empty_font_object_copies_nothing_onto_a_fontstring() {
         "DressedFont",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(14.0),
-            color: Some([0.2, 0.4, 0.6, 1.0]),
+            height: Some(crate::layout::Len::Script(14.0)),
+            color: Some(crate::color::Rgba8::from_f32([0.2, 0.4, 0.6, 1.0])),
             ..FontObject::default()
         },
     );
@@ -616,8 +635,8 @@ fn an_empty_font_object_copies_nothing_onto_a_fontstring() {
         f = CreateFrame("Frame", "EmptyFontHost")
         f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         fs = f:CreateFontString(nil, "ARTWORK")
-        fs:SetText("keep")
         fs:SetFontObject(DressedFont)
+        fs:SetText("keep")
         blank = CreateFont("ABlankFont")
         fs:SetFontObject(blank)
     "#,
@@ -711,11 +730,39 @@ fn both_tables_speak_one_justify_law() {
             "{obj}:SetJustifyH must not trim its argument"
         );
 
-        // A cross-axis token is in the table and raises nothing. The reference then clears the
-        // axis; the FontString does too, the `<Font>` object leaves it as it was.
+        // A cross-axis token is in the table and raises nothing: it zeroes the axis on both
+        // tables (`0x79fc5d`-`0x79fc75`), which then reads "UNKNOWN".
         s.run(&format!("{obj}:SetJustifyH('TOP')")).unwrap();
         s.run(&format!("{obj}:SetJustifyV('LEFT')")).unwrap();
+        assert_eq!(
+            s.eval::<String>(&format!(
+                "return {obj}:GetJustifyH() .. ' ' .. {obj}:GetJustifyV()"
+            ))
+            .unwrap(),
+            "UNKNOWN UNKNOWN",
+            "{obj}"
+        );
     }
+}
+
+/// `SetJustifyH 0x79fc20` with the other axis's token zeroes the axis, clears the font's own bit
+/// and pushes (`0x79fc7c`, `0x79fc84`): a following string reads the cleared axis, and an inheriting
+/// font that did it no longer follows its parent's justify.
+#[test]
+fn a_fonts_cross_axis_justify_clears_the_axis_and_pushes() {
+    let s = script();
+    s.run(
+        "F = CreateFont('CrossAxisF') F:SetFont('Fonts\\FRIZQT__.TTF', 12) F:SetJustifyH('LEFT')
+         host = CreateFrame('Frame') fs = host:CreateFontString() fs:SetFontObject(F)
+         A = CreateFont('CrossAxisA') B = CreateFont('CrossAxisB') B:SetFontObject(A)
+         B:SetJustifyH('TOP') A:SetJustifyH('RIGHT')
+         F:SetJustifyH('TOP')",
+    )
+    .unwrap();
+    let got = |e: &str| s.eval::<String>(&format!("return {e}")).unwrap();
+    assert_eq!(got("F:GetJustifyH()"), "UNKNOWN");
+    assert_eq!(got("fs:GetJustifyH()"), "UNKNOWN", "pushed to the string");
+    assert_eq!(got("B:GetJustifyH()"), "UNKNOWN", "B no longer follows A");
 }
 
 /// `SetFont` is one routine (`0x79f210`) behind three entries, Font `0x7a0270`, FontString
@@ -780,6 +827,7 @@ fn a_cross_axis_token_erases_the_axis_but_still_draws_centred() {
         "f = CreateFrame('Frame', 'ClearAxisFrame')\n\
          f:SetWidth(200) f:SetHeight(40) f:SetPoint('CENTER', 0, 0)\n\
          fs = f:CreateFontString()\n\
+         fs:SetFont('Fonts\\\\FRIZQT__.TTF', 12)\n\
          fs:SetAllPoints(f)\n\
          fs:SetText('erased')",
     )
@@ -865,7 +913,7 @@ fn the_font_block_reaches_both_message_frame_tables() {
         assert_eq!(s.arity(&format!("{obj}:GetShadowColor()")).unwrap(), 4);
     }
 
-    s.run("mf:AddMessage('flush left please')").unwrap();
+    s.run("mf:AddMessage('centred by default')").unwrap();
     s.resolve();
     let j = s
         .extract()
@@ -875,14 +923,14 @@ fn the_font_block_reaches_both_message_frame_tables() {
                 text: Some(ref t),
                 justify_h,
                 ..
-            } if t == "flush left please" => Some(justify_h),
+            } if t == "centred by default" => Some(justify_h),
             _ => None,
         })
         .expect("the message draws");
     assert_eq!(
         j,
-        JustifyH::Left,
-        "creating the style region must not re-justify the frame to the FontString default"
+        JustifyH::Center,
+        "a Lua-created frame keeps its font's constructor word, CENTER (`0x783a87`)"
     );
 }
 
@@ -1012,8 +1060,9 @@ fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inheri
         .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "-64"))
         .expect("MSBT's text quad");
     assert_eq!(
-        q.alpha, 0.5,
-        "the scroll animation's fade is the quad's alpha"
+        q.alpha,
+        127.0 / 255.0,
+        "the scroll animation's fade is the quad's alpha, the byte `SetAlpha(0.5)` stores"
     );
     match q.content {
         QuadContent::Text {
@@ -1048,4 +1097,174 @@ fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inheri
             "OUTLINE".to_string()
         )
     );
+}
+
+/// The flags word of the text quad reading `text`: `(outline, monochrome)`.
+fn flags_of(s: &UiScript, text: &str) -> (Outline, bool) {
+    s.extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(ref t),
+                outline,
+                monochrome,
+                ..
+            } if t == text => Some((outline, monochrome)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no text quad reading {text:?}"))
+}
+
+/// The action button's `HotKey` (`ActionButtonTemplate.xml`) inherits `NumberFontNormalSmallGray`,
+/// which inherits `NumberFontNormalSmall`'s `monochrome="true"` (`Fonts.xml`): the hotkey draws
+/// monochrome and THICK.
+#[test]
+fn the_hotkey_font_draws_monochrome_through_its_inherited_object() {
+    let mut s = script();
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="NumberFontNormalSmall" font="Fonts\ARIALN.TTF" outline="THICK" virtual="true" monochrome="true">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Font name="NumberFontNormalSmallGray" inherits="NumberFontNormalSmall" outline="THICK" virtual="true">
+               <Color r="0.6" g="0.6" b="0.6"/>
+             </Font>
+             <Font name="NumberFontNormal" font="Fonts\ARIALN.TTF" outline="NORMAL" virtual="true">
+               <FontHeight><AbsValue val="14"/></FontHeight>
+             </Font>
+             <Frame name="Bar" parent="UIParent">
+               <Size><AbsDimension x="36" y="36"/></Size>
+               <Anchors><Anchor point="CENTER"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentHotKey" inherits="NumberFontNormalSmallGray" text="2">
+                   <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                 </FontString>
+                 <FontString name="$parentCount" inherits="NumberFontNormal" text="4">
+                   <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.resolve();
+    assert_eq!(flags_of(&s, "2"), (Outline::Thick, true));
+    assert_eq!(flags_of(&s, "4"), (Outline::Normal, false));
+}
+
+/// `SetFont`'s flags are found as substrings (`0x6f1a90`), `MONOCHROME` among them, and replace the
+/// whole flags word, the inherited monochrome bit included.
+#[test]
+fn set_font_reads_and_clears_monochrome() {
+    let mut s = script();
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="Mono" font="Fonts\ARIALN.TTF" monochrome="true">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Frame name="F" parent="UIParent">
+               <Size><AbsDimension x="36" y="36"/></Size>
+               <Anchors><Anchor point="CENTER"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentA" inherits="Mono" text="a">
+                   <Anchors><Anchor point="TOP"/></Anchors>
+                 </FontString>
+                 <FontString name="$parentB" inherits="Mono" text="b">
+                   <Anchors><Anchor point="BOTTOM"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.run(
+        r#"
+        FA:SetFont("Fonts\\ARIALN.TTF", 12, "OUTLINE")
+        FB:SetFont("Fonts\\ARIALN.TTF", 12, "outline, monochrome")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(flags_of(&s, "a"), (Outline::Normal, false));
+    assert_eq!(flags_of(&s, "b"), (Outline::Normal, true));
+}
+
+/// `CSimpleFont`'s constructor zeroes the shadow colour (`0x783a72`): a `CreateFont` font, an
+/// EditBox's and a message frame's read transparent black, and `SetShadowOffset` keeps it, so a
+/// following string takes an invisible shadow. Only a FontString's own default is opaque
+/// (`0x770da1`).
+#[test]
+fn a_fonts_unset_shadow_is_transparent() {
+    let s = script();
+    s.run(
+        "F = CreateFont('UnsetShadowF')
+         host = CreateFrame('Frame') fs = host:CreateFontString() plain = host:CreateFontString()
+         eb = CreateFrame('EditBox') mf = CreateFrame('MessageFrame')
+         smf = CreateFrame('ScrollingMessageFrame') html = CreateFrame('SimpleHTML')",
+    )
+    .unwrap();
+    let alpha = |obj: &str| {
+        s.eval::<Vec<f32>>(&format!("return {{ {obj}:GetShadowColor() }}"))
+            .unwrap()
+    };
+    for obj in ["F", "eb", "mf", "smf", "html"] {
+        assert_eq!(alpha(obj), vec![0.0, 0.0, 0.0, 0.0], "{obj}");
+    }
+    // SimpleHTML's four element fonts come from the same constructor (`0x789e7c`), and
+    // `SetShadowOffset` keeps their colour.
+    s.run("html:SetShadowOffset('H1', 1, -1)").unwrap();
+    for elem in ["P", "H1", "H2", "H3"] {
+        let c = s
+            .eval::<Vec<f32>>(&format!("return {{ html:GetShadowColor('{elem}') }}"))
+            .unwrap();
+        assert_eq!(c, vec![0.0, 0.0, 0.0, 0.0], "SimpleHTML {elem}");
+    }
+    assert_eq!(
+        alpha("plain")[3],
+        crate::color::quant::read32(1.0),
+        "a FontString's own shadow"
+    );
+    s.run("F:SetShadowOffset(1, -1) fs:SetFontObject(F) eb:SetShadowOffset(1, -1)")
+        .unwrap();
+    assert_eq!(alpha("F"), vec![0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(
+        alpha("fs"),
+        vec![0.0, 0.0, 0.0, 0.0],
+        "the follower's shadow"
+    );
+    assert_eq!(alpha("eb"), vec![0.0, 0.0, 0.0, 0.0]);
+}
+
+/// A Font object's table holds its handle at `[0]` as a light userdata, like every object's
+/// (`0x701bd0`): `CopyFontObject` reads it with `lua_touserdata` (`0x79f10e`) and refuses a null
+/// one (`0x79f12f`), so a plain table whose `[0]` is a number is no font.
+#[test]
+fn a_font_objects_handle_is_a_light_userdata() {
+    let s = script();
+    s.register_font_object("HandleFont", FontObject::default());
+    assert_eq!(
+        s.eval::<String>("return type(HandleFont[0])").unwrap(),
+        "userdata"
+    );
+    assert_eq!(
+        s.eval::<String>("return type(CreateFont('HandleMade')[0])")
+            .unwrap(),
+        "userdata"
+    );
+    assert!(s
+        .eval::<bool>(
+            "return HandleFont[0] ~= HandleMade[0] and HandleFont[0] ~= CreateFrame('Frame')[0]"
+        )
+        .unwrap());
+    for code in [
+        "HandleMade:CopyFontObject({ [0] = 0 })",
+        "HandleMade:CopyFontObject({ [0] = 1 })",
+        "CreateFrame('Frame'):CreateFontString():SetFontObject({ [0] = 0 })",
+    ] {
+        let e = s.run(code).unwrap_err().to_string();
+        assert!(
+            e.contains("Couldn't find 'this' in font object"),
+            "{code}: {e}"
+        );
+    }
 }

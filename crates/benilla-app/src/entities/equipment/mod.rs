@@ -58,6 +58,8 @@ pub(crate) struct ItemDisplays {
     pub(crate) catalog: ItemDisplayCatalog,
     /// Keyed by model kind too: a helm display has a file per race and sex, a shoulder a pair.
     pub(super) models: HashMap<(u32, ItemModelKind), DisplayModel>,
+    /// `ChrRaces.dbc`, whose client prefix names a helm's model per race (`0x479a21`).
+    pub(crate) races: benilla_formats::ChrRaces,
 }
 
 #[cfg(test)]
@@ -66,6 +68,7 @@ impl ItemDisplays {
         ItemDisplays {
             catalog,
             models: HashMap::new(),
+            races: benilla_formats::ChrRaces::default(),
         }
     }
 }
@@ -85,6 +88,127 @@ pub(crate) struct Equipment {
     /// The tabard designer's preview on our own body (`[cc+0xc]`, `0x5e07d0`).
     pub(crate) tabard_preview: bool,
     pub(crate) settled: bool,
+}
+
+/// The active player's helm and cloak as a `ShowHelm` or `ShowCloak` call left its model, ahead of
+/// the server: on the native display the call attaches (`0x5ee6af`) or detaches (`0x5ee76e`) the
+/// piece. Every later re-dress goes by the flag, ending the call's: the piece's `PLAYER_FLAGS` edge
+/// (`0x5eea45`-`0x5eea8e`), a display rebuild (`0x604990` → `0x5fb200` → `0x5ed700`, the bit at
+/// `0x5ed802`, `0x5ed81a`), its visible item's change (`0x5dee30` → `0x5df0de`) and its item
+/// record's arrival (`0x5ed880`).
+#[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) struct WornPins {
+    helm: Option<WornPin>,
+    cloak: Option<WornPin>,
+}
+
+/// One piece as a call left it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct WornPin {
+    shown: bool,
+    /// The slot's item record was still asked for at the call, so its arrival re-dresses it.
+    waiting: bool,
+}
+
+/// The equipment slots of the two pieces, head and back.
+const HEAD: u8 = 0;
+const BACK: u8 = 14;
+
+impl WornPins {
+    /// A call's re-dress of `piece`, made while its slot's item record was `waiting`.
+    pub(crate) fn pin(
+        &mut self,
+        piece: benilla_ui::script::WornDisplay,
+        shown: bool,
+        waiting: bool,
+    ) {
+        *self.slot(piece) = Some(WornPin { shown, waiting });
+    }
+
+    fn slot(&mut self, piece: benilla_ui::script::WornDisplay) -> &mut Option<WornPin> {
+        match piece {
+            benilla_ui::script::WornDisplay::Helm => &mut self.helm,
+            benilla_ui::script::WornDisplay::Cloak => &mut self.cloak,
+        }
+    }
+
+    /// The equipment slot `piece` wears in.
+    pub(crate) fn equipment_slot(piece: benilla_ui::script::WornDisplay) -> u8 {
+        match piece {
+            benilla_ui::script::WornDisplay::Helm => HEAD,
+            benilla_ui::script::WornDisplay::Cloak => BACK,
+        }
+    }
+
+    /// A `PLAYER_FLAGS` edge, `flipped` its changed bits: `HIDE_HELM 0x400` (`0x5eea45`) and
+    /// `HIDE_CLOAK 0x800` (`0x5eea6d`) hand their piece back to the flag.
+    pub(crate) fn flags_moved(&mut self, flipped: u32) {
+        if flipped & 0x400 != 0 {
+            self.helm = None;
+        }
+        if flipped & 0x800 != 0 {
+            self.cloak = None;
+        }
+    }
+
+    /// The body rebuilt for a new display (`0x60abe0` deletes the model at `+0xd30`): both pieces
+    /// dressed by the flag.
+    pub(crate) fn rebuilt(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Equipment slot `slot`'s visible item changed (`0x5df0de`): its piece goes by the flag.
+    pub(crate) fn visible_moved(&mut self, slot: u8) {
+        match slot {
+            HEAD => self.helm = None,
+            BACK => self.cloak = None,
+            _ => {}
+        }
+    }
+
+    /// The item records that have landed, `landed(slot)`: a piece whose record was asked for at
+    /// the call is dressed by the flag once it lands (`0x5ed880` → `0x5ed700`).
+    pub(crate) fn records_landed(&mut self, landed: impl Fn(u8) -> bool) {
+        for (pin, slot) in [(&mut self.helm, HEAD), (&mut self.cloak, BACK)] {
+            if pin.is_some_and(|p| p.waiting) && landed(slot) {
+                *pin = None;
+            }
+        }
+    }
+
+    /// `(helm hidden, cloak hidden)` as the model shows them: a call's re-dress, else the bit.
+    pub(crate) fn hidden(
+        pins: Option<&Self>,
+        s: &benilla_protocol::messages::ObjectFields,
+    ) -> (bool, bool) {
+        let pins = pins.copied().unwrap_or_default();
+        (
+            pins.helm.map_or(s.player_hides_helm(), |p| !p.shown),
+            pins.cloak.map_or(s.player_hides_cloak(), |p| !p.shown),
+        )
+    }
+}
+
+#[cfg(test)]
+mod worn_pins_tests {
+    use super::WornPins;
+    use benilla_protocol::messages::ObjectFields;
+    use benilla_ui::script::WornDisplay;
+
+    /// A hide made while the slot's record was asked for holds until the record lands, which
+    /// dresses the piece by the flag (`0x5ed880` → `0x5ed700`); one made over a cached record does
+    /// not wait on it.
+    #[test]
+    fn a_waited_record_landing_dresses_by_the_flag() {
+        let shown = ObjectFields::default();
+        let mut pins = WornPins::default();
+        pins.pin(WornDisplay::Helm, false, true);
+        pins.pin(WornDisplay::Cloak, false, false);
+        pins.records_landed(|_| false);
+        assert_eq!(WornPins::hidden(Some(&pins), &shown), (true, true));
+        pins.records_landed(|slot| slot == 0 || slot == 14);
+        assert_eq!(WornPins::hidden(Some(&pins), &shown), (false, true));
+    }
 }
 
 /// The [`Equipment`] a player's visual was dressed with; a change re-dresses it in place.
@@ -109,8 +233,36 @@ const COMPOSITE_SLOTS: [(u8, usize); 8] = [
 
 /// The item models a unit shows this frame, in [`ATTACH_SLOT_NAMES`] order.
 #[derive(Component, Default, Clone, PartialEq, Eq)]
-pub(super) struct HeldItems {
+pub(crate) struct HeldItems {
     slots: [Option<HeldSlot>; ATTACH_SLOTS],
+}
+
+impl HeldItems {
+    /// Where each hand's weapon hangs, main hand then off hand, while it carries a glow: what
+    /// `0x5eed00` re-applies at every attach of the hands (`0x60b770` → `0x5eed50`, which skips a
+    /// weapon whose visual is none, `0x5eed7a`, or whose point the model lacks, `0x5eed8d`).
+    pub(crate) fn glowing_hands(&self) -> [Option<u16>; 2] {
+        [0, 1].map(|hand| {
+            self.slots[hand]
+                .filter(|s| s.visual != NO_GLOW)
+                .map(|s| s.attach)
+        })
+    }
+
+    /// The hands alone, each `(attach, visual)`, for a test outside the resolve.
+    #[cfg(test)]
+    pub(crate) fn hands_for_tests(hands: [Option<(u16, i32)>; 2]) -> Self {
+        let mut slots = [None; ATTACH_SLOTS];
+        for (slot, hand) in slots.iter_mut().zip(hands) {
+            *slot = hand.map(|(attach, visual)| HeldSlot {
+                display: 1234,
+                kind: ItemModelKind::Weapon,
+                attach,
+                visual,
+            });
+        }
+        HeldItems { slots }
+    }
 }
 
 pub(super) const ATTACH_SLOTS: usize = 8;
@@ -223,6 +375,21 @@ pub(crate) const ATTACH_SLOT_NAMES: [&str; ATTACH_SLOTS] = [
 /// (`0x47a200`) and the ranged and ammo builder pass the display's visual.
 const NO_GLOW: i32 = 0;
 
+/// A helm display's model file for a race and sex: `<stem>_<prefix><M|F>.m2`, the prefix the
+/// `ChrRaces` row's client prefix (`+0x18`, `0x479a21`, formatted at `0x479a41`). A race with no
+/// row has no model, and `0x4799a0` attaches no helm (`0x4799cc`, `0x4799d8`, `0x4799e9`).
+fn helm_model_name(
+    model: &str,
+    races: &benilla_formats::ChrRaces,
+    race: u8,
+    sex: u8,
+) -> Option<String> {
+    let prefix = races.client_prefix(u32::from(race))?;
+    let letter = if sex == 1 { 'F' } else { 'M' };
+    let stem = model.strip_suffix(".m2").unwrap_or(model);
+    Some(format!("{stem}_{prefix}{letter}.m2"))
+}
+
 /// Ensure `display` has a [`DisplayModel`] for `kind`; its texture is the BLP the display row
 /// names, never derived from the model name.
 pub(in crate::entities) fn ensure_item_model(
@@ -258,12 +425,13 @@ pub(in crate::entities) fn ensure_item_model(
         Some(d) if d.model[col].is_some() => {
             let mut model = d.model[col].clone().unwrap();
             if let ItemModelKind::Helm { race, sex } = kind {
-                // Race 1-8 is Hu Or Dw Ni Sc Ta Gn Tr, sex M or F.
-                const RACE_PREFIX: [&str; 8] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr"];
-                let prefix = RACE_PREFIX[(race.clamp(1, 8) - 1) as usize];
-                let letter = if sex == 1 { 'F' } else { 'M' };
-                let stem = model.strip_suffix(".m2").unwrap_or(&model).to_string();
-                model = format!("{stem}_{prefix}{letter}.m2");
+                // `0x4799a0` names the model by the `ChrRaces` row's client prefix, and a race
+                // with no row attaches no helm.
+                let Some(named) = helm_model_name(&model, &held.races, race, sex) else {
+                    held.models.insert((display, kind), super::empty_display());
+                    return;
+                };
+                model = named;
             }
             let disp_id = display;
             debug!(
@@ -281,4 +449,50 @@ pub(in crate::entities) fn ensure_item_model(
         _ => super::empty_display(),
     };
     held.models.insert((display, kind), dm);
+}
+
+#[cfg(test)]
+mod helm_model_tests {
+    use super::helm_model_name;
+    use benilla_formats::ChrRaces;
+
+    fn races() -> ChrRaces {
+        ChrRaces::from_rows([
+            (1, "Human", "Human"),
+            (8, "Troll", "Troll"),
+            (9, "Goblin", "Goblin"),
+        ])
+        .with_client_prefix(1, "Hu")
+        .with_client_prefix(8, "Tr")
+        .with_client_prefix(9, "Gb")
+    }
+
+    /// The prefix is the race row's, so race 9 gets its own model and not the Troll one a clamp to
+    /// eight gave it; a race with no row, 0 included, has none (`0x4799cc`-`0x4799e9`).
+    #[test]
+    fn a_helm_takes_its_races_prefix_and_a_race_without_a_row_has_none() {
+        let races = races();
+        let name = |race, sex| helm_model_name("Helm_Plate.m2", &races, race, sex);
+        assert_eq!(name(1, 0).as_deref(), Some("Helm_Plate_HuM.m2"));
+        assert_eq!(name(8, 1).as_deref(), Some("Helm_Plate_TrF.m2"));
+        assert_eq!(name(9, 0).as_deref(), Some("Helm_Plate_GbM.m2"));
+        assert_eq!(name(10, 0), None);
+        assert_eq!(name(0, 0), None);
+    }
+
+    /// The shipped `ChrRaces.dbc` through the same read: the eight playable prefixes in race
+    /// order, `Gb` for the goblin, nothing past the nine rows.
+    #[test]
+    fn the_shipped_races_name_their_helm_models() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let races = benilla_formats::load_chr_races(&mut chain).expect("ChrRaces.dbc");
+        let prefixes: Vec<_> = (1..=9).map(|r| races.client_prefix(r)).collect();
+        assert_eq!(
+            prefixes,
+            ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr", "Gb"].map(Some)
+        );
+        assert_eq!(races.client_prefix(0), None);
+        assert_eq!(races.client_prefix(10), None);
+    }
 }

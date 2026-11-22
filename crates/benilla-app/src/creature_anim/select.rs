@@ -70,6 +70,9 @@ pub(crate) mod move_flags {
     /// The keyboard turn keys (with `TURN_RIGHT`), which rotate the facing (`0x7c4f30`).
     pub const TURN_LEFT: u32 = 0x10;
     pub const TURN_RIGHT: u32 = 0x20;
+    /// The pitch keys while swimming (`0x7c6df0`), which pitch the mover (`0x7c5c90`).
+    pub const PITCH_UP: u32 = 0x40;
+    pub const PITCH_DOWN: u32 = 0x80;
     /// Walk mode: it scales only the rate numerator, never the id choice.
     pub const WALK_MODE: u32 = 0x100;
     /// `MOVEFLAG_LEVITATING`: the swim decision `0x6030c0` bails on it first (`0x6030d2`), so
@@ -124,8 +127,9 @@ pub(crate) mod move_flags {
     pub const ROUTE_COMMITTED_MOVE: u32 =
         FORWARD | BACKWARD | STRAFE_LEFT | STRAFE_RIGHT | TURN_LEFT | TURN_RIGHT | SWIMMING;
 
-    /// The stationary-cast pin's moving test (`0x5fde80`): no turn bits, so a caster turning in
-    /// place keeps the pin, where [`ROUTE_COMMITTED_MOVE`]'s turn bits would flap it.
+    /// The stationary pins' moving test, `[+0x9e8] & 0x20000f` (`0x5fde80`), for the cast hold and
+    /// the state-kit pin: no turn bits, so a unit turning in place keeps the pin, where
+    /// [`ROUTE_COMMITTED_MOVE`]'s turn bits would flap it.
     pub const CAST_PIN_MOVE: u32 = ANY_MOVE | SWIMMING;
 }
 
@@ -468,8 +472,8 @@ pub(super) fn ranged_hold_anim(load: u16) -> u16 {
 
 /// Whether the drawn ranged idle owns the standing pose: `0x5fd460` claims on sheath CUR == 2
 /// (`0x5fd463`) and the auto-repeat bit `[+0xd58] & 0x200` (`0x5fd476`) alone, a bit only the
-/// local cast-send sets (`0x6e593b`). `0x400` ([`super::RangedHold`]) is not tested here, only by
-/// `0x5fc3f0`'s Hold sustain.
+/// local cast-send sets (`0x6e593b`). The precast bit `0x400` ([`super::Precast`]) is not tested
+/// here, only by `0x5fc3f0`'s Hold sustain (`0x5fc61f`, `0x5fc664`).
 pub(super) fn ranged_idle_gate(auto_repeat: bool, sheath_cur: Option<u8>) -> bool {
     sheath_cur == Some(2) && auto_repeat
 }
@@ -519,6 +523,18 @@ pub(super) fn is_combat_anim(id: u16) -> bool {
 /// (`0x5feae0`): a locomotion request lifts such a bone-0 clip to the key bone, not replacing it.
 pub(super) fn is_cast_anim(id: u16) -> bool {
     matches!(id, 2 | 32 | 33 | 53 | 54)
+}
+
+/// The demotion drop of `PlayAnimation` for an unmounted request with the route flag clear and no
+/// key bone armed (`0x5feb00`-`0x5feb56`), over the current id: a swing (`0x5fcc10`) or ready
+/// stance (`0x5fde60`, 25-29) refuses Stand and a ready stance, a cast (`0x5fcbb0`) or spell-ready
+/// stance (`0x5fde40`, 51-52) refuses Stand and a spell-ready stance. Any other pair plays.
+pub(super) fn demotion_drops(current: u16, request: u16) -> bool {
+    let ready = |id: u16| matches!(id, 25..=29);
+    let spell_ready = |id: u16| matches!(id, 51 | 52);
+    ((is_combat_anim(current) || ready(current)) && (ready(request) || request == STAND))
+        || ((is_cast_anim(current) || spell_ready(current))
+            && (spell_ready(request) || request == STAND))
 }
 
 /// The state-emote resolver's verdict (`0x5fd770`): the row's `AnimID` for the unit's
@@ -804,7 +820,8 @@ pub(super) fn scaled_rate(clip: &AnimClip, speed: f32, model_scale: f32) -> Opti
 }
 
 /// The unified movement view, first present winning: the controller's [`MovementState`], a
-/// remote's relayed flags ([`RemoteMotion`]), a creature's spline, else still.
+/// unit's spline, a remote's relayed flags ([`RemoteMotion`]), else still. A path outranks the
+/// mover state it rides on: the spline drives the mover while it lives.
 /// `creature_swimming` supplies the `SWIMMING` the wire never sends for a creature; `modes`, the
 /// `SMSG_SPLINE_MOVE_*` grants, join the remote and creature flags (one word in the reference).
 pub(crate) fn unify(
@@ -820,20 +837,20 @@ pub(crate) fn unify(
         return MovementState { flying, ..*m };
     }
     let granted = modes.map_or(0, |m| m.0);
-    if let Some(r) = remote {
-        return MovementState {
-            speed: r.speed,
-            flags: r.flags | granted,
-            vertical_speed: r.vertical_velocity,
-            flying,
-            ..default()
-        };
-    }
     let swim = if creature_swimming {
         move_flags::SWIMMING
     } else {
         0
     };
+    if let Some(r) = remote.filter(|_| spline.is_none()) {
+        return MovementState {
+            speed: r.speed,
+            flags: r.flags | granted | swim,
+            vertical_speed: r.vertical_velocity,
+            flying,
+            ..default()
+        };
+    }
     let s = spline.map(|s| s.speed()).filter(|s| *s > MOVING_EPSILON);
     MovementState {
         speed: s.unwrap_or(0.0),

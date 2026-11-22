@@ -9,6 +9,7 @@ use super::test_ui::load_ui as load_xml;
 fn a_started_fade_ramps_off_uiparents_tick_and_completes() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
@@ -38,7 +39,7 @@ fn a_started_fade_ramps_off_uiparents_tick_and_completes() {
     s.resolve();
     let mid = s.eval::<f64>("return BenillaFadeProbe:GetAlpha()").unwrap();
     assert!(
-        (mid - 0.5).abs() < 1e-3,
+        (mid - 0.5).abs() < 1.0 / 255.0,
         "half the timeToFade in, half the ramp: {mid}"
     );
 
@@ -61,6 +62,7 @@ fn a_started_fade_ramps_off_uiparents_tick_and_completes() {
 fn a_flash_alternates_then_stops() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");

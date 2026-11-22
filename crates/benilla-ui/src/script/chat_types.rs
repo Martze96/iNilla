@@ -2,8 +2,9 @@
 //! `ResetChatColors`: the reference's runtime table (`0xb4e518`), which the `COLORS` block of
 //! `chat-cache.txt` overwrites in place at load; the app owns that file.
 
-use mlua::{Lua, MultiValue};
+use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::Model;
 
 /// The fixed segment: 94 entries, in the reference's order (index = position + 1).
@@ -198,10 +199,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetChatTypeIndex",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name else {
-                return Ok(0);
-            };
+        lua.create_function(|lua, name: Value| {
+            // `is-number-or-string` else `Usage: GetChatTypeIndex(type)` (`0x844d54`, `0x4a0a9c`).
+            let name = binding_abi::string_arg(lua, name, "Usage: GetChatTypeIndex(type)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(position(&model.chat_colors, &name).map_or(0, |i| i as i64 + 1))
         })?,
@@ -209,36 +209,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "ChangeChatColor",
-        lua.create_function(
-            |lua, (name, r, g, b): (String, Option<f64>, Option<f64>, Option<f64>)| {
-                let written = {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                    let Some(i) = position(&model.chat_colors, &name) else {
-                        return Ok(());
-                    };
-                    let rgb = [
-                        to_byte(r.unwrap_or(0.0)),
-                        to_byte(g.unwrap_or(0.0)),
-                        to_byte(b.unwrap_or(0.0)),
-                    ];
-                    model.chat_colors[i].rgb = rgb;
-                    model.chat_colors_changed = true;
-                    (model.chat_colors[i].name.clone(), rgb)
+        lua.create_function(|lua, (name, r, g, b): (Value, Value, Value, Value)| {
+            // `is-number-or-string` on the type, `is-number` on r, g and b, else the client's
+            // own `Usage(ChangeChatColor(chatType, r, g, b)` (`0x844d28`, `0x4a07fe`-`0x4a09d0`).
+            const USAGE: &str = "Usage(ChangeChatColor(chatType, r, g, b)";
+            let name = binding_abi::string_arg(lua, name, USAGE)?;
+            let r = binding_abi::float_arg(lua, r, USAGE)?;
+            let g = binding_abi::float_arg(lua, g, USAGE)?;
+            let b = binding_abi::float_arg(lua, b, USAGE)?;
+            let rgb = {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let Some(i) = position(&model.chat_colors, &name) else {
+                    return Ok(());
                 };
-                let (name, rgb) = written;
-                super::tick::fire_event_into(
-                    lua,
-                    "UPDATE_CHAT_COLOR",
-                    vec![
-                        super::ScriptValue::Str(name),
-                        super::ScriptValue::Number(from_byte(rgb[0])),
-                        super::ScriptValue::Number(from_byte(rgb[1])),
-                        super::ScriptValue::Number(from_byte(rgb[2])),
-                    ],
-                );
-                Ok(())
-            },
-        )?,
+                let rgb = [to_byte(r), to_byte(g), to_byte(b)];
+                model.chat_colors[i].rgb = rgb;
+                model.chat_colors_changed = true;
+                rgb
+            };
+            // The event carries the caller's string, not the entry's spelling (`0x4a0850` keeps
+            // `lua_tostring(1)`, `0x4a094a` pushes it as the `%s` of `0x703f50`).
+            super::tick::fire_event_into(
+                lua,
+                "UPDATE_CHAT_COLOR",
+                vec![
+                    super::ScriptValue::Str(name),
+                    super::ScriptValue::Number(from_byte(rgb[0])),
+                    super::ScriptValue::Number(from_byte(rgb[1])),
+                    super::ScriptValue::Number(from_byte(rgb[2])),
+                ],
+            );
+            Ok(())
+        })?,
     )?;
 
     g.set(
@@ -260,6 +262,30 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
+    /// `DEFAULTS` is `reference/chat_types.tsv`, row for row: index, name and colour.
+    #[test]
+    fn the_defaults_are_the_reference_table() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/chat_types.tsv"
+        );
+        let text = std::fs::read_to_string(path).expect("reference/chat_types.tsv");
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').collect())
+            .collect();
+        assert_eq!(rows.len(), DEFAULTS.len(), "row count");
+        for (i, (row, (name, [r, g, b]))) in rows.iter().zip(DEFAULTS).enumerate() {
+            assert_eq!(row[0], i.to_string(), "indices run in order");
+            assert_eq!(
+                (row[1], row[2]),
+                (name, format!("{r:02x}{g:02x}{b:02x}").as_str()),
+                "type {i}"
+            );
+        }
+    }
+
     #[test]
     fn the_index_is_one_based_case_folded_and_zero_on_a_miss() {
         let s = UiScript::new().unwrap();
@@ -276,7 +302,6 @@ mod tests {
             "extras are 95… — count_before_match + 0x5f"
         );
         assert_eq!(s.eval::<i64>("return GetChatTypeIndex('NOPE')").unwrap(), 0);
-        assert_eq!(s.eval::<i64>("return GetChatTypeIndex()").unwrap(), 0);
     }
 
     #[test]
@@ -293,8 +318,8 @@ mod tests {
         assert_eq!(say.rgb, [127, 255, 254], "truncate, never round");
         assert_eq!(
             s.eval::<String>("return SEEN[1]").unwrap(),
-            "SAY",
-            "the registry's spelling, not the caller's"
+            "say",
+            "the caller's spelling, not the registry's"
         );
         let heard = s.eval::<f64>("return SEEN[2]").unwrap();
         assert!(
@@ -303,6 +328,8 @@ mod tests {
         );
         assert!(s.take_chat_color_changes());
         assert!(!s.take_chat_color_changes(), "the cue is one-shot");
+        s.run("ChangeChatColor('SaY', 0, 0, 0)").unwrap();
+        assert_eq!(s.eval::<String>("return SEEN[1]").unwrap(), "SaY");
     }
 
     #[test]

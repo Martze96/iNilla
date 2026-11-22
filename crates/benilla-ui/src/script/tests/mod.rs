@@ -8,12 +8,14 @@ mod anchor_slots;
 mod anchors;
 mod backdrop;
 mod button;
+mod button_fonts;
 mod capture;
 mod channel;
 mod chat_bubble;
 mod clear_points;
 mod colour_args;
-mod common;
+mod colour_bytes;
+pub(in crate::script) mod common;
 mod cooldown;
 mod create_frame_template;
 mod cvar_bindings;
@@ -23,10 +25,13 @@ mod drag_threshold;
 mod dying_target;
 mod end_to_end;
 mod engine_updates;
+mod european_text;
 mod events;
 mod flag_args;
+mod font_links;
 mod font_object;
 mod frame_api;
+mod frame_state;
 mod generic_for;
 mod glue_surface;
 mod gm_ticket;
@@ -36,7 +41,9 @@ mod host_state;
 mod hover_publish;
 mod hover_walk;
 mod hyperlink;
+mod index_usage;
 mod input;
+mod is_number_gates;
 mod keep_rect;
 mod keyboard;
 mod layout_gate;
@@ -44,6 +51,7 @@ mod layout_mode;
 mod layout_structure;
 mod line_spacing;
 mod measure;
+mod message_justify;
 mod minimap;
 mod miss_tuples;
 mod model_clock;
@@ -51,37 +59,54 @@ mod modelframe;
 mod movable;
 mod name_targets;
 mod nameplate;
+mod no_font;
+mod number_text;
 mod numeric_shape_gate;
 mod object_model;
 mod one_or_nil_methods;
+mod open_layout;
+mod protected_gate;
 mod reference_surface;
 mod region_map;
 mod regions;
+mod reputation_list;
 mod resize_bounds;
+mod screen_units;
+mod script_lengths;
 mod scrollframe;
 mod set_font_args;
 mod setparent;
 mod shown_bit;
 mod simplehtml;
 mod size_changed;
+mod skill_list;
 mod slider;
 mod statusbar;
 mod stdlib;
+mod string_usage_gates;
 mod structure_queries;
 mod talent;
 mod taxi;
 mod texcoord_font;
+mod text_wrap;
 mod texture_art;
 mod tooltip;
 mod tooltip_item;
 mod tooltip_setter_flags;
+mod tooltip_size;
 mod tooltip_spell;
 mod tooltip_unit;
+mod tooltip_unit_status;
 mod toplevel;
 mod update_walk;
+mod usage_lines;
+mod usage_number_args;
+mod usage_range_gates;
 mod visibility;
+mod wheel;
 mod widget_args;
 mod widget_surface;
+mod world_press_hook;
 mod worldframe;
 mod worldmap;
 
@@ -117,18 +142,53 @@ fn an_instruction_budget_turns_a_runaway_loop_into_an_error() {
     assert_eq!(t.eval::<i64>("return BudgetOk").unwrap(), 500_500);
 }
 
-/// The hearth location's name, `""` before the packet; `StaticPopup.lua:1742` formats it.
+/// The budget's raise reaches the host past every `pcall` and `xpcall`, and runs no handler: a
+/// loop under a protected call is stopped too.
 #[test]
-fn get_bind_location_answers_the_pushed_name_and_never_nil() {
+fn an_instruction_budget_is_caught_by_no_protected_call() {
+    for src in [
+        "while true do pcall(function() while true do end end) end",
+        "xpcall(function() while true do end end, function() while true do end end)",
+    ] {
+        let s = crate::script::UiScript::new().unwrap();
+        s.set_instruction_budget(5_000_000);
+        let err = s.run(src).expect_err(src).to_string();
+        assert!(err.contains("instruction budget exhausted"), "{src}: {err}");
+    }
+}
+
+/// The budget counts Lua that a library function calls, as 5.1's count hook does: a `gsub`
+/// replacement over three million characters runs four instructions a call on either VM
+/// (`GETGLOBAL`, `ADD`, `SETGLOBAL`, `RETURN`), and a runaway one is stopped.
+#[test]
+fn the_instruction_budget_counts_lua_a_library_function_runs() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(u64::MAX);
+    s.run("n = 0 string.gsub(string.rep('a', 3000000), 'a', function(c) n = n + 1 return c end)")
+        .unwrap();
+    assert_eq!(s.instructions_used(), 12_000_000);
+
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(5_000_000);
+    let err = s
+        .run("string.gsub(string.rep('a', 50000000), 'a', function(c) n = 1 return c end)")
+        .expect_err("a library function's callbacks run inside the budget")
+        .to_string();
+    assert!(err.contains("instruction budget exhausted"), "{err}");
+}
+
+/// The hearth location's name; before the packet, or for a bind zone with no AreaTable row, the
+/// `HOME_INN` text (`0x48db19`), never nil. `StaticPopup.lua:1742` formats it.
+#[test]
+fn get_bind_location_answers_the_pushed_name_and_the_inn_text_otherwise() {
     let mut s = crate::script::UiScript::new().unwrap();
-    assert_eq!(s.eval::<String>("return GetBindLocation()").unwrap(), "");
+    s.eval::<()>(r#"HOME_INN = "your inn""#).unwrap();
     assert_eq!(
-        s.eval::<String>("return type(GetBindLocation())").unwrap(),
-        "string",
-        "never nil — a consumer concatenates it"
+        s.eval::<String>("return GetBindLocation()").unwrap(),
+        "your inn"
     );
 
-    s.set_bind_location("Stormwind City");
+    s.set_bind_location(Some("Stormwind City"));
     assert_eq!(
         s.eval::<String>("return GetBindLocation()").unwrap(),
         "Stormwind City"
@@ -138,17 +198,24 @@ fn get_bind_location_answers_the_pushed_name_and_never_nil() {
             .unwrap(),
         "Bound: Stormwind City"
     );
-    s.set_bind_location("Ironforge");
+    s.set_bind_location(Some("Ironforge"));
     assert_eq!(
         s.eval::<String>("return GetBindLocation()").unwrap(),
         "Ironforge"
     );
+    s.set_bind_location(None);
+    assert_eq!(
+        s.eval::<String>("return GetBindLocation()").unwrap(),
+        "your inn"
+    );
 }
 
-/// `RequestTimePlayed()` queues the ask; `TIME_PLAYED_MSG` carries the answer.
+/// `RequestTimePlayed()` is a call the host sends inside the verb; `TIME_PLAYED_MSG` carries the
+/// answer.
 #[test]
-fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
+fn request_time_played_is_a_call_and_the_answer_arrives_as_an_event() {
     let mut s = crate::script::UiScript::new().unwrap();
+    s.keep_calls();
 
     assert_eq!(s.arity("RequestTimePlayed()").unwrap(), 0);
     // A count, not a latch: the packet is empty, so two asks in a frame are two sends.
@@ -158,7 +225,11 @@ fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
         3,
         "the eval above plus two more — each ask is its own CMSG_PLAYED_TIME"
     );
-    assert_eq!(s.take_played_time_asks(), 0, "the drain empties the queue");
+    assert_eq!(
+        s.take_played_time_asks(),
+        0,
+        "the take empties the kept calls"
+    );
 
     s.run(
         r#"
@@ -197,7 +268,6 @@ fn a_chosen_error_handler_hears_engine_caught_errors_and_none_leaves_the_host_ch
 
     // With no handler set, as before FrameXML sets one, the dispatch adds nothing.
     s.fire_event("PLAYER_ALIVE", vec![]);
-    s.dispatch_script_errors_to_handler();
     let errors = s.take_errors();
     assert_eq!(
         errors.iter().filter(|e| e.contains("boom")).count(),
@@ -209,7 +279,6 @@ fn a_chosen_error_handler_hears_engine_caught_errors_and_none_leaves_the_host_ch
     s.run("caught = {} seterrorhandler(function(msg) table.insert(caught, msg) end)")
         .unwrap();
     s.fire_event("PLAYER_ALIVE", vec![]);
-    s.dispatch_script_errors_to_handler();
     assert!(
         s.eval::<String>("return caught[1]")
             .unwrap()
@@ -241,7 +310,6 @@ fn a_widget_handler_error_reaches_the_chosen_error_handler() {
          sl:SetValue(5)",
     )
     .unwrap();
-    s.dispatch_script_errors_to_handler();
     let caught = s
         .eval::<String>("return table.concat(caught, ' | ')")
         .unwrap();
@@ -270,7 +338,6 @@ fn the_error_handler_receives_the_bare_lua_message() {
     )
     .unwrap();
     s.fire_event("PLAYER_ALIVE", vec![]);
-    s.dispatch_script_errors_to_handler();
     let caught: Vec<String> = s.eval("return caught").unwrap();
     assert!(caught.len() >= 3, "{caught:?}");
     for m in &caught {
@@ -310,34 +377,138 @@ fn a_self_unregistering_listener_does_not_rob_its_successor_on_the_internal_disp
     assert_eq!(s.eval::<String>("return log").unwrap(), "ab");
 }
 
-/// The handler's own failure goes to the host channel only, never re-queued; the batch stops.
+/// Every runner calls its script under the error function (`0x704e4f`-`0x704e79`), and Lua 5.0
+/// runs an error function at the raise: the handler sees the failing handler's `this`, `event` and
+/// `arg1` (`this` is put back only at `0x704ea7`), its frames are on the stack for `debugstack`,
+/// and it runs before the event's next listener.
 #[test]
-fn an_error_handler_that_errors_does_not_recurse() {
+fn the_error_handler_runs_at_the_raise_inside_the_failing_handler() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run_chunk_named(
+        b"order = '' seen = nil stack = ''\n\
+          seterrorhandler(function(m)\n\
+            order = order .. 'h'\n\
+            seen = (this and this:GetName() or 'nil') .. ' ' .. tostring(event) .. ' ' .. tostring(arg1)\n\
+            stack = debugstack()\n\
+          end)\n\
+          function FailingListener()\n\
+            error('listener fault')\n\
+          end\n\
+          local a = CreateFrame('Frame', 'FirstListener')\n\
+          a:RegisterEvent('CHAT_MSG_SAY')\n\
+          a:SetScript('OnEvent', function() FailingListener() end)\n\
+          local b = CreateFrame('Frame', 'NextListener')\n\
+          b:RegisterEvent('CHAT_MSG_SAY')\n\
+          b:SetScript('OnEvent', function() order = order .. 'b' end)\n",
+        "@Interface\\AddOns\\Probe\\probe.lua",
+    )
+    .unwrap();
+    s.fire_event(
+        "CHAT_MSG_SAY",
+        vec![crate::script::ScriptValue::Str("hello".into())],
+    );
+    assert_eq!(s.eval::<String>("return order").unwrap(), "hb");
+    assert_eq!(
+        s.eval::<String>("return seen").unwrap(),
+        "FirstListener CHAT_MSG_SAY hello"
+    );
+    let stack = s.eval::<String>("return stack").unwrap();
+    assert!(
+        stack.contains("probe.lua:8: in function `FailingListener'"),
+        "the failing function is on the stack: {stack}"
+    );
+    // The host log keeps its row.
+    assert!(s.take_errors().iter().any(|e| e.contains("listener fault")));
+}
+
+/// `OnUpdate` runs through the same runner (`0x704f10`), with `arg1` the elapsed time.
+#[test]
+fn an_on_update_error_reaches_the_handler_with_its_this_and_arg1() {
     let mut s = crate::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run(
-        "seterrorhandler(function() error('the handler is broken too') end) \
+        "seen = nil \
+         seterrorhandler(function(m) seen = this:GetName() .. ' ' .. arg1 .. ' ' .. m end) \
+         local f = CreateFrame('Frame', 'Ticker') \
+         f:SetScript('OnUpdate', function() error('tick fault', 0) end)",
+    )
+    .unwrap();
+    s.tick(0.5);
+    assert_eq!(
+        s.eval::<String>("return seen").unwrap(),
+        "Ticker 0.5 tick fault"
+    );
+}
+
+/// A file chunk runs under the error function too (`0x704ae0`, `0x704b68`): the handler hears
+/// its error inside the run, with the file's frame on the stack. A file that fails to compile
+/// goes to the error function directly (`0x704b42`), before the run answers its error.
+#[test]
+fn a_file_chunks_error_reaches_the_handler_as_it_runs() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        "heard = {} seterrorhandler(function(m) table.insert(heard, m .. '|' .. debugstack()) end)",
+    )
+    .unwrap();
+    s.run_chunk_named(
+        b"local x = 1\nerror('file fault')\n",
+        "@Interface\\AddOns\\Probe\\file.lua",
+    )
+    .expect_err("the file raised");
+    s.run_chunk_named(b"x = = 1\n", "@Interface\\AddOns\\Probe\\bad.lua")
+        .expect_err("the file failed to compile");
+    let heard: Vec<String> = s.eval("return heard").unwrap();
+    assert_eq!(heard.len(), 2, "{heard:?}");
+    assert!(
+        heard[0].starts_with("Interface\\AddOns\\Probe\\file.lua:2: file fault|")
+            && heard[0].contains("file.lua:2: in main chunk"),
+        "{heard:?}"
+    );
+    assert!(
+        heard[1].starts_with("Interface\\AddOns\\Probe\\bad.lua:1: "),
+        "{heard:?}"
+    );
+    assert!(
+        !heard[1].contains("bad.lua:1: in"),
+        "no failing frame: {heard:?}"
+    );
+}
+
+/// The handler runs as the pcall's error function, unprotected (`0x703b6d`): its own error runs
+/// it again for that error (`luaG_errormsg`, `0x6fc780`) until `luaD_call` throws status 5 at
+/// depth 225 (`0x6f65cf`), and that is what the pcall answers. The next fire runs as before.
+#[test]
+fn an_error_handler_that_errors_runs_again_until_error_in_error_handling() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "heard = {} \
+         seterrorhandler(function(m) table.insert(heard, m) error('the handler is broken too') end) \
          local f = CreateFrame('Frame') \
          f:RegisterEvent('PLAYER_ALIVE') \
          f:SetScript('OnEvent', function() error('original fault') end)",
     )
     .unwrap();
     s.fire_event("PLAYER_ALIVE", vec![]);
-    s.dispatch_script_errors_to_handler();
     let errors = s.take_errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
-        errors.iter().any(|e| e.contains("original fault")),
-        "the original fault is on the host channel: {errors:?}"
+        errors[0].contains("original fault — error handler failed: error in error handling"),
+        "{errors:?}"
     );
+    let heard: Vec<String> = s.eval("return heard").unwrap();
+    assert!(heard[0].ends_with("original fault"), "{heard:?}");
+    assert!(heard.len() > 2, "{}", heard.len());
+    // `luaD_call` raises `C stack overflow` at depth 200 (`0x6f65bf`), and the handler hears that too.
     assert!(
-        errors
+        heard[1..]
             .iter()
-            .any(|e| e.contains("error handler itself failed")),
-        "and so is the handler's own failure, named as such: {errors:?}"
+            .all(|m| m.ends_with("the handler is broken too") || m == "C stack overflow"),
+        "{heard:?}"
     );
-    s.dispatch_script_errors_to_handler();
-    assert!(
-        s.take_errors().is_empty(),
-        "nothing recurses: the queue drained and the handler failure did not re-enter it"
-    );
+    s.run("heard = {}").unwrap();
+    s.fire_event("PLAYER_ALIVE", vec![]);
+    let again: Vec<String> = s.eval("return heard").unwrap();
+    assert_eq!(again.len(), heard.len(), "the same depth again");
 }

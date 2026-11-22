@@ -8,7 +8,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::{flag, string_arg};
+use super::binding_abi::{flag, s_str_to_int, string_arg};
 use super::{Model, ScriptValue};
 
 /// One of the four user agreements the login screen walks before it shows the login boxes
@@ -57,9 +57,9 @@ pub struct NoticeState {
 }
 
 impl NoticeState {
-    /// The flags for a CVar value, read as `atoi` reads it: anything unparseable is 0.
+    /// The flags for a CVar value, read as its record's integer ([`s_str_to_int`]).
     pub fn from_cvar(value: &str) -> Self {
-        let n = leading_int(value);
+        let n = s_str_to_int(value);
         NoticeState {
             accepted: n == 1,
             show_notice: n < 0,
@@ -67,21 +67,59 @@ impl NoticeState {
     }
 }
 
-/// `atoi`: an optional sign and the leading digits, 0 when there are none.
-pub(super) fn leading_int(s: &str) -> i64 {
-    let s = s.trim_start();
-    let (sign, digits) = match s.as_bytes().first() {
-        Some(b'-') => (-1, &s[1..]),
-        Some(b'+') => (1, &s[1..]),
-        _ => (1, s),
-    };
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    sign * digits[..end].parse::<i64>().unwrap_or(0)
+/// The four agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): C globals, which outlive the Lua
+/// state. The glue manager seeds them once (`0x46a400`) and seats the same cells in every glue VM
+/// it builds, so a rebuild (`0x46a7b0`) reads what the last one left and the accepts' stores
+/// (`0x46aef0` and its siblings) are the only writes after the seed.
+#[derive(Clone, Default)]
+pub struct GlueNotices(std::rc::Rc<std::cell::Cell<[NoticeState; 4]>>);
+
+impl GlueNotices {
+    /// The cells seeded with `states`, in [`GlueNotice::ALL`] order.
+    pub fn new(states: [NoticeState; 4]) -> Self {
+        Self(std::rc::Rc::new(std::cell::Cell::new(states)))
+    }
+
+    /// One agreement's flags.
+    pub fn get(&self, notice: GlueNotice) -> NoticeState {
+        self.0.get()[notice.index()]
+    }
+
+    /// Store one agreement's flags.
+    pub fn set(&self, notice: GlueNotice, state: NoticeState) {
+        let mut all = self.0.get();
+        all[notice.index()] = state;
+        self.0.set(all);
+    }
+}
+
+/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`, `__input` `0x744e21`) over `s` as a C
+/// string: blanks skipped (`__whiteout`, `0x7458ae`), an optional sign and the leading digits,
+/// accumulated in 32 bits that wrap (`0x7456c9`, `0x74570f`), negated for `-` (`0x745744`) and
+/// stored as a dword (`0x745781`). `None` when no digit follows, which leaves the out-slot
+/// untouched.
+pub fn scanf_d(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+    let mut i = b
+        .iter()
+        .take_while(|&&c| c == b' ' || (0x09..=0x0d).contains(&c))
+        .count();
+    let neg = b.get(i) == Some(&b'-');
+    if matches!(b.get(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let digits = b[i..].iter().take_while(|c| c.is_ascii_digit());
+    let (mut n, mut v) = (0, 0i32);
+    for &c in digits {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(c - b'0'));
+        n += 1;
+    }
+    (n > 0).then(|| if neg { v.wrapping_neg() } else { v })
 }
 
 /// `DefaultServerLogin`'s two strings. Never logged: the `Debug` form names the account only.
+#[derive(Clone)]
 pub struct GlueCredentials {
     pub account: String,
     pub password: String,
@@ -96,12 +134,27 @@ impl std::fmt::Debug for GlueCredentials {
     }
 }
 
+/// `PINEntered`'s keys: the positions pressed on the keypad, 4 to 10 of them. Never logged: the
+/// `Debug` form gives the count only, since with the grid `PLAYER_ENTER_PIN` showed they spell the
+/// PIN.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GluePin {
+    pub positions: Vec<u8>,
+}
+
+impl std::fmt::Debug for GluePin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GluePin(<{} keys>)", self.positions.len())
+    }
+}
+
+/// The `accountName` CVar's table key, its name lowercased.
+const CVAR_ACCOUNT_NAME_KEY: &str = "accountname";
+
 /// A glue verb's effect the host carries out on its next frame, drained by its glue manager: the
-/// account name's file, the glue music and the browser. None of them is anything Lua reads back.
-#[derive(Debug)]
+/// glue music and the browser. None of them is anything Lua reads back.
+#[derive(Clone, Debug)]
 pub enum GlueRequest {
-    /// `SetSavedAccountName(name)` (`0x46cdf0`): the `accountName` CVar's new value.
-    SetSavedAccountName(String),
     /// `PlayGlueMusic(file)` (`0x46ceb0` → `0x45aeb0`).
     PlayGlueMusic(String),
     /// `StopGlueMusic()` (`0x46cf00`): `0x45b050(1.0)`, a one-second fade.
@@ -119,7 +172,7 @@ pub enum GlueRequest {
 /// One of the glue manager's own functions a verb calls (`CGlueMgr`, `[0x46a400, 0x476020)`), run
 /// in place by the host the VM is seated with ([`GlueHost::call`]): its screen state, its dialog
 /// and its other events land before the verb returns; only the network half waits for the host.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum GlueCall {
     /// `DefaultServerLogin(account, password)` (`0x46d160`) past the agreements (`0x46afb0`'s
     /// first two tests, `[0xb41dfc]`, `[0xb41e04]`), the rest of `CGlueMgr::Login`: the idle
@@ -128,6 +181,9 @@ pub enum GlueCall {
     /// `StatusDialogClick()` (`0x46d270` → `0x46b720`): the status dialog's button, per screen
     /// state.
     StatusDialogClick,
+    /// `PINEntered(...)` (`0x46d1c0`) past its checks: `0x46b0c0`, the `CANCEL` dialog and the keys
+    /// on to the logon (`0x5ab5a0` → `0x5b3120`).
+    PinEntered(GluePin),
     /// `DisconnectFromServer()` (`0x46d340`): the world link's flag down and the link dropped if
     /// up (`0x5ab1a0`), then the logon cancelled (`0x5b3320`).
     DisconnectFromServer,
@@ -164,6 +220,15 @@ pub enum GlueCall {
     /// screen state 5, the `CHAR_CREATE_IN_PROGRESS` dialog and the `CMSG_CHAR_CREATE`
     /// (`0x46b290`).
     CreateCharacter(super::glue_create::GlueCreateRequest),
+    /// `PatchDownloadCancel()` (`0x46d400` → `0x474710`) with no download in flight: the logon
+    /// cancelled (`0x5b3320`), the screen state 0 and the `login` screen up (`0x46b840`).
+    CancelPatchDownload,
+    /// `PatchDownloadApply()` (`0x46d410` → `0x4749f0`) with no `wow-patch.mpq` to open: the
+    /// failure dialog for code 4 (`0x474a43`, `0x474ab0`).
+    ApplyPatch,
+    /// `SurveyNotificationDone()` (`0x46ddd0` → EndSurvey `0x473e30`): the logon listener's
+    /// slot 4 with `LOGIN_STATE_AUTHENTICATED` (`0x473ef5`).
+    SurveyDone,
 }
 
 /// A glue string by its global's key, or as given.
@@ -214,6 +279,11 @@ pub enum GlueSignal {
     SelectLast,
     /// `FORCE_RENAME_CHARACTER(key)` (event 23): the key, unresolved.
     ForceRename(&'static str),
+    /// `PLAYER_ENTER_PIN` (event 25, `0x46bb15`): the keypad's grid, ten numbers.
+    EnterPin([u8; 10]),
+    /// The stock keypad pressed by its buttons: the keys at these positions (button `p + 1`
+    /// carries id `p`), then Okay, each by `Click` (`0x7826c0`), the physical click's path.
+    PressKeypad(Vec<u8>),
     /// A CVar the manager set (`CVar::Set`, `0x63df50`), written to the VM's table as the
     /// engine's write.
     Cvar { name: &'static str, value: String },
@@ -353,15 +423,16 @@ const LAUNCH_HOSTS: [&str; 10] = [
 ];
 
 /// The gate in front of the browser: `0x5abd00` tests `0x5abc10` and `0x429ff0` takes the URL.
-/// The URL begins `http://` (`0x85d6bc`, compared case-folded), every byte after it is a letter,
-/// a digit, `.`, `-` or `/` (so no query, port, escape or `_`), and its host, the text up to the
-/// first `/`, is one of [`LAUNCH_HOSTS`], compared case-folded. `0x429ff0` refuses a URL of 0x400
-/// bytes or more (`0x42a01c`). The reference works on a C string, so the verb cuts its argument
-/// at a NUL before asking; a URL with a NUL in it is refused here.
+/// The URL begins `http://` (`0x85d6bc`, compared case-folded), every byte after it is `/`, `.`,
+/// `-` (`0x5abc54`-`0x5abc5e`) or passes `isalpha` (`0x73fb91`, mask `0x103`), so no digit, query,
+/// port, escape or `_`, and its host, the text up to the first `/`, is one of [`LAUNCH_HOSTS`],
+/// compared case-folded. `0x429ff0` refuses a URL of 0x400 bytes or more (`0x42a01c`). The
+/// reference works on a C string, so the verb cuts its argument at a NUL before asking; a URL with
+/// a NUL in it is refused here.
 ///
-/// Deviation: a host of 0x80 bytes or more is refused. The reference copies the host into a 0x80-byte
-/// buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut
-/// host could end in a whitelisted suffix the real one does not; this takes the safe side.
+/// Deviation: a host of 0x80 bytes or more is refused because the reference copies the host into a
+/// 0x80-byte buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and
+/// the cut host could end in a whitelisted suffix the real one does not; this takes the safe side.
 pub fn launch_url_allowed(url: &str) -> bool {
     if url.len() >= 0x400 || url.contains('\0') {
         return false;
@@ -377,7 +448,7 @@ pub fn launch_url_allowed(url: &str) -> bool {
     };
     if !rest
         .iter()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'/'))
+        .all(|b| b.is_ascii_alphabetic() || matches!(b, b'.' | b'-' | b'/'))
     {
         return false;
     }
@@ -400,7 +471,8 @@ pub fn launch_url_allowed(url: &str) -> bool {
 /// What the browser is given for an add-on's URL, or `None` for one benilla will not open. The
 /// reference hands the server's string to `0x429ff0` with no whitelist (`0x46d5e0`): a C string of
 /// fewer than 0x400 bytes, each `%XY` replaced by the byte it spells (table `0x801490`: a
-/// non-hex digit reads 0; a `%` with fewer than two bytes after it ends the string), then
+/// non-hex ASCII digit reads 0, and one from 0x80 up, sign-extended at `0x42a059`, reads the 128
+/// bytes before the table; a `%` with fewer than two bytes after it ends the string), then
 /// `ShellExecute "open"`.
 ///
 /// Deviation: benilla keeps that decode and then encodes it again, every byte outside the URL
@@ -414,6 +486,7 @@ pub fn launch_addon_url(url: &str) -> Option<String> {
     if url.is_empty() || url.len() >= 0x400 {
         return None;
     }
+    // Any non-hex byte reads 0: the reference's read below its table from 0x80 up is not copied.
     let hex = |b: u8| -> u8 {
         match b {
             b'1'..=b'9' => b - b'0',
@@ -499,18 +572,16 @@ pub fn launch_addon_url_allowed(url: &str) -> bool {
 }
 
 /// The glue core's slots and queue in the VM's model.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GlueCore {
     requests: Vec<GlueRequest>,
     /// The glue manager the verbs call in place, once the host has seated this VM.
     host: Option<std::rc::Rc<dyn GlueHost>>,
     /// Calls made before any host was seated, for the one that seats this VM to run.
     calls: Vec<GlueCall>,
-    /// The `accountName` CVar (`[0x8826c8]`), which `GetSavedAccountName` (`0x46cdd0`) reads.
-    saved_account: String,
-    /// The agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): read off their CVars when the glue
-    /// starts, set by their accepts, and read by the getters and the login's first two tests.
-    notices: [NoticeState; 4],
+    /// The agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): read by the getters and the login's
+    /// first two tests, set by the accepts, and the host's to seed ([`GlueNotices`]).
+    notices: GlueNotices,
     /// The current glue screen's name (`[0xb41478]`), which `SetCurrentScreen` (`0x46ce60` →
     /// `0x46b860`) copies into a 0x40-byte buffer.
     pub(super) screen: String,
@@ -519,6 +590,10 @@ pub(crate) struct GlueCore {
     /// credits frame (`CreditsFrame.lua:75`, `CreditsFrame.xml:456`) and the movie frame
     /// (`MovieFrame.lua:36`, `:49`).
     cursor_hidden: bool,
+    /// The device's pointer calls (`0x58b590`) the glue made since the host last took them, in
+    /// order: the verbs' (`0x46db60` shows, `0x46db70` hides) and the build's `SetCursor`
+    /// (`0x46a872`), which shows.
+    pub(super) pointer_calls: Vec<bool>,
     /// The realm list the realm verbs read ([`super::glue_realm`]).
     pub(super) realms: super::glue_realm::GlueRealmList,
     /// The character roster and the select verbs' cells ([`super::glue_select`]).
@@ -527,17 +602,6 @@ pub(crate) struct GlueCore {
     pub(super) create: super::glue_create::GlueCreate,
     /// The AddOns screen's enable nodes ([`super::glue_addons`]).
     pub(super) addons: super::glue_addons::GlueAddons,
-    /// The character name check's lists ([`super::char_name`]), as the host seated them.
-    name_lists: Option<std::rc::Rc<dyn super::NameLists>>,
-}
-
-impl GlueCore {
-    /// The name check's lists; with none seated, nothing is reserved.
-    pub(super) fn name_lists(&self) -> std::rc::Rc<dyn super::NameLists> {
-        self.name_lists
-            .clone()
-            .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
-    }
 }
 
 /// `SetCurrentScreen`'s buffer, 0x40 bytes with its terminator (`0x46b860`, `SStrCopy`).
@@ -564,24 +628,29 @@ impl super::UiScript {
         fire_signal(&self.lua, signal);
     }
 
-    /// Seat the lists the character name check searches (`0x6c91a0` compiles them at startup).
-    pub fn set_glue_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
-        self.model_mut().glue.name_lists = Some(lists);
-    }
-
-    /// Seed the saved account name `GetSavedAccountName` answers.
-    pub fn set_glue_saved_account(&mut self, name: &str) {
-        self.model_mut().glue.saved_account = name.to_string();
-    }
-
-    /// Seed one agreement's flags.
+    /// Store one agreement's flags in the cells this VM is seated with.
     pub fn set_glue_notice(&mut self, notice: GlueNotice, state: NoticeState) {
-        self.model_mut().glue.notices[notice.index()] = state;
+        self.model_ref().glue.notices.set(notice, state);
     }
 
-    /// One agreement's flags as the VM holds them.
+    /// One agreement's flags as the cells hold them.
     pub fn glue_notice(&self, notice: GlueNotice) -> NoticeState {
-        self.model_ref().glue.notices[notice.index()]
+        self.model_ref().glue.notices.get(notice)
+    }
+
+    /// The agreement cells this VM reads and writes.
+    pub fn glue_notices(&self) -> GlueNotices {
+        self.model_ref().glue.notices.clone()
+    }
+
+    /// Seat the host's agreement cells, which outlive this VM.
+    pub fn set_glue_notices(&mut self, notices: GlueNotices) {
+        self.model_mut().glue.notices = notices;
+    }
+
+    /// The pointer calls the glue made since the last take, as shown or not, in order.
+    pub fn take_glue_pointer_calls(&self) -> Vec<bool> {
+        std::mem::take(&mut self.model_mut().glue.pointer_calls)
     }
 
     /// Whether the glue has hidden the pointer (`HideCursor`) and not shown it again.
@@ -592,6 +661,12 @@ impl super::UiScript {
     /// The current glue screen's name, as `SetCurrentScreen` last set it.
     pub fn glue_screen(&self) -> String {
         self.model_ref().glue.screen.clone()
+    }
+
+    /// Seed the current glue screen's name. The buffer is the client's (`[0xb41478]`), which a
+    /// glue rebuild (`0x46a7b0`) leaves as it was, so the host carries it into the new VM.
+    pub fn set_glue_screen_name(&mut self, name: &str) {
+        self.model_mut().glue.screen = name.to_string();
     }
 
     /// A string global's text, `GetGlobalString`'s answer (`0x703bf0` with no gender and no
@@ -686,6 +761,25 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
                 vec![ScriptValue::Str(key.to_string())],
             );
         }
+        GlueSignal::EnterPin(grid) => fire(
+            "PLAYER_ENTER_PIN",
+            grid.iter()
+                .map(|&d| ScriptValue::Int(i64::from(d)))
+                .collect(),
+        ),
+        GlueSignal::PressKeypad(positions) => {
+            let keys = positions
+                .iter()
+                .map(|p| format!("VirtualKeypadButton{}", p + 1));
+            for name in keys.chain(["VirtualKeypadOkayButton".to_string()]) {
+                if let Err(e) = click_global(lua, &name) {
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data")
+                        .record_lua_error(&e);
+                    return;
+                }
+            }
+        }
         GlueSignal::Cvar { name, value } => {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             super::cvars::set_from_engine(&mut model, name, value);
@@ -706,6 +800,14 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
     }
 }
 
+/// `Click` on the button the global `name` holds, the stock handlers running as for a press.
+fn click_global(lua: &Lua, name: &str) -> mlua::Result<()> {
+    use mlua::ObjectLike;
+    lua.globals()
+        .get::<mlua::Table>(name)?
+        .call_method::<()>("Click", ())
+}
+
 /// The text of a string global, as [`super::UiScript::global_text`] reads it.
 pub(super) fn global_text(lua: &Lua, key: &str) -> String {
     match lua.globals().get::<Value>(key) {
@@ -720,6 +822,8 @@ pub(super) fn global_text(lua: &Lua, key: &str) -> String {
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // `Screenshot` (`0x46d3d0`): the in-game verb's capture ask, answered with the glue's events.
+    super::screenshot::install(lua)?;
     let g = lua.globals();
 
     // Both arguments `is-number-or-string` (`0x46d168`, `0x46d178`), else the usage error
@@ -739,7 +843,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let agreed = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let n = &model.glue.notices;
-                n[GlueNotice::Tos.index()].accepted && n[GlueNotice::Eula.index()].accepted
+                n.get(GlueNotice::Tos).accepted && n.get(GlueNotice::Eula).accepted
             };
             if agreed {
                 call(lua, GlueCall::Login(GlueCredentials { account, password }));
@@ -756,26 +860,63 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The `accountName` CVar's string (`0x46cdd5`, `[cvar+0x20]`).
+    // Arguments 1 to 10 up to the first nil or none (`lua_type` ≤ 0, `0x46d1eb`), each passing
+    // `lua_isnumber` (`0x46d1f1`, numeric strings too) or the usage error with its position
+    // (`0x837d34`); each key is the low byte of the number's `__ftol` (`0x46d203`, `0x46d20f`).
+    // Fewer than 4 or more than 10 raise `0x837cf4` with the count; the rest is `0x46b0c0`.
+    g.set(
+        "PINEntered",
+        lua.create_function(|lua, args: MultiValue| {
+            let mut positions = Vec::with_capacity(10);
+            for (i, v) in args.into_iter().take(10).enumerate() {
+                if matches!(v, Value::Nil) {
+                    break;
+                }
+                let Some(n) = lua.coerce_number(v)? else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Usage: PINEntered(4-10 key positions) - non-numeric arg #{}",
+                        i + 1
+                    )));
+                };
+                positions.push(super::binding_abi::ftol(n) as u8);
+            }
+            if !(4..=10).contains(&positions.len()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Usage: PINEntered(4-10 key positions) - bad number of args {}",
+                    positions.len()
+                )));
+            }
+            call(lua, GlueCall::PinEntered(GluePin { positions }));
+            Ok(())
+        })?,
+    )?;
+
+    // The `accountName` CVar's string (`0x46cdd5`, `[[0x8826c8]+0x20]`), the saved, script-visible
+    // record registered at `0x402bd2`: `GetCVar("accountName")` reads the same text.
     g.set(
         "GetSavedAccountName",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            lua.create_string(&model.glue.saved_account)
+            let value = model
+                .cvars
+                .get(CVAR_ACCOUNT_NAME_KEY)
+                .map_or("", |slot| slot.value.as_str());
+            lua.create_string(value)
         })?,
     )?;
     // A string argument (`0x46cdf8`) or `Usage: SetSavedAccountName("accountName")` (`0x837c28`),
-    // then `CVar::Set` (`0x46ce2e`), so the next `GetSavedAccountName` reads it back at once.
+    // then `CVar::Set(s, 1, 0, 0, 1)` on that record (`0x46ce13`-`0x46ce2e`), a write like
+    // `SetCVar`'s that the host persists, so the next `GetSavedAccountName` reads it back at once.
     g.set(
         "SetSavedAccountName",
         lua.create_function(|lua, name: Value| {
             let name = string_arg(lua, name, "Usage: SetSavedAccountName(\"accountName\")")?;
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .glue
-                .saved_account = name.clone();
-            queue(lua, GlueRequest::SetSavedAccountName(name));
-            Ok(())
+            super::cvars::write_cvar(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                "accountName",
+                name,
+            );
+            super::cvars::written(lua)
         })?,
     )?;
 
@@ -805,31 +946,34 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             "AcceptContest",
         ),
     ] {
-        let i = notice.index();
         g.set(
             show,
             lua.create_function(move |lua, _: MultiValue| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(flag(model.glue.notices[i].show_notice))
+                Ok(flag(model.glue.notices.get(notice).show_notice))
             })?,
         )?;
         g.set(
             accepted,
             lua.create_function(move |lua, _: MultiValue| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(flag(model.glue.notices[i].accepted))
+                Ok(flag(model.glue.notices.get(notice).accepted))
             })?,
         )?;
         g.set(
             accept,
             lua.create_function(move |lua, _: MultiValue| {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.glue.notices[i] = NoticeState {
-                    accepted: true,
-                    show_notice: false,
-                };
+                model.glue.notices.set(
+                    notice,
+                    NoticeState {
+                        accepted: true,
+                        show_notice: false,
+                    },
+                );
                 super::cvars::set_from_engine(&mut model, notice.cvar(), "1".to_string());
-                Ok(())
+                drop(model);
+                super::cvars::written(lua)
             })?,
         )?;
     }
@@ -851,11 +995,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // The locale name table `0x8558a4` at the locale index `[0xc0e080]` (`0x46ce40`), the same
-    // answer as the in-game binding: benilla is enUS-only.
-    // iNilla: the game data's language instead, once the app has told us it (`set_locale`).
+    // answer as the in-game binding.
     g.set(
         "GetLocale",
-        lua.create_function(|lua, _: MultiValue| lua.create_string(super::client::locale()))?,
+        lua.create_function(|lua, _: MultiValue| {
+            lua.create_string(super::client::locale_name(lua))
+        })?,
     )?;
 
     // A string argument (`0x46ce68`) or `Usage: SetCurrentScreen("screen")` (`0x837c54`), copied
@@ -974,6 +1119,103 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // Three numbers (`0x46dc40`) off the plan flags byte `f` (`+0x1afc`): 1, 2, 3 or 4 for
+    // `f & 0x16` equal to 2, 4, 0 or 0x10 and 0 for any other, then `f >> 5 & 1`, then
+    // `f >> 3 & 1`. With no billing group received, `f` is 0: plan 3.
+    g.set(
+        "GetBillingPlan",
+        lua.create_function(|lua, _: MultiValue| {
+            let f = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .billing_plan_flags;
+            let plan = match f & 0x16 {
+                0x02 => 1.0,
+                0x04 => 2.0,
+                0x00 => 3.0,
+                0x10 => 4.0,
+                _ => 0.0,
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::Number(plan),
+                Value::Number(f64::from((f >> 5) & 1)),
+                Value::Number(f64::from((f >> 3) & 1)),
+            ]))
+        })?,
+    )?;
+    // One number (`0x46dbf0`): the minutes left (`+0x1af4`, unsigned), 0 when the plan is a
+    // recurring subscription (bit 1 of `+0x1afc`, `0x46dc0a`).
+    g.set(
+        "GetBillingTimeRemaining",
+        lua.create_function(|lua, _: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let minutes = if model.billing_plan_flags & 0x02 != 0 {
+                0
+            } else {
+                model.billing_time_remaining
+            };
+            Ok(f64::from(minutes))
+        })?,
+    )?;
+    // One number (`0x46dcf0`): the rested minutes (`+0x1af8`, unsigned).
+    g.set(
+        "GetBillingTimeRested",
+        lua.create_function(|lua, _: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(f64::from(model.billing_time_rested))
+        })?,
+    )?;
+
+    // One number (`0x46d3e0`): the patch download's progress float `[0xb414c0]`, 0 at load; only
+    // a download (`0x474b70`) writes it, and this client downloads no patch.
+    g.set(
+        "PatchDownloadProgress",
+        lua.create_function(|_, _: MultiValue| Ok(0.0f64))?,
+    )?;
+    // No result (`0x46d400` → `0x474710`, then `xor eax,eax`); with no download in flight the
+    // abort and the free are skipped, the rest runs in the host.
+    g.set(
+        "PatchDownloadCancel",
+        lua.create_function(|lua, _: MultiValue| {
+            call(lua, GlueCall::CancelPatchDownload);
+            Ok(())
+        })?,
+    )?;
+    // No result (`0x46d410` → `0x4749f0`, then `xor eax,eax`); there is no `wow-patch.mpq` to open.
+    g.set(
+        "PatchDownloadApply",
+        lua.create_function(|lua, _: MultiValue| {
+            call(lua, GlueCall::ApplyPatch);
+            Ok(())
+        })?,
+    )?;
+    // The flag argument 1 through `0x6f1c10`, default 1 (`0x46db80`-`0x46db87`), then
+    // `CVar::Set` (`0x63df50`) of `movieSubtitle` to "1" or "0"; no result.
+    g.set(
+        "SetMovieSubtitles",
+        lua.create_function(|lua, args: MultiValue| {
+            let on = super::binding_abi::bool_or_default(args.front(), true);
+            super::cvars::set_from_engine(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                "movieSubtitle",
+                if on { "1" } else { "0" }.to_string(),
+            );
+            super::cvars::written(lua)
+        })?,
+    )?;
+    // The flag argument 1 (`0x6f1c10`, default 0, `0x46ddd7`) only sends the kept survey result
+    // (`0x473df0`), which benilla never keeps. EndSurvey (`0x473e30`) always runs: it frees the
+    // result and file (none held), then reports the login authenticated (`0x473ef5`) in the host
+    // and stores state 1 in `0xb41da0`, the screen state the host models. One result without a
+    // push (`0x46ddea`): the stack's top, the last argument, or nil with none.
+    g.set(
+        "SurveyNotificationDone",
+        lua.create_function(|lua, args: MultiValue| {
+            call(lua, GlueCall::SurveyDone);
+            Ok(args.back().cloned().unwrap_or(Value::Nil))
+        })?,
+    )?;
+
     // One value (`0x46dbc0`): 1 when the `movieSubtitle` CVar's integer (`[0x882640]+0x28`) is
     // nonzero, else nil.
     g.set(
@@ -983,7 +1225,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let on = model
                 .cvars
                 .get("moviesubtitle")
-                .is_some_and(|c| leading_int(&c.value) != 0);
+                .is_some_and(|c| s_str_to_int(&c.value) != 0);
             Ok(flag(on))
         })?,
     )?;
@@ -997,7 +1239,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let width = model
                 .cvars
                 .get("gxresolution")
-                .map_or(0, |c| leading_int(&c.value));
+                .map_or(0, |c| scanf_d(&c.value).unwrap_or(0));
             Ok(width as f64)
         })?,
     )?;
@@ -1006,10 +1248,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, _: MultiValue| {
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .glue
-                    .cursor_hidden = hidden;
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.glue.cursor_hidden = hidden;
+                model.glue.pointer_calls.push(!hidden);
                 Ok(())
             })?,
         )?;
@@ -1064,6 +1305,24 @@ mod tests {
         *host.replies.borrow_mut() = replies;
         s.set_glue_host(host.clone());
         (s, host)
+    }
+
+    /// `sscanf`'s `%d` accumulates in 32 bits that wrap, after C's blanks only.
+    #[test]
+    fn scanf_d_wraps_in_32_bits() {
+        assert_eq!(scanf_d(" 42x"), Some(42));
+        assert_eq!(scanf_d("-7"), Some(-7));
+        assert_eq!(scanf_d("+7"), Some(7));
+        assert_eq!(scanf_d("2147483647"), Some(i32::MAX));
+        assert_eq!(scanf_d("2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("-2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("4294967296"), Some(0));
+        assert_eq!(scanf_d("4294967301"), Some(5));
+        assert_eq!(scanf_d("99999999999999999999"), Some(1_661_992_959));
+        assert_eq!(scanf_d("\u{a0}1"), None, "no blank past C's");
+        for text in ["", " ", "-", "+x", "x1"] {
+            assert_eq!(scanf_d(text), None, "{text:?}");
+        }
     }
 
     /// A seated host runs the call inside the verb, and what it raised has run its handlers by
@@ -1160,7 +1419,8 @@ mod tests {
         let (s, host) = seated(Vec::new());
         s.run(
             "DisconnectFromServer() QuitGame() RequestRealmList(1) CancelRealmListQuery() \
-             SetCurrentScreen('login') RealmListDialogCancelled()",
+             SetCurrentScreen('login') RealmListDialogCancelled() PatchDownloadCancel() \
+             PatchDownloadApply() SurveyNotificationDone()",
         )
         .unwrap();
         assert_eq!(
@@ -1170,7 +1430,10 @@ mod tests {
                 "QuitGame",
                 "RequestRealmList { dialog: true }",
                 "CancelRealmListQuery",
-                "CancelLogon"
+                "CancelLogon",
+                "CancelPatchDownload",
+                "ApplyPatch",
+                "SurveyDone"
             ]
         );
     }
@@ -1220,6 +1483,96 @@ mod tests {
         assert!(s.take_glue_calls().is_empty());
     }
 
+    /// `PLAYER_ENTER_PIN` (event 25) carries the grid's ten digits as numbers, the first key's
+    /// first (`0x46bac3`-`0x46bb15`, `%d` ten times at `0x8372a8`).
+    #[test]
+    fn enter_pin_fires_the_grid_as_ten_numbers() {
+        let grid = [6, 3, 2, 1, 9, 8, 7, 0, 4, 5];
+        let (s, _host) = seated(vec![(
+            "StatusDialogClick",
+            vec![GlueSignal::EnterPin(grid)],
+        )]);
+        s.run(
+            "GOT = {} F = CreateFrame('Frame') F:RegisterEvent('PLAYER_ENTER_PIN') \
+             F:SetScript('OnEvent', function() for i = 1, 10 do \
+               local v = getglobal('arg'..i) if type(v) == 'number' then GOT[i] = v end \
+             end end)",
+        )
+        .unwrap();
+        let got: Vec<i64> = s.eval("StatusDialogClick() return GOT").unwrap();
+        assert_eq!(got, grid.map(i64::from));
+    }
+
+    /// The keys `PINEntered` handed the host, or the error it raised.
+    fn pin_entered(args: &str) -> Result<Vec<u8>, String> {
+        let mut s = UiScript::new_glue().unwrap();
+        s.run(&format!("PINEntered({args})"))
+            .map_err(|e| e.to_string())?;
+        match s.take_glue_calls().as_slice() {
+            [GlueCall::PinEntered(pin)] => Ok(pin.positions.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `PINEntered` (`0x46d1c0`) reads arguments 1 to 10 up to the first nil (`lua_type` ≤ 0,
+    /// `0x46d1eb`), numbers or numeric strings, each the low byte of its `__ftol` (`0x46d20f`), and
+    /// hands 4 to 10 of them to `0x46b0c0`. The stock keypad passes its keys' ids as strings.
+    #[test]
+    fn pin_entered_hands_on_the_keys_pressed() {
+        assert_eq!(pin_entered("'2', '9', '4', '7'"), Ok(vec![2, 9, 4, 7]));
+        assert_eq!(pin_entered("1, 2, 3, 4, nil, 6"), Ok(vec![1, 2, 3, 4]));
+        assert_eq!(pin_entered("258, -1, 3.9, '7'"), Ok(vec![2, 255, 3, 7]));
+        assert_eq!(
+            pin_entered("0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            Ok((0..10).collect()),
+            "the eleventh is never read"
+        );
+        assert!(
+            format!(
+                "{:?}",
+                GlueCall::PinEntered(GluePin {
+                    positions: vec![1, 2, 3, 4]
+                })
+            )
+            .contains("4 keys"),
+            "the keys are never printed"
+        );
+    }
+
+    /// A count outside 4 to 10 raises `0x837cf4` with the count; an argument that is not a number
+    /// raises `0x837d34` with its position. Either hands nothing on.
+    #[test]
+    fn pin_entered_raises_its_usage() {
+        let err = pin_entered("1, 2, 3").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - bad number of args 3"),
+            "{err}"
+        );
+        let err = pin_entered("").unwrap_err();
+        assert!(err.contains("bad number of args 0"), "{err}");
+        let err = pin_entered("1, 'x', 3, 4").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - non-numeric arg #2"),
+            "{err}"
+        );
+        let err = pin_entered("1, 2, 3, false").unwrap_err();
+        assert!(err.contains("non-numeric arg #4"), "{err}");
+    }
+
+    /// An agreement's flags come off its record's integer (`0x46a41a` reads `+0x28`), Storm's
+    /// `SStrToInt`: no whitespace skip, no `+`, a 32-bit wrap.
+    #[test]
+    fn an_agreement_reads_its_cvar_as_the_records_integer() {
+        let accepted = |text: &str| NoticeState::from_cvar(text).accepted;
+        assert!(accepted("1"));
+        assert!(accepted("1abc"));
+        assert!(!accepted(" 1"), "no whitespace skip");
+        assert!(!accepted("+1"), "no unary plus");
+        assert!(accepted("4294967297"), "the register wraps");
+        assert!(NoticeState::from_cvar("-1").show_notice);
+        assert!(!NoticeState::from_cvar(" -1").show_notice);
+    }
+
     /// `AcceptEULA` sets its flag pair and its CVar in the call (`0x46af20`).
     #[test]
     fn the_agreements_answer_their_seeded_flags_and_accept_sets_them() {
@@ -1251,23 +1604,30 @@ mod tests {
         assert!(s.take_glue_requests().is_empty() && s.take_glue_calls().is_empty());
     }
 
+    /// The saved account name is the `accountName` CVar (`0x46cdd0`, `0x46cdf0`): what one side
+    /// writes the other reads, and the write queues for the host like a `SetCVar`.
     #[test]
-    fn the_saved_account_reads_back_what_was_set() {
+    fn the_saved_account_is_the_account_name_cvar() {
         let mut s = UiScript::new_glue().unwrap();
-        s.set_glue_saved_account("PROBE");
+        s.register_cvars([("accountName", "")]);
+        s.set_cvar_host("accountName", "PROBE");
         assert_eq!(
             s.eval::<String>("return GetSavedAccountName()").unwrap(),
             "PROBE"
         );
+        s.run("SetSavedAccountName('Other')").unwrap();
+        assert_eq!(s.cvar("accountName").as_deref(), Some("Other"));
         s.run("SetSavedAccountName('')").unwrap();
         assert_eq!(
             s.eval::<String>("return GetSavedAccountName()").unwrap(),
             ""
         );
-        assert!(matches!(
-            s.take_glue_requests().as_slice(),
-            [GlueRequest::SetSavedAccountName(n)] if n.is_empty()
-        ));
+        assert_eq!(
+            s.take_cvar_changes(),
+            [("accountName", "Other"), ("accountName", "")]
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+        );
+        assert!(s.take_glue_requests().is_empty());
         let err = s.run("SetSavedAccountName()").unwrap_err().to_string();
         assert!(
             err.contains("Usage: SetSavedAccountName(\"accountName\")"),
@@ -1302,6 +1662,8 @@ mod tests {
             "http://battle.net/",
             "http://www.blizzard.com/?q=1",
             "http://www.blizzard.com:80/",
+            "http://www.blizzard.com/patch1121",
+            "http://us1.blizzard.com/",
             "http://www.blizzard.com/a_b",
             "http://www.blizzard.com/a b",
             "http://www.blizzard.com\n/",
@@ -1438,6 +1800,28 @@ mod tests {
         );
         s.set_cvar_host("gxResolution", "800x600");
         assert_eq!(s.eval::<f64>("return GetMovieResolution()").unwrap(), 800.0);
+        // `GetMovieSubtitles` reads the record's integer (`0x46dbc5`, `+0x28`), `SStrToInt`: a
+        // leading space or `+` is 0. `GetMovieResolution` scans the text with `sscanf`
+        // (`0x46cf34`), which skips whitespace and takes a sign.
+        for text in [" 1", "+1"] {
+            s.set_cvar_host("movieSubtitle", text);
+            assert!(
+                s.eval::<bool>("return GetMovieSubtitles() == nil").unwrap(),
+                "{text:?}"
+            );
+        }
+        s.set_cvar_host("movieSubtitle", "1x");
+        assert_eq!(
+            s.eval::<Option<i64>>("return GetMovieSubtitles()").unwrap(),
+            Some(1)
+        );
+        s.set_cvar_host("gxResolution", " 640x480");
+        assert_eq!(s.eval::<f64>("return GetMovieResolution()").unwrap(), 640.0);
+        s.set_cvar_host("gxResolution", "+1280x960");
+        assert_eq!(
+            s.eval::<f64>("return GetMovieResolution()").unwrap(),
+            1280.0
+        );
         assert!(s
             .eval::<bool>("return table.getn({GetMovieResolution()}) == 1")
             .unwrap());
@@ -1447,12 +1831,98 @@ mod tests {
         assert!(s.glue_cursor_hidden());
         s.run("ShowCursor()").unwrap();
         assert!(!s.glue_cursor_hidden());
+        // The build's `SetCursor` with a texture (`0x46a872`) shows first, then each verb in order.
+        assert_eq!(s.take_glue_pointer_calls(), [true, false, true]);
+        assert!(s.take_glue_pointer_calls().is_empty());
         assert!(s.take_errors().is_empty());
     }
 
-    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex digit reads 0, a `%` with fewer
-    /// than two bytes after it ends the string, a decoded NUL ends it too; then the web-address
-    /// rule on the result.
+    /// The billing trio decodes the group the session wrote (`0x46dbf0`, `0x46dc40`, `0x46dcf0`):
+    /// with none received the plan flags are 0, which is plan 3, and the minutes 0.
+    #[test]
+    fn the_billing_verbs_decode_the_connections_group() {
+        let mut s = UiScript::new_glue().unwrap();
+        let plan = |s: &UiScript| s.eval::<Vec<f64>>("return {GetBillingPlan()}").unwrap();
+        assert_eq!(plan(&s), [3.0, 0.0, 0.0]);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            0.0
+        );
+        assert_eq!(s.eval::<f64>("return GetBillingTimeRested()").unwrap(), 0.0);
+        assert_eq!(
+            s.eval::<f64>("return PatchDownloadProgress()").unwrap(),
+            0.0
+        );
+
+        // `f & 0x16` of 2, 4, 0x10 and 0x06 (no arm): plans 1, 2, 4 and 0; bit 5 and bit 3 follow.
+        for (flags, want) in [
+            (0x02, [1.0, 0.0, 0.0]),
+            (0x04, [2.0, 0.0, 0.0]),
+            (0x10, [4.0, 0.0, 0.0]),
+            (0x06, [0.0, 0.0, 0.0]),
+            (0x28, [3.0, 1.0, 1.0]),
+        ] {
+            s.set_billing(90, 7, flags);
+            assert_eq!(plan(&s), want, "flags {flags:#x}");
+        }
+        // Bit 1 (a recurring plan) answers 0 minutes left; any other keeps them.
+        s.set_billing(4_000_000_000, 4_000_000_001, 0x02);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            0.0
+        );
+        s.set_billing(4_000_000_000, 4_000_000_001, 0x08);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            4_000_000_000.0,
+            "unsigned"
+        );
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRested()").unwrap(),
+            4_000_000_001.0
+        );
+        assert!(s
+            .eval::<bool>("return table.getn({GetBillingPlan()}) == 3")
+            .unwrap());
+    }
+
+    /// `SetMovieSubtitles` stores "1" or "0" in `movieSubtitle` from its flag argument, default 1
+    /// (`0x46db80`).
+    #[test]
+    fn set_movie_subtitles_writes_the_flag_and_the_survey_verb_answers_its_top() {
+        let mut s = UiScript::new_glue().unwrap();
+        s.register_cvars([("movieSubtitle", "0")]);
+        for (call, want) in [
+            ("SetMovieSubtitles()", 1),
+            ("SetMovieSubtitles(0)", 0),
+            ("SetMovieSubtitles('y')", 1),
+            ("SetMovieSubtitles(nil)", 0),
+            ("SetMovieSubtitles(1)", 1),
+            ("SetMovieSubtitles(false)", 0),
+            ("SetMovieSubtitles({})", 1),
+        ] {
+            s.run(call).unwrap();
+            assert_eq!(
+                s.eval::<Option<i64>>("return GetMovieSubtitles()").unwrap(),
+                (want == 1).then_some(1),
+                "{call}"
+            );
+        }
+        assert!(s.eval::<bool>("return SetMovieSubtitles() == nil").unwrap());
+        assert_eq!(
+            s.eval::<String>("return SurveyNotificationDone(1, 'last')")
+                .unwrap(),
+            "last"
+        );
+        assert!(s
+            .eval::<bool>("return SurveyNotificationDone() == nil")
+            .unwrap());
+        assert!(s.take_errors().is_empty());
+    }
+
+    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex ASCII digit reads 0 (one from
+    /// 0x80 up reads before the table, `0x42a059`; benilla reads 0), a `%` with fewer than two
+    /// bytes after it ends the string, a decoded NUL ends it too; then the web-address rule.
     #[test]
     fn the_addon_url_is_decoded_as_the_launcher_decodes_it_and_must_be_a_web_address() {
         for (url, want) in [

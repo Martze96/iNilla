@@ -86,6 +86,10 @@ reads the game's data from your own 1.12.1 install. Every file format, the netwo
 the interface engine are written from scratch, with no original client code, no third-party WoW
 crates and no bundled game assets.
 
+What the real client does is read at its bytes in
+[benilla-re](https://github.com/samwhosung/benilla-re), the reverse engineering benilla is built
+against, by the same client addresses the comments here cite.
+
 ## What's inside
 
 - **Formats:** readers for the whole asset stack (the MPQ patch chain, BLP, DBC, ADT, WDT, WDL, M2
@@ -110,32 +114,38 @@ crates and no bundled game assets.
 
 The format readers and the UI engine core are plain Rust with no Bevy in them, and the world
 renderer runs with no game attached. [`docs/MAP.md`](docs/MAP.md) maps every crate and subsystem,
+and [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) lists everywhere benilla differs from 1.12.1; both are
 generated from the code.
 
 ## Status
 
-Complete and fully playable. What is left:
+Fully playable on a 1.12.1 server that doesn't enforce Warden or need client changes beyond its
+MPQ archives. What is left:
 
-- The long tail of small features that separates a working client from a finished one, tracked
-  as [issues](https://github.com/samwhosung/benilla/issues).
-- Addons, options and performance, ongoing.
+- The long tail of small differences from 1.12.1, tracked as
+  [issues](https://github.com/samwhosung/benilla/issues).
+- Addon compatibility, the remaining options and performance, ongoing.
 
 benilla is a faithful 1.12.1 client and the foundation people build on. There are no prebuilt
 downloads: a packaged build, a particular server's changes or anything 1.12.1 never had belongs
 in a fork, and forks are welcome. GitHub lists
 [every public fork](https://github.com/samwhosung/benilla/forks).
 
-Not planned: other expansions or client versions, Warden (anticheat).
+Not planned: other expansions or client versions, Warden (anticheat). For Wrath of the Lich King
+(3.3.5a), [benilla-wotlk](https://github.com/Onixaz/benilla-wotlk) is a separate client built from
+benilla.
 
 ## Running it
 
 benilla builds and runs on macOS, Linux and Windows. You need:
 
-- **An English 1.12.1 client (build 5875)** for the game data. benilla only reads it.
-- **A 1.12.1 server with Warden off.** [vmangos](https://github.com/vmangos/core) is what
-  development runs against, and it ships with Warden off; cMaNGOS and the other 1.12.1 cores speak
-  the same protocol.
-- **Stable Rust and a C compiler**, because the client's Lua is built from source: on macOS the
+- **A 1.12.1 client (build 5875)** for the game data, in any locale. benilla only reads it, and
+  shows its text in the client's language; development runs on English clients.
+- **A 1.12.1 server.** [vmangos](https://github.com/vmangos/core) is what development runs
+  against; cMaNGOS and the other 1.12.1 cores speak the same protocol. benilla does not answer
+  Warden, so a server that enforces it disconnects the session after its timeout; vmangos ships
+  with Warden off.
+- **Stable Rust and a C compiler**, which some dependencies build with: on macOS the
   Xcode command line tools, on Linux the ALSA and udev development packages and pkg-config, on
   Windows the MSVC build tools that the Rust installer sets up.
 
@@ -158,7 +168,9 @@ does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs n
 `localhost:3724`, the stock auth port. Point `WOW_HOST` at another (`WOW_HOST=play.example.com`, or
 `play.example.com:5000` for a remapped port), or set it from the Realmlist button on the login
 screen, which remembers it. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS`
-to skip it.
+to skip it. A PIN-protected account answers the keypad from `WOW_PIN` (the digits) or
+`WOW_PIN_TOTP` (the authenticator's base32 secret), as
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md), "Running it unattended", describes.
 
 Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
 `benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
@@ -183,6 +195,6 @@ runtime. The few files under `crates/benilla-app/assets/ui/` are our own, not co
 adapters over stock files, and the settings windows and script error log benilla draws itself.
 
 World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
-[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The two vendored components
-under `third_party/`, the kira audio engine and a Lua 5.1 patched to the 1.12 client's dialect,
-keep their own upstream licenses, alongside each.
+[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The kira audio engine and the
+wgpu-hal graphics layer under `third_party/` are vendored under the same two licenses, with their
+authors' copyright notices beside them.

@@ -263,7 +263,8 @@ fn handshake(
     let mut s = TcpStream::connect((host, AUTH_PORT))
         .with_context(|| format!("connecting to {host}:{AUTH_PORT}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
-    auth::write_logon_challenge(&mut s, user, BUILD).context("sending logon challenge")?;
+    auth::write_logon_challenge(&mut s, user, BUILD, auth::LOCALE_TAG_EN_US)
+        .context("sending logon challenge")?;
     let reply = auth::read_challenge_reply(&mut s)
         .context("reading logon challenge reply")?
         .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
@@ -276,7 +277,7 @@ fn handshake(
     let attempt = compute(&reply, user, pass, enc, want, tries)
         .ok_or_else(|| anyhow!("ephemeral search did not reach the wanted shape"))?;
 
-    auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt)
+    auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt, None)
         .context("sending logon proof")?;
     let outcome = match auth::read_proof_reply(&mut s) {
         Ok(None) => Outcome::Error("SUCCESS_SURVEY: accepted with no M2".into()),
@@ -370,7 +371,12 @@ fn main() -> Result<()> {
         println!("logon: {logons} full handshakes through benilla_protocol::logon\n");
         let (mut ok, mut failed) = (0u32, 0u32);
         for i in 0..logons {
-            match benilla_protocol::logon(&host, &user, &pass) {
+            match benilla_protocol::logon(
+                &host,
+                &user,
+                &pass,
+                benilla_protocol::auth::LOCALE_TAG_EN_US,
+            ) {
                 Ok(_) => ok += 1,
                 Err(e) => {
                     failed += 1;

@@ -20,10 +20,11 @@
 //! `0x6e6b30`), cached in `[0xcecaac]` by its one non-zeroing writer, `0x6e6ca0` (called from
 //! `0x5debcc`). The shipped values are vmangos `SpellFamilyNames`.
 //!
-//! Field 16, the relic-slot flag, read by `UnitHasRelicSlot` (`0x519e50`) and nothing else: no
+//! Field 16, the relic-slot flag, read at the row's `+0x40` by `UnitHasRelicSlot` (`0x519ebb`),
+//! the slot check (`0x5ea7c8`) and the sheathe toggle and setter (`0x5eb639`, `0x611d41`): no
 //! class id is compared, the table is the data. It is set for Paladin, Shaman and Druid, and
-//! `IsValidForSlot` (`0x5da1d0`) enforces it: INVSLOT 17 takes a relic (`InventoryType` 28) for
-//! those three and a ranged weapon for everyone else.
+//! `IsValidForSlot` (`0x5da1d0`), which the slot check calls, enforces it: INVSLOT 17 takes a relic
+//! (`InventoryType` 28) for those three and a ranged weapon for everyone else.
 
 use std::collections::HashMap;
 
@@ -31,7 +32,7 @@ use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::chain::Chain;
-use crate::dbc::{name_lang_at, parse, str_at, u32_at};
+use crate::dbc::{loc_str, parse, str_at, u32_at};
 
 const CHR_CLASSES: &str = "DBFilesClient\\ChrClasses.dbc";
 
@@ -70,6 +71,8 @@ struct ChrClass {
     file: Option<String>,
     has_relic_slot: bool,
     spell_family: u32,
+    /// The row's place in the file.
+    index: usize,
 }
 
 /// `ChrClasses.dbc`'s read columns by class id.
@@ -77,6 +80,27 @@ struct ChrClass {
 pub struct ChrClasses(HashMap<u32, ChrClass>);
 
 impl ChrClasses {
+    /// A table of `(id, name, file)` rows, the other columns at their zero values.
+    pub fn from_rows<'a>(rows: impl IntoIterator<Item = (u32, &'a str, &'a str)>) -> Self {
+        Self(
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, (id, name, file))| {
+                    let row = ChrClass {
+                        damage_bonus_stat: 0,
+                        pet_name_token: None,
+                        name: Some(name.to_string()).filter(|n| !n.is_empty()),
+                        file: Some(file.to_string()).filter(|f| !f.is_empty()),
+                        has_relic_slot: false,
+                        spell_family: 0,
+                        index,
+                    };
+                    (id, row)
+                })
+                .collect(),
+        )
+    }
+
     /// `HasPetSpells`' second return: always a string, never nil, and the literal
     /// [`PET_NAME_TOKEN_FALLBACK`] for a class with no row (`0x4b44a6`).
     pub fn pet_name_token(&self, class: u32) -> &str {
@@ -90,6 +114,25 @@ impl ChrClasses {
     /// row or no name, which that binding answers with the empty string (`0x47336e`).
     pub fn name(&self, class: u32) -> Option<&str> {
         self.0.get(&class)?.name.as_deref()
+    }
+
+    /// Every row's id and name, in no order, the empty string for a row with none, as the `/who`
+    /// class tag searches them (`0x5aef0d`).
+    pub fn names_by_id(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.0
+            .iter()
+            .map(|(id, c)| (*id, c.name.as_deref().unwrap_or_default()))
+    }
+
+    /// Every row in file order, its id and name, the empty string for a row with none: the record
+    /// table (`0xc0deec`, count `0xc0def0`) as an item's class lines walk it, with no flag test
+    /// (`0x52cecd`, `0x52d003`, `0x52d1cd`, `0x4feaa8`, `0x4fec02`, `0x4feddf`).
+    pub fn in_file_order(&self) -> Vec<(u32, &str)> {
+        let mut rows: Vec<_> = self.0.iter().collect();
+        rows.sort_by_key(|(id, c)| (c.index, **id));
+        rows.into_iter()
+            .map(|(id, c)| (*id, c.name.as_deref().unwrap_or_default()))
+            .collect()
     }
 
     /// The class's file string (`"WARRIOR"`), the create screen's second value per class; `None`
@@ -113,6 +156,31 @@ impl ChrClasses {
     /// row answers false, as the reference's bound check against `0xc0def8` falls to its nil leg.
     pub fn has_relic_slot(&self, class: u32) -> bool {
         self.0.get(&class).is_some_and(|c| c.has_relic_slot)
+    }
+
+    /// Whether a unit of `class` may hold the ranged sheathe state: a row whose relic flag is
+    /// clear. The sheathe toggle (`0x5eb616`-`0x5eb640`) and setter (`0x611d12`-`0x611d44`) read
+    /// the flag as [`Self::has_relic_slot`] does, but a class with no row fails their test too.
+    pub fn has_ranged_sheath(&self, class: u32) -> bool {
+        self.0.get(&class).is_some_and(|c| !c.has_relic_slot)
+    }
+
+    /// Sets `class`'s relic flag, for a table built by [`Self::from_rows`]; a class with no row
+    /// is left without one.
+    pub fn with_relic_slot(mut self, class: u32) -> Self {
+        if let Some(c) = self.0.get_mut(&class) {
+            c.has_relic_slot = true;
+        }
+        self
+    }
+
+    /// Sets `class`'s spell family, for a table built by [`Self::from_rows`]; a class with no row
+    /// is left without one.
+    pub fn with_spell_family(mut self, class: u32, family: u32) -> Self {
+        if let Some(c) = self.0.get_mut(&class) {
+            c.spell_family = family;
+        }
+        self
     }
 
     /// The class spell family, which the reference caches in `[0xcecaac]` and matches against a
@@ -151,18 +219,20 @@ pub fn load_chr_classes(chain: &mut Chain) -> Result<ChrClasses> {
         .read_file(CHR_CLASSES)
         .with_context(|| format!("reading {CHR_CLASSES}"))?;
     let rs = parse(&bytes, schema(), "ChrClasses.dbc")?;
+    let locale = chain.locale();
     let mut by_id = HashMap::new();
-    for r in rs.records() {
+    for (index, r) in rs.records().iter().enumerate() {
         let Some(id) = u32_at(r, 0) else { continue };
         by_id.insert(
             id,
             ChrClass {
                 damage_bonus_stat: u32_at(r, DAMAGE_BONUS_STAT_FIELD).unwrap_or(0),
                 pet_name_token: str_at(&rs, r, PET_NAME_TOKEN_FIELD),
-                name: name_lang_at(&rs, r, NAME_FIELD),
+                name: loc_str(&rs, r, NAME_FIELD, locale),
                 file: str_at(&rs, r, FILE_FIELD),
                 has_relic_slot: u32_at(r, RELIC_SLOT_FIELD).is_some_and(|v| v != 0),
                 spell_family: u32_at(r, SPELL_FAMILY_FIELD).unwrap_or(0),
+                index,
             },
         );
     }
@@ -176,6 +246,18 @@ mod tests {
     fn chain() -> Option<crate::chain::Chain> {
         let data = crate::wow_data_or_skip!(None);
         Some(crate::open_chain(&data).expect("open chain"))
+    }
+
+    /// An item's class lines walk the rows as the file holds them (`0x52cecd`), whatever their ids,
+    /// a row with no name included.
+    #[test]
+    fn the_rows_walk_in_file_order() {
+        let t = ChrClasses::from_rows([
+            (8, "Mage", "MAGE"),
+            (1, "Warrior", "WARRIOR"),
+            (3, "", "HUNTER"),
+        ]);
+        assert_eq!(t.in_file_order(), [(8, "Mage"), (1, "Warrior"), (3, "")]);
     }
 
     /// Field 5 holds the class name, so a one-column slip would blank the spellbook tab silently.
@@ -213,6 +295,25 @@ mod tests {
         // No row: the reference's nil leg.
         assert!(!t.has_relic_slot(6));
         assert!(!t.has_relic_slot(0));
+    }
+
+    /// The sheathe class test (`0x5eb616`-`0x5eb640`, `0x611d12`-`0x611d44`): a relic class has
+    /// no ranged sheathe state, and neither has a class with no row, where `UnitHasRelicSlot`
+    /// answers nil.
+    #[test]
+    fn a_relic_class_and_a_class_without_a_row_have_no_ranged_sheath() {
+        let t = ChrClasses::from_rows([(1, "Warrior", "WARRIOR"), (2, "Paladin", "PALADIN")])
+            .with_relic_slot(2);
+        assert!(t.has_ranged_sheath(1), "a Warrior draws a bow");
+        assert!(
+            !t.has_ranged_sheath(2),
+            "a Paladin's libram is no ranged weapon"
+        );
+        assert!(!t.has_ranged_sheath(6), "no row");
+        assert!(
+            !t.has_relic_slot(6),
+            "while UnitHasRelicSlot says no relic slot there"
+        );
     }
 
     /// Field 14 is the class file string the create screen keys its icons by

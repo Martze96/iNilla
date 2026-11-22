@@ -1,93 +1,77 @@
-//! The inspect feed: another player's public descriptor as the slot views the inspect window's
-//! Lua reads. Their inventory guids are server-private, so there are no item objects, only the
-//! `PLAYER_VISIBLE_ITEM_*` entries and their templates, which is why the reference's inspect doll
-//! shows no counts and no durability.
+//! Inspect: another player's public descriptor as the `GetInventoryItem*` verbs read it through a
+//! token naming them, at the call ([`InspectLive`]). Their inventory guids are server-private, so
+//! there are no item objects, only the `PLAYER_VISIBLE_ITEM_*` entries and their templates, which
+//! is why the reference's inspect doll shows no counts and no durability.
 //!
-//! `NotifyInspect(unit)` sends `CMSG_INSPECT`, which also sets the server-side selection, and
-//! latches the token; the window paints without waiting for `SMSG_INSPECT`, a bare guid echo.
-//! `UNIT_INVENTORY_CHANGED` and `UNIT_LEVEL` fire for the inspected token on change, a first
-//! resolve included (`InspectPaperDollFrame.lua:2-5`, `82`).
+//! `NotifyInspect(unit)` sends `CMSG_INSPECT`, which also sets the server-side selection, and sets
+//! the inspect target to the unit's guid (`0x5ded1c` → `0x4c6f70`); `SMSG_INSPECT` echoes only the
+//! guid (`0x5e7d70`). The window paints inside the call that shows it
+//! (`InspectPaperDollFrame.lua:57-79`), off the objects as they stand, so nothing here signals: a
+//! change of the gear, as of the level, is the unit-field bridge's ([`crate::field_watch`]), fired
+//! per token on a values block.
+
+use benilla_ui::script::ItemRead;
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{InspectView, InvSlotView, InventorySlots, ScriptValue, UiScript};
+use benilla_ui::script::{InspectCall, InvSlotView, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
-use crate::portrait::InspectBooth;
-use crate::ui_script::UiFeed;
+use crate::net::{ClientCommand, NetCommands, ObjectStore};
+use crate::query_cache::Ask;
 
-/// The reference's `InspectFrame.unit`. The token, not the guid, is the identity: the reference
-/// re-reads it on every retarget, so `"target"` follows the selection.
-#[derive(Resource, Default)]
-pub(crate) struct InspectTarget {
-    pub(crate) token: Option<String>,
-}
+mod live;
 
-/// The last view pushed and level seen, per VM ([`crate::ui_script::VmMemo`]), so a `/reload`'s
-/// new VM gets the view re-pushed and its events re-fired.
-#[derive(Resource, Default)]
-struct InspectFeedState {
-    vm: crate::ui_script::VmMemo<InspectFeedMemo>,
-}
+pub(crate) use live::InspectLive;
 
-/// The per-VM change bases.
-#[derive(Default)]
-struct InspectFeedMemo {
-    last: Option<InspectView>,
-    last_level: Option<u32>,
-}
-
-pub(crate) struct InspectUiPlugin;
-
-impl Plugin for InspectUiPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<InspectTarget>()
-            .init_resource::<InspectFeedState>()
-            .add_systems(Update, feed_inspect.in_set(UiFeed));
-    }
-}
-
-/// One inspected slot from the target's visible-item entry; `slot0` is the 0-based
-/// `EQUIPMENT_SLOT_*` index, `slot0 + 1` in Lua. With no item object the count is the reference's
-/// always-1 and durability, flags, locks and creator stay inert. Only the enchants broadcast, at
+/// One slot from a player's visible-item entry; `slot0` is the 0-based `EQUIPMENT_SLOT_*` index,
+/// `slot0 + 1` in Lua. With no item object the count is the reference's always-1 and durability,
+/// flags and locks stay inert. The block's creator guid is the maker line's (`0x5333cd` copies it
+/// to the tooltip's `+0x410`, read at `0x52e1d5`); its name is read, and the tooltip build asks
+/// it. Only the enchants broadcast, at
 /// `PLAYER_VISIBLE_ITEM_<slot>_0 + 1 + j`, and 1.12 fills PERM and TEMP alone (vmangos
-/// `SetVisibleItemSlot`, `MAX_INSPECTED_ENCHANTMENT_SLOT`).
+/// `SetVisibleItemSlot`, `MAX_INSPECTED_ENCHANTMENT_SLOT`). The record is read, never asked: the
+/// getters' lookup passes no callback (`0x4c8420` → `0x5f0d60` → `0x62eb40`).
 fn inspect_slot_view(
     store: &ObjectStore,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
-    commands: &NetCommands,
+    names: &crate::names::NameCache,
     slot0: u8,
 ) -> Option<InvSlotView> {
     let entry = store.0.player_visible_item_entry(slot0)?;
+    let creator_guid = store.0.player_visible_item_creator(slot0);
+    let creator = (creator_guid != 0)
+        .then(|| names.resolve_player(creator_guid, Ask::Read))
+        .flatten()
+        .map(str::to_string);
     // The roll, the properties field's low word as the reference's inspect leg reads it into
     // `+0x424`, names the suffix only: its stat lines would sit in enchant slots 2-6, which 1.12
     // servers leave empty.
     let roll = store.0.player_visible_item_properties(slot0);
-    // By entry alone (guid 0), as the reference's item cache asks: there is no item object.
-    let (name, quality, display) = match items.template(entry, 0, commands) {
-        Some(t) => (
-            Some(rolls.name(&t.name, roll)),
-            t.quality,
-            t.display_info_id,
-        ),
-        None => (None, 0, 0),
+    // The link names the permanent enchant, the block's `+0xc`, and the suffix at `+0x28`
+    // (`0x4c8d5c`-`0x4c8d74` → `0x52adb0`).
+    let roll = benilla_ui::script::ItemRoll {
+        enchant: store.0.player_visible_item_enchant(slot0, 0).unwrap_or(0),
+        property: roll,
+        suffix_factor: 0,
     };
-    let link = name
-        .as_ref()
-        .map(|n| crate::ui_items::item_link_full(entry, 0, roll, 0, n, quality));
+    // By entry alone (guid 0), as the reference's item cache asks: there is no item object. What
+    // the getters read of it as they run, read here the same way.
+    let live = crate::ui_items::live::LiveItem::record(entry, roll, items, icons, rolls);
     Some(InvSlotView {
         item_id: entry,
-        icon: icons
-            .and_then(|i| i.catalog.get(display))
-            .and_then(|d| d.icon.clone()),
+        icon: live.texture(),
         count: 1,
-        quality: quality as i32,
-        name,
-        link,
+        quality: live.quality().map_or(0, |q| q as i32),
+        inventory_type: live.cached().then(|| live.inventory_type()),
+        name: live.name(),
+        link: live.link(),
+        roll,
+        creator,
+        creator_guid,
         // `0x5da2c0` reads an item object's `ITEM_FIELD_FLAGS`, which inspected gear lacks, so the
         // tooltip prints the template's bind line, as the reference's does.
         already_bound: false,
@@ -104,105 +88,176 @@ fn inspect_slot_view(
     })
 }
 
-fn feed_inspect(
-    script: Option<NonSendMut<UiScript>>,
-    mut target: ResMut<InspectTarget>,
-    mut feed: ResMut<InspectFeedState>,
-    mut booth: ResMut<InspectBooth>,
-    items: Res<Items>,
-    icons: Option<Res<ItemDisplays>>,
-    // `SpellItemEnchantment` names the enchant lines, `ItemRandomProperties` the roll suffix.
-    catalogs: (
-        Option<Res<crate::items::Enchants>>,
-        Option<Res<crate::items::RandomProperties>>,
-    ),
-    commands: Res<NetCommands>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
-    selection: Res<crate::target::Selection>,
-    group: Res<crate::ui_party::GroupState>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    // A `/reload` keeps the latched token, and the fresh memo re-pushes the view.
-    let memo = feed.vm.get(&script);
+/// What a player's visible-item views read beside the descriptor: the item records, the icons,
+/// the `SpellItemEnchantment` and `ItemRandomProperties` catalogs that name the enchant lines
+/// and the roll suffix, and the name cache that names the creator.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct VisibleItemTables<'w> {
+    items: Res<'w, Items>,
+    icons: Option<Res<'w, ItemDisplays>>,
+    enchants: Option<Res<'w, crate::items::Enchants>>,
+    props: Option<Res<'w, crate::items::RandomProperties>>,
+    names: Res<'w, crate::names::NameCache>,
+}
 
-    // `NotifyInspect(unit)`: send `CMSG_INSPECT` for the unit's guid and latch its token.
-    for token in script.take_inspect_notifies() {
-        match crate::ui_unit::player_token_guid(&token, &selection, &group) {
-            Some(guid) => {
-                debug!("inspect: {token:?} -> {guid:#x}; sending CMSG_INSPECT");
-                let _ = commands.0.send(ClientCommand::Inspect { target: guid });
-                target.token = Some(token);
-            }
-            None => {
-                debug!("inspect: {token:?} did not resolve to a player guid — nothing sent");
-            }
-        }
-    }
-    // `ClearInspectPlayer()`, from `InspectFrame_OnHide`: the resolve stops and the booth empties.
-    if script.take_inspect_clear() {
-        target.token = None;
-    }
-
-    // Re-resolve the latched token every frame, so the window follows a retarget as the
-    // reference's `PLAYER_TARGET_CHANGED` arm does.
-    let resolved = target.token.as_ref().and_then(|token| {
-        let guid = crate::ui_unit::player_token_guid(token, &selection, &group)?;
-        let entity = *index.0.get(&guid)?;
-        Some((token.clone(), guid, entity))
-    });
-
-    let Some((token, guid, entity)) = resolved else {
-        // Nothing inspected, or the target is not streamed: clear the view and empty the booth.
-        if memo.last.is_some() {
-            script.set_inspect(None);
-            memo.last = None;
-            memo.last_level = None;
-        }
-        booth.unit = None;
-        return;
-    };
-
-    booth.unit = Some(entity);
-    // The stock Lua turns the doll through the pane (`InspectModelFrame:SetRotation`).
-    booth.yaw = script.model_pane_facing("InspectModelFrame");
-
-    let Ok(store) = stores.get(entity) else {
-        return;
-    };
-    let mut slots: InventorySlots = Default::default();
-    for slot in 1..=19u8 {
-        slots[usize::from(slot)] = inspect_slot_view(
+impl VisibleItemTables<'_> {
+    /// A player's slot `slot0`, the 0-based `EQUIPMENT_SLOT_*` index, as of `store`.
+    pub(crate) fn slot(&self, store: &ObjectStore, slot0: u8) -> Option<InvSlotView> {
+        let rolls = crate::items::RollCatalogs {
+            enchants: self.enchants.as_deref(),
+            props: self.props.as_deref(),
+        };
+        inspect_slot_view(
             store,
-            &items,
-            icons.as_deref(),
-            crate::items::RollCatalogs {
-                enchants: catalogs.0.as_deref(),
-                props: catalogs.1.as_deref(),
-            },
-            &commands,
-            slot - 1,
-        );
+            &self.items,
+            self.icons.as_deref(),
+            rolls,
+            &self.names,
+            slot0,
+        )
     }
-    let view = InspectView {
-        unit: token.clone(),
-        guid,
-        slots,
-    };
-    if memo.last.as_ref() != Some(&view) {
-        script.set_inspect(Some(view.clone()));
-        memo.last = Some(view);
-        // `InspectPaperDollItemSlotButton_OnEvent` filters it on `arg1` being the inspected unit.
-        script.fire_event(
-            "UNIT_INVENTORY_CHANGED",
-            vec![ScriptValue::Str(token.clone())],
-        );
+
+    /// A player's 19 slots by slot id.
+    #[cfg(test)]
+    pub(crate) fn slots(&self, store: &ObjectStore) -> benilla_ui::script::InventorySlots {
+        let mut slots: benilla_ui::script::InventorySlots = Default::default();
+        for slot in 1..=19u8 {
+            slots[usize::from(slot)] = self.slot(store, slot - 1);
+        }
+        slots
     }
-    let level = store.0.unit_level();
-    if memo.last_level != level {
-        memo.last_level = level;
-        script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str(token)]);
+}
+
+/// The inspect verbs inside their calls ([`benilla_ui::script::InspectCall`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct InspectSteps<'w, 's> {
+    /// The inspect target and its honor slot; absent in a harness without the inspect window.
+    slot: Option<ResMut<'w, crate::ui_honor::InspectHonor>>,
+    selection: Res<'w, crate::target::Selection>,
+    tokens: crate::ui_unit::UnitTokens<'w, 's>,
+    net: Res<'w, NetCommands>,
+}
+
+impl InspectSteps<'_, '_> {
+    /// `call` inside its verb.
+    pub(crate) fn apply(
+        &mut self,
+        _script: &mut UiScript,
+        call: InspectCall,
+    ) -> Option<benilla_ui::script::CallTail> {
+        let dropped = match call {
+            // `0x48a36a`: the token through the unit resolver `0x515970`, any unit; then
+            // `0x5decc0`, for a nonzero guid (`0x5deccf`), `CMSG_INSPECT` and then the inspect
+            // target set to it (`0x5ded10`, `0x5ded1c`).
+            InspectCall::Notify(token) => {
+                let Some(guid) = self.tokens.guid(&token, &self.selection) else {
+                    debug!("inspect: {token:?} names nobody — nothing sent");
+                    return None;
+                };
+                debug!("inspect: {token:?} -> {guid:#x}; sending CMSG_INSPECT");
+                let _ = self.net.0.send(ClientCommand::Inspect { target: guid });
+                self.slot.as_deref_mut().is_some_and(|s| s.set_target(guid))
+            }
+            // `ClearInspectPlayer()` (`0x4c9780`): the target set to 0 (`0x4c9784`).
+            InspectCall::Clear => self.slot.as_deref_mut().is_some_and(|s| s.set_target(0)),
+            // `RequestInspectHonorData()` past its two flags: for a nonzero target guid
+            // (`0x4c80c2`), `MSG_INSPECT_HONOR_STATS` with it (`0x4c8112`), then pending set
+            // (`0x4c811b`). With none it returns before both, and the pane asks again from its
+            // next `OnShow`.
+            InspectCall::Honor => {
+                let Some(slot) = self.slot.as_deref_mut().filter(|s| s.target() != 0) else {
+                    debug!("honor: inspect-honor request with no target — not sent");
+                    return None;
+                };
+                let target = slot.target();
+                debug!("honor: inspect-honor request -> {target:#x}");
+                let _ = self.net.0.send(ClientCommand::InspectHonorStats { target });
+                slot.asked();
+                false
+            }
+        };
+        // The dropped reply's repaint, the slot's `Deviation:` ([`crate::ui_honor::InspectHonor`]),
+        // fired once the call returns, with the host back.
+        dropped.then(|| -> benilla_ui::script::CallTail {
+            Box::new(|script: &mut UiScript| script.fire_event("INSPECT_HONOR_UPDATE", Vec::new()))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A world holding one player wearing a helm of `entry` with `extra` fields, its tables empty.
+    fn world(entry: u32, extra: &[(u16, u32)]) -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<Items>();
+        world.init_resource::<crate::names::NameCache>();
+        let mut pairs = vec![(2, 0x19), (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 2, entry)];
+        pairs.extend_from_slice(extra);
+        let e = world
+            .spawn(ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&pairs)
+                    .into_created(benilla_protocol::messages::ObjectType::Player),
+            ))
+            .id();
+        (world, e)
+    }
+
+    /// The helm's view as the tables build it now.
+    fn helm(world: &mut World, e: Entity) -> InvSlotView {
+        world
+            .run_system_once(
+                move |tables: VisibleItemTables, stores: Query<&ObjectStore>| {
+                    tables.slots(stores.get(e).unwrap())[1]
+                        .clone()
+                        .expect("the helm")
+                },
+            )
+            .unwrap()
+    }
+
+    /// The visible item's link carries the slot's permanent enchant, the block's `+0xc`, which the
+    /// getter hands the link builder (`0x4c8d60` → `0x52adb0`), beside the suffix at `+0x28`.
+    #[test]
+    fn an_inspected_link_carries_the_permanent_enchant() {
+        const HELM: u32 = 7366;
+        let (mut world, e) = world(HELM, &[(FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 3, 1900)]);
+        world
+            .resource_mut::<Items>()
+            .insert_template(HELM, Some(crate::items::test_template("Helm")));
+        let link = helm(&mut world, e).link.expect("a link");
+        assert!(link.contains("|Hitem:7366:1900:0:0|h"), "{link}");
+    }
+
+    /// A slot's creator is the first two words of its visible-item block, which the tooltip copies
+    /// to its `+0x410` (`0x5333cd`-`0x5333d5`) for the maker line (`0x52e1d5`), and which vmangos
+    /// fills from the item's creator (`Player.cpp:10589`). The view carries the guid, and the
+    /// name once the name cache holds it, read as the view is built.
+    #[test]
+    fn an_inspected_slot_carries_its_creator() {
+        const SMITH: u64 = 0x77;
+        const ROBE: u32 = 7366;
+        let (mut world, e) = world(
+            ROBE,
+            &[
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR, SMITH as u32),
+                (
+                    FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 1,
+                    (SMITH >> 32) as u32,
+                ),
+            ],
+        );
+        world
+            .resource_mut::<Items>()
+            .insert_template(ROBE, Some(crate::items::test_template("Robe")));
+        let v = helm(&mut world, e);
+        assert_eq!((v.creator_guid, v.creator), (SMITH, None));
+        world
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(SMITH, "Smith".into(), None);
+        assert_eq!(helm(&mut world, e).creator.as_deref(), Some("Smith"));
     }
 }

@@ -1,7 +1,8 @@
-//! The mirror-timer feed: breath, fatigue and feign-death edges off the wire, fired as
-//! `MIRROR_TIMER_START`, `_PAUSE` and `_STOP` (`UIParent.lua:97`, `MirrorTimer.lua:73-74`). The
-//! stock bars integrate `value + scale * elapsed` every `OnUpdate`, so a packet every few seconds
-//! paints a smooth countdown.
+//! The mirror timers: breath, fatigue and feign-death edges off the wire, fired as
+//! `MIRROR_TIMER_START`, `_PAUSE` and `_STOP` (`UIParent.lua:97`, `MirrorTimer.lua:73-74`) on the
+//! notice lane at their packet, as the handler `0x5e7990` signals inside itself. The stock bars
+//! integrate `value + scale * elapsed` every `OnUpdate`, so a packet every few seconds paints a
+//! smooth countdown.
 //!
 //! The client computes nothing: vmangos's `Player::UpdateMirrorTimers` runs the timers off its own
 //! liquid checks and ships a value and a signed rate, so there is no local underwater predicate to
@@ -13,10 +14,9 @@ use bevy::prelude::*;
 use benilla_protocol::messages::{MirrorTimerKind, MirrorTimerStart};
 
 use crate::ui_action::Spells;
-use crate::ui_unit::UnitFeed;
 
-/// One mirror-timer edge off the wire, queued by the net bridge for the bars.
-#[derive(Debug, Clone, Copy)]
+/// One mirror-timer edge off the wire, as the notice lane carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MirrorTimerEdge {
     /// `SMSG_START_MIRROR_TIMER`: starts or wholly restates a timer; vmangos re-sends it on every
     /// change of direction, remaining time or freeze.
@@ -27,9 +27,15 @@ pub(crate) enum MirrorTimerEdge {
     Stop { kind: u32 },
 }
 
-/// The net bridge's mirror-timer queue.
-#[derive(Resource, Default)]
-pub(crate) struct MirrorTimerFeed(pub(crate) Vec<MirrorTimerEdge>);
+impl MirrorTimerEdge {
+    /// The wire's `timerType`.
+    fn kind(&self) -> u32 {
+        match *self {
+            Self::Start(start) => start.kind,
+            Self::Pause { kind, .. } | Self::Stop { kind } => kind,
+        }
+    }
+}
 
 /// The timer's arg1 and `MirrorTimerColors` key, from the client's 3-entry table by wire type
 /// (`"EXHAUSTION"` `0x460520`, `"BREATH"` `0x46052c`, `"FEIGNDEATH"` `0x460534`). Type 0 is
@@ -42,115 +48,88 @@ fn script_name(kind: MirrorTimerKind) -> &'static str {
     }
 }
 
-/// A spell-less timer's caption, the reference's `<NAME>_LABEL` lookup: the 1.12
-/// `GlobalStrings.lua` defines `BREATH_LABEL` and `EXHAUSTION_LABEL` and no `FEIGNDEATH_LABEL`,
-/// which `GetGlobalString` (`0x703bf0`) answers with its static empty string (`0x882748`), never
-/// nil. These are the enUS values inlined; the reference reads the install's.
-fn global_string_label(kind: MirrorTimerKind) -> &'static str {
-    match kind {
-        MirrorTimerKind::Fatigue => "Fatigue",
-        MirrorTimerKind::Breath => "Breath",
-        MirrorTimerKind::FeignDeath => "",
+/// `MIRROR_TIMER_START`'s arg6 (handler `0x5e7990`, label helper `0x5e7b10`): the owning spell's
+/// localized name (`SpellRec + 0x1e0 + 4*locale`, by the packet's `spellId`, `0x5e7b37`), else
+/// `"%s_LABEL"` (`0x860540`) of the timer's name read from the strings (`0x5e7b48`-`0x5e7b66`):
+/// the 1.12 `GlobalStrings.lua` defines `BREATH_LABEL` and `EXHAUSTION_LABEL` and no
+/// `FEIGNDEATH_LABEL`, which `GetText` (`0x703bf0`) answers with its empty string. A
+/// water-breathing buff owns the breath timer (vmangos `UpdateMirrorTimers`,
+/// `GetMirrorTimerBuff`), so the bar reads its name; the colour still keys off the timer.
+/// `spell_name` is `None` for no spell and for one not in the catalog.
+fn caption(
+    kind: MirrorTimerKind,
+    spell_name: Option<&str>,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    match spell_name {
+        Some(name) => name.to_string(),
+        None => get(&format!("{}_LABEL", script_name(kind))).unwrap_or_default(),
     }
 }
 
-/// `MIRROR_TIMER_START`'s arg6 (handler `0x5e7990`, label helper `0x5e7b10`): the owning spell's
-/// localized name (`SpellRec + 0x1e0 + 4*locale`, by the packet's `spellId`), else the
-/// `<NAME>_LABEL` string. A water-breathing buff owns the breath timer (vmangos
-/// `UpdateMirrorTimers`, `GetMirrorTimerBuff`), so the bar reads its name; the colour still keys
-/// off the timer. `spell_name` is `None` for no spell and for one not in the catalog.
-fn caption(kind: MirrorTimerKind, spell_name: Option<&str>) -> String {
-    spell_name
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| global_string_label(kind))
-        .to_string()
-}
-
-/// Drains the queue into the VM, one event per edge.
-///
-/// Deviation: a type with no bar is dropped, because no bar appears either way: the reference
-/// fires it as `"UNKNOWN"` (`0x5e7ae0`) and `MirrorTimer_Show` errors on its nil colour before
-/// `Show()`. vmangos's `NUM_CLIENT_TIMERS` keeps its fourth timer off the wire.
-fn feed_mirror_timers(
-    script: Option<NonSendMut<UiScript>>,
-    mut feed: ResMut<MirrorTimerFeed>,
-    spells: Option<Res<Spells>>,
-    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
-) {
-    let Some(mut script) = script else {
-        // No VM (a capture or headless run): drop the edges so the queue stays bounded.
-        feed.0.clear();
+/// One edge's signal, as the handler raises it (`0x5e79cc`, `0x5e7a11`, `0x5e7a9a`), the owning
+/// spell's name read off `spells`. An edge of a type with no bar never reaches the lane
+/// ([`net`]).
+pub(crate) fn fire_edge(script: &mut UiScript, edge: MirrorTimerEdge, spells: Option<&Spells>) {
+    let Some(kind) = MirrorTimerKind::from_wire(edge.kind()) else {
         return;
     };
     // The VM has no spell-catalog binding, so the owning spell's name resolves here; 0 is none.
     let spell_name = |id: u32| -> Option<String> {
         (id != 0)
-            .then(|| spells.as_ref()?.catalog.get(id).map(|d| d.name.clone()))
+            .then(|| spells?.catalog.get(id).map(|d| d.name.clone()))
             .flatten()
     };
-    for edge in feed.0.drain(..) {
-        let raw = match edge {
-            MirrorTimerEdge::Start(start) => start.kind,
-            MirrorTimerEdge::Pause { kind, .. } | MirrorTimerEdge::Stop { kind } => kind,
-        };
-        let Some(kind) = MirrorTimerKind::from_wire(raw) else {
-            continue;
-        };
-        // The handler's two tutorial arms: type 0 (`0x5e7ab0`) and type 1 (`0x5e7acd`).
-        if matches!(edge, MirrorTimerEdge::Start(_)) {
-            match kind {
-                MirrorTimerKind::Fatigue => {
-                    if let Some(t) = tutorials.as_mut() {
-                        t.write(crate::tutorial::TutorialEvent::trigger(
-                            crate::tutorial::id::FATIGUE,
-                        ));
-                    }
-                }
-                MirrorTimerKind::Breath => {
-                    if let Some(t) = tutorials.as_mut() {
-                        t.write(crate::tutorial::TutorialEvent::trigger(
-                            crate::tutorial::id::BREATH,
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-        let name = ScriptValue::Str(script_name(kind).into());
-        let (event, args): (&str, Vec<ScriptValue>) = match edge {
-            MirrorTimerEdge::Start(start) => (
-                "MIRROR_TIMER_START",
-                vec![
-                    name,
-                    ScriptValue::Int(i64::from(start.remaining_ms)),
-                    ScriptValue::Int(i64::from(start.duration_ms)),
-                    ScriptValue::Int(i64::from(start.scale)),
-                    ScriptValue::Int(i64::from(start.paused)),
-                    ScriptValue::Str(caption(kind, spell_name(start.spell_id).as_deref())),
-                ],
-            ),
-            // The stock handler raises on this: it matches `arg1` as the timer name, then tests
-            // `arg1 > 0` (`MirrorTimer.lua:84-88`), 1.12's own bug. vmangos never sends it
-            // (`Player::SendMirrorTimers`); a repair belongs over the stock body, not here.
-            MirrorTimerEdge::Pause { paused, .. } => (
-                "MIRROR_TIMER_PAUSE",
-                vec![name, ScriptValue::Int(i64::from(paused))],
-            ),
-            MirrorTimerEdge::Stop { .. } => ("MIRROR_TIMER_STOP", vec![name]),
-        };
-        // One log line per edge: the bars live inside the VM, so this is their only outside trace.
-        debug!("net: mirror timer {event} {edge:?}");
-        script.fire_event(event, args);
+    let name = ScriptValue::Str(script_name(kind).into());
+    let (event, args): (&str, Vec<ScriptValue>) = match edge {
+        MirrorTimerEdge::Start(start) => (
+            "MIRROR_TIMER_START",
+            vec![
+                name,
+                ScriptValue::Int(i64::from(start.remaining_ms)),
+                ScriptValue::Int(i64::from(start.duration_ms)),
+                ScriptValue::Int(i64::from(start.scale)),
+                ScriptValue::Int(i64::from(start.paused)),
+                ScriptValue::Str(caption(
+                    kind,
+                    spell_name(start.spell_id).as_deref(),
+                    &|key| benilla_ui::strings::global(script.lua(), key),
+                )),
+            ],
+        ),
+        // The stock handler raises on this: it matches `arg1` as the timer name, then tests
+        // `arg1 > 0` (`MirrorTimer.lua:84-88`), 1.12's own bug. vmangos never sends it
+        // (`Player::SendMirrorTimers`); a repair belongs over the stock body, not here.
+        MirrorTimerEdge::Pause { paused, .. } => (
+            "MIRROR_TIMER_PAUSE",
+            vec![name, ScriptValue::Int(i64::from(paused))],
+        ),
+        MirrorTimerEdge::Stop { .. } => ("MIRROR_TIMER_STOP", vec![name]),
+    };
+    // One log line per edge: the bars live inside the VM, so this is their only outside trace.
+    debug!("net: mirror timer {event} {edge:?}");
+    script.fire_event(event, args);
+}
+
+/// `StopMirrorTimers` (`0x5e9b90`), which the active player's release runs (`0x5e9b55`): a
+/// `MIRROR_TIMER_STOP` for each of types 0 to 2 in turn (`0x5e9ba5`), with no test of whether one
+/// runs.
+pub(crate) fn stop_all(lane: &mut crate::field_watch::NoticeLane) {
+    for kind in 0..3 {
+        lane.write(crate::field_watch::FieldNotice::MirrorTimer(
+            MirrorTimerEdge::Stop { kind },
+        ));
     }
 }
 
-/// The mirror timers' packet handlers, which only queue. The drain runs before the VM ticks, so
-/// an edge and its first `OnUpdate` land on the same frame.
+/// The mirror timers' packet handlers, which put each edge on the notice lane at its packet.
 mod net {
+    use benilla_protocol::messages::MirrorTimerKind;
     use benilla_protocol::{SessionEvent, SessionEventKind};
     use bevy::prelude::*;
 
-    use super::{MirrorTimerEdge, MirrorTimerFeed};
+    use super::MirrorTimerEdge;
+    use crate::field_watch::{FieldNotice, NoticeLane};
     use crate::net::NetHandlerApp;
 
     pub(super) fn register(app: &mut App) {
@@ -160,7 +139,13 @@ mod net {
             .net_handler(K::MirrorTimerStop, on_edge);
     }
 
-    fn on_edge(In(ev): In<SessionEvent>, mut feed: ResMut<MirrorTimerFeed>) {
+    /// `0x5e7990`: the edge's signal, then for a start of type 0 or 1 its tutorial, 0x1a or 0x1c
+    /// (`0x5e7ab0`, `0x5e7acd`), after the signal.
+    ///
+    /// Deviation: a type with no bar is dropped, because no bar appears either way: the reference
+    /// fires it as `"UNKNOWN"` (`0x5e7ae0`) and `MirrorTimer_Show` errors on its nil colour before
+    /// `Show()`. vmangos's `NUM_CLIENT_TIMERS` keeps its fourth timer off the wire.
+    fn on_edge(In(ev): In<SessionEvent>, mut lane: ResMut<NoticeLane>) {
         let edge = match ev {
             SessionEvent::MirrorTimerStart(start) => MirrorTimerEdge::Start(start),
             SessionEvent::MirrorTimerPause { kind, paused } => {
@@ -169,7 +154,16 @@ mod net {
             SessionEvent::MirrorTimerStop { kind } => MirrorTimerEdge::Stop { kind },
             _ => return,
         };
-        feed.0.push(edge);
+        let Some(kind) = MirrorTimerKind::from_wire(edge.kind()) else {
+            return;
+        };
+        lane.write(FieldNotice::MirrorTimer(edge));
+        let tutorial = match (edge, kind) {
+            (MirrorTimerEdge::Start(_), MirrorTimerKind::Fatigue) => crate::tutorial::id::FATIGUE,
+            (MirrorTimerEdge::Start(_), MirrorTimerKind::Breath) => crate::tutorial::id::BREATH,
+            _ => return,
+        };
+        lane.write(FieldNotice::Tutorial { id: tutorial });
     }
 }
 
@@ -178,8 +172,6 @@ pub(crate) struct UiMirrorPlugin;
 impl Plugin for UiMirrorPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<MirrorTimerFeed>()
-            .add_systems(Update, feed_mirror_timers.in_set(UnitFeed));
     }
 }
 
@@ -195,23 +187,36 @@ mod tests {
         assert_eq!(script_name(MirrorTimerKind::FeignDeath), "FEIGNDEATH");
     }
 
-    /// Feign death has no label global, so its caption is empty.
-    #[test]
-    fn a_spell_less_timer_captions_from_the_global_string() {
-        assert_eq!(caption(MirrorTimerKind::Fatigue, None), "Fatigue");
-        assert_eq!(caption(MirrorTimerKind::Breath, None), "Breath");
-        assert_eq!(caption(MirrorTimerKind::FeignDeath, None), "");
+    /// Marked stand-ins: the caption is the install's string under the timer's `_LABEL` key.
+    fn labels(key: &str) -> Option<String> {
+        match key {
+            "EXHAUSTION_LABEL" => Some("[EXHAUSTION]".into()),
+            "BREATH_LABEL" => Some("[BREATH]".into()),
+            _ => None,
+        }
     }
 
-    /// `0x5e7b10` tries the owning spell's name before the global string.
+    /// `"%s_LABEL"` of the timer's name (`0x5e7b48`-`0x5e7b66`); feign death has no label global,
+    /// so its caption is empty.
+    #[test]
+    fn a_spell_less_timer_captions_from_the_global_string() {
+        assert_eq!(
+            caption(MirrorTimerKind::Fatigue, None, &labels),
+            "[EXHAUSTION]"
+        );
+        assert_eq!(caption(MirrorTimerKind::Breath, None, &labels), "[BREATH]");
+        assert_eq!(caption(MirrorTimerKind::FeignDeath, None, &labels), "");
+    }
+
+    /// `0x5e7b10` takes the owning spell's record's name as it is (`0x5e7b37`) before the global
+    /// string.
     #[test]
     fn an_owning_spell_captions_the_bar_with_its_own_name() {
         assert_eq!(
-            caption(MirrorTimerKind::Breath, Some("Water Breathing")),
+            caption(MirrorTimerKind::Breath, Some("Water Breathing"), &labels),
             "Water Breathing"
         );
         // An id the catalog cannot resolve falls back as a spell-less timer does.
-        assert_eq!(caption(MirrorTimerKind::Breath, None), "Breath");
-        assert_eq!(caption(MirrorTimerKind::Breath, Some("")), "Breath");
+        assert_eq!(caption(MirrorTimerKind::Breath, None, &labels), "[BREATH]");
     }
 }

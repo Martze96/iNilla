@@ -1,33 +1,40 @@
-//! The taxi-map bindings the stock `TaxiFrame.lua` runs on, over a node list the app resolves
-//! and pushes (types, positions, fares and routes); `TakeTaxiNode` and `CloseTaxiMap` queue
-//! intents the app drains. Positions are normalized 0..1 from the map's bottom-left, which the Lua
-//! scales by the 316x352 map.
+//! The taxi-map bindings the stock `TaxiFrame.lua` runs on, over the slots the open's builder
+//! made (types, positions, routes), read through the lent host at the call with each fare
+//! ([`TaxiNodeQuery`]); `TakeTaxiNode` and `CloseTaxiMap` act inside their calls through the host
+//! ([`TaxiCall`]). Positions are normalized 0..1 from the map's bottom-left, which the Lua scales
+//! by the 316x352 map.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Value};
 
-use super::region::region_handle_of;
+use super::binding_abi;
+use super::live::{ask, LiveQuery};
 use super::Model;
 
-/// A visible node's icon state (`TaxiNodeGetType`): green, white or yellow in the reference.
+/// A listed node's type (`TaxiNodeGetType`, `0x4dc4e0`): the green, white or yellow icon in the
+/// reference, or no button.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaxiNodeType {
     /// The flight master's own node, "You are here".
     Current,
-    /// Known and routable from the current node; clickable.
+    /// Known and routed from the current node; clickable.
     #[default]
     Reachable,
-    /// Known but unroutable. Never produced: the reference's DISTANT branch is dead and an
-    /// unroutable node does not render; the variant stays because `TaxiButtonTypes` names it.
+    /// Known with its bit clear in the stored mask. Never produced: every listed node's bit is set
+    /// (`0x4dc545`); the variant stays because `TaxiButtonTypes` names it.
     Distant,
+    /// `NONE`: listed, but the route search never reached it (`0x4dc512`); stock `TaxiFrame.lua`
+    /// hides its button.
+    Unrouted,
 }
 
 impl TaxiNodeType {
-    /// The type string, a `TaxiButtonTypes` key.
+    /// The type string, a `TaxiButtonTypes` key, or `NONE`.
     fn era_str(self) -> &'static str {
         match self {
             TaxiNodeType::Current => "CURRENT",
             TaxiNodeType::Reachable => "REACHABLE",
             TaxiNodeType::Distant => "DISTANT",
+            TaxiNodeType::Unrouted => "NONE",
         }
     }
 }
@@ -37,15 +44,19 @@ impl TaxiNodeType {
 pub struct TaxiUiNode {
     /// `TaxiNodeName`, the DBC's localized name.
     pub name: String,
-    /// `TaxiNodeGetType`; a node the reference types `"NONE"` is not pushed.
+    /// `TaxiNodeGetType`.
     pub node_type: TaxiNodeType,
     /// `TaxiNodePosition`: normalized `(x, y)` on the map art, from the bottom-left.
     pub pos: (f32, f32),
     /// `TaxiNodeCost`: the fare in copper, 0 for the current node.
     pub cost: u32,
-    /// The hover route's hops as `[src_x, src_y, dest_x, dest_y]` in the same space, for
-    /// `GetNumRoutes` and `TaxiGetSrcX` to `TaxiGetDestY`; empty for the current node.
+    /// The hover route's lines as `[src_x, src_y, dest_x, dest_y]` in the same space, for
+    /// `TaxiGetSrcX` to `TaxiGetDestY` (`0x4dc5c0`); empty for the current node and an unrouted
+    /// one.
     pub routes: Vec<[f32; 4]>,
+    /// `GetNumRoutes` (`0x4dc170`): 1 with a direct path from the current node, else the route's
+    /// node count less 1, so 0 for the current node and 999998 for one never routed.
+    pub num_routes: u32,
 }
 
 /// The open taxi map: the continent art and the visible nodes.
@@ -57,36 +68,94 @@ pub struct TaxiUiState {
     pub nodes: Vec<TaxiUiNode>,
 }
 
+/// The map as the getters read it at the call: its art (`0xbb4a78`) and its slot count
+/// (`0xbb4aa8`), which a close keeps (`0x4dc0f0`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaxiMapHead {
+    pub art: Option<String>,
+    pub nodes: usize,
+}
+
+/// The question: [`TaxiMapHead`] now.
+pub struct TaxiMapQuery;
+
+impl LiveQuery for TaxiMapQuery {
+    type Answer = TaxiMapHead;
+}
+
+/// The 0-based slot, its fare taken at the call with the flight master's discount, 0 with no
+/// flight master resolved (`0x4dc3d0`, `0x4dc423`); `None` past the count.
+pub struct TaxiNodeQuery(pub usize);
+
+impl LiveQuery for TaxiNodeQuery {
+    type Answer = Option<TaxiUiNode>;
+}
+
+/// The map's head now: the host's, else the VM's copy, which only a test sets (every production
+/// entry that runs Lua lends the host).
+fn head(lua: &Lua, model: &Model) -> TaxiMapHead {
+    ask(lua, &TaxiMapQuery).unwrap_or_else(|| {
+        model
+            .taxi
+            .as_ref()
+            .map_or_else(TaxiMapHead::default, |t| TaxiMapHead {
+                art: Some(t.art.clone()),
+                nodes: t.nodes.len(),
+            })
+    })
+}
+
 impl super::UiScript {
-    /// Push (or clear, with `None`) the open taxi map's snapshot.
+    /// Set (or clear, with `None`) the VM's copy of the open map, which the getters read with no
+    /// host to ask.
     pub fn set_taxi(&mut self, state: Option<TaxiUiState>) {
         self.model_mut().taxi = state;
     }
 
-    /// Whether the player is riding a taxi, for `UnitOnTaxi("player")`.
+    /// Seat the VM's copy of the active player's taxi flag (`UNIT_FLAG_TAXI_FLIGHT`), which the
+    /// cursor control gate reads with no host to ask (`0x494ba6`): the app seats it off our
+    /// object before a call's apply reaches the gate, and with the host lent the gate reads the
+    /// object itself.
     pub fn set_on_taxi(&mut self, riding: bool) {
         self.model_mut().taxi_riding = riding;
     }
 
-    /// Drain the 1-based indices `TakeTaxiNode` queued; the app sends the activate for each.
-    pub fn take_taxi_node(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.model_mut().taxi_takes)
-    }
-
-    /// Whether `CloseTaxiMap` was called since the last drain; it sends no packet, as the server
-    /// holds no window session for the map.
-    pub fn take_taxi_close(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().taxi_close)
+    /// The taxi calls a harness's VM kept ([`Self::keep_calls`]), in call order.
+    pub fn take_taxi_calls(&mut self) -> Vec<TaxiCall> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Taxi(call) => Some(*call),
+            _ => None,
+        })
     }
 }
 
-/// A node by 1-based Lua index.
-fn node(model: &Model, i: i64) -> Option<&TaxiUiNode> {
-    let nodes = &model.taxi.as_ref()?.nodes;
-    usize::try_from(i)
-        .ok()?
-        .checked_sub(1)
-        .and_then(|i| nodes.get(i))
+/// A taxi verb, which the host applies inside the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaxiCall {
+    /// `TakeTaxiNode(slot)` (`0x4dc8d0`), the Lua number as given: a slot under the count
+    /// (`0x4dc8dc`) is refused or activated with the flight master's cell as it stands.
+    Take(i32),
+    /// `CloseTaxiMap()` (`0x4dcce0`): the close core `0x4dc0f0`, which sends no packet.
+    Close,
+}
+
+/// Hand `call` to the host, which applies it before this returns ([`super::calls::submit`]).
+fn submit(lua: &Lua, call: TaxiCall) -> mlua::Result<()> {
+    super::calls::submit(lua, super::ScriptCall::Taxi(call))
+}
+
+/// What `TaxiNodePosition` and `TaxiNodeCost` raise for a slot the map lacks (`0x84b008`).
+const INVALID_SLOT: &str = "Invalid taxi node slot";
+
+/// A node by 1-based Lua index, as of the call: the reference compares the index less 1,
+/// unsigned, with the count (`0x4dc380`, `0x4dcbc5`, `0x4dcc63`), so 0, a negative index and an
+/// empty list miss.
+fn node(lua: &Lua, model: &Model, i: i64) -> Option<TaxiUiNode> {
+    let i = usize::try_from(i).ok()?.checked_sub(1)?;
+    match ask(lua, &TaxiNodeQuery(i)) {
+        Some(node) => node,
+        None => model.taxi.as_ref()?.nodes.get(i).cloned(),
+    }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -96,62 +165,99 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "NumTaxiNodes",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.taxi.as_ref().map_or(0, |t| t.nodes.len()) as i64)
+            Ok(head(lua, &model).nodes as i64)
         })?,
     )?;
 
     // "NONE" out of range, a button the reference hides.
     g.set(
         "TaxiNodeGetType",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: TaxiNodeGetType(slot)` (`0x84b080`, `0x4dcd01`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: TaxiNodeGetType(slot)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(node(&model, i).map_or("NONE", |n| n.node_type.era_str()))
+            Ok(node(lua, &model, i).map_or("NONE", |n| n.node_type.era_str()))
         })?,
     )?;
 
     g.set(
         "TaxiNodePosition",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: TaxiNodeTaxiNodeLocation(slot)` (`0x84b020`, `0x4dcb97`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: TaxiNodeTaxiNodeLocation(slot)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model");
-            let (x, y) = node(&model, i).map_or((0.0, 0.0), |n| n.pos);
-            Ok((x, y))
+            let n = node(lua, &model, i)
+                .ok_or_else(|| mlua::Error::RuntimeError(INVALID_SLOT.into()))?;
+            Ok(n.pos)
         })?,
     )?;
 
     g.set(
         "TaxiNodeName",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: TaxiNodeName(slot)` (`0x84afec`, `0x4dcb41`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: TaxiNodeName(slot)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(node(&model, i).map_or(String::new(), |n| n.name.clone()))
+            // `INVALID` (`0x84afc8`) out of range (`0x4dc388`).
+            Ok(node(lua, &model, i).map_or_else(|| "INVALID".to_owned(), |n| n.name))
         })?,
     )?;
 
     g.set(
         "TaxiNodeCost",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: TaxiNodeCost(slot)` (`0x84b048`, `0x4dcc35`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: TaxiNodeCost(slot)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(node(&model, i).map_or(0, |n| n.cost) as i64)
+            let n = node(lua, &model, i)
+                .ok_or_else(|| mlua::Error::RuntimeError(INVALID_SLOT.into()))?;
+            Ok(i64::from(n.cost))
         })?,
     )?;
 
     // The reference computes the hovered node's route here; the app precomputes every route.
-    // Deviation: returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4dcd7c`), so
-    // Lua 5.0 hands back the stack top, the node argument: an accident of the handler, not an API,
-    // and copying a stack-top leak would copy a bug.
+    // Deviation: returns nothing because the handler ends `mov eax,1` with nothing pushed
+    // (`0x4dcd7c`), so Lua 5.0 hands back the stack top, the node argument: an accident of the
+    // handler, not an API, and copying a stack-top leak would copy a bug.
     g.set(
         "TaxiNodeSetCurrent",
-        lua.create_function(|_, _: i64| Ok(()))?,
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: TaxiNodeSetCurrent(slot)` (`0x84b0a0`, `0x4dcd51`).
+            binding_abi::number_arg(lua, slot, "Usage: TaxiNodeSetCurrent(slot)")?;
+            Ok(())
+        })?,
     )?;
 
     g.set(
         "GetNumRoutes",
-        lua.create_function(|lua, i: i64| {
+        // A bare `lua_tonumber` (`0x4dcede`) with no gate: a non-number reads 0, which `0x4dc170`
+        // (index - 1 as unsigned) answers 0 for, as for any out-of-range node.
+        lua.create_function(|lua, i: Value| {
+            let i = i64::from(binding_abi::ftol(binding_abi::coerced_number(lua, Some(i))));
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(node(&model, i).map_or(0, |n| n.routes.len()) as i64)
+            Ok(node(lua, &model, i).map_or(0, |n| i64::from(n.num_routes)))
         })?,
     )?;
 
-    // One coordinate of 1-based hop `hop`, for the reference's `DrawRouteLine` loop.
+    // One coordinate of 1-based segment `hop` of slot `i`, for the stock `DrawRouteLine` loop: both
+    // arguments a bare `lua_tonumber` and `_ftol`, the segment's read first (`0x4dcd9d`-`0x4dcdbb`),
+    // so a non-number is 0 and misses, as any slot or segment out of range answers 0 (`0x4dca3a`).
     for (name, pick) in [
         ("TaxiGetSrcX", 0usize),
         ("TaxiGetSrcY", 1),
@@ -160,11 +266,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     ] {
         g.set(
             name,
-            lua.create_function(move |lua, (i, hop): (i64, i64)| {
+            lua.create_function(move |lua, (i, hop): (Value, Value)| {
+                let index =
+                    |v| i64::from(binding_abi::ftol(binding_abi::coerced_number(lua, Some(v))));
+                let (hop, i) = (index(hop), index(i));
                 let model = lua.app_data_ref::<Model>().expect("model");
-                let coord = node(&model, i)
+                let coord = node(lua, &model, i)
                     .zip(usize::try_from(hop).ok().and_then(|h| h.checked_sub(1)))
-                    .and_then(|(n, h)| n.routes.get(h))
+                    .and_then(|(n, h)| n.routes.get(h).copied())
                     .map_or(0.0, |seg| seg[pick]);
                 Ok(coord)
             })?,
@@ -173,57 +282,63 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "TakeTaxiNode",
-        lua.create_function(|lua, i: i64| {
-            if let Ok(i) = usize::try_from(i) {
-                lua.app_data_mut::<Model>()
-                    .expect("model")
-                    .taxi_takes
-                    .push(i);
-            }
-            Ok(())
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: TakeTaxiNode(slot)` (`0x84b064`, `0x4dccb1`).
+            let i = binding_abi::number_arg(lua, i, "Usage: TakeTaxiNode(slot)")?;
+            submit(lua, TaxiCall::Take(i))
         })?,
     )?;
 
     g.set(
         "CloseTaxiMap",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>().expect("model").taxi_close = true;
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, TaxiCall::Close))?,
     )?;
 
-    // The open map's continent art (`TAXIMAP<map>`, the app's pick) onto the given texture.
+    // The map's continent art (`TAXIMAP<map>`, the app's pick) onto the given texture. With no
+    // art loaded it returns before reading its argument (`0x4dca5c`); else the argument resolves
+    // as a member function's receiver, a Texture (`0x4dca8b`-`0x4dcad9`).
     g.set(
         "SetTaxiMap",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
+        lua.create_function(|lua, this: Value| {
+            let art = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                head(lua, &model).art
+            };
+            let Some(art) = art else {
+                return Ok(());
+            };
+            let rh = super::region::this_texture(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            let art = model.taxi.as_ref().map(|t| t.art.clone());
-            if let Some(art) = art {
-                model.set_texel(rh, crate::script::texel::TexSet::File(art));
-                model.note_art(rh);
-            }
+            model.set_texel(rh, crate::script::texel::TexSet::File(art));
+            model.note_art(rh);
             Ok(())
         })?,
     )?;
 
     // `0x517a40`: the number 1 or nil, never a boolean; an argument neither string nor number
-    // raises the reference's usage (`0x517a48`). Only the player is tracked, as the stock UI asks
-    // about no other unit.
+    // raises the reference's usage (`0x517a48`). The token resolves (`0x515940`) and bit 20 of the
+    // unit's `UNIT_FIELD_FLAGS` (`0x517a80`-`0x517a8c`, `UNIT_FLAG_TAXI_FLIGHT`) answers, for any
+    // unit it names; a token naming nothing is nil. Read off the object as the call runs, else off
+    // the snapshot's flags ([`crate::script::unit`]'s `with_object`).
     g.set(
         "UnitOnTaxi",
         lua.create_function(|lua, unit: mlua::Value| {
             let unit =
                 crate::script::binding_abi::string_arg(lua, unit, r#"Usage: UnitOnTaxi("unit")"#)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::flag(
-                unit.eq_ignore_ascii_case("player") && model.taxi_riding,
-            ))
+            Ok(crate::script::binding_abi::flag(super::unit::with_object(
+                lua,
+                &Some(unit),
+                false,
+                |_, o| o.flags() & TAXI_FLIGHT != 0,
+            )?))
         })?,
     )?;
 
     Ok(())
 }
+
+/// `UNIT_FIELD_FLAGS` bit 20 (`0x517a86`), vmangos `UNIT_FLAG_TAXI_FLIGHT`.
+const TAXI_FLIGHT: u32 = 1 << 20;
 
 #[cfg(test)]
 mod tests {

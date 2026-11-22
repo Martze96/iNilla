@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Value};
 
-use super::{clear, clear_cursor, set_cursor, Clear, CursorMoney, CursorPayload};
+use super::{clear, clear_cursor, set_cursor, Clear, CursorMoney, CursorPayload, Setter};
 use crate::script::binding_abi::{flag, number_arg};
 use crate::script::tick::verb;
 use crate::script::Model;
@@ -41,23 +41,21 @@ pub(crate) fn cursor_money(model: &Model) -> u32 {
 /// Put coins on the cursor as `0x494cc0` does. Its inner `ClearCursor(1,1)` (`0x494cd9`) drops
 /// whatever is held with that arm's events, an item's unlock or coins' `PLAYER_MONEY`, and fires
 /// `CURSOR_UPDATE` (`0x4952cc`) on the empty cursor, so that handler sees no coins; then the coins
-/// land and `PLAYER_MONEY` fires (`0x494d0a`), with no second `CURSOR_UPDATE`.
-fn install_money(lua: &Lua, copper: u32) {
-    set_cursor(lua, true, |_| {
+/// land and `PLAYER_MONEY` fires (`0x494d0a`), with no second `CURSOR_UPDATE`. Without control
+/// the setter does nothing (`0x494cc5`). Returns whether the coins went on.
+fn install_money(lua: &Lua, copper: u32) -> bool {
+    set_cursor(lua, true, Setter::Controlled, |_| {
         Some(CursorPayload::Money(CursorMoney { copper }))
-    });
+    })
 }
 
 /// `PickupPlayerMoney` after the argument gate; each refusal is silent.
 pub(crate) fn pickup_player_money(lua: &Lua, copper: u32) -> bool {
     let allowed = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        copper != 0 && model.player_control && u64::from(copper) <= model.money
+        copper != 0 && u64::from(copper) <= crate::script::stat_read::purse(lua, &model)
     };
-    if allowed {
-        install_money(lua, copper);
-    }
-    allowed
+    allowed && install_money(lua, copper)
 }
 
 /// `DropCursorMoney` (`0x48aba0`), `SetCursorMoney(0)`: its `ClearCursor(1,1)` fires the coin
@@ -70,55 +68,71 @@ pub(crate) fn drop_cursor_money(model: &mut Model) -> bool {
     true
 }
 
-/// `AddTradeMoney`, also run first by `ClickTradeButton`, `ClickTargetTradeButton` and the trade
-/// window's open: the offer becomes offer plus cursor, if the purse covers it.
-pub(crate) fn add_trade_money(model: &mut Model) -> bool {
+/// The new offer `0x5d4500` sends for the held coins: our offer `[0xc4be70]` as it stands
+/// (`0x5d4520`) plus the cursor's, when `purse`, the coinage, covers it (`0x5d4570`); `None` with no
+/// coins held.
+pub(crate) fn trade_money_total(lua: &Lua, model: &Model, purse: u64) -> Option<u32> {
     let copper = cursor_money(model);
     if copper == 0 {
-        return false;
+        return None;
     }
-    let offer = model.trade.as_ref().map_or(0, |t| t.player.gold);
+    let offer = crate::script::trade::money_now(lua, model).player;
     let total = u64::from(offer) + u64::from(copper);
-    if total > model.money {
-        return false;
-    }
-    let total = total as u32;
-    model.trade_set_money = Some(total);
+    (total <= purse).then_some(total as u32)
+}
+
+/// Our money offer `[0xc4be70]` as a sender stores it after its send, in the VM's copy; the host
+/// stores its own in the send's call.
+pub(crate) fn set_own_offer(model: &mut Model, copper: u32) {
     if let Some(t) = model.trade.as_mut() {
-        t.player.gold = total;
+        t.player.gold = copper;
     }
-    // `ClearCursor(1,0)` (`0x4bfe4b`): no PLAYER_MONEY, the clear's own CURSOR_UPDATE.
-    clear(model, Clear::NO_MONEY_EVENT);
-    true
 }
 
-/// `PickupTradeMoney` after the argument gate: signed gates, then `CMSG_SET_TRADE_GOLD` (`0x11F`)
-/// with the trimmed offer, then the coins onto the cursor.
-pub(crate) fn pickup_trade_money(lua: &Lua, amount: i32) -> bool {
-    let trimmed = verb(lua, |model| {
-        let offer = model.trade.as_ref().map_or(0, |t| t.player.gold) as i32;
-        if amount <= 0 || amount > offer {
-            return false;
-        }
-        let left = (offer - amount) as u32;
-        model.trade_set_money = Some(left);
-        if let Some(t) = model.trade.as_mut() {
-            t.player.gold = left;
-        }
-        true
+/// `AddTradeMoney` (`0x4c07f0`), also run first by `ClickTradeButton` (`0x4bfe34`) and
+/// `ClickTargetTradeButton` (`0x4c00a3`): with coins held, `0x5d4500` sends the offer plus the
+/// coins when the purse covers it, inside its call, then `ClearCursor(1,0)` drops them with no
+/// `PLAYER_MONEY` and its own `CURSOR_UPDATE` (`0x4c080a`). Whether coins were held, the arm that
+/// ends both clicks whatever the purse answered.
+pub(crate) fn add_trade_money(lua: &Lua) -> mlua::Result<bool> {
+    let (held, total) = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let purse = crate::script::stat_read::purse(lua, &model);
+        (
+            cursor_money(&model) != 0,
+            trade_money_total(lua, &model, purse),
+        )
+    };
+    let Some(total) = total else {
+        return Ok(held);
+    };
+    crate::script::trade::submit(lua, crate::script::trade::TradeCall::Gold(total))?;
+    verb(lua, |model| {
+        set_own_offer(model, total);
+        clear(model, Clear::NO_MONEY_EVENT);
     });
-    if trimmed {
-        install_money(lua, amount as u32);
-    }
-    trimmed
+    Ok(true)
 }
 
-impl crate::script::UiScript {
-    /// The trade window's open (`SetTradePartner`, `0x4bf4e0`) folds held coins into the offer.
-    pub fn fold_cursor_money_into_trade(&mut self) -> Option<u32> {
-        let mut model = self.model_mut();
-        add_trade_money(&mut model).then(|| model.trade.as_ref().map_or(0, |t| t.player.gold))
-    }
+/// `PickupTradeMoney` (`0x4c0790`) after the argument gate: `0x5d45f0`'s signed gates, then
+/// `CMSG_SET_TRADE_GOLD` (`0x11F`) with the trimmed offer inside its call, then the coins onto the
+/// cursor.
+pub(crate) fn pickup_trade_money(lua: &Lua, amount: i32) -> mlua::Result<bool> {
+    let left = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let offer = crate::script::trade::money_now(lua, &model).player as i32;
+        (amount > 0 && amount <= offer).then(|| (offer - amount) as u32)
+    };
+    let Some(left) = left else {
+        return Ok(false);
+    };
+    crate::script::trade::submit(lua, crate::script::trade::TradeCall::Gold(left))?;
+    set_own_offer(
+        &mut lua.app_data_mut::<Model>().expect("model app_data"),
+        left,
+    );
+    install_money(lua, amount as u32);
+    Ok(true)
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -154,17 +168,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "AddTradeMoney",
-        lua.create_function(|lua, ()| {
-            verb(lua, add_trade_money);
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| add_trade_money(lua).map(|_| ()))?,
     )?;
     g.set(
         "PickupTradeMoney",
         lua.create_function(|lua, amount: Value| {
             let n = number_arg(lua, amount, "Usage: PickupTradeMoney(amount)")?;
-            pickup_trade_money(lua, n);
-            Ok(())
+            pickup_trade_money(lua, n).map(|_| ())
         })?,
     )?;
     g.set(
@@ -313,29 +323,32 @@ mod tests {
 
     #[test]
     fn the_trade_pair_moves_coins_between_the_cursor_and_the_offer() {
+        use crate::script::TradeCall;
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_money(1_000);
+        s.open_trade_window(0x7);
         s.set_trade(Some(crate::script::TradeState::default()));
         s.run("PickupPlayerMoney(300) AddTradeMoney()").unwrap();
         assert_eq!(
-            s.take_trade_money(),
-            Some(300),
+            s.take_trade_calls(),
+            [TradeCall::Gold(300)],
             "an ABSOLUTE offer + cursor"
         );
         assert_eq!(s.eval::<i64>("return GetCursorMoney()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return GetPlayerTradeMoney()").unwrap(), 300);
         // The purse cannot cover offer + cursor: refused, the coins stay held.
         s.run("PickupPlayerMoney(800) AddTradeMoney()").unwrap();
-        assert_eq!(s.take_trade_money(), None);
+        assert!(s.take_trade_calls().is_empty());
         assert_eq!(s.eval::<i64>("return GetCursorMoney()").unwrap(), 800);
         s.run("DropCursorMoney()").unwrap();
         // Back off the offer: signed gates, the trimmed offer on the wire, coins on the cursor.
         assert!(s.run("PickupTradeMoney(nil)").is_err());
         s.run("PickupTradeMoney(0) PickupTradeMoney(301) PickupTradeMoney(-1)")
             .unwrap();
-        assert_eq!(s.take_trade_money(), None);
+        assert!(s.take_trade_calls().is_empty());
         s.run("PickupTradeMoney(100)").unwrap();
-        assert_eq!(s.take_trade_money(), Some(200));
+        assert_eq!(s.take_trade_calls(), [TradeCall::Gold(200)]);
         assert_eq!(s.eval::<i64>("return GetCursorMoney()").unwrap(), 100);
         assert!(matches!(s.cursor_payload(), Some(CursorPayload::Money(_))));
         assert!(s.errors().is_empty(), "{:?}", s.errors());

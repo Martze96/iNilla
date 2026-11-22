@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 
-use crate::net::{ObjectStore, Reputations, SelfPlayer};
+use crate::net::{ObjectStore, SelfPlayer};
 
 use super::ring::Factions;
 use super::{go_is_nearest, Hovered, HoveredObject};
@@ -47,6 +47,9 @@ pub(crate) enum CursorKind {
     /// Cast(2): the spell-targeting cursor (`0x4820f0`), which pre-empts the whole object
     /// classifier while a spell awaits a target; the classifier here never sets it.
     Cast,
+    /// Custom(41): the texture FrameXML's `SetCursor` loaded by name (`0x523c40`), never set by
+    /// the classifier; its picture is [`crate::cursor::CustomCursorName`]'s path.
+    Custom,
 }
 
 impl CursorKind {
@@ -70,6 +73,8 @@ impl CursorKind {
             CursorKind::GatherHerbs => "GatherHerbs",
             CursorKind::PickLock => "PickLock",
             CursorKind::Cast => "Cast",
+            // No `Interface\Cursor` stem: the platform drivers key it by its path.
+            CursorKind::Custom => "Custom",
         }
     }
 }
@@ -122,7 +127,7 @@ pub(crate) mod npc_flags {
 }
 
 pub(super) const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
-const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
+pub(crate) const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
 
 /// The hovered unit is one the unit dispatcher `0x60bea0` forks to its attack arm for (`0x60c192`):
 /// alive or feigning, refused by `CanInteract` and passed by `CanAttack`. The sword also needs the
@@ -152,7 +157,7 @@ const ATTACK_RANGE_SQ: f32 = 109.2025;
 pub(super) const MELEE_OFFSET: f32 = 1.333_33;
 pub(super) const MELEE_FLOOR: f32 = 5.0;
 
-pub(super) fn melee_reach(target: &ObjectStore, me: &ObjectStore) -> f32 {
+pub(crate) fn melee_reach(target: &ObjectStore, me: &ObjectStore) -> f32 {
     (target.0.unit_combat_reach() + me.0.unit_combat_reach() + MELEE_OFFSET).max(MELEE_FLOOR)
 }
 
@@ -197,26 +202,200 @@ pub(crate) const GO_TYPE_TEXT: i32 = 9;
 const GO_TYPE_RITUAL: i32 = 18;
 pub(super) const GO_TYPE_MAILBOX: i32 = 19;
 const GO_TYPE_28: i32 = 28;
-/// Every other type's interact range: the NPC-service reach, standing in for the reference's
-/// per-type strategy constant (`[strat+0xc]`, compared squared by `usable 0x5f3130`; base 5.0,
-/// overridden by several types), which is not transcribed.
-const GO_INTERACT_RANGE_SQ: f32 = SERVICE_RANGE_SQ;
 /// `GAMEOBJECT_TYPE_FISHINGNODE` (17), the bobber: its strategy (vtable `0x80bc80`) overrides only
-/// the highlightable slot, and its interact range is 100 yd (`0x5f66b0`, `[0x80b0b0]`).
+/// the highlightable slot.
 pub(crate) const GO_TYPE_FISHINGNODE: i32 = 17;
 /// `GAMEOBJECT_TYPE_CHAIR` (7): its own range predicate `0x5f5670` accepts within 3.0 yd
 /// (`[0xc4d808]`, written only by `0x5f98b0` as 3.0 squared).
 pub(crate) const GO_TYPE_CHAIR: i32 = 7;
-pub(super) fn go_interact_range_sq(type_id: i32) -> f32 {
+/// `GAMEOBJECT_TYPE_QUESTGIVER` (2), TEXT (9), FLAGSTAND (24), FLAGDROP (26), MINIGAME (27): the
+/// 5.5555553 yd range (`[0x80b07c]`, stored at `0x5f45c2`, `0x5f5852`, `0x5f6c12`, `0x5f6c72`,
+/// `0x5f6cd2`).
+const GO_RANGE_NEAR_SERVICE: f32 = 5.555_555_3;
+/// The base handler's range (`[0x80b084]`, `0x5f2f67`, run first by every constructor).
+const GO_RANGE_BASE: f32 = 5.0;
+/// `GAMEOBJECT_TYPE_BINDER` (4): 10.0 yd (`[0x80b088]`, `0x5f478b`).
+const GO_RANGE_BINDER: f32 = 10.0;
+/// The chair's and the bobber's 100.0 yd (`[0x80b0b0]`, `0x5f562a`, `0x5f66d2`).
+const GO_RANGE_FAR: f32 = 100.0;
+
+/// A type's use range, `[handler+0xc]` (`0x5f2f50` stores 5.0 and nine types store another value
+/// over it): the range `usable 0x5f3130` squares for its distance test and hands back. Type 21 and
+/// any type above 30 take the static handler `0xc4d840`, which has none and whose slot 6
+/// (`0x5f3700`) is never usable: 0.0.
+const fn go_handler_range(type_id: i32) -> f32 {
     match type_id {
-        GO_TYPE_FISHINGNODE => 100.0 * 100.0,
-        // Measured to the object; the reference (seats from `0x5f5760`) and vmangos
-        // (`GameObject.cpp:2231-2236`) measure to the nearest seat, so only a multi-seat bench
-        // differs, by up to half its span.
-        GO_TYPE_CHAIR => 9.0,
-        _ => GO_INTERACT_RANGE_SQ,
+        2 | 9 | 24 | 26 | 27 => GO_RANGE_NEAR_SERVICE,
+        4 => GO_RANGE_BINDER,
+        GO_TYPE_CHAIR | GO_TYPE_FISHINGNODE => GO_RANGE_FAR,
+        // AREADAMAGE stores a zeroed register (`0x5f4504`).
+        12 => 0.0,
+        0 | 1 | 3 | 5 | 6 | 8 | 10 | 11 | 13..=16 | 18..=20 | 22 | 23 | 25 | 28..=30 => {
+            GO_RANGE_BASE
+        }
+        _ => 0.0,
     }
 }
+
+/// The range slot 6 hands back, which the walk to a too-far object stops short of (`0x5f86b0`):
+/// `[handler+0xc]`, written before the opener spell's range (`0x5f32f4`) so that never reaches it.
+/// The chair's replaces it with 3.0 (`0x5f569d`, `[0x80b0a0]`) only when its base test passed
+/// (`0x5f5689 jne`); past that test it keeps the 100.0.
+pub(super) fn go_use_range(type_id: i32, base_passed: bool) -> f32 {
+    if type_id == GO_TYPE_CHAIR && base_passed {
+        3.0
+    } else {
+        go_handler_range(type_id)
+    }
+}
+
+/// The squared distance the base test of `usable 0x5f3130` allows (`0x5f3346`): the handler's
+/// range, or the maximum range of the spell that opens the object's lock (`0x5f3328`).
+pub(super) fn go_reach_sq(type_id: i32, opener_range: Option<f32>) -> f32 {
+    let range = opener_range.unwrap_or_else(|| go_handler_range(type_id));
+    range * range
+}
+
+/// The chair's seat test, 3.0 yd squared (`[0xc4d808]`, `0x5f571a`).
+const CHAIR_SEAT_RANGE_SQ: f32 = 9.0;
+
+/// Whether `dist_sq` passes `usable 0x5f3130`'s distance test, error 0xe1 otherwise: within
+/// [`go_reach_sq`], equal and NaN passing (`0x5f336c`-`0x5f3379`). The chair then runs its own seat
+/// test (`0x5f5670`), which is strict: `fcomp` at `0x5f571a` and `jnp` at `0x5f572b` succeed only
+/// on C0 alone, so equal and NaN fail. Measured to the object, where the reference (seats from
+/// `0x5f5760`) and vmangos (`GameObject.cpp:2231-2236`) measure to the nearest seat, so only a
+/// multi-seat bench differs, by up to half its span.
+pub(super) fn go_in_reach(dist_sq: f32, type_id: i32, opener_range: Option<f32>) -> bool {
+    go_base_in_reach(dist_sq, type_id, opener_range)
+        && (type_id != GO_TYPE_CHAIR || dist_sq < CHAIR_SEAT_RANGE_SQ)
+}
+
+/// The base test alone (`0x5f3346`), before the chair's seat test.
+pub(super) fn go_base_in_reach(dist_sq: f32, type_id: i32, opener_range: Option<f32>) -> bool {
+    dist_sq.is_nan() || dist_sq <= go_reach_sq(type_id, opener_range)
+}
+
+/// `usable 0x5f3130`'s state arm (`0x5f3392`-`0x5f33ac`), after the lock arm and ahead of the
+/// distance test: without an opener spell, `GAMEOBJECT_STATE` 2 (`go+0x27c`) refuses with error
+/// 0xe5, `ERR_USE_DESTROYED`. A spell that opens the lock skips it (`0x5f3315`).
+pub(super) fn go_destroyed(state: u32, opener_spell: bool) -> bool {
+    state == benilla_formats::GO_STATE_ACTIVE_ALTERNATIVE && !opener_spell
+}
+
+/// Why `usable 0x5f3130`'s player arms, ahead of its lock and range arms, or the door's own slot
+/// ahead of them (`0x5f4360`), refuse a GameObject. The cursor grays on any (the type's slot 6 at
+/// `0x5f3093`, the Inspect and Mail cursors' `0x5f58a8`, `0x5f6858`), and the click raises
+/// [`PlayerRefusal::error_key`] (`0x5f874b`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PlayerRefusal {
+    /// A door with autoClose resting opposite its start (`0x5f42f0`): error 0xe3.
+    Moving,
+    /// Dead or a ghost (`IsDeadOrGhost 0x605f30` at `0x5f315f`), for every type: error 0x7e.
+    Dead,
+    /// The player-control flag `[0xb4b3e4]` clear (`0x5f316e`): error 0x7f.
+    LockedOut,
+    /// Mounted (`0x5f31a8`) at an object without a `Lock.dbc` row (`0x5f8180`, a pointer test, so
+    /// an all-empty row counts) that is no MAILBOX (`0x5f31bb`): error 0x19f.
+    Mounted,
+    /// Shapeshifted (`0x60e9f0` at `0x5f31e1`) into a form without flag `0x8` (`0x5f3210`), at an
+    /// object without a lock row: error 0x1a0.
+    Shapeshifted,
+    /// `UNIT_FLAG_IN_COMBAT` (`0x5f3237`) at an object whose notInCombat column is set
+    /// (`0x5f5970`): error 0x1a1.
+    InCombat,
+    /// `UNIT_FIELD_FLAGS` bit 31 (`0x5f3272`) at a chest or an object whose noDamageImmune column
+    /// is set (`0x5f59a0`): error 0x169.
+    Immune,
+}
+
+impl PlayerRefusal {
+    /// The `DisplayError` key, `None` for 0x19f, whose `ERR_NOT_WHILE_MOUNTED` has no
+    /// GlobalStrings text, so `0x4945b0` drops it unshown.
+    pub(super) fn error_key(self) -> Option<&'static str> {
+        match self {
+            PlayerRefusal::Moving => Some("ERR_USE_OBJECT_MOVING"),
+            PlayerRefusal::Dead => Some("ERR_PLAYER_DEAD"),
+            PlayerRefusal::LockedOut => Some("ERR_CLIENT_LOCKED_OUT"),
+            PlayerRefusal::Mounted => None,
+            PlayerRefusal::Shapeshifted => Some("ERR_NOT_WHILE_SHAPESHIFTED"),
+            PlayerRefusal::InCombat => Some("ERR_NOT_IN_COMBAT"),
+            PlayerRefusal::Immune => Some("ERR_USE_CANT_IMMUNE"),
+        }
+    }
+}
+
+/// `UNIT_FLAG_IN_COMBAT` (`[unit+0xa0]` bit 19, `0x5f323d`).
+const UNIT_FLAG_IN_COMBAT: u32 = 0x8_0000;
+/// `[unit+0xa0]` bit 31 (`0x5f3278`), which `0x5f3130` reads as immune.
+const UNIT_FLAG_IMMUNE: u32 = 0x8000_0000;
+/// `GAMEOBJECT_TYPE_DOOR` (0), whose handler (vtable `0x80b2a0`) puts `0x5f4360` in slot 6.
+const GO_TYPE_DOOR: i32 = 0;
+/// `GAMEOBJECT_TYPE_CHEST` (3), which `0x5f59a0` refuses while immune whatever its columns.
+const GO_TYPE_CHEST: i32 = 3;
+
+/// What `usable`'s player arms and the door's slot read: our player and the object.
+pub(super) struct GoUse<'a> {
+    pub(super) me: &'a ObjectStore,
+    /// `[0xb4b3e4]` clear ([`crate::player::OwnControlLost`]).
+    pub(super) control_lost: bool,
+    /// `SpellShapeshiftForm.dbc`'s rows, for the form's flag `0x8`.
+    pub(super) forms: Option<&'a std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>>,
+    pub(super) go: &'a ObjectStore,
+    pub(super) anim: Option<&'a crate::go_anim::GoAnim>,
+    /// The template, for the columns; `None` in flight, which `0x5f8150` reads as 0.
+    pub(super) template: Option<&'a crate::go_templates::GoTemplate>,
+    /// The object's `Lock.dbc` row exists (`0x5f8180`).
+    pub(super) has_lock_row: bool,
+}
+
+/// [`PlayerRefusal`] for our player at an object, in the reference's order.
+pub(super) fn go_player_refusal(u: &GoUse) -> Option<PlayerRefusal> {
+    use crate::go_templates::GoColumn;
+    let column = |id| u.template.map_or(0, |t| t.column(&u.go.0, id));
+    let go_type = u.go.0.gameobject_type_id();
+    // The door's slot 6 runs ahead of `0x5f3130` (`0x5f4366`): with autoClose, a door that
+    // starts open refuses at substate 1, one that starts closed at substate 3.
+    if go_type == GO_TYPE_DOOR && column(GoColumn::AutoClose) != 0 {
+        let blocked = if column(GoColumn::StartOpen) != 0 {
+            crate::go_anim::ANIM_CLOSED
+        } else {
+            crate::go_anim::ANIM_OPENED
+        };
+        if crate::go_anim::substate_anim(u.anim, u.go) == Some(blocked) {
+            return Some(PlayerRefusal::Moving);
+        }
+    }
+    let me = &u.me.0;
+    if me.is_dead_or_ghost() {
+        return Some(PlayerRefusal::Dead);
+    }
+    if u.control_lost {
+        return Some(PlayerRefusal::LockedOut);
+    }
+    // A lock row skips the mount and form arms (`0x5f319c`).
+    if !u.has_lock_row {
+        if me.unit_mount_display_id() != 0 && go_type != GO_TYPE_MAILBOX {
+            return Some(PlayerRefusal::Mounted);
+        }
+        let barred = u.forms.is_some_and(|forms| {
+            crate::ui_session::form_bars_interaction(forms, me.unit_shapeshift_form())
+        });
+        if barred {
+            return Some(PlayerRefusal::Shapeshifted);
+        }
+    }
+    let flags = me.unit_flags();
+    if flags & UNIT_FLAG_IN_COMBAT != 0 && column(GoColumn::NotInCombat) != 0 {
+        return Some(PlayerRefusal::InCombat);
+    }
+    if flags & UNIT_FLAG_IMMUNE != 0
+        && (go_type == GO_TYPE_CHEST || column(GoColumn::NoDamageImmune) != 0)
+    {
+        return Some(PlayerRefusal::Immune);
+    }
+    None
+}
+
 /// `GameObjectFlags` IN_USE (`0x1`) and NO_INTERACT (`0x10`), which `0x5f2f80` rejects together.
 const GO_FLAG_IN_USE_OR_NO_INTERACT: u32 = 0x11;
 /// `GO_FLAG_INTERACT_COND`: usable only while the per-player activate bit is set, the quest gate.
@@ -495,6 +674,9 @@ struct CorpseFacts {
     skin_latch: bool,
     /// `d2`, centre to centre.
     dist_sq: f32,
+    /// Any loot target held (`[player+0x1d28/2c]` nonzero), which `CanLootNow` refuses
+    /// (`0x5ec1f6`).
+    loot_held: bool,
     /// The already-looting override: `[player+0x1d28/2c] == corpse GUID`.
     looting_this: bool,
     /// `CanAutoInteract`, which `CanLootNow` asks first and then skips its range (`0x5ec11b`).
@@ -505,10 +687,13 @@ struct CorpseFacts {
 }
 
 fn corpse_cursor(f: CorpseFacts) -> Option<(CursorKind, bool)> {
-    // Leg 1, lootable: able within `CanLootNow 0x5ec110`'s reach or while this corpse's loot
-    // window is open; Pickup or LootAll by key 0 (`0x41f8f0` at `0x4827f8`), grayed at `0x482818`.
+    // Leg 1, lootable: able where `CanLootNow 0x5ec110` allows (`0x4827d7`), its reach and no loot
+    // target held, or while this corpse's loot window is open (`0x4827e3`); Pickup or LootAll by
+    // key 0 (`0x41f8f0` at `0x4827f8`), grayed at `0x482818`.
     if f.lootable {
-        let able = f.can_auto_interact || f.dist_sq <= CORPSE_INTERACT_RANGE_SQ || f.looting_this;
+        let can_loot_now =
+            !f.loot_held && (f.can_auto_interact || f.dist_sq <= CORPSE_INTERACT_RANGE_SQ);
+        let able = can_loot_now || f.looting_this;
         return Some((loot_cursor(f.auto_loot, f.shift_held), !able));
     }
     // Leg 2, the PvP insignia (`0x482875..0x4828a2`), inert in 1.12.1 as no player holds a
@@ -538,10 +723,10 @@ pub(super) fn classify_cursor(
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct CursorInputs<'w, 's> {
-    factions: Option<Res<'w, Factions>>,
-    reputations: Res<'w, Reputations>,
-    // `own_control_lost` is the attack leg's `[0xb4b3e4]` clear.
-    player: Res<'w, crate::player::Player>,
+    relations: super::RelationWorld<'w, 's>,
+    lock: Res<'w, crate::player::MoverLock>,
+    // The attack leg's `[0xb4b3e4]` clear.
+    own_control: Res<'w, crate::player::OwnControlLost>,
     approach: Res<'w, crate::player::Approach>,
     #[allow(clippy::type_complexity)]
     units: Query<
@@ -555,6 +740,7 @@ pub(super) struct CursorInputs<'w, 's> {
     >,
     self_q: Query<'w, 's, (&'static Transform, &'static ObjectStore), With<SelfPlayer>>,
     go_inputs: super::lock::GoLockInputs<'w, 's>,
+    opener_reach: super::lock::OpenerReach<'w, 's>,
     player_actions: Res<'w, crate::ui_action::PlayerActions>,
     // `[0xb700e4]` and `[0xb700e8]`, the skin legs' learned-spell latches.
     learned: Res<'w, crate::ui_action::LearnedAbilities>,
@@ -567,20 +753,22 @@ pub(super) struct CursorInputs<'w, 's> {
     stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
 }
 
-/// The cursor and the attack fork over a pick; no pick, or nothing resolvable, reads Point.
+/// The cursor and the attack fork over a pick; no pick, or nothing resolvable, reads Point, the
+/// classifier's clear (`0x523d30`), which [`crate::cursor`] shows as the base mode.
 pub(super) fn classify(
     inputs: &CursorInputs,
     hovered: &Hovered,
     hovered_object: &HoveredObject,
 ) -> (WorldCursor, AttackFork) {
     let CursorInputs {
-        factions,
-        reputations,
-        player,
+        relations,
+        lock,
+        own_control,
         approach,
         units,
         self_q,
         go_inputs,
+        opener_reach,
         player_actions,
         learned,
         quest,
@@ -592,7 +780,7 @@ pub(super) fn classify(
     let can_auto_interact = crate::player::can_auto_interact(
         approach.enabled,
         self_q.single().ok().map(|(_, s)| s),
-        player,
+        lock,
     );
     // A GameObject that is not highlightable clears the cursor, as the reference's handler does.
     let resolve_go = || {
@@ -600,12 +788,12 @@ pub(super) fn classify(
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
         let reaction = go_reaction(
-            factions.as_deref(),
+            relations.factions(),
             store.0.gameobject_faction(),
             Some(self_store),
         );
         // Read before the gate: MEETINGSTONE's override is a template slot.
-        let tmpl = hovered_object.guid.and_then(|g| go_inputs.templates.get(g));
+        let tmpl = go_inputs.templates.of(&store.0);
         let overrides = GoOverrides {
             channel_owned: fishing_channel_owned(Some(self_store), hovered_object.guid),
             meeting_stone_queued: meeting_stone_queued(
@@ -623,20 +811,36 @@ pub(super) fn classify(
             go_inputs.locks.as_deref(),
             go_inputs.lock_types.as_deref(),
         );
-        let kind = go_cursor_kind(store.0.gameobject_type_id(), lock_cursor);
+        let go_type = store.0.gameobject_type_id();
+        let kind = go_cursor_kind(go_type, lock_cursor);
         let dist_sq = go_tf.translation.distance_squared(self_tf.translation);
-        // `usable 0x5f3130`'s lock arm (`0x5f32a6`) then range arm (`0x5f330c`); its player-state
-        // arm is not applied. The lock arm needs `GO_FLAG_LOCKED`, so an herb the player cannot
-        // gather stays lit and refuses on the click, while a padlocked door grays.
+        let has_lock_row = lock_id != 0
+            && go_inputs
+                .locks
+                .as_deref()
+                .is_some_and(|l| l.0.slots(lock_id).is_some());
+        let refused = go_player_refusal(&GoUse {
+            me: self_store,
+            control_lost: own_control.0,
+            forms: go_inputs.spells.as_deref().map(|s| &s.forms),
+            go: store,
+            anim,
+            template: tmpl,
+            has_lock_row,
+        })
+        .is_some();
+        // `usable 0x5f3130`'s player arms, lock arm (`0x5f32a6`), then range arm (`0x5f330c`).
+        // The lock arm needs `GO_FLAG_LOCKED`, so an herb the player cannot gather stays lit and
+        // refuses on the click, while a padlocked door grays.
         let facts = super::lock::go_facts(Some((store, crate::go_anim::go_state(anim, store))));
-        let lock_unmet = go_inputs
+        let outcome = go_inputs
             .locks
             .as_deref()
             .and_then(|l| l.0.slots(lock_id).filter(|_| lock_id != 0))
-            .is_some_and(|slots| {
+            .map(|slots| {
                 super::lock::resolve_lock(
                     slots,
-                    &player_actions.spells,
+                    &player_actions.openers,
                     go_inputs.spells.as_deref(),
                     go_inputs.skill_lines.as_ref().map(|s| &s.catalog),
                     Some(self_store),
@@ -644,10 +848,15 @@ pub(super) fn classify(
                     facts,
                     &mut None,
                 )
-                .blocks_usable(facts.flag_locked)
             });
+        let lock_unmet = outcome.is_some_and(|o| o.blocks_usable(facts.flag_locked));
+        // The distance test's range is the opener spell's when one opens the lock (`0x5f3328`).
+        let opener = outcome.map_or_else(Default::default, |o| opener_reach.opener(go_inputs, o));
         let unable = kind != CursorKind::PickLock
-            && (lock_unmet || dist_sq > go_interact_range_sq(store.0.gameobject_type_id()));
+            && (refused
+                || lock_unmet
+                || go_destroyed(facts.state, opener.spell)
+                || !go_in_reach(dist_sq, go_type, opener.range));
         Some((kind, unable))
     };
     // The reference picks once over all objects; benilla picks units and GameObjects apart and
@@ -664,12 +873,15 @@ pub(super) fn classify(
         let dead = store.0.unit_is_dead();
         if dead {
             if store.0.unit_lootable() {
-                // Grayed by `CanLootNow 0x5ec110`'s melee reach; the reference's mid-loot state
-                // block and open-loot-window override are not applied to units.
+                // Lit where `CanLootNow 0x5ec110` allows (`0x4824fe`), its melee reach and no loot
+                // target held, or over the unit being looted (`0x48250a`).
                 let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+                let held = loot_latch.0;
+                let can_loot_now = held.is_none() && (can_auto_interact || in_melee);
+                let looting_this = held.is_some() && held == hovered.guid;
                 return Some((
                     loot_cursor(loot_cfg.auto_loot, shift),
-                    !(can_auto_interact || in_melee),
+                    !(can_loot_now || looting_this),
                 ));
             }
             // Skin also needs the learn latch `[0xb700e4 + 4×isPlayerTarget]` (`0x482589`): a
@@ -680,14 +892,11 @@ pub(super) fn classify(
             return None; // a plain corpse: Point
         }
 
+        let rel = relations.get();
+        let (me, unit) = (relations.me()?, relations.unit_of(hovered.guid?, store));
         // `CanInteract 0x6067f0`, asked at `0x482310` through `CanInteractNow 0x606880`, picks
         // the ladder; it is not a reaction threshold.
-        if super::can_interact(
-            Some(store),
-            factions.as_deref(),
-            reputations,
-            Some(self_store),
-        ) {
+        if rel.can_interact(&me, &unit) {
             let status = hovered.guid.and_then(|g| quest.status(g));
             // No matching bit clears the cursor (`je 0x4826cb`) without reaching the attack leg:
             // Point, never the sword.
@@ -696,16 +905,11 @@ pub(super) fn classify(
         }
         // `CanAttack 0x606980` (`0x482680`), the predicate TAB, the combat flash and
         // `UnitCanAttack` share; not attackable clears the cursor (`0x4826cb`): Point.
-        if !super::can_attack(
-            Some(store),
-            factions.as_deref(),
-            reputations,
-            Some(self_store),
-        ) {
+        if !rel.can_attack(&me, &unit) {
             return None;
         }
         attack_fork.set(true);
-        player_attack_legs(self_store, player.own_control_lost)
+        player_attack_legs(self_store, own_control.0)
             .then_some((CursorKind::Attack, dist_sq > ATTACK_RANGE_SQ))
     };
     // The corpse classifier `0x482740`.
@@ -719,6 +923,7 @@ pub(super) fn classify(
             insignia: store.0.corpse_pvp_insignia(),
             skin_latch: learned.skin_player_corpse.is_some(),
             dist_sq: corpse_tf.translation.distance_squared(self_tf.translation),
+            loot_held: loot_latch.0.is_some(),
             looting_this: loot_latch.0.is_some() && loot_latch.0 == hovered.corpse_guid,
             can_auto_interact,
             auto_loot: loot_cfg.auto_loot,
@@ -1252,15 +1457,90 @@ mod tests {
             }
         ));
         assert!(highlightable_flags(0, 0, 0, None, GoOverrides::default()));
-        assert_eq!(go_interact_range_sq(GO_TYPE_FISHINGNODE), 100.0 * 100.0);
-        assert_eq!(go_interact_range_sq(0), GO_INTERACT_RANGE_SQ);
-        assert_eq!(go_interact_range_sq(GO_TYPE_CHAIR), 9.0);
-        assert!(
-            go_interact_range_sq(GO_TYPE_CHAIR) < GO_INTERACT_RANGE_SQ,
-            "a chair's reach is shorter than the default GameObject reach"
-        );
+        assert_eq!(go_reach_sq(GO_TYPE_FISHINGNODE, None), 100.0 * 100.0);
+        assert_eq!(go_reach_sq(GO_TYPE_CHAIR, None), 100.0 * 100.0);
         assert!(!fishing_channel_owned(None, Some(7)));
         assert!(!fishing_channel_owned(None, None));
+    }
+
+    /// `[handler+0xc]` by type (`0x5f2f67` and the nine stores over it), as the table in
+    /// benilla-re's gameobjecttypes gives it.
+    #[test]
+    fn each_type_has_its_handlers_use_range() {
+        let base = [
+            0, 1, 3, 5, 6, 8, 10, 11, 13, 14, 15, 16, 18, 19, 20, 22, 23, 25, 28, 29, 30,
+        ];
+        for t in base {
+            assert_eq!(go_use_range(t, true), 5.0, "type {t}");
+        }
+        for t in [2, 9, 24, 26, 27] {
+            assert_eq!(go_use_range(t, true), 5.555_555_3, "type {t}");
+        }
+        assert_eq!(go_use_range(4, true), 10.0);
+        assert_eq!(go_use_range(17, true), 100.0);
+        assert_eq!(go_use_range(12, true), 0.0);
+        // The chair hands back 3.0 after its 100.0 base test; the static handler has none.
+        assert_eq!(go_use_range(GO_TYPE_CHAIR, true), 3.0);
+        assert_eq!(
+            go_use_range(GO_TYPE_CHAIR, false),
+            100.0,
+            "past the base test"
+        );
+        assert_eq!(go_use_range(21, true), 0.0);
+        assert_eq!(go_use_range(31, true), 0.0);
+    }
+
+    /// The Hyjal gate's defect: a door lit from beyond its 5.0 yd (`0x5f3346`).
+    #[test]
+    fn a_door_is_in_reach_to_five_yards_and_no_farther() {
+        assert!(!go_in_reach(5.2 * 5.2, 0, None), "5.2 yd");
+        assert!(go_in_reach(4.9 * 4.9, 0, None), "4.9 yd");
+        assert!(go_in_reach(25.0, 0, None), "equality passes");
+        assert!(go_in_reach(f32::NAN, 0, None), "a NaN passes");
+        // A quest giver keeps 5.5555553, a binder 10.
+        assert!(go_in_reach(5.5 * 5.5, 2, None));
+        assert!(!go_in_reach(5.6 * 5.6, 2, None));
+        assert!(go_in_reach(9.9 * 9.9, 4, None));
+        assert!(!go_in_reach(10.1 * 10.1, 4, None));
+    }
+
+    /// `0x5f3328`: the range of the spell that opens the lock replaces the handler's for the test.
+    #[test]
+    fn an_opener_spells_range_replaces_the_handlers() {
+        assert!(go_in_reach(7.9 * 7.9, 0, Some(8.0)));
+        assert!(go_in_reach(64.0, 0, Some(8.0)), "equality passes");
+        assert!(!go_in_reach(8.1 * 8.1, 0, Some(8.0)));
+        assert!(
+            !go_in_reach(4.0, 0, Some(1.0)),
+            "a shorter spell shortens it"
+        );
+        // The chair's own 3.0 yd test still follows.
+        assert!(!go_in_reach(4.0 * 4.0, GO_TYPE_CHAIR, Some(100.0)));
+        assert!(go_in_reach(2.9 * 2.9, GO_TYPE_CHAIR, None));
+    }
+
+    /// `0x5f571a`/`0x5f572b`: the seat test succeeds only strictly below 3.0 yd squared, so exactly
+    /// 9.0 and a NaN fail, where the base test passes both.
+    #[test]
+    fn the_chairs_seat_test_is_strict() {
+        assert!(!go_in_reach(9.0, GO_TYPE_CHAIR, None), "exactly 3.0 yd");
+        assert!(go_in_reach(
+            f32::from_bits(9.0f32.to_bits() - 1),
+            GO_TYPE_CHAIR,
+            None
+        ));
+        assert!(!go_in_reach(f32::NAN, GO_TYPE_CHAIR, None));
+        assert!(go_in_reach(9.0, 0, None), "a door at 3.0 yd, unaffected");
+    }
+
+    /// `0x5f3395`: state 2 refuses unless a spell opens the lock.
+    #[test]
+    fn state_two_refuses_without_an_opener_spell() {
+        use benilla_formats::{GO_STATE_ACTIVE, GO_STATE_READY};
+        assert!(go_destroyed(2, false));
+        assert!(!go_destroyed(2, true));
+        assert!(!go_destroyed(GO_STATE_ACTIVE, false));
+        assert!(!go_destroyed(GO_STATE_READY, false));
     }
 
     #[test]

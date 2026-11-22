@@ -10,8 +10,9 @@
 //! `AddOns/` folder in [`benilla_app::config_dir`], where an addon the crate ships is written.
 //!
 //! A crate of its own copies the `benilla` launcher (`crates/benilla`): a build script that stamps
-//! its commit, a `main` like this one that reads the stamp back as `crates/benilla/src/main.rs`
-//! does, and a manifest that takes benilla as the workspace does:
+//! its commit and gives its binary the 8 MB main-thread stack the app needs on Windows, a `main`
+//! like this one that reads the stamp back as `crates/benilla/src/main.rs` does, and a manifest
+//! that takes benilla as the workspace does:
 //!
 //! ```toml
 //! [features]
@@ -29,10 +30,13 @@
 //! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! # Cargo reads `[patch]` and `[profile]` from the root manifest only, so benilla's are repeated:
-//! # without the patches the addon Lua and the mixer are not benilla's.
+//! # without the kira patch the mixer is not benilla's, without the alsa one the lock holds two
+//! # `alsa-sys` and does not resolve, and without the wgpu-hal one a presentation stall past a
+//! # second loses the device on Vulkan.
 //! [patch.crates-io]
-//! lua-src = { git = "https://github.com/samwhosung/benilla" }
 //! kira = { git = "https://github.com/samwhosung/benilla" }
+//! alsa = { git = "https://github.com/samwhosung/benilla" }
+//! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! [profile.dev]
 //! opt-level = 1
@@ -42,7 +46,7 @@
 //! ```
 //!
 //! ```text
-//! // build.rs
+//! // build.rs: the stamp, and on Windows the main-thread stack of every binary in the package
 //! fn main() {
 //!     benilla_buildstamp::emit();
 //! }

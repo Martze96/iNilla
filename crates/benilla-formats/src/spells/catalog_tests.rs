@@ -18,12 +18,12 @@ fn real_learn_spell_hop_resolves_the_taught_ability() {
             "learn wrapper {wrapper} teaches ability {ability}"
         );
         assert_eq!(
-            skills.spell_to_line(wrapper),
+            skills.first_line(wrapper),
             None,
             "the wrapper {wrapper} is not itself in SkillLineAbility (the bug's root)"
         );
         assert_eq!(
-            skills.spell_to_line(ability),
+            skills.first_line(ability),
             Some(line),
             "the taught ability {ability} groups under skill line {line}"
         );
@@ -285,6 +285,22 @@ fn real_spell_catalog_pins_the_skin_latch_effects() {
         cat.get(6247).unwrap().effects[0],
         crate::SPELL_EFFECT_SKINNING
     );
+}
+
+/// The value the unit tooltip's skinnable line colours by (`0x529f4e`): Skinning's `SKINNING`
+/// effect, `0 + 1 + 5.0×(skill/5)`, the skill down to a multiple of 5, plus one.
+#[test]
+fn real_spell_catalog_computes_the_skinning_value() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+    for id in [8613, 8617, 8618, 10768] {
+        let d = cat.get(id).unwrap();
+        assert_eq!(d.effects[0], crate::SPELL_EFFECT_SKINNING, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 300), 301, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 149), 146, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 0), 1, "spell {id}");
+    }
 }
 
 /// The left side of the client's lock test (`0x5f850f`), with the player's skill as the level
@@ -1209,9 +1225,9 @@ fn real_spell_catalog_cost_columns() {
         (0, 0, 6)
     );
 
-    // `manaPerSecondPerLevel` (column 35) is zero on every row, so it stays unparsed;
-    // `manaCostPerlevel` (33) is nonzero on 72 creature spells, so `power_cost` applies it though
-    // no player tooltip shows it.
+    // `manaPerSecondPerLevel` (column 35) is zero on every row, so the per-second cost's level term
+    // never moves a 5875 tooltip; `manaCostPerlevel` (33) is nonzero on 72 creature spells, so
+    // `power_cost` applies it though no player tooltip shows it.
     let bytes = chain.read_file(super::SPELL).expect("reading Spell.dbc");
     let rs = super::parse(&bytes, super::spell_schema(), "Spell.dbc").expect("Spell.dbc");
     let mut per_level_rows = 0u32;
@@ -1238,6 +1254,36 @@ fn real_spell_catalog_cost_columns() {
         (0xFFFF_FFFE, 180, 9, 24),
         "Dark Offering: the per-level term's health-lane row"
     );
+}
+
+/// `MinFactionId` and `MinReputation` (columns 170, 171), the spell tooltip's reputation line
+/// (`0x52f2ae`): set on one 5875 row, 6994, Gadgetzan (369) at Friendly (4).
+#[test]
+fn real_spell_catalog_reputation_columns() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let rows: Vec<(u32, u32, u32)> = cat
+        .iter()
+        .filter(|(_, d)| d.min_faction_id != 0)
+        .map(|(id, d)| (id, d.min_faction_id, d.min_reputation))
+        .collect();
+    assert_eq!(rows, [(6994, 369, 4)]);
+}
+
+/// `RequiredAuraVision` (column 172, `SpellRec+0x2b0`), the aura rows' vision test
+/// (`0x519873`): set on one 5875 row, 26869 Amorous, at 1.
+#[test]
+fn real_spell_catalog_required_aura_vision_column() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let rows: Vec<(u32, u32)> = cat
+        .iter()
+        .filter(|(_, d)| d.required_aura_vision != 0)
+        .map(|(id, d)| (id, d.required_aura_vision))
+        .collect();
+    assert_eq!(rows, [(26869, 1)]);
 }
 
 /// A chat language reaches its skill only through the spell whose `Effect_1` is
@@ -1271,7 +1317,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
     // The fourteenth, "Lesser Draconic (Language)", declares Draconic (11) but has no
     // `SkillLineAbility` row, so the gate's second hop dead-ends and Draconic always garbles.
     assert_eq!(spells.declared_language(25674), Some(11));
-    assert_eq!(skills.spell_to_line(25674), None);
+    assert_eq!(skills.first_line(25674), None);
 
     assert_eq!(
         spells.declared_languages().count(),
@@ -1286,7 +1332,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
         );
         // The second hop the garble gate walks: spell -> SkillLineAbility -> SkillLine.dbc id.
         assert_eq!(
-            skills.spell_to_line(spell),
+            skills.first_line(spell),
             Some(line),
             "spell {spell} -> skill line"
         );
@@ -1295,7 +1341,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
     // Both hops walked, only the eight player languages can ever be understood.
     let understandable: std::collections::BTreeSet<u32> = spells
         .declared_languages()
-        .filter(|(spell, _)| skills.spell_to_line(*spell).is_some())
+        .filter(|(spell, _)| skills.first_line(*spell).is_some())
         .map(|(_, l)| l)
         .collect();
     assert_eq!(
@@ -1585,4 +1631,36 @@ fn creature_type_mask_rule() {
         "type 1 is bit 0, not the wrapped bit 32"
     );
     assert!(masked(1).admits_creature_type(33), "bit 32 wraps to bit 0");
+}
+
+/// The weapon-skill table `0x5e2ca0` builds (`0xc4d738`), by weapon subclass: One-Handed Axes
+/// 196, Bows 264, One-Handed Swords 201, Daggers 1180, Wands 5009, Fishing Poles 7738; the
+/// obsolete subclass 9 names none, and no weapon-skill spell names a subclass past 20, the last
+/// class-2 row of `ItemSubClass.dbc` that bounds the table.
+#[test]
+fn the_weapon_skill_table_reads_the_real_file() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let spells = load_spell_catalog(&mut chain).expect("load Spell.dbc");
+    for (subclass, spell) in [
+        (0, 196),
+        (2, 264),
+        (7, 201),
+        (15, 1180),
+        (19, 5009),
+        (20, 7738),
+    ] {
+        assert_eq!(
+            spells.weapon_skill_spell(subclass),
+            Some(spell),
+            "{subclass}"
+        );
+    }
+    assert_eq!(spells.weapon_skill_spell(9), None);
+    assert!(spells.iter().all(|(_, d)| {
+        !(d.attributes & 0x40 != 0
+            && d.equipped_item_class == 2
+            && d.equipped_item_subclass_mask.is_power_of_two())
+            || d.equipped_item_subclass_mask.trailing_zeros() <= 20
+    }));
 }

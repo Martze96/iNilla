@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{ActionSlot, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{ActionSlot, ScriptValue, UnitState};
 
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
@@ -16,20 +16,28 @@ use benilla_world::schedule::WorldStage;
 pub(crate) mod addons;
 mod content;
 pub(crate) mod extract;
-/// The stock glue screens behind `WOW_GLUE_STOCK=1`.
+/// The stock glue screens as the session and the instruments see them.
 pub(crate) mod glue;
 /// The stock create screen's catalog off the host's DBC catalogs.
 pub(crate) mod glue_create;
-/// `CGlueMgr`'s screen states over the native login, for the stock glue screens.
+/// `CGlueMgr`'s screen states over benilla's login, for the stock glue screens.
 pub(crate) mod glue_mgr;
 pub(crate) mod glue_scene;
 mod input;
+mod movie;
+pub(crate) mod raise_origin;
+mod records;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
 #[cfg(test)]
+pub(crate) use input::dispatch_input_records;
+#[cfg(test)]
 pub(crate) use input::feed_keys;
 #[cfg(test)]
-mod layer_tests;
+pub(crate) use records::records_from_planes;
+pub(crate) use records::{collect_input_records, InputRecord, InputRecords, Record};
+#[cfg(test)]
+pub(crate) mod layer_tests;
 mod load_log;
 mod manifest;
 
@@ -39,9 +47,6 @@ mod reference_ui;
 /// What the host remembers per VM, so a seed or change-memo never outlives the VM it was for.
 mod session;
 
-/// The feed gate: a UI feed's input-side early-out, audited by `WOW_FEED_GATE_CHECK=1`.
-pub(crate) mod gate;
-
 pub(crate) use session::{VmMemo, WindowMemo};
 
 // Not test-only: the addon harness loads the whole shipped interface under each addon.
@@ -50,6 +55,7 @@ pub(crate) use manifest::load_default_ui;
 pub(crate) use manifest::load_ingame_ui;
 #[cfg(test)]
 pub(crate) use manifest::{load_stock_bindings, stock_bindings_file};
+pub(crate) use reference_ui::{boot_client_locale, client_locale, client_region};
 
 /// Whether the pointer is over any UI (the egui dev overlay or a player-UI frame), combined by
 /// [`arbitrate_pointer_over_ui`]; gameplay reads it, so it is not the dev plugin's.
@@ -70,6 +76,11 @@ pub(crate) struct CapturePointerPinned(pub(crate) bool);
 /// defined here so a build without dev overlays still has the type.
 #[derive(Resource, Default)]
 pub(crate) struct EguiPointerOver(pub(crate) bool);
+
+/// Whether a dev overlay's text field has the keyboard: the UI and the bindings get no keys, as
+/// when an EditBox has focus.
+#[derive(Resource, Default)]
+pub(crate) struct EguiKeyboard(pub(crate) bool);
 
 /// Whether the dev `I` inspector's world picking is armed; `player::control` and `target::click`
 /// read it every frame, so it lives here, and the default (disarmed) is the player's.
@@ -134,15 +145,11 @@ pub(crate) struct UiKeyboardCapture {
 pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
 
 /// A press the UI consumed this frame, whatever is under the pointer: the layout drag's press
-/// returns at `0x766353`–`0x76635b`, before any frame, the world frame included, sees it, so the
-/// world latch takes no press this frame even with no UI frame hovered.
+/// returns at `0x766353`–`0x76635b`, and a right press with a payload held at the world input
+/// hook (`0x492b50`, `0x766370`), each before any frame, the world frame included, sees it, so
+/// the world frame's binding takes no press this frame even with no UI frame hovered.
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiPressConsumed(pub(crate) bool);
-
-/// Whether the cursor carries a payload, a `Send` mirror. A click on sky with one held never
-/// deselects: the reference gates its nothing-leg `SetSelection(0,0)` on no payload (`0x492d30`).
-#[derive(Resource, Default)]
-pub(crate) struct CursorPayloadHeld(pub(crate) bool);
 
 /// What [`extract::tick_script`] hands [`extract::paint_script`]; with `live` false (no VM or
 /// window) the paint does nothing.
@@ -161,27 +168,45 @@ pub(crate) struct UiPassState {
     pub(crate) derives_before: u64,
 }
 
-/// UI chrome under the pointer: [`PointerOverUi`] minus the nameplates, which take the mouse but
-/// not the wheel. The reference has no such bit: a wheel notch walks the strata and falls through
-/// any frame without `OnMouseWheel` to `CGWorldFrame`.
-#[derive(Resource, Default)]
-pub(crate) struct PointerOverUiPanel(pub(crate) bool);
-
-/// The player-UI feed phase, after [`WorldStage::Net`] and ungated (`UnitFeed` is the gated
-/// sub-phase): every push this frame's tick must see, as in the reference's frame, where packet
-/// dispatch precedes every `FrameScript_SignalEvent` and both precede `OnUpdate`. Every VM holder
-/// in `Update` is in this set or `.after(UiInput)`, as `game_plugins::schedule_tests` checks.
+/// The player-UI feed phase, after the input pass and [`WorldStage::Net`] and ungated (`UnitFeed`
+/// is the gated sub-phase): every push this frame's tick must see, as in the reference's tick,
+/// where the packets (category 6, `0x420d55`) follow the window input and precede the frame pass's
+/// `OnUpdate`. Every VM holder in `Update` is in the frame's input records ([`UiInput`],
+/// [`crate::player::WorldMouse`]), in this set or
+/// `.after(UiTick)`, as `game_plugins::schedule_tests` checks.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiFeed;
+
+/// The drains of what the pass's Lua asked for (a send, a window's verb, a save, a sound), after
+/// the tick and after every later host they are free to follow: the reference applies each
+/// inside its call, so an ask is drained the frame it is made, wherever in the pass its Lua ran.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiDrain;
 
 /// The player-UI paint pass, after the camera so world-anchored widgets use this frame's view.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiPaint;
 
-/// The player-UI input pass (tick, hit-test, handlers), before [`WorldStage::Input`] so its
-/// [`PlayerUiHover`] reaches `PointerOverUi` before `player::control` reads it.
+/// The player-UI input pass: the frame's window input records ([`InputRecords`]), each whole
+/// through the interface's walk and the world frame's binding before the next, which the reference
+/// runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of the net drain
+/// ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the world as the
+/// last frame left it. First of the frame's input records, so its [`PlayerUiHover`] reaches
+/// `PointerOverUi` before the world's mouse reads it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
+
+/// The VM's views the input records read pushed ahead of them, at the head of [`UiInput`]: what an
+/// engine writer outside the calls moved after the last frame's feeds (the targeting cursor's
+/// word).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiInputViews;
+
+/// The tick: the `OnUpdate` walk of the frame pass (category 0x11 at `0x420d6a`, `0x764330` →
+/// `0x765650`), after the input pass and the feeds, so a handler reads this frame's input and
+/// packets applied.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiTick;
 
 /// The frame's atomic (`Instant`, `GetTime`) pair, the one base for mapping a store `Instant` onto
 /// `GetTime`: `anchor`'s steps are the VM clock's deltas, so a mapped start is stable frame to
@@ -189,10 +214,27 @@ pub(crate) struct UiInput;
 /// `Cooldown.lua:3` gates on `start > 0`, so a reset would hide every running cooldown's sweep.
 #[derive(Resource)]
 pub(crate) struct UiClock {
-    /// `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
+    /// [`FrameStep::at`] at the tick that produced [`Self::ui_now`].
+    ///
+    /// [`FrameStep::at`]: benilla_world::frame_pace::FrameStep::at
     pub(crate) anchor: std::time::Instant,
     /// The VM clock after that tick, in seconds since this process started.
     pub(crate) ui_now: f64,
+}
+
+/// [`UiClock`] as the call host reads it. The system that ticks the VM lends the host and writes
+/// [`UiClock`], so the host reads this copy, made after each tick and at a new VM's seed: the last
+/// tick's pair until the next, which maps an instant onto `GetTime` the same way, as both of its
+/// legs move by the same steps.
+#[derive(Resource, Default)]
+pub(crate) struct HostClock(pub(crate) UiClock);
+
+/// The copy after the tick ([`HostClock`]).
+fn copy_host_clock(clock: Res<UiClock>, mut host: ResMut<HostClock>) {
+    host.0 = UiClock {
+        anchor: clock.anchor,
+        ui_now: clock.ui_now,
+    };
 }
 
 /// The pre-boot pair, replaced by [`lifecycle::seed_vm_clock`] at the first VM.
@@ -218,9 +260,9 @@ pub(crate) fn run_or_warn(script: &benilla_ui::script::UiScript, chunk: &str) {
 }
 
 /// The reference's `uiScale` CVar, which the VM makes `UIParent`'s own scale
-/// ([`UiScript::set_ui_scale`]): the screen root stays 768 units tall, so `uiScale = 768/screenH`
-/// is pixel-perfect inside `UIParent`, and a frame outside it is not scaled. Tests pin the
-/// `Default` 1.0.
+/// ([`benilla_ui::script::UiScript::set_ui_scale`]): the screen root stays 768 units tall, so
+/// `uiScale = 768/screenH` is pixel-perfect inside `UIParent`, and a frame outside it is not
+/// scaled. Tests pin the `Default` 1.0.
 #[derive(Resource)]
 pub(crate) struct UiScaleCvar(pub(crate) f32);
 
@@ -264,47 +306,142 @@ pub(crate) fn seam_scale(window_h: f32) -> f32 {
     }
 }
 
+/// The interface's own screen on the window. Its cells take the aspect `0x4901e0` (in glue
+/// `0x46ab40`) answers, the window's while `widescreen` is on and 4/3 when it is 0, through
+/// `0x41ad10` (`0x48fe1e`, `0x46a81c`), and the layout always spans the whole window. So with
+/// `widescreen` 0 the interface lays out 4:3, `4/3` of the window's height across, and is drawn
+/// stretched across the window, as 1.12.1 does on any other shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UiScreen {
+    /// The interface's screen in its own px: the window's height, and its width or `4/3` of it.
+    pub(crate) size: Vec2,
+    /// Window px per interface px across; 1 unless stretched.
+    pub(crate) stretch: f32,
+    /// The display aspect the cells and the automatic scale take (`0x4901e0`, stored at
+    /// `0x48fe1e`): the window's `RN24(w/h)`, or exactly `RN24(4/3)` with `widescreen` 0, never
+    /// derived from a rounded size.
+    pub(crate) aspect: f32,
+    /// The window in logical px, the display size the automatic scale is keyed on (`0x492f70`).
+    pub(crate) window: Vec2,
+}
+
+impl UiScreen {
+    /// The screen for a window of `window` logical px.
+    pub(crate) fn of(window: Vec2, widescreen: bool) -> Self {
+        if window.x <= 0.0 || window.y <= 0.0 {
+            return Self {
+                size: window,
+                stretch: 1.0,
+                aspect: 4.0 / 3.0,
+                window,
+            };
+        }
+        if widescreen {
+            return Self {
+                size: window,
+                stretch: 1.0,
+                aspect: window.x / window.y,
+                window,
+            };
+        }
+        let size = Vec2::new(window.y * (4.0 / 3.0), window.y);
+        Self {
+            size,
+            stretch: window.x / size.x,
+            aspect: 4.0 / 3.0,
+            window,
+        }
+    }
+
+    /// The display size in whole logical px, as the automatic scale takes it (`0x492f70`).
+    pub(crate) fn display(self) -> (u32, u32) {
+        (self.window.x.round() as u32, self.window.y.round() as u32)
+    }
+
+    /// The screen for `window` under the `widescreen` the CVar holds (on when absent).
+    pub(crate) fn of_window(
+        window: &bevy::window::Window,
+        widescreen: Option<&crate::video::Widescreen>,
+    ) -> Self {
+        Self::of(
+            Vec2::new(window.width(), window.height()),
+            widescreen.is_none_or(|w| w.0),
+        )
+    }
+
+    /// A window point (logical px) in the interface's px.
+    pub(crate) fn point(self, window_px: Vec2) -> Vec2 {
+        Vec2::new(window_px.x / self.stretch, window_px.y)
+    }
+
+    /// [`Self::point`]'s inverse: an interface point in window px.
+    pub(crate) fn window_point(self, ui_px: Vec2) -> Vec2 {
+        Vec2::new(ui_px.x * self.stretch, ui_px.y)
+    }
+}
+
+/// [`window_to_ui`]'s inverse: a point in the VM's root units as a window cursor.
+pub(crate) fn ui_to_window(screen: UiScreen, at: Vec2) -> Vec2 {
+    let h = screen.size.y;
+    let s = seam_scale(h);
+    screen.window_point(Vec2::new(at.x * s, h - at.y * s))
+}
+
 /// A window cursor (logical px, y-down from the top left) in the VM's root units, y up: what the
 /// pointer feed hands the engine and `GetCursorPosition` answers (`0x48b820`, no scale divided out).
-pub(crate) fn window_to_ui(window_h: f32, cursor: Vec2) -> Vec2 {
-    let s = seam_scale(window_h);
-    Vec2::new(cursor.x / s, (window_h - cursor.y) / s)
+pub(crate) fn window_to_ui(screen: UiScreen, cursor: Vec2) -> Vec2 {
+    let h = screen.size.y;
+    let s = seam_scale(h);
+    let p = screen.point(cursor);
+    Vec2::new(p.x / s, (h - p.y) / s)
 }
 
 /// The Lua UI host (a `NonSend` resource: an mlua VM is `!Send`) and its per-frame passes.
 pub(crate) struct UiScriptPlugin;
 
 /// `uiScale`'s change callback: the dial's own `[0.5, 1.5]` clamp.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiScaleCvar>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut scale: bevy::prelude::Mut<'_, UiScaleCvar>,
+) {
     if ev.is("uiScale") {
         scale.0 = ev.num().clamp(0.5, 1.5);
     }
 }
 
-/// `/console reloadUI`: the same deferred rebuild `ReloadUI()` and `/reload` queue.
-fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
-    match world.get_non_send_resource_mut::<UiScript>() {
-        Some(mut script) => {
-            script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
-            Vec::new()
-        }
-        None => vec!["reloadUI: no interface to reload".to_string()],
+/// `/console reloadUI` (`0x4035f0`): a glue rebuild asked for whatever the state
+/// ([`glue::run_pending_glue_rebuild`] spends it), then the same deferred rebuild `ReloadUI()` and
+/// `/reload` queue, which the world alone honours. It prints nothing in any state: the handler
+/// sets the flag `[0xb41d8c]` and calls `CGGameUI::Reload` (`0x491380`), neither of which writes
+/// a line, so a run with no interface to reload is silent too.
+fn console_reload_ui(steps: &mut crate::console::ConsoleSteps, _args: &str) -> Vec<String> {
+    if let Some(rebuild) = steps.glue_rebuild.as_deref_mut() {
+        rebuild.request();
     }
+    // `CGGameUI::Reload`'s flag `0xb4b3f4`, which the session's `ReloadUI()` sets too.
+    if let Some(reload) = steps.reload.as_deref_mut() {
+        reload.0 = true;
+    }
+    Vec::new()
 }
 
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         use crate::console::ConsoleCommandApp;
-        app.add_observer(on_cvar);
-        app.console_command("reloadUI", "Reload the interface.", console_reload_ui);
+        crate::ui_script::raise_origin::arm_each_frame(app);
+        // Category 1 with no help (`0x402ba6`-`0x402bb4`).
+        app.console_command_in_call(
+            "reloadUI",
+            crate::console::GRAPHICS,
+            None,
+            console_reload_ui,
+        );
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
-            .insert_resource(glue::GlueStock::from_env())
             .init_non_send_resource::<glue_mgr::SharedGlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
-            .init_resource::<crate::bindings::WheelNotches>()
             .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
             .init_resource::<SyntheticPointer>()
@@ -313,32 +450,46 @@ impl Plugin for UiScriptPlugin {
                     || std::env::var_os("WOW_CAPTURE_UI").is_some(),
             ))
             .init_resource::<EguiPointerOver>()
+            .init_resource::<EguiKeyboard>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<PlayerUiPressConsumed>()
-            .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
+            .init_resource::<HostClock>()
+            .init_resource::<benilla_world::frame_pace::FrameStep>()
             .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open`: the VM's first load is the chain's `GlobalStrings.lua`.
             .add_systems(
                 Startup,
-                // After the CVars load: the glue screens read the agreements as they come up.
+                // After the CVars load: the glue screens read the agreements as they come up. After
+                // the glyph cache, which measures the text their first show sizes frames by. After
+                // the word lists, which every VM is seated with as it is made.
                 setup_script
                     .after(benilla_assets::AssetSet::Open)
-                    .after(crate::cvars::CvarLoad),
+                    .after(crate::text_filter::TextFilterLoad)
+                    .after(crate::cvars::CvarLoad)
+                    .after(crate::ui_text::FontAtlasInit),
             )
             // The in-game UI loads on world entry, as the reference's does, once the loading cover
             // has presented, so its ~0.5 s never stalls the cover's first frame.
             .add_systems(
-                OnEnter(crate::char_select::ClientState::InWorld),
+                OnEnter(crate::client_state::ClientState::InWorld),
                 lifecycle::arm_entry_ui_load,
             )
-            // The shutdown tail: events, then writes, in the reference's order.
+            // The shutdown tail: events, then writes, in the reference's order; the clears of what
+            // the dying state shows after its `PLAYER_LOGOUT`, then the glue VM.
+            .configure_sets(
+                OnExit(crate::client_state::ClientState::InWorld),
+                (SessionEnd::Shutdown, SessionEnd::Clears, SessionEnd::Glue).chain(),
+            )
             .add_systems(
-                OnExit(crate::char_select::ClientState::InWorld),
-                end_ui_session,
+                OnExit(crate::client_state::ClientState::InWorld),
+                (
+                    lifecycle::shut_down_session.in_set(SessionEnd::Shutdown),
+                    lifecycle::install_session_glue.in_set(SessionEnd::Glue),
+                ),
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
             .init_world_leave_sweep()
@@ -346,44 +497,122 @@ impl Plugin for UiScriptPlugin {
             // A queued `ReloadUI()` runs in `PreUpdate`, a frame after its drain (the reference's
             // deferral, `0x495590`) and before every `Update` seed or feed.
             .init_resource::<ReloadUiPending>()
+            .init_resource::<glue::GlueRebuild>()
             // Both are exclusive edges on the VM and must not interleave.
             .add_systems(
                 PreUpdate,
-                (run_pending_reload, lifecycle::run_pending_entry_load).chain(),
+                (
+                    run_pending_reload,
+                    // The glue top's size callback, then the rebuild it or a `reloadUI` asked
+                    // for. The callback reads the `gxResolution` the screen shows this frame.
+                    glue::watch_glue_aspect
+                        .after(crate::video::show_screen_size)
+                        .run_if(glue::glue_ui_up),
+                    glue::run_pending_glue_rebuild,
+                    lifecycle::run_pending_entry_load,
+                )
+                    .chain(),
             )
-            // The three UI phases in order: feeds after the net drain, the tick, then the paint.
+            // The UI phases in the reference's tick order (`core/loop`, "What one tick runs"): the
+            // window input records (`0x423920` at `0x420d23`) ahead of the net drain, then the
+            // feeds of the packets it applied (category 6, `0x420d55`), then the tick, the frame
+            // pass's `OnUpdate` walk (category 0x11, `0x420d6a`), and the paint; the drains of
+            // what the Lua asked after the tick, and after every later host the VM pass can put
+            // them behind, before the paint (`crate::vm_pass`).
             .configure_sets(
                 Update,
                 (
+                    UiInput.before(WorldStage::Net),
                     UiFeed.after(WorldStage::Net),
-                    UiInput.before(WorldStage::Input),
+                    UiTick.before(WorldStage::Input),
                     UiPaint,
                 )
                     .chain(),
             )
-            // In the feed phase, so an `OnUpdate` reads this frame's `GetFramerate()`.
+            .configure_sets(Update, UiDrain.after(UiTick))
+            .configure_sets(
+                Update,
+                UiInputViews
+                    .in_set(UiInput)
+                    .before(input::dispatch_input_records),
+            )
+            // `GetFramerate()`'s ring, a static of the client's that no reload or logout
+            // resets: the feed hands a new VM its rate before the tick, and each world frame's
+            // step joins the ring after its paint, standing for `CGWorldFrame::OnRender`
+            // (`0x482ea0`), so an `OnUpdate` reads the frames before its own.
+            .init_resource::<WorldFrameTimes>()
             .add_systems(Update, feed_framerate.in_set(UiFeed))
-            // The input pass hit-tests the rects the tick just resolved, and runs in-world only or
-            // on the stock glue screens.
+            .add_systems(
+                Update,
+                record_world_frame_time
+                    .after(UiPaint)
+                    .after(WorldStage::Present)
+                    .run_if(in_state(crate::client_state::ClientState::InWorld)),
+            )
+            // The input pass hit-tests the rects the last frame's paint resolved, as the reference's
+            // records meet the rects its last frame pass drained (`0x7656ba`, `0x765799`), and runs
+            // in-world only or on the stock glue screens.
             .init_resource::<UiPassState>()
-            .init_resource::<PointerOverUiPanel>()
+            // The frame's window input records, read first, ungated, so no frame dispatches a
+            // stale one.
+            .init_resource::<InputRecords>()
+            .add_message::<bevy::window::WindowEvent>()
+            .add_systems(
+                Update,
+                collect_input_records
+                    .in_set(UiInput)
+                    .before(UiInputViews)
+                    .before(crate::bindings::BindingHead),
+            )
+            // In `Last`, after a look session's end has put the cursor back, so the next frame's
+            // records start from where the pointer is.
+            .add_systems(Last, records::note_frame_end_cursor)
+            .init_resource::<input::RecordWalk>()
+            .add_systems(
+                Update,
+                input::dispatch_input_records
+                    .run_if(
+                        in_state(crate::client_state::ClientState::InWorld).or(glue::glue_ui_up),
+                    )
+                    .in_set(UiInput)
+                    // Exclusive, as its records' world steps run the click's legs: placed among
+                    // the hosts by hand, so the pass chains it as it did the walk.
+                    .in_set(crate::vm_pass::VmPass::Member)
+                    .after(glue::skip_unattended_startup_movie)
+                    // Each record's binding runs inside its walk, between the pass's head and tail.
+                    .after(crate::bindings::BindingHead)
+                    .before(crate::bindings::BindingTail),
+            )
             .add_systems(
                 Update,
                 (
                     extract::tick_script,
-                    input::feed_ui_input.run_if(
-                        in_state(crate::char_select::ClientState::InWorld).or(glue::glue_ui_up),
-                    ),
-                    // Off the walk that just ran, for the pick and the arbiter after the pass.
+                    copy_host_clock,
+                    // After the input pass's hover walk and the pump's leaves and re-pick, for the
+                    // pick after the pass.
                     crate::vplates::seed_plate_hover,
                 )
                     .chain()
-                    .in_set(UiInput)
-                    // So a key a focused box consumed never also fires a binding.
-                    .before(crate::bindings::BindingSet),
+                    .in_set(UiTick),
             )
             // After the plate driver seats this frame's nameplates, and before the append lane
             // fills the widget slot this pass parks.
+            // A scripted run's startup movie skipped before its first tick.
+            .add_systems(Update, glue::skip_unattended_startup_movie.in_set(UiInput))
+            // The movie audio's play times, a feed of the tick whose clock reads them.
+            .add_systems(Update, movie::feed_movie_audio.in_set(UiFeed))
+            // The movie pictures the tick showed, ahead of the paint that draws them.
+            .init_resource::<movie::MovieScreen>()
+            .add_systems(
+                Update,
+                // After the frame's window and present modes apply, so the aspect is the
+                // window's this frame.
+                movie::upload_movie_pictures
+                    .in_set(UiPaint)
+                    .after(crate::video::apply_present_mode)
+                    .after(crate::video::apply_window_mode)
+                    .before(extract::paint_script),
+            )
             .add_systems(
                 Update,
                 extract::paint_script
@@ -391,12 +620,33 @@ impl Plugin for UiScriptPlugin {
                     .after(crate::vplates::VPlateSet)
                     .before(crate::ui_pass::UiQuadAppend),
             )
-            // After the hover is known and before gameplay reads `PointerOverUi`.
+            // After the hover is known and before gameplay reads `PointerOverUi`: the world's
+            // mouse among the input records, so a press the cursor brings onto a frame is the
+            // frame's alone.
             .add_systems(
                 Update,
                 arbitrate_pointer_over_ui
                     .after(UiInput)
-                    .before(WorldStage::Input),
+                    .before(crate::player::WorldMouse),
+            )
+            .add_message::<server_alert::LaunchUrl>()
+            .add_message::<server_alert::LaunchAddonUrl>()
+            // The stock glue screens' frame, ahead of the login engine, so the manager's asks reach
+            // it in the frame whose Lua made them.
+            .add_systems(
+                Update,
+                (
+                    // After the tick whose Lua called its verbs.
+                    glue_mgr::drive_glue_mgr.in_set(crate::ui_script::UiDrain),
+                    // Off the roster and the screen the manager and the tick just moved.
+                    glue_scene::feed_stock_glue_preview.in_set(crate::portrait::GluePreviewFeed),
+                    // Each reads only its message, so no state orders it but the sets.
+                    server_alert::open_launched.after(WorldStage::Stream),
+                    server_alert::open_addon_launched.after(WorldStage::Stream),
+                )
+                    .chain()
+                    .before(crate::glue_session::login::LoginPolicy)
+                    .after(WorldStage::Net),
             );
 
         // A UI capture's synthetic unit snapshots, after the real feed so they win.
@@ -410,6 +660,28 @@ impl Plugin for UiScriptPlugin {
     }
 }
 
+/// The mouse and key feed once, for a test over the whole client: the input records the test's
+/// planes and key messages make, each walked and its world steps taken, with the call host the
+/// world lends.
+#[cfg(test)]
+pub(crate) fn feed_input_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    records_from_planes(world);
+    world
+        .run_system_once(input::dispatch_records_alone)
+        .expect("the input feeds");
+}
+
+/// The tick once, for a test over the whole client: the `OnUpdate` pump's Lua, with the call host
+/// the world lends.
+#[cfg(test)]
+pub(crate) fn tick_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(extract::tick_script)
+        .expect("the tick runs");
+}
+
 /// Whether a capture includes the player UI: world baselines stay UI-free unless
 /// [`crate::run_mode::capture_ui_opted_in`], which the UI load and window size also read.
 fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool {
@@ -420,21 +692,17 @@ fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool
 fn arbitrate_pointer_over_ui(
     egui: Option<Res<EguiPointerOver>>,
     hover: Res<PlayerUiHover>,
-    plate_hover: Res<crate::vplates::PlateHover>,
     mut over: ResMut<PointerOverUi>,
-    mut panel: ResMut<PointerOverUiPanel>,
 ) {
     // No cinematic term: the hit test finds the full-screen, mouse-enabled `CinematicFrame`.
     over.0 = egui.is_some_and(|e| e.0) || hover.0.is_some();
-    // Chrome excludes the plates, whose hover is this frame's walk's.
-    panel.0 = over.0 && plate_hover.0.is_none();
 }
 
 /// The session lifecycle: the VM's birth, identity, death and reload.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
-    PendingEntryUiLoad, ReloadUiPending,
+    ingame_ui_up, ingame_ui_up_in, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
+    PendingEntryUiLoad, ReloadUiPending, SessionEnd,
 };
 /// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
 mod sweep;
@@ -443,7 +711,7 @@ pub(crate) use sweep::test_support as sweep_test;
 #[cfg(test)]
 pub(crate) use sweep::WorldLeaveSweep;
 pub(crate) use sweep::{
-    run_leave_world_sweep, sweep_on_worldport, LeavingWorldArmed, SweepApp, SweepLeg, SweptWorlds,
+    add_worldport_sweep, run_leave_world_sweep, LeavingWorldArmed, SweepApp, SweepLeg, SweptWorlds,
 };
 #[cfg(test)]
 mod sweep_tests;
@@ -453,235 +721,234 @@ pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
 use lifecycle::shutdown_on_exit;
 #[cfg(test)]
 pub(crate) use lifecycle::{
-    finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
+    end_ui_session, finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
 };
 
-/// `GetFramerate()`'s host half: FPS on `Time<Real>`, smoothed by a one-second pole; how the
-/// reference averages it is untraced.
-fn feed_framerate(
-    script: Option<NonSendMut<UiScript>>,
-    time: Res<Time<bevy::time::Real>>,
-    mut smoothed: Local<f64>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let dt = time.delta_secs_f64();
-    if dt <= 0.0 {
-        return; // the first frame, or a paused one
-    }
-    let instant = 1.0 / dt;
-    // One-pole IIR with a 1 s time constant, frame-rate independent.
-    let alpha = (dt / 1.0).min(1.0);
-    *smoothed = if *smoothed <= 0.0 {
-        instant
-    } else {
-        *smoothed + alpha * (instant - *smoothed)
-    };
-    script.set_framerate(*smoothed);
+/// The 30 world-frame times `GetFramerate()` averages (`0xc631c8`).
+#[derive(Resource, Default)]
+struct WorldFrameTimes(benilla_ui::script::FrameTimeRing);
+
+/// `GetFramerate()`'s rate as the ring stands, for the tick about to run.
+fn feed_framerate(mut hosted_vm: crate::script_calls::HostedVm, times: Res<WorldFrameTimes>) {
+    hosted_vm.run(|script| {
+        if let Some(script) = script {
+            script.set_framerate(times.0.rate());
+        }
+    })
 }
 
-/// Synthetic player and target snapshots for a server-less UI capture, and its first events once.
-fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<bool>>) {
-    /// The synthetic target's guid: a creature high part; only its distinctness matters.
-    const DEMO_TARGET_GUID: u64 = 0xF130_0000_0000_0001;
+/// One world frame's step into the ring (`0x672700`), the elapsed every `OnUpdate` was handed;
+/// [`feed_framerate`] hands the VM the rate before the next tick reads it.
+fn record_world_frame_time(
+    step: Res<benilla_world::frame_pace::FrameStep>,
+    mut times: ResMut<WorldFrameTimes>,
+) {
+    times.0.push(step.delta.as_secs_f32());
+}
 
-    let Some(mut script) = script else {
-        return;
-    };
-    // Session-keyed: a fresh VM needs the one-shot events and bar seeds again.
-    let fired = fired.get(&script);
-    // Debug (`WOW_CAPTURE_REHOVER=1`): re-fire the world hover every frame, a flapping raycast.
-    if std::env::var("WOW_CAPTURE_REHOVER").as_deref() == Ok("1") {
-        script.world_tooltip_unit("mouseover");
-    }
-    script.set_unit(
-        "player",
-        Some(UnitState {
-            exists: true,
-            name: Some("Benilla".into()),
-            health: 72,
-            max_health: 100,
-            level: 12,
-            power_type: 0, // mana
-            power: 45,
-            max_power: 80,
-            dead: false,
-            reaction: 0, // own avatar: no reaction to itself
-            // Race/class so the ui-char capture's level line reads "Level 12 Night Elf Warrior".
-            race: Some("Night Elf".into()),
-            race_file: Some("NightElf".into()),
-            class: Some("Warrior".into()),
-            class_file: Some("WARRIOR".into()),
-            sex: 2,
-            is_player: true,
-            player_controlled: true,
-            ..Default::default()
-        }),
-    );
-    script.set_unit(
-        "target",
-        Some(UnitState {
-            exists: true,
-            name: Some("Young Wolf".into()),
-            health: 30,
-            max_health: 50,
-            level: 3,
-            // A powerless beast (maxPower 0): exercises the power-bar-hide path in the capture.
-            power_type: 0,
-            power: 0,
-            max_power: 0,
-            dead: false,
-            reaction: 4, // neutral: yellow (UnitReactionColor[4])
-            // A beast: no race/class tokens (UnitRace/UnitClass report the absent shape).
-            race: None,
-            race_file: None,
-            class: None,
-            class_file: None,
-            sex: 0,
-            // The tooltip's level line reads "Level 3 Beast".
-            creature_type_name: Some("Beast".into()),
-            // `GetComboPoints` reports only points banked on the current target's guid.
-            guid: DEMO_TARGET_GUID,
-            ..Default::default()
-        }),
-    );
-    // The combo dots need a rogue and banked points, seeded only for `ui-combopoints`.
-    if std::env::var("WOW_CAPTURE").as_deref() == Ok("ui-combopoints") {
-        script.set_player_req_state(benilla_ui::script::PlayerReqState {
-            level: 12,
-            class_id: 4, // rogue
-            ..Default::default()
-        });
-        script.set_combo_points(4, DEMO_TARGET_GUID);
-        script.fire_event("PLAYER_COMBO_POINTS", vec![]);
-    }
-    if !*fired {
-        // Battle-stance page slots (actions 73..); slot 80 is a consumable stack of 5, since stock
-        // `ActionButton_UpdateCount` shows only a consumable's count (`ActionButton.lua:287`).
-        script.set_bonus_bar_offset(1);
-        // A macro on button 4; a capture has no character for `ui_macro::load_macros` to read.
-        script.set_macros(benilla_ui::script::MacroState {
-            account: vec![benilla_ui::script::MacroView {
-                name: "spawn".into(),
-                texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
-                body: ".spawn 16032".into(),
-                local_only: false,
-            }],
-            character: Vec::new(),
-        });
-        for (action, icon, kind, id, count) in [
-            (
-                73,
-                "Interface\\Icons\\Ability_SteelMelee",
-                0x00u8,
-                100u32,
-                0u32,
-            ),
-            (74, "Interface\\Icons\\Ability_Rogue_Ambush", 0x00, 101, 0),
-            (
-                75,
-                "Interface\\Icons\\Ability_Warrior_BattleShout",
-                0x00,
-                102,
-                0,
-            ),
-            (
-                76,
-                "Interface\\Icons\\Ability_Racial_Cannibalize",
-                0x40,
-                1,
-                0,
-            ),
-            (80, "Interface\\Icons\\INV_Misc_Food_16", 0x80, 117, 5),
-            (84, "Interface\\Icons\\Spell_Holy_SealOfMight", 0x00, 103, 0),
-            // BottomLeft is actions 61..72, BottomRight 49..60; an empty multibar well hides.
-            (
-                61,
-                "Interface\\Icons\\Spell_Nature_Regenerate",
-                0x00,
-                104,
-                0,
-            ),
-            (62, "Interface\\Icons\\Spell_Shadow_Curse", 0x00, 105, 0),
-            (
-                72,
-                "Interface\\Icons\\Spell_Frost_FrostBolt02",
-                0x00,
-                106,
-                0,
-            ),
-            (49, "Interface\\Icons\\Spell_Fire_FlameBolt", 0x00, 107, 0),
-            (60, "Interface\\Icons\\Spell_Holy_Heal", 0x00, 108, 0),
-        ] {
-            script.set_action(
-                action,
-                Some(ActionSlot {
-                    texture: Some(icon.into()),
-                    kind,
-                    action: id,
-                    count,
-                    // The seed's only item slot is the food stack, which is consumable.
-                    consumable: kind == 0x80,
-                    use_spell: None,
-                }),
-            );
-            // Server-less a slot has no usable state; a live bar's resting state is usable.
-            script.set_action_state(
-                action,
-                Some(benilla_ui::script::ActionState {
-                    usable: true,
+/// The demo's stances, Battle, Defensive and Berserker, which a UI capture's known spells list
+/// (`crate::capture`) and [`demo_unit_feed`] seeds the entries of.
+pub(crate) const DEMO_STANCES: [u32; 3] = [2457, 71, 2458];
+
+/// Synthetic player and target snapshots for a server-less UI capture, and its first events once.
+pub(crate) fn demo_unit_feed(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut fired: Local<VmMemo<bool>>,
+) {
+    hosted_vm.run(|script| {
+        /// The synthetic target's guid: a creature high part; only its distinctness matters.
+        const DEMO_TARGET_GUID: u64 = 0xF130_0000_0000_0001;
+
+        let Some(script) = script else {
+            return;
+        };
+        // Session-keyed: a fresh VM needs the one-shot events and bar seeds again.
+        let fired = fired.get(script);
+        // Debug (`WOW_CAPTURE_REHOVER=1`): re-fire the world hover every frame, a flapping raycast.
+        if std::env::var("WOW_CAPTURE_REHOVER").as_deref() == Ok("1") {
+            script.world_tooltip_unit("mouseover");
+        }
+        script.set_unit(
+            "player",
+            Some(UnitState {
+                exists: true,
+                name: Some("Benilla".into()),
+                health: 72,
+                max_health: 100,
+                level: 12,
+                power_type: 0, // mana
+                power: 45,
+                max_power: 80,
+                dead: false,
+                reaction: 0, // own avatar: no reaction to itself
+                // Race/class so the ui-char capture's level line reads "Level 12 Night Elf
+                // Warrior".
+                race: Some("Night Elf".into()),
+                race_file: Some("NightElf".into()),
+                class: Some("Warrior".into()),
+                class_file: Some("WARRIOR".into()),
+                sex: 2,
+                is_player: true,
+                player_controlled: true,
+                ..Default::default()
+            }),
+        );
+        script.set_unit(
+            "target",
+            Some(UnitState {
+                exists: true,
+                name: Some("Young Wolf".into()),
+                health: 30,
+                max_health: 50,
+                level: 3,
+                // A powerless beast (maxPower 0): exercises the power-bar-hide path in the capture.
+                power_type: 0,
+                power: 0,
+                max_power: 0,
+                dead: false,
+                reaction: 4, // neutral: yellow (UnitReactionColor[4])
+                // A beast: no race/class tokens (UnitRace/UnitClass report the absent shape).
+                race: None,
+                race_file: None,
+                class: None,
+                class_file: None,
+                sex: 0,
+                // The tooltip's level line reads "Level 3 Beast".
+                creature_type_name: Some("Beast".into()),
+                guid: DEMO_TARGET_GUID,
+                ..Default::default()
+            }),
+        );
+        if !*fired {
+            // Battle-stance page slots (actions 73..); slot 80 is a consumable stack of 5, since
+            // stock `ActionButton_UpdateCount` shows only a consumable's count
+            // (`ActionButton.lua:287`).
+            script.set_bonus_bar_offset(1);
+            // A macro on button 4; a capture has no character for the macro reader to read.
+            script.set_macros(benilla_ui::script::MacroState::from_scopes(
+                vec![benilla_ui::script::MacroView {
+                    name: "spawn".into(),
+                    texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
+                    body: ".spawn 16032".into(),
                     ..Default::default()
-                }),
-            );
-        }
-        // The stance bar: battle active (bonus offset 1), defensive uncastable, berserker cooling.
-        script.set_shapeshift_forms(vec![
-            benilla_ui::script::ShapeshiftFormView {
-                spell_id: 2457,
-                texture: Some("Interface\\Icons\\Ability_Warrior_OffensiveStance".into()),
-                name: "Battle Stance".into(),
-                active: true,
-                castable: true,
-                cooldown: None,
-            },
-            benilla_ui::script::ShapeshiftFormView {
-                spell_id: 71,
-                texture: Some("Interface\\Icons\\Ability_Warrior_DefensiveStance".into()),
-                name: "Defensive Stance".into(),
-                active: false,
-                castable: false,
-                cooldown: None,
-            },
-            benilla_ui::script::ShapeshiftFormView {
-                spell_id: 2458,
-                texture: Some("Interface\\Icons\\Ability_Racial_Avatar".into()),
-                name: "Berserker Stance".into(),
-                active: false,
-                castable: true,
-                cooldown: Some((900, 1500, true)),
-            },
-        ]);
-        script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
-        // 70% XP, set before the world-enter events so the bar's first update reads it.
-        script.set_player_xp(4200, 6000);
-        script.fire_world_enter();
-        // The bottom multibars ship off and a capture has no toggle byte, so raise them as the
-        // Options rows do; `WOW_DEMO_BOTTOM_BARS=0` leaves them down for the stance shelf art,
-        // which `ShapeshiftBar_UpdatePosition` hides under the bottom-left bar.
-        if std::env::var("WOW_DEMO_BOTTOM_BARS").as_deref() != Ok("0") {
-            let _ = script.run(
-                "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
+                }],
+                Vec::new(),
+            ));
+            for (action, icon, kind, id, count) in [
+                (
+                    73,
+                    "Interface\\Icons\\Ability_SteelMelee",
+                    0x00u8,
+                    100u32,
+                    0u32,
+                ),
+                (74, "Interface\\Icons\\Ability_Rogue_Ambush", 0x00, 101, 0),
+                (
+                    75,
+                    "Interface\\Icons\\Ability_Warrior_BattleShout",
+                    0x00,
+                    102,
+                    0,
+                ),
+                (
+                    76,
+                    "Interface\\Icons\\Ability_Racial_Cannibalize",
+                    0x40,
+                    1,
+                    0,
+                ),
+                (80, "Interface\\Icons\\INV_Misc_Food_16", 0x80, 117, 5),
+                (84, "Interface\\Icons\\Spell_Holy_SealOfMight", 0x00, 103, 0),
+                // BottomLeft is actions 61..72, BottomRight 49..60; an empty multibar well hides.
+                (
+                    61,
+                    "Interface\\Icons\\Spell_Nature_Regenerate",
+                    0x00,
+                    104,
+                    0,
+                ),
+                (62, "Interface\\Icons\\Spell_Shadow_Curse", 0x00, 105, 0),
+                (
+                    72,
+                    "Interface\\Icons\\Spell_Frost_FrostBolt02",
+                    0x00,
+                    106,
+                    0,
+                ),
+                (49, "Interface\\Icons\\Spell_Fire_FlameBolt", 0x00, 107, 0),
+                (60, "Interface\\Icons\\Spell_Holy_Heal", 0x00, 108, 0),
+            ] {
+                script.set_action(
+                    action,
+                    Some(ActionSlot {
+                        texture: Some(icon.into()),
+                        kind,
+                        action: id,
+                        count,
+                        // The seed's only item slot is the food stack, which is consumable.
+                        consumable: kind == 0x80,
+                        use_spell: None,
+                    }),
+                );
+                // Server-less a slot has no usable state; a live bar's resting state is usable.
+                script.set_action_state(
+                    action,
+                    Some(benilla_ui::script::ActionState {
+                        usable: true,
+                        ..Default::default()
+                    }),
+                );
+            }
+            // The stance bar's entries, which its getters read with no player held, for the
+            // [`DEMO_STANCES`] the known spells list: battle active (bonus offset 1), defensive
+            // uncastable, berserker cooling.
+            script.set_shapeshift_forms(vec![
+                benilla_ui::script::ShapeshiftFormView {
+                    spell_id: 2457,
+                    texture: Some("Interface\\Icons\\Ability_Warrior_OffensiveStance".into()),
+                    name: "Battle Stance".into(),
+                    active: true,
+                    castable: true,
+                    cooldown: None,
+                },
+                benilla_ui::script::ShapeshiftFormView {
+                    spell_id: 71,
+                    texture: Some("Interface\\Icons\\Ability_Warrior_DefensiveStance".into()),
+                    name: "Defensive Stance".into(),
+                    active: false,
+                    castable: false,
+                    cooldown: None,
+                },
+                benilla_ui::script::ShapeshiftFormView {
+                    spell_id: 2458,
+                    texture: Some("Interface\\Icons\\Ability_Racial_Avatar".into()),
+                    name: "Berserker Stance".into(),
+                    active: false,
+                    castable: true,
+                    cooldown: Some((900, 1500, true)),
+                },
+            ]);
+            script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+            // 70% XP, set before the world-enter events so the bar's first update reads it.
+            script.set_player_xp(4200, 6000);
+            script.fire_world_enter();
+            // The bottom multibars ship off and a capture has no toggle byte, so raise them as the
+            // Options rows do; `WOW_DEMO_BOTTOM_BARS=0` leaves them down for the stance shelf art,
+            // which `ShapeshiftBar_UpdatePosition` hides under the bottom-left bar.
+            if std::env::var("WOW_DEMO_BOTTOM_BARS").as_deref() != Ok("0") {
+                let _ = script.run(
+                    "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
                  if MultiActionBar_Update then MultiActionBar_Update() end",
-            );
+                );
+            }
+            script.fire_event("PLAYER_XP_UPDATE", vec![ScriptValue::Str("player".into())]);
+            for token in ["player", "target"] {
+                script.fire_event("UNIT_HEALTH", vec![ScriptValue::Str(token.into())]);
+            }
+            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+            *fired = true;
         }
-        script.fire_event("PLAYER_XP_UPDATE", vec![]);
-        for token in ["player", "target"] {
-            script.fire_event("UNIT_HEALTH", vec![ScriptValue::Str(token.into())]);
-        }
-        script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        *fired = true;
-    }
+    })
 }
 
 /// A test font engine: every character `.0` wide, 12 tall per line, greedily wrapped.
@@ -748,6 +1015,19 @@ mod cinematic_tests;
 mod glue_input_tests;
 #[cfg(test)]
 mod key_walk_tests;
+#[cfg(test)]
+mod record_order_tests;
+#[cfg(test)]
+mod tick_order_tests;
+
+/// Whether `Update` declares `system` before the tick, the frame pass's `OnUpdate` walk.
+#[cfg(test)]
+pub(crate) fn tick_runs_after<M>(
+    app: &mut App,
+    system: impl bevy::ecs::system::IntoSystem<(), (), M>,
+) -> bool {
+    crate::test_support::runs_before(app, system, extract::tick_script)
+}
 
 #[cfg(test)]
 mod cast_tests;
@@ -775,6 +1055,9 @@ mod dropdown_tests;
 
 #[cfg(test)]
 mod ui_scale_tests;
+
+#[cfg(test)]
+mod frame_step_tests;
 
 #[cfg(test)]
 mod action_bar_tests;
@@ -822,7 +1105,7 @@ mod faux_scroll_tests;
 #[cfg(test)]
 mod panel_template_tests;
 
-/// The return-shape gate: `reference/1.12-shapes.tsv` against what this client answers.
+/// The return-shape gate: `reference/bindings.tsv` against what this client answers.
 #[cfg(test)]
 mod shape_gate;
 
@@ -830,11 +1113,15 @@ mod shape_gate;
 #[cfg(test)]
 mod surface_gate;
 
-/// The event argument-shape gate: every fire site against `reference/1.12-events.tsv`.
+/// The reader of every fire site, for the event gates.
+#[cfg(test)]
+pub(crate) mod fire_scan;
+
+/// The event argument-shape gate: every fire site against `reference/event_args.tsv`.
 #[cfg(test)]
 mod event_shape_gate;
 
-/// The verb-fired event gate, against `reference/1.12-verb-events.tsv`.
+/// The verb-fired event gate, against `reference/verb_events.tsv`.
 #[cfg(test)]
 mod verb_event_gate;
 
@@ -984,8 +1271,9 @@ mod durability_tests;
 #[cfg(test)]
 pub(crate) mod world_state_tests;
 
+// `pub(crate)` for `harness`, which `crate::screenshot`'s test uses.
 #[cfg(test)]
-mod screenshot_tests;
+pub(crate) mod screenshot_tests;
 
 #[cfg(test)]
 mod questlog_tests;
@@ -1014,6 +1302,8 @@ mod dressup_tests;
 #[cfg(test)]
 mod minimap_tests;
 
+#[cfg(test)]
+mod protected_gate_tests;
 #[cfg(test)]
 mod spellbook_tests;
 
@@ -1059,7 +1349,7 @@ mod world_map_tests;
 
 #[cfg(test)]
 mod seam_scale_tests {
-    use super::{seam_scale, window_to_ui};
+    use super::{seam_scale, ui_to_window, window_to_ui, UiScreen};
     use bevy::math::Vec2;
 
     #[test]
@@ -1075,10 +1365,34 @@ mod seam_scale_tests {
     /// is 0 and its top 768, its middle column `768·a/2`.
     #[test]
     fn the_cursor_reaches_the_vm_in_root_units() {
-        let at = window_to_ui(1080.0, Vec2::new(960.0, 108.0));
+        let screen = UiScreen::of(Vec2::new(1920.0, 1080.0), true);
+        let at = window_to_ui(screen, Vec2::new(960.0, 108.0));
         assert!((at.x - 960.0 * 768.0 / 1080.0).abs() < 1e-3, "{at}");
         assert!((at.y - 972.0 * 768.0 / 1080.0).abs() < 1e-3, "{at}");
-        assert_eq!(window_to_ui(1080.0, Vec2::new(0.0, 1080.0)), Vec2::ZERO);
+        assert_eq!(window_to_ui(screen, Vec2::new(0.0, 1080.0)), Vec2::ZERO);
+        // With `widescreen` 0 the 4:3 root spans the window: its middle column is 512, its right
+        // edge 1024.
+        let stretched = UiScreen::of(Vec2::new(1920.0, 1080.0), false);
+        let mid = window_to_ui(stretched, Vec2::new(960.0, 540.0));
+        assert!((mid - Vec2::new(512.0, 384.0)).length() < 1e-3, "{mid}");
+        let edge = window_to_ui(stretched, Vec2::new(1920.0, 0.0));
+        assert!((edge - Vec2::new(1024.0, 768.0)).length() < 1e-3, "{edge}");
+    }
+
+    /// [`ui_to_window`] undoes [`window_to_ui`], stretched or not.
+    #[test]
+    fn a_root_point_goes_to_the_window_and_back() {
+        for widescreen in [true, false] {
+            let screen = UiScreen::of(Vec2::new(1920.0, 1080.0), widescreen);
+            for p in [
+                Vec2::ZERO,
+                Vec2::new(512.0, 384.0),
+                Vec2::new(1000.0, 700.0),
+            ] {
+                let back = window_to_ui(screen, ui_to_window(screen, p));
+                assert!((back - p).length() < 1e-3, "{widescreen}: {p} -> {back}");
+            }
+        }
     }
 }
 
@@ -1086,73 +1400,29 @@ mod seam_scale_tests {
 mod pointer_arbiter_tests {
     use super::*;
 
-    /// A world to run the arbiter in: its inputs and its two outputs, nothing else.
+    /// A world to run the arbiter in: its inputs and its output, nothing else.
     fn app() -> App {
         let mut app = App::new();
         app.init_resource::<PlayerUiHover>()
-            .init_resource::<crate::vplates::PlateHover>()
             .init_resource::<PointerOverUi>()
-            .init_resource::<PointerOverUiPanel>()
             .add_systems(Update, arbitrate_pointer_over_ui);
         app
     }
 
+    /// The camera reads this flag (`0x7662c0` gives a mouse-down to exactly one frame, a plate
+    /// included); the wheel does not (`ui_script::input`'s sweep).
     #[test]
-    fn a_hovered_plate_is_ui_but_not_chrome() {
-        let mut app = app();
-        let plate = app.world_mut().spawn_empty().id();
-        app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
-        app.world_mut()
-            .resource_mut::<crate::vplates::PlateHover>()
-            .0 = Some(plate);
-        app.update();
-        assert!(
-            app.world().resource::<PointerOverUi>().0,
-            "the plate takes the pointer"
-        );
-        assert!(
-            !app.world().resource::<PointerOverUiPanel>().0,
-            "…and the WHEEL looks straight through it"
-        );
-    }
-
-    /// The camera reads the raw flag (`0x7662c0` gives a mouse-down to exactly one frame, the
-    /// plate); the wheel reads chrome, walking past a frame that only takes the mouse.
-    #[test]
-    fn the_camera_yields_to_a_plate_and_the_wheel_does_not() {
-        let mut app = app();
-        let plate = app.world_mut().spawn_empty().id();
-        app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
-        app.world_mut()
-            .resource_mut::<crate::vplates::PlateHover>()
-            .0 = Some(plate);
-        app.update();
-        // `latch_world_mouse` reads this one: the press is not the world's, so no look starts.
-        assert!(
-            app.world().resource::<PointerOverUi>().0,
-            "the camera must yield the press to the plate"
-        );
-        // …and `bindings`' wheel branch reads this one.
-        assert!(
-            !app.world().resource::<PointerOverUiPanel>().0,
-            "the wheel must still reach the world over a plate"
-        );
-    }
-
-    #[test]
-    fn a_hovered_panel_is_both() {
+    fn a_hovered_frame_is_ui() {
         let mut app = app();
         app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
         app.update();
         assert!(app.world().resource::<PointerOverUi>().0);
-        assert!(app.world().resource::<PointerOverUiPanel>().0);
     }
 
     #[test]
-    fn no_hover_is_neither() {
+    fn no_hover_is_not() {
         let mut app = app();
         app.update();
         assert!(!app.world().resource::<PointerOverUi>().0);
-        assert!(!app.world().resource::<PointerOverUiPanel>().0);
     }
 }

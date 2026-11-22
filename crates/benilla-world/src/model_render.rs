@@ -12,14 +12,16 @@ use benilla_assets::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY
 
 mod batch;
 pub mod lazy;
+pub mod order;
 pub mod park;
 mod visibility;
 
 pub use batch::{BatchVariants, EntityUvLane, M2BatchMaterials, ModelMaterials, SkyboxBatch};
 
-/// Yards of transparent sort bias per authored batch step: a model's coplanar batches tie on one
-/// mesh centre, and the reference keeps their authored order inside the instance's sort key
-/// (`0x707db1`). Under [`benilla_formats::owner_last_rung`]'s 1-yd floor, over f32 noise at 500 yd.
+/// Yards of transparent sort bias per authored batch step of a batch the transparent order does
+/// not place ([`order`]): a WMO's coplanar batches draw in strict file order
+/// (`0x6b4f10`/`0x6b5190`). Under [`benilla_formats::owner_last_rung`]'s 1-yd floor, over f32 noise
+/// at 500 yd.
 pub(crate) const BATCH_ORDER_SORT_EPS: f32 = 1e-3;
 
 /// The eps product's ceiling, since `depth_bias as i32` is a pipeline-key axis: under 1.0, and
@@ -58,11 +60,19 @@ pub struct MatKey {
     fog_policy: benilla_formats::FogPolicy,
     /// The batch samples the generated sphere-map coordinate, not its vertex UVs.
     env_map: bool,
+    /// The second texture stage ([`benilla_assets::Stage1`], [`stage1_key`]).
+    stage1: Option<Stage1Key>,
+    /// Stage 0's combine preset (`ModelSubmesh::combine`), which sets a fade twin's alpha.
+    combine: Option<u8>,
     /// The static terrain-shade selector, fixed per placement.
     shade: ShadeSel,
-    /// Authored batch index + 1 (0 = unordered): the transparent sort bias of every batch, and for
-    /// WMO the clip-z nudge too (MOBA batches draw in strict file order, `0x6b4f10`/`0x6b5190`).
+    /// Authored batch index + 1 (0 = unordered): the batch's own material, and for WMO the
+    /// transparent sort bias and the clip-z nudge (MOBA batches draw in strict file order,
+    /// `0x6b4f10`/`0x6b5190`).
     batch_order: u16,
+    /// An M2 batch's keys in the transparent order ([`order`]), which sorts it in place of the
+    /// bias.
+    order: Option<benilla_formats::BatchOrder>,
     /// The `Arc<UvAnim>` pointer, stable while its model is loaded: one material per UV loop.
     uv_anim: Option<usize>,
     /// The `Arc<RgbAnim>` pointer, keyed like [`Self::uv_anim`]; `None` is a static vertex tint.
@@ -142,8 +152,11 @@ pub fn model_material(
     no_depth_test: bool,
     fog_policy: benilla_formats::FogPolicy,
     env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
+    combine: Option<u8>,
     shade: ShadeSel,
     batch_order: u16,
+    order: Option<benilla_formats::BatchOrder>,
     uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
     rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
     wmo_class: Option<WmoBatchClass>,
@@ -167,8 +180,11 @@ pub fn model_material(
         no_depth_test,
         fog_policy,
         env_map,
+        stage1: stage1.map(stage1_key),
+        combine,
         shade,
         batch_order,
+        order,
         uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
         rgb_anim: rgb_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
         wmo_class,
@@ -200,13 +216,15 @@ pub fn model_material(
     // Single-sided unless the M2's 0x04 flag is set.
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
     // Transparent batches only: opaque passes never sort by it. Tying past index 899 is safe:
-    // the eps matters only for same-centre stacks (M2 item overlays), and WMO batches sort by
-    // their own centres. Skybox transparents take their own rung under the world's; its painted
-    // cube faces draw opaque, as in the reference.
+    // WMO batches sort by their own centres. An M2 batch takes no bias: the transparent order
+    // places it ([`order`]). Skybox transparents take their own rung under the world's; its
+    // painted cube faces draw opaque, as in the reference.
     let depth_bias = if !matches!(alpha_mode, AlphaMode::Blend) {
         0.0
     } else if sky_depth {
         skybox_sort_bias(batch_order)
+    } else if order.is_some() {
+        0.0
     } else {
         (f32::from(batch_order) * BATCH_ORDER_SORT_EPS).min(BATCH_ORDER_SORT_CAP)
     };
@@ -321,7 +339,19 @@ pub fn model_material(
                 },
                 // Zero until a sampler registers this material and bakes its table slot in once.
                 anim_slots: Vec4::ZERO,
+                stage1: stage1_params(stage1, combine),
+                // Stage 1's own rows start at zero too; zw its translation at t = 0, the seed its
+                // row is added to, as `sun_scale.zw` is stage 0's.
+                stage1_uv: {
+                    let uv0 = stage1
+                        .and_then(|s| s.uv_anim.as_ref())
+                        .map_or([0.0, 0.0], |a| a.sample(0.0));
+                    Vec4::new(0.0, 0.0, uv0[0], uv0[1])
+                },
+                stage1_texture: stage1.map(|s| s.texture.clone()),
                 light_buf: light.clone(),
+                // The sky keeps its own band.
+                order: order.filter(|_| !sky_depth),
             },
         },
     );
@@ -358,12 +388,9 @@ fn skybox_sort_bias(batch_order: u16) -> f32 {
         + (f32::from(batch_order) * SKYBOX_ORDER_EPS).min(SKYBOX_ORDER_CAP)
 }
 
-/// The depth-prime twin's sort bias in yards (negative draws earlier), past the spread of one
-/// model's part centres so all its twins draw before any colour part, as the reference's one sort
-/// key per instance with twins first does (`cmd+0x14 = model+0x84`, `0x707db1`, `0x70ae10`). 8 yd
-/// covers humanoids and mounts; a taller model can keep some self-overlap, and a transparent
-/// sorting within 8 yd behind a fading body draws after its prime and clips where the body covers
-/// it. As a raster depth bias it is ~2⁻²⁰ relative, away from the eye.
+/// The depth-prime twin's `depth_bias`, a raster depth bias of ~2⁻²⁰ relative, away from the eye,
+/// and its own pipeline key. Its place in the list is the transparent order's `+0x8` key
+/// ([`order`]), which takes this back out.
 pub(crate) const ZFILL_SORT_BIAS: f32 = -8.0;
 
 /// Build or fetch the depth-prime twin for one fadeable entity batch, the reference's
@@ -376,10 +403,16 @@ pub fn zfill_material(
     cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
     texture: Option<Handle<Image>>,
+    env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
     two_sided: bool,
     cutout: bool,
     light: &Buffer,
 ) -> Handle<WowModelMaterial> {
+    // Only a cutout reads the coordinates and stage 1, which shape the alpha it tests; the
+    // reference's depth-only element binds the same coordinates as the colour pass (`0x70b833`).
+    let env_map = env_map && cutout;
+    let stage1 = stage1.filter(|_| cutout);
     let key = MatKey {
         light: light.id(),
         texture: texture.as_ref().map(Handle::id),
@@ -397,9 +430,12 @@ pub fn zfill_material(
         no_depth_write: false,
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
-        env_map: false,
+        env_map,
+        stage1: stage1.map(stage1_key),
+        combine: None,
         shade: ShadeSel::Lit,
         batch_order: 0,
+        order: Some(benilla_formats::BatchOrder::default()),
         uv_anim: None,
         rgb_anim: None,
         wmo_class: None,
@@ -431,7 +467,11 @@ pub fn zfill_material(
                 clutter_fade: Vec4::new(
                     0.0,
                     0.0,
-                    f32::from(ZFILL_MARKER | if cutout { TWIN_CUTOUT_MARKER } else { 0 }),
+                    f32::from(
+                        ZFILL_MARKER
+                            | if cutout { TWIN_CUTOUT_MARKER } else { 0 }
+                            | (u16::from(env_map) * ENV_MAP_MARKER),
+                    ),
                     0.0,
                 ),
                 // `y` stays 0: the zfill pipeline forces its own depth write.
@@ -440,12 +480,46 @@ pub fn zfill_material(
                 tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
                 sidn: Vec4::ZERO,
                 anim_slots: Vec4::ZERO,
+                stage1: stage1_params(stage1, None),
+                // No transform, as stage 0 here: the twin is not on the UV lane.
+                stage1_uv: Vec4::ZERO,
+                stage1_texture: stage1.map(|s| s.texture.clone()),
                 light_buf: light.clone(),
+                // A depth-fill copy, which its entity's link marks: it leads its instance by the
+                // `+0x8` key, whatever its own.
+                order: Some(benilla_formats::BatchOrder::default()),
             },
         },
     );
     cache.insert(key, handle.clone());
     handle
+}
+
+/// `WowModelExt::stage1`: `x` = stage 1 bound, `y` = its combine preset, `z` = the stage-0 preset
+/// plus one (`0` for a batch without one, which keeps the texel's alpha, the modulate), `w` = it
+/// reads the vertex's UV set 1.
+fn stage1_params(stage1: Option<&benilla_assets::Stage1>, combine: Option<u8>) -> Vec4 {
+    Vec4::new(
+        f32::from(u8::from(stage1.is_some())),
+        stage1.map_or(0.0, |s| f32::from(s.combine)),
+        combine.map_or(0.0, |p| f32::from(p) + 1.0),
+        f32::from(u8::from(stage1.is_some_and(|s| s.uv_set))),
+    )
+}
+
+/// A stage 1's dedup key: its texture, combine preset, coordinate source and translation loop,
+/// the `Arc<UvAnim>` pointer as [`MatKey::uv_anim`] keys stage 0's.
+type Stage1Key = (AssetId<Image>, u8, bool, Option<usize>);
+
+fn stage1_key(s: &benilla_assets::Stage1) -> Stage1Key {
+    (
+        s.texture.id(),
+        s.combine,
+        s.uv_set,
+        s.uv_anim
+            .as_ref()
+            .map(|a| std::sync::Arc::as_ptr(a) as usize),
+    )
 }
 
 /// `clutter_fade.z` marker bit 11: a far-side-of-water twin, whose −4e4 sort rung `specialize`
@@ -825,6 +899,8 @@ pub fn replace_fog_policy(z: f32, policy: benilla_formats::FogPolicy) -> f32 {
 
 /// The model-render lane's registrations.
 pub fn plugin(app: &mut App) {
+    // The scene's transparent order over the M2 batches.
+    order::plugin(app);
     // Before `ModelVisSet`, so the authority's pick sees this frame's side, and after the fade
     // resolve. The self feather is unordered: it composes the same marker and can lag one frame
     // as the eye crosses the surface.
@@ -850,6 +926,12 @@ pub fn plugin(app: &mut App) {
         Update,
         visibility::trace_model_visibility.after(ModelVisSet),
     );
+    // `WOW_LIQUID_TRACE=1` traces every building pool's verdict per frame; registered only then,
+    // so an untraced run's schedule carries no reader of every `Visibility`.
+    if let Some(trace) = visibility::LiquidTrace::from_env() {
+        app.insert_resource(trace)
+            .add_systems(Update, visibility::trace_wmo_liquid.after(ModelVisSet));
+    }
     // The material dedup cache and its evictors: by distance, and whole on a cross-map transition.
     app.init_resource::<ModelMaterials>()
         .add_systems(Update, (scope_model_materials, evict_model_materials));
@@ -946,6 +1028,59 @@ mod tests {
         // No stray bits invented.
         let out2 = replace_fog_policy(f32::from(0u16), FogPolicy::Grey) as u16;
         assert_eq!(out2, (FogPolicy::Grey as u16) << 4);
+    }
+
+    /// The stage-0 combine reaches the shader as `stage1.z`, preset + 1, so a preset-0 twin and a
+    /// preset-1 twin are two uniforms (and, by `MatKey::combine`, two materials), while a batch
+    /// with no combine (WMO, clutter tuft) is the zero the shader reads as the texel's alpha.
+    #[test]
+    fn the_stage_zero_combine_rides_stage1_z() {
+        let z = |c| super::stage1_params(None, c).z;
+        assert_eq!(z(None), 0.0);
+        assert_eq!(z(Some(0)), 1.0, "opaque preset 0 is not the untagged zero");
+        assert_eq!(z(Some(1)), 2.0);
+        assert_eq!(z(Some(5)), 6.0);
+        // Stage 1's own fields do not move with it.
+        let stage = benilla_assets::Stage1 {
+            texture: Default::default(),
+            combine: 3,
+            uv_set: false,
+            uv_anim: None,
+        };
+        let p = super::stage1_params(Some(&stage), Some(0));
+        assert_eq!((p.x, p.y, p.z, p.w), (1.0, 3.0, 1.0, 0.0));
+    }
+
+    /// A stage 1 on the vertex's UV set says so in `stage1.w`, which `wow_model.wgsl` reads to
+    /// take `uv_b` and the stage's own transform, and keys a material of its own: its own
+    /// coordinates and its own translation loop are each part of the look.
+    #[test]
+    fn a_stage_one_on_a_uv_set_is_its_own_material() {
+        let generated = benilla_assets::Stage1 {
+            texture: Default::default(),
+            combine: 1,
+            uv_set: false,
+            uv_anim: None,
+        };
+        let on_uvs = benilla_assets::Stage1 {
+            uv_set: true,
+            ..generated.clone()
+        };
+        let scroll = std::sync::Arc::new(benilla_formats::UvAnim {
+            period: 1.0,
+            step: false,
+            wrap: true,
+            gseq: true,
+            keys: vec![(0.0, [0.0, 0.0]), (1.0, [0.5, 0.0])],
+        });
+        let scrolling = benilla_assets::Stage1 {
+            uv_anim: Some(scroll),
+            ..on_uvs.clone()
+        };
+        assert_eq!(super::stage1_params(Some(&on_uvs), None).w, 1.0);
+        assert_eq!(super::stage1_params(Some(&generated), None).w, 0.0);
+        let keys = [&generated, &on_uvs, &scrolling].map(super::stage1_key);
+        assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
     }
 
     /// Too small and coplanar layers strobe; too large and effects interleave into their owner.

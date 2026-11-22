@@ -6,7 +6,7 @@
 //!
 //! With an install directory it also derives that install's own digest the way the 1.12 client
 //! does, HMAC-SHA1 keyed by the challenge over five binaries, and says whether it is the stock
-//! one. Deviation: benilla always sends the published constant instead, since an install without
+//! one. Deviation: benilla always sends the published constant instead, because an install without
 //! those binaries could never answer for itself.
 //!
 //! Usage: `cargo run -p benilla-protocol --example version_check_probe -- <host[:port]> <user>
@@ -50,8 +50,13 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
         let mut stream = TcpStream::connect((host, port))
             .with_context(|| format!("connecting to {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)
-            .context("sending logon challenge")?;
+        auth::write_logon_challenge(
+            &mut stream,
+            &user.to_uppercase(),
+            CLIENT_BUILD,
+            auth::LOCALE_TAG_EN_US,
+        )
+        .context("sending logon challenge")?;
         let reply = auth::read_challenge_reply(&mut stream)
             .context("reading challenge reply")?
             .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
@@ -78,6 +83,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
             challenge.client_public_key(),
             challenge.client_proof(),
             &salt,
+            None,
         )
         .context("sending logon proof")?;
 
@@ -183,7 +189,12 @@ fn main() -> Result<()> {
     let mut stream =
         TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)?;
+    auth::write_logon_challenge(
+        &mut stream,
+        &user.to_uppercase(),
+        CLIENT_BUILD,
+        auth::LOCALE_TAG_EN_US,
+    )?;
     let crc_salt = auth::read_challenge_reply(&mut stream)?
         .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?
         .crc_salt;

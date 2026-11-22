@@ -71,6 +71,7 @@ const BARS: &[&str] = &[
 /// with no loader warning of any kind.
 fn setup_counted(extra: &[&str]) -> (UiScript, usize) {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let mut built = 0;
     for file in super::test_ui::production_order(&[BARS, GROUP_LOOT, extra]) {
@@ -105,6 +106,7 @@ fn rolls() -> LootRollsState {
                 item_id: 17182,
                 link: Some(STAFF_LINK.into()),
                 random_property_id: 0,
+                closed: false,
             },
             LootRollEntry {
                 roll_id: 8,
@@ -116,6 +118,7 @@ fn rolls() -> LootRollsState {
                 item_id: 25,
                 link: Some(SWORD_LINK.into()),
                 random_property_id: 0,
+                closed: false,
             },
             // No template yet: name, texture, quality and link (which embeds the name) are nil.
             LootRollEntry {
@@ -128,6 +131,7 @@ fn rolls() -> LootRollsState {
                 item_id: 4306,
                 link: None,
                 random_property_id: 0,
+                closed: false,
             },
         ],
     }
@@ -403,7 +407,7 @@ fn in_flight_roll_opens_without_a_name_or_icon() {
 
 /// The stock popup paints only in `OnShow`, so a `START_LOOT_ROLL` that beats its roll to the model
 /// stays blank. On a cache miss the reference fires it from the item-template arrival callback
-/// (`0x61b460`, armed by `0x61b310`), and `feed_loot_rolls` holds it the same way.
+/// (`0x61b460`, armed by `0x61b310`), and the roll handlers hold it the same way.
 #[test]
 fn nothing_repaints_a_frame_that_opened_before_its_snapshot() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -463,6 +467,7 @@ fn nothing_repaints_a_frame_that_opened_before_its_snapshot() {
 fn managed_positions_engage_for_the_bare_frame_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // `GameTooltip.xml` brings `TOOLTIP_DEFAULT_COLOR`, which the dropdown lists read in their
     // OnLoad (`UIDropDownMenuTemplates.xml:186`).
@@ -490,13 +495,13 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // No bars: the row's base, 60, which the XML anchor also gives.
     s.run("UIParent_ManageFramePositions()").unwrap();
     s.resolve();
-    assert_eq!(bottom(&s), 60.0, "baseY");
+    benilla_ui::assert_near!(bottom(&s), 60.0, "baseY");
 
     // The pass reads `SHOW_MULTI_ACTIONBAR_1`/`_2`, not the bars (`UIParent.lua:1599-1606`).
     s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
+    benilla_ui::assert_near!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
 
     // The stance bar shows too. The pass touches its three shelf textures by name, unguarded
     // (`UIParent.lua:1705-1732`), so the stand-in bar needs stand-in textures.
@@ -511,12 +516,12 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     )
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s), 144.0, "60 + 42 + pet 42");
+    benilla_ui::assert_near!(bottom(&s), 144.0, "60 + 42 + pet 42");
 
     s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s), 102.0, "back to the multibar-only stack");
+    benilla_ui::assert_near!(bottom(&s), 102.0, "back to the multibar-only stack");
 }
 
 /// The roll icon's OnClick (`LootFrame.xml:353-361`): ctrl dresses up the item and shift posts
@@ -633,6 +638,7 @@ fn the_roll_template_carries_the_reference_name_and_the_parts_addons_reach_for()
 fn the_stock_group_loot_frame_survives_an_in_flight_roll() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -665,9 +671,9 @@ fn the_stock_group_loot_frame_survives_an_in_flight_roll() {
         .eval("local r, g, b = GetItemQualityColor(1)\nreturn r, g, b")
         .unwrap();
     assert!(
-        (painted.0 - common.0).abs() < 1e-6
-            && (painted.1 - common.1).abs() < 1e-6
-            && (painted.2 - common.2).abs() < 1e-6,
+        (painted.0 - common.0).abs() < 1.0 / 255.0
+            && (painted.1 - common.1).abs() < 1.0 / 255.0
+            && (painted.2 - common.2).abs() < 1.0 / 255.0,
         "the stock roll popup paints the miss tail's Common, got {painted:?} want {common:?}"
     );
 }

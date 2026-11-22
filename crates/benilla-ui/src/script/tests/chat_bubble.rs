@@ -31,6 +31,8 @@ fn vm() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(BlockFont));
+    // Stock `Fonts.xml` sets it; a plate or bubble built without it has no font and draws no text.
+    s.run(r#"NAMEPLATE_FONT = "Fonts\\FRIZQT__.TTF""#).unwrap();
     s.run(r#"WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()"#)
         .unwrap();
     s.resolve();
@@ -57,7 +59,7 @@ fn say(key: u64, line: u64, text: &str) -> BubbleState {
         text: text.to_string(),
         colour: [1.0, 1.0, 1.0],
         shown: true,
-        alpha: 1.0,
+        alpha: 255,
         seat: (500.0, 300.0),
     }
 }
@@ -140,7 +142,8 @@ fn the_text_is_the_line_in_its_colour_and_the_frame_hugs_it() {
         )
         .unwrap();
     assert_eq!(text, "Well met!");
-    assert_eq!((r, g, b), (1.0, 0.25, 0.25));
+    let read = crate::color::quant::read32;
+    crate::assert_near!((r, g, b), (read(1.0), read(0.25), read(0.25)));
 
     let rect = |s: &UiScript, what: &str| -> (f32, f32, f32, f32) {
         s.eval(&format!(
@@ -152,19 +155,19 @@ fn the_text_is_the_line_in_its_colour_and_the_frame_hugs_it() {
     };
     // Nine characters, 54 wide: over the two-border floor and under the cap.
     let fs = rect(&s, "regions[11]");
-    assert_eq!(
+    crate::assert_near!(
         fs,
         (473.0, 300.0, 54.0, LINE_H),
         "the text's BOTTOM on the seat"
     );
     let frame = rect(&s, "b");
-    assert_eq!(
+    crate::assert_near!(
         frame,
         (460.0, 287.0, 54.0 + 2.0 * MARGIN, LINE_H + 2.0 * MARGIN),
         "the margin on all four sides"
     );
     let tail = rect(&s, "regions[10]");
-    assert_eq!(
+    crate::assert_near!(
         tail,
         (
             500.0 - BORDER,
@@ -177,11 +180,11 @@ fn the_text_is_the_line_in_its_colour_and_the_frame_hugs_it() {
 
     // Short text takes the floor, long text the cap and a second line.
     drive(&mut s, &[say(7, 2, "hi")]);
-    assert_eq!(rect(&s, "regions[11]").2, 2.0 * BORDER);
+    crate::assert_near!(rect(&s, "regions[11]").2, 2.0 * BORDER);
     let long = "x".repeat(50);
     drive(&mut s, &[say(7, 3, &long)]);
     let fs = rect(&s, "regions[11]");
-    assert_eq!((fs.2, fs.3), (256.0, 2.0 * LINE_H));
+    crate::assert_near!((fs.2, fs.3), (256.0, 2.0 * LINE_H));
 
     // The frame's left edge lands on the device grid, wherever the seat falls.
     let mut off = say(7, 4, "Well met!");
@@ -195,7 +198,7 @@ fn the_text_is_the_line_in_its_colour_and_the_frame_hugs_it() {
     );
     s.resolve();
     let frame = rect(&s, "b");
-    assert_eq!(
+    crate::assert_near!(
         ((frame.0 * 2.0).fract(), (frame.1 * 2.0).fract()),
         (0.0, 0.0)
     );
@@ -362,7 +365,7 @@ fn a_bubble_is_reused_never_reparented_and_hidden_when_done() {
 fn bubbles_take_levels_from_two_in_list_order_and_their_fade_alpha() {
     let mut s = vm();
     let mut near = say(1, 1, "near");
-    near.alpha = 0.5;
+    near.alpha = 127;
     drive(&mut s, &[say(2, 1, "far"), near.clone()]);
     let levels = |s: &UiScript| -> (i64, i64) {
         s.eval(
@@ -373,9 +376,9 @@ fn bubbles_take_levels_from_two_in_list_order_and_their_fade_alpha() {
     };
     assert_eq!(levels(&s), (2, 3));
     assert_eq!(
-        s.eval::<f32>("local _, near = WorldFrame:GetChildren() return near:GetAlpha()")
+        s.eval::<f64>("local _, near = WorldFrame:GetChildren() return near:GetAlpha()")
             .unwrap(),
-        0.5
+        127.0 / 255.0
     );
     drive(&mut s, &[near, say(2, 1, "far")]);
     assert_eq!(
@@ -463,10 +466,65 @@ fn the_text_takes_the_nameplate_font_global() {
     );
 
     let mut bare = vm();
+    bare.run("NAMEPLATE_FONT = nil").unwrap();
     drive(&mut bare, &[say(1, 1, "a")]);
     assert!(bare
         .eval::<bool>(
             "local r = { (WorldFrame:GetChildren()):GetRegions() } return r[11]:GetFont() == nil"
         )
         .unwrap());
+}
+
+/// The lookup honours an `_G` `__index` (`lua_gettable`, `0x704373`), which may call any verb, the
+/// Model's included; it is made for a new bubble only, and outside the Model's borrow.
+#[test]
+fn a_global_index_metamethod_may_touch_the_model_during_a_bubbles_font_lookup() {
+    let mut s = vm();
+    s.run(
+        r#"NAMEPLATE_FONT = nil
+           hits = 0
+           setmetatable(getfenv(0), { __index = function(t, k)
+               if k == "NAMEPLATE_FONT" then
+                   hits = hits + 1
+                   CreateFrame("Frame", nil, UIParent):SetWidth(UIParent:GetWidth())
+               end
+               return nil
+           end })"#,
+    )
+    .unwrap();
+    drive(&mut s, &[say(1, 1, "a")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 1);
+    // The same speaker's next line takes the freed frame; a second speaker needs a new one.
+    drive(&mut s, &[say(1, 2, "b")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 1);
+    drive(&mut s, &[say(1, 2, "b"), say(2, 1, "c")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 2);
+}
+
+/// The bubble text's justification as a Lua reader sees it.
+fn text_justify(s: &mut UiScript) -> String {
+    s.eval::<String>(
+        r#"local regions = { (WorldFrame:GetChildren()):GetRegions() }
+           return regions[11]:GetJustifyH()"#,
+    )
+    .unwrap()
+}
+
+/// `0x4b16e7`: only koKR left-justifies the text; every other locale keeps the FontString's
+/// CENTER. A reused bubble takes the new line's justify alike, and the VM's seated locale is the
+/// one read.
+#[test]
+fn only_a_korean_client_left_justifies_the_bubble_text() {
+    for index in 0..8 {
+        let mut s = vm();
+        s.set_locale(index);
+        drive(
+            &mut s,
+            &[say(7, 1, "Well met, traveller, and well met again!")],
+        );
+        let want = if index == 1 { "LEFT" } else { "CENTER" };
+        assert_eq!(text_justify(&mut s), want, "locale {index}");
+        drive(&mut s, &[say(7, 2, "Farewell.")]);
+        assert_eq!(text_justify(&mut s), want, "locale {index}, second line");
+    }
 }

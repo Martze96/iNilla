@@ -17,7 +17,7 @@ pub struct SpellDisplay {
     /// `0x6e3130` (`0x6e384b`).
     pub id: u32,
     pub name: String,
-    /// `SpellNameSubtext` enUS (column 129): "Rank N", even "Rank 1", or a word such as "Racial".
+    /// `SpellNameSubtext` (the block at column 129, read at the locale): "Rank N", even "Rank 1", or a word such as "Racial".
     pub rank: Option<String>,
     /// The icon's MPQ path, without extension; `None` for icon 0 or an id not in `SpellIcon.dbc`.
     pub icon: Option<String>,
@@ -100,8 +100,11 @@ pub struct SpellDisplay {
     pub mana_cost_pct: u32,
     /// `manaCostPerlevel` (column 33): the per-level cost term of `GetPowerCost` (`0x6e31b0`).
     pub mana_cost_per_level: u32,
-    /// `manaPerSecond` (column 34): the tooltip's "plus N per sec"; column 35 is 0 on every row.
+    /// `manaPerSecond` (column 34): the tooltip's "plus N per sec" (`0x6e3300`).
     pub mana_per_second: u32,
+    /// `manaPerSecondPerLevel` (column 35): the per-second cost's per-level term (`0x6e332e`), 0
+    /// on every 5875 row.
+    pub mana_per_second_per_level: u32,
     /// `rangeIndex` (column 36): the `SpellRange.dbc` row.
     pub range_index: u32,
     /// `Targets` (column 13): the `TARGET_FLAG_*` seed of the cast arm's targeting word.
@@ -133,7 +136,8 @@ pub struct SpellDisplay {
     /// `EquippedItemSubClassMask` (column 59): the allowed subclasses, `1 << subclass` each.
     pub equipped_item_subclass_mask: u32,
     /// `EquippedItemInventoryTypeMask` (column 60): `1 << InventoryType` each; the item-target
-    /// gate's last leg (`0x495d60`), whose mismatch is the local "Invalid target" (`0x0a`).
+    /// gate's last leg (`0x495d60`), whose mismatch is the local `0x0a`, "That item is not a valid
+    /// target." for a spell with `Targets & 0x10` (`0x6e1bfa`).
     pub equipped_item_inventory_type_mask: u32,
     /// `RequiresSpellFocus` (column 15): the `SpellFocusObject.dbc` object needed nearby.
     pub requires_spell_focus: u32,
@@ -147,9 +151,9 @@ pub struct SpellDisplay {
     /// `ActiveIconID` (column 118) as stored: nonzero makes a second press cancel the spell's
     /// live aura. The client tests the id, not the texture (`0x4e55f0`, `0x4b36f0`).
     pub active_icon_id: u32,
-    /// `Description` enUS (column 138): the tooltip body, its `$` tokens unsubstituted.
+    /// `Description` (the block at column 138): the tooltip body, its `$` tokens unsubstituted.
     pub description: Option<String>,
-    /// `AuraDescription` enUS (column 147): the buff or debuff icon's tooltip.
+    /// `AuraDescription` (the block at column 147): the buff or debuff icon's tooltip.
     pub aura_description: Option<String>,
     /// `DurationIndex` (column 30): the `SpellDuration.dbc` row; 0 for no duration.
     pub duration_index: u32,
@@ -168,6 +172,15 @@ pub struct SpellDisplay {
     pub max_target_level: u32,
     /// `MaxAffectedTargets` (column 163): the description expander's `$i` (`507fc3`).
     pub max_affected_targets: u32,
+    /// `MinFactionId` (column 170, `+0x2a8`): the faction whose standing the spell tooltip's
+    /// reputation line names (`0x52f2ae`); 0 for none, set on one 5875 row.
+    pub min_faction_id: u32,
+    /// `MinReputation` (column 171, `+0x2ac`): the rank that line requires, 0 Hated to 7 Exalted.
+    pub min_reputation: u32,
+    /// `RequiredAuraVision` (column 172, `+0x2b0`): nonzero hides the aura on every unit's rows
+    /// unless bit `value - 1` of the active player's `PLAYER_FIELD_BYTES2` byte 1 is set
+    /// (`0x51989c`-`0x5198b8`); 26869 Amorous carries 1.
+    pub required_aura_vision: u32,
     /// `EffectBasePoints[3]` (columns 76-78, signed): each roll's floor; -1 on weapon damage.
     pub effect_base_points: [i32; 3],
     /// `EffectDieSides[3]` (columns 64-66, signed): with n dice, the value runs base + n to
@@ -249,6 +262,7 @@ impl Default for SpellDisplay {
             mana_cost_pct: 0,
             mana_cost_per_level: 0,
             mana_per_second: 0,
+            mana_per_second_per_level: 0,
             range_index: 0,
             targets: 0,
             target_creature_type: 0,
@@ -277,6 +291,9 @@ impl Default for SpellDisplay {
             stack_amount: 0,
             max_target_level: 0,
             max_affected_targets: 0,
+            min_faction_id: 0,
+            min_reputation: 0,
+            required_aura_vision: 0,
             effect_base_points: [0; 3],
             effect_die_sides: [0; 3],
             effect_base_dice: [0; 3],
@@ -318,11 +335,19 @@ impl SpellDisplay {
     }
 
     /// The lock skill this spell provides (`0x5f850f`), from the player's skill in its line:
-    /// the effect value (`0x6e3800`) with its caller's rounding (`0x6e3760`). Its level term is
-    /// that skill with its bonuses (`0x5ea690`), not the caster's level; a skill of 0 leaves only
-    /// the flat terms.
+    /// [`Self::effect_points_int`] of its open-lock effect.
     pub fn open_lock_skill(&self, skill_value: u32) -> Option<i32> {
-        let e = self.open_lock?.effect;
+        Some(self.effect_points_int(self.open_lock?.effect, skill_value))
+    }
+
+    /// Effect `e`'s minimum points as an integer, `0x6e3760` at level 0 for the player: the effect
+    /// value (`0x6e3800`) with its rounding. Its level term is `skill_value`, the player's skill in
+    /// the spell's line with its bonuses (`0x5ea690`), not the caster's level; a skill of 0 leaves
+    /// only the flat terms. `e` past the three effects reads 0.
+    pub fn effect_points_int(&self, e: usize, skill_value: u32) -> i32 {
+        if e >= self.effects.len() {
+            return 0;
+        }
         // Less baseLevel floored at 0 (read at `0x6e3854`, subtracted at `0x6e385b`-`0x6e385f`).
         let delta = self
             .skill_level(skill_value)
@@ -338,7 +363,7 @@ impl SpellDisplay {
         } else {
             v * 2.0 + 0.5
         };
-        Some((doubled.round_ties_even() as i32) >> 1)
+        (doubled.round_ties_even() as i32) >> 1
     }
 
     /// The hostility classifier `0x6ea280` reduced to "targets enemies", the gate on the victim's
@@ -383,8 +408,8 @@ impl SpellDisplay {
         self.attributes_ex4 & ATTR_EX4_ALLOW_CLIENT_TARGETING != 0
     }
 
-    /// `AttributesEx3 & 0x400000`: a running auto-repeat with this bit ends when any new cast
-    /// begins (`0x60959e`). Only wand Shoot 5019 has it; Auto Shot survives, so hunters weave.
+    /// `AttributesEx3 & 0x400000`, wand Shoot 5019's: a running auto-repeat with this bit ends when
+    /// the validator refuses a spell as not ready (`0x60959e`), and a cast that commits leaves it.
     pub fn casting_cancels_autorepeat(&self) -> bool {
         self.attributes_ex3 & 0x0040_0000 != 0
     }
@@ -414,7 +439,7 @@ impl SpellDisplay {
     }
 
     /// `AttributesEx & 0x80000`: the caster is never a bind candidate, not in `BindTarget`
-    /// (`0x6e5b40` at `6e5bf7`), not for `SpellCanTargetUnit`'s unit leg (`0x6e6460` at `6e6507`)
+    /// (`0x6e5b40` at `6e5bf7`), not for `SpellCanTargetObject`'s unit leg (`0x6e6460` at `6e6507`)
     /// and not for the world pick (`0x6e61a0` at `6e61cf`).
     pub fn excludes_caster(&self) -> bool {
         self.attributes_ex & ATTR_EX_EXCLUDE_CASTER != 0
@@ -549,6 +574,22 @@ impl SpellDisplay {
         self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST != 0
     }
 
+    /// `TestSpellAttributesAndFlags 0x6e4870(rec, flags)`: 1 for `AttributesEx2 & 0x40000000`;
+    /// else 0 for `AttributesEx & 0x400` or `AttributesEx2 & 0x10000000`; else 1 when `flags`
+    /// bit 0 is clear or bit 12 set. Its one caller, the GO handler `0x6e7a70`, passes the cast
+    /// flags (`0x6e7aa4`) and gates the precast end's tail with the answer (`0x6e7fc5`).
+    pub fn test_attributes_and_flags(&self, flags: u32) -> bool {
+        if self.attributes_ex2 & ATTR_EX2_ACTIVE_THREAT != 0 {
+            return true;
+        }
+        if self.attributes_ex & ATTR_EX_NO_THREAT != 0
+            || self.attributes_ex2 & ATTR_EX2_NOT_AN_ACTION != 0
+        {
+            return false;
+        }
+        flags & 0x1 == 0 || flags & 0x1000 != 0
+    }
+
     /// Hidden from the buff bar (`0x4e4170`, `0x4e42b6`-`0x4e42c8`): `Attributes` read as a byte,
     /// so `0x80` and not the dword's sign, or `AttributesEx & 0x10000000`. The aura stays live;
     /// `GetPlayerBuff` never returns it: warrior stances, Defensive State 5302.
@@ -677,6 +718,37 @@ impl FormRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x6e4870`'s order (`0x6e4873`-`0x6e4892`): the `AttributesEx2` 0x40000000 pass first,
+    /// then the two refusals, then the flags. vmangos's GO flags (0x100, with 0x20 for a ranged
+    /// shot) leave bit 0 clear, so a plain record answers 1.
+    #[test]
+    fn the_go_attribute_test_reads_the_record_before_the_flags() {
+        let row = |ex: u32, ex2: u32| SpellDisplay {
+            attributes_ex: ex,
+            attributes_ex2: ex2,
+            ..Default::default()
+        };
+        assert!(row(0, 0).test_attributes_and_flags(0x100), "a plain GO");
+        assert!(row(0, 0).test_attributes_and_flags(0x120));
+        assert!(
+            !row(0, 0).test_attributes_and_flags(0x1),
+            "flag bit 0 alone"
+        );
+        assert!(
+            row(0, 0).test_attributes_and_flags(0x1001),
+            "bit 12 beside it"
+        );
+        assert!(!row(0x400, 0).test_attributes_and_flags(0x100), "Ex 0x400");
+        assert!(
+            !row(0, 0x1000_0000).test_attributes_and_flags(0x100),
+            "Ex2 0x10000000"
+        );
+        assert!(
+            row(0x400, 0x5000_0000).test_attributes_and_flags(0x1),
+            "Ex2 0x40000000 passes ahead of both refusals and the flags"
+        );
+    }
 
     #[test]
     fn is_harmful_follows_the_client_classifier() {

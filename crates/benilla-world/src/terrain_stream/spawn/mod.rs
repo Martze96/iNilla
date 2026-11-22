@@ -235,9 +235,8 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // The collision hull, welded into the owner tile's batch, which carries the
-                    // `PickOccluder` clamp. A hull-less model (a tree canopy) stays pick-through,
-                    // as the reference's world trace tests only collision-flagged doodads.
+                    // The collision hull, welded into the owner tile's batch: the body's alone, as
+                    // the mouse pick tests the drawn batches (`interact::DoodadOccluders`).
                     if let Some((verts, tris)) = (!doodad_bodies_disabled())
                         .then(|| placement_collider_data(m.collision.as_ref(), &p.transform))
                         .flatten()
@@ -245,13 +244,10 @@ pub(super) fn spawn_loaded_placements(
                         if hull_weld_disabled() {
                             ents.push(
                                 commands
-                                    .spawn((
-                                        PendingCollider::new(
-                                            build_collider_task(verts, tris),
-                                            None,
-                                            !doodad_hulls_bare(),
-                                        ),
-                                        PickOccluder,
+                                    .spawn(PendingCollider::new(
+                                        build_collider_task(verts, tris),
+                                        None,
+                                        !doodad_hulls_bare(),
                                     ))
                                     .id(),
                             );
@@ -324,7 +320,6 @@ pub(super) fn spawn_loaded_placements(
                                 visible: vec![true; m.group_nav.len()],
                                 // Fogged only once a flood puts the group on the chain.
                                 interior_fog: vec![false; m.group_nav.len()],
-                                liquid_visited: vec![false; m.group_nav.len()],
                                 // MOGP `groupLiquid`: a room wholly submerged, with no liquid grid.
                                 flooded: m
                                     .group_nav
@@ -715,13 +710,10 @@ pub(super) fn spawn_loaded_placements(
                 if hull_weld_disabled() {
                     ents.push(
                         commands
-                            .spawn((
-                                PendingCollider::new(
-                                    build_collider_task(verts, tris),
-                                    None,
-                                    !doodad_hulls_bare(),
-                                ),
-                                PickOccluder,
+                            .spawn(PendingCollider::new(
+                                build_collider_task(verts, tris),
+                                None,
+                                !doodad_hulls_bare(),
                             ))
                             .id(),
                     );

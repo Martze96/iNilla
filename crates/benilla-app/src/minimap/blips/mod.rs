@@ -6,21 +6,24 @@
 //! - In range (`d / viewRadius ≤ 0.8`): the `POIIcons.blp` cell of the `Icon` column, only for
 //!   rows with `Flags & 2` (the world-PvP towers in 1.12 data); other rows draw nothing.
 //! - Out of range within 694.444 yd: the first 3 by (`Importance` signed ascending, distance),
-//!   on the 0.8 rim, each rotated to point at its POI in its source's art ([`RimArrow`]).
+//!   each a rim arrow: one of the minimap's engine `Model` children, which the VM aims at its POI
+//!   and the model pane renderer draws in its source's art ([`RimArrow`]), at a level above the
+//!   minimap's own draw, so above every dot.
+//! - After the DBC rows, the static records: the selected quest's point (slot 0, icon 5, flags 0,
+//!   `0x6dacb0`), the gossip marker (slot 1) and the corpse (slot 2, icon 7, flags 2, rank −1,
+//!   `0x6dacd0`), which alone skips the 694.444-yd cut (`0x6d9cc2`).
 //!
 //! Dots come from the ObjectIcons classifier `0x4eaa90`. A unit or player must first be alive, not
 //! our own charm or summon, and trackable ([`dots`]'s `unit_dot_eligible`). Then quest status 7
 //! draws the gold cell 3 (status 6 draws nothing; green cell 2 is never used in 1.12), and every
 //! other object falls through to tracking: a GameObject passing `0x5ed2b0` draws gold cell 0, a
 //! unit passing `0x5ed210` red cell 1, against the `PLAYER_TRACK_CREATURES`/`RESOURCES` masks.
-//! Party members are blue cell 4. Dots cull at the view radius in 3-D distance and draw last.
+//! Party members and our pet, our charm else our summon (`0x6dad10` slot 4), are blue cell 4 within
+//! 0.8 of the radius. Object dots cull at the view radius in 3-D distance; all draw last.
 //!
 //! Blip sizes are frozen once by the CGMinimapFrame ctor (`0x4edbc0`) against a 140.8-px basis.
 //!
-//! Not built: the landmark `WorldStateID` gate (`0x6d9b27`); the per-source rim-arrow z-order
-//! (bottom to top landmark, party, quest, gossip, corpse, from `+0x48` as a frame-level offset),
-//! which conflicts with `0x4ed7b7` drawing the dots last and is unsettled; and static blip slot 0,
-//! `SelectQuestLogEntry()`'s gold guide arrow at the quest's POI (`0x4def70`).
+//! Not built: the landmark `WorldStateID` gate (`0x6d9b27`).
 //!
 //! Deviation: dots re-project every frame, where the reference draws coordinates about 1 s
 //! stale, because that staleness is a throttle quirk.
@@ -33,18 +36,18 @@ mod dots;
 
 pub(super) use dots::{emit_party_dots, emit_quest_dots, emit_tracking_dots, SelfTracking};
 
-use bevy::ecs::system::NonSendMut;
 use bevy::math::Rect;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use benilla_assets::coords::bevy_to_wow;
 use benilla_formats::{AreaPoi, AreaPoiCatalog};
-use benilla_ui::script::UiScript;
+use benilla_ui::script::MinimapRimArrow;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::names::NameCache;
 use crate::net::{Embodied, Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 
 /// The landmark rank radius in yards (`0x8116cc`).
@@ -58,99 +61,125 @@ const FLAG_IN_RANGE_ICON: u32 = 0x2;
 /// The basis every blip size is frozen against: the stock 140-unit widget at 140.8 px on the
 /// 1024×768 screen, computed once by the CGMinimapFrame ctor (`0x4edbc0`).
 pub(super) const BLIP_BASIS_PX: f32 = 140.8;
-/// The player arrow's art, on the minimap and the world map, whose stock `WorldMapFrame.lua`
-/// `SetModel`s a pane to the same M2.
-pub(crate) const PLAYER_ARROW_TEXTURE: &str = "Interface\\Minimap\\MinimapArrow";
-/// `MinimapArrow.m2` is one 0.0262 × 0.0263-unit quad at 1280 px per model unit.
-pub(crate) const PLAYER_ARROW_QUAD_PX: f32 = 33.6;
-/// The quad's authored centre, (+0.0004, +0.00135) model units off the origin; it turns with
-/// facing.
-pub(crate) const PLAYER_ARROW_OFFSET_PX: bevy::math::Vec2 = bevy::math::Vec2::new(0.51, -1.73);
-/// The rim arrow's quad: `Rotating-MinimapArrow.m2`'s 0.0500-unit full-texture quads at 768 px
-/// per model unit (modelScale 0.6 × 1280), so the sprite needs no uv crop.
+/// The rim arrow's quad for the hover test: `Rotating-MinimapArrow.m2`'s 0.0500-unit quads at
+/// 768 units per model unit (model scale 0.6 × 1280).
 const ARROW_QUAD_PX: f32 = 38.4;
 
-/// Which rim-arrow art a blip source draws. The minimap's one arrow model,
-/// `Rotating-MinimapArrow.m2`, picks among four arrow layers by sequence (`0x4ed349`): in each
-/// looping sequence exactly one layer's stepped alpha is 1.0, untinted, so one flat sprite per
-/// source is exact. `AnimationData.dbc` names them 165 `GroupArrow`, 166 `Arrow`, 167
-/// `CorpseArrow`, 168 `GuideArrow`.
-///
-/// The selector is `0xa7` when the output record's `+0x48 == 2`, else `0xa6 + 2·(v != -2)`, so
-/// everything but a DBC landmark and the corpse draws the guide arrow.
+/// Which source a landmark rim arrow comes from: an `AreaPOI.dbc` row (`+0x48 == -2`, sequence
+/// 166 `Arrow`), the guard's directions, the gossip marker (static slot 1, sequence 168
+/// `GuideArrow`), or the corpse (static slot 2, sequence 167 `CorpseArrow`). The VM picks the
+/// sequence from the slot (`0x4ed353`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RimArrow {
-    /// An `AreaPOI.dbc` landmark: sequence `0xa6`, `+0x48 == -2`, the white one.
+    /// An `AreaPOI.dbc` landmark.
     Landmark,
-    /// A party or raid member, or your pet: sequence `0xa5`, armed once at `0x4ee1e3` and never
-    /// re-armed.
-    Group,
-    /// Your own corpse: sequence `0xa7`, `+0x48 == 2`.
-    Corpse,
-    /// The guard's directions ([`crate::poi_marker`]): sequence `0xa8`, the default arm, gold.
+    /// The selected quest's point ([`quest_landmark`]).
+    Quest,
+    /// The guard's directions ([`crate::poi_marker`]).
     Guide,
+    /// The player's corpse ([`corpse_landmark`]).
+    Corpse,
 }
 
 impl RimArrow {
-    /// The `AnimationData.dbc` sequence the reference plays for this art; the test checks the
-    /// model against it.
-    #[cfg(test)]
-    pub(crate) const fn anim_id(self) -> u16 {
+    /// The arrow record's static slot (`+0x48`, `0x6dab26`–`0x6dab41`), −2 for a DBC row.
+    fn slot(self) -> i32 {
         match self {
-            Self::Group => 0xa5,
-            Self::Landmark => 0xa6,
-            Self::Corpse => 0xa7,
-            Self::Guide => 0xa8,
+            RimArrow::Landmark => -2,
+            RimArrow::Quest => 0,
+            RimArrow::Guide => 1,
+            RimArrow::Corpse => 2,
         }
     }
-
-    /// The `.blp` that sequence lights.
-    pub(crate) const fn texture(self) -> &'static str {
-        match self {
-            Self::Landmark => "Interface\\Minimap\\Rotating-MinimapArrow",
-            Self::Group => "Interface\\Minimap\\Rotating-MinimapGroupArrow",
-            Self::Corpse => "Interface\\Minimap\\Rotating-MinimapCorpseArrow",
-            Self::Guide => "Interface\\Minimap\\Rotating-MinimapGuideArrow",
-        }
-    }
-
-    /// The four, in [`RimArrowArt`]'s slot order.
-    pub(crate) const ALL: [Self; 4] = [Self::Landmark, Self::Group, Self::Corpse, Self::Guide];
 }
 
-/// The four rim-arrow textures; a missing one draws no arrow for its source, never another's.
-#[derive(Default)]
-pub(crate) struct RimArrowArt([Option<Handle<Image>>; 4]);
-
-impl RimArrowArt {
-    pub(crate) fn set(&mut self, kind: RimArrow, tex: Option<Handle<Image>>) {
-        self.0[kind as usize] = tex;
-    }
-
-    pub(super) fn get(&self, kind: RimArrow) -> Option<&Handle<Image>> {
-        self.0[kind as usize].as_ref()
-    }
-
-    /// Any art at all: the landmark pass runs without `AreaPOI.dbc`, for the guard marker.
-    pub(super) fn any(&self) -> bool {
-        self.0.iter().any(Option::is_some)
+/// The selected quest's static blip (`0x6dacb0`): slot 0, icon 5, no flags, ranked by the record's
+/// `PointOpt` and named by its title, on the map the player is on as the setter takes it
+/// (`0x6dac10` stores `[0x86f694]`).
+pub(crate) fn quest_landmark(blip: &benilla_ui::script::QuestBlip, map_id: u32) -> AreaPoi {
+    AreaPoi {
+        importance: blip.rank,
+        icon: 5,
+        faction_id: 0,
+        pos: [blip.x, blip.y, 0.0],
+        continent_id: map_id,
+        flags: 0,
+        area_id: 0,
+        name: blip.name.clone(),
+        description: String::new(),
+        world_state_id: 0,
     }
 }
+
+/// The corpse's static blip (`0x6dacd0`): slot 2, icon 7, flags 2, rank −1, named by
+/// `CORPSE_RED`, present only while the corpse is on the map the player is on (`0x492010`).
+pub(crate) fn corpse_landmark(position: [f32; 3], map_id: u32, name: String) -> AreaPoi {
+    AreaPoi {
+        importance: -1_i32 as u32,
+        icon: 7,
+        faction_id: 0,
+        pos: position,
+        continent_id: map_id,
+        flags: 2,
+        area_id: 0,
+        name,
+        description: String::new(),
+        world_state_id: 0,
+    }
+}
+
 /// An in-range POI icon's quad, 16 px (`[0xbc7658]`, frozen by the ctor).
 const POI_ICON_PX: f32 = 16.0;
 
-/// The blip under the cursor this frame, for [`drive_blip_tooltip`].
-#[derive(Resource, Default)]
-pub(crate) enum MinimapBlipHover {
-    #[default]
-    None,
-    /// A landmark's name.
-    Landmark(String),
-    /// A unit dot's guid, resolved through the name cache, and whether the dot drew grey; the
-    /// tooltip line greys the same way (`|cffb0b0b0`).
-    Npc(u64, bool),
-    /// A tracked GameObject dot: its template name and the grey flag.
-    TrackedGo(String, bool),
+/// Which of the probe's masks an element under the cursor sets, in the order the tooltip's text
+/// joins them (`0x4eb58c`-`0x4eb840`): the rim arrows (`0xbdcbb0`), the party and pet arrow frames
+/// (`0xbdcbb4`), the landmark icons (`0xbdcbac`), then the dots of categories 0 to 4 (`0xbc81e4`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum BlipBlock {
+    RimArrow,
+    GroupArrow,
+    Icon,
+    /// A dot's category: 0 a tracked game object, 1 a tracked unit, 3 a quest giver, 4 a party
+    /// member or the pet.
+    Dot(u8),
+}
+
+/// How a hovered element names itself.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum BlipName {
+    /// A landmark's name or a game object's template name, already in hand.
+    Known(String),
+    /// A unit's guid, resolved through its object or the name cache (`0x4eb31a`, `0x4eb33c`).
+    Unit(u64),
+}
+
+/// One element under the cursor.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct BlipLine {
+    pub(crate) block: BlipBlock,
+    pub(crate) name: BlipName,
+    /// A dot record's colour flag `+0x10`, set across a subzone line: its line is wrapped in
+    /// `|cffb0b0b0` (`0x4eb7bb`-`0x4eb7cf`).
+    pub(crate) grey: bool,
+}
+
+/// Every element under the cursor this frame, as the probe's masks keep them, for
+/// [`drive_blip_tooltip`].
+#[derive(Resource, Default, Debug)]
+pub(crate) struct MinimapBlipHover(Vec<BlipLine>);
+
+impl MinimapBlipHover {
+    /// One element under the cursor, in its block's list order.
+    pub(super) fn push(&mut self, block: BlipBlock, name: BlipName, grey: bool) {
+        self.0.push(BlipLine { block, name, grey });
+    }
+
+    /// The elements in the order the text joins them: block by block, each in list order.
+    pub(crate) fn lines(&self) -> Vec<&BlipLine> {
+        let mut lines: Vec<&BlipLine> = self.0.iter().collect();
+        lines.sort_by_key(|l| l.block);
+        lines
+    }
 }
 
 /// The blip layer's system inputs, tupled to keep `emit_minimap` under Bevy's 16-parameter cap.
@@ -158,7 +187,11 @@ pub(super) type BlipInputs<'w, 's> = (
     Res<'w, crate::ui_quest::QuestGiver>,
     Res<'w, GuidIndex>,
     Query<'w, 's, &'static GlobalTransform, With<NetEntity>>,
-    Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    // The window and `widescreen`, for the cursor on the interface's screen.
+    (
+        Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+        Option<Res<'w, crate::video::Widescreen>>,
+    ),
     ResMut<'w, MinimapBlipHover>,
     Res<'w, crate::ui_party::GroupState>,
     TrackedCandidates<'w, 's>,
@@ -168,8 +201,6 @@ pub(super) type BlipInputs<'w, 's> = (
     Option<Res<'w, crate::go_templates::Locks>>,
     Res<'w, crate::poi_marker::PoiMarker>,
     Option<Res<'w, crate::area_poi::AreaPoiRes>>,
-    ResMut<'w, super::MinimapPing>,
-    Option<NonSendMut<'w, UiScript>>,
 );
 
 /// Every streamed object the classifier considers; our own avatar is the arrow, never a dot.
@@ -199,9 +230,6 @@ pub(super) struct BlipCtx {
     pub(super) wz: f32,
     /// The cursor in the quads' y-down logical px.
     pub(super) cursor: Option<Vec2>,
-    /// Window px per root unit: everything else here is window px, while Lua
-    /// ([`Minimap:PingLocation`](super::ping)) hands root units.
-    pub(super) seam: f32,
 }
 
 impl BlipCtx {
@@ -222,12 +250,15 @@ pub(super) struct LandmarkSelection<'a> {
     pub(super) arrows: Vec<(f32, &'a AreaPoi, RimArrow)>,
 }
 
-/// The landmark selection (module doc). `marker`, the guard-directions POI, is appended after
-/// the DBC scan as the reference appends its static blip slot: it skips the candidacy gate but
-/// not the 694.444-yd cut, which `0x6d9cc2` spares only the corpse slot `0xcea848`.
+/// The landmark selection (module doc). `quest`, the selected quest's POI, `marker`, the
+/// guard-directions POI, and `corpse` are appended after the DBC scan as the reference appends its
+/// static blip slots 0 to 2: all skip the candidacy gate, and only the corpse (`0xcea848`) skips
+/// the 694.444-yd cut (`0x6d9cc2`).
 pub(super) fn select_landmarks<'a>(
     pois: impl Iterator<Item = &'a AreaPoi>,
+    quest: Option<&'a AreaPoi>,
     marker: Option<&'a AreaPoi>,
+    corpse: Option<&'a AreaPoi>,
     map_id: u32,
     wx: f32,
     wy: f32,
@@ -238,14 +269,16 @@ pub(super) fn select_landmarks<'a>(
     let candidates = pois
         .filter(|p| p.continent_id == map_id && p.flags & FLAG_CANDIDATE != 0)
         .map(|p| (p, RimArrow::Landmark))
-        .chain(marker.map(|m| (m, RimArrow::Guide)));
+        .chain(quest.map(|q| (q, RimArrow::Quest)))
+        .chain(marker.map(|m| (m, RimArrow::Guide)))
+        .chain(corpse.map(|c| (c, RimArrow::Corpse)));
     for (p, art) in candidates {
         let d = ((p.pos[0] - wx).powi(2) + (p.pos[1] - wy).powi(2)).sqrt();
         if d / radius_yd <= BLIP_EDGE_RATIO {
             if p.flags & FLAG_IN_RANGE_ICON != 0 {
                 icons.push(p);
             }
-        } else if d <= LANDMARK_RANK_YD {
+        } else if d <= LANDMARK_RANK_YD || art == RimArrow::Corpse {
             arrows.push((d, p, art));
         }
     }
@@ -267,20 +300,23 @@ fn poi_icon_cell(icon: u32) -> Option<[f32; 4]> {
     Some([c / 8.0, (c + 1.0) / 8.0, r / 8.0, (r + 1.0) / 8.0])
 }
 
-/// Draw the in-range POI icons, then the rim arrows; the later-drawn hover hit wins.
+/// Draw the in-range POI icons, then hover-test the rim arrows, which the engine children draw.
 pub(super) fn emit_landmarks(
     ctx: &BlipCtx,
     cat: Option<&AreaPoiCatalog>,
+    quest: Option<&AreaPoi>,
     marker: Option<&AreaPoi>,
+    corpse: Option<&AreaPoi>,
     map_id: u32,
-    arrows: &RimArrowArt,
     poi_icons: Option<&Handle<Image>>,
     quads: &mut UiQuads,
     hover: &mut MinimapBlipHover,
 ) {
     let sel = select_landmarks(
         cat.into_iter().flat_map(|c| c.rows().map(|(_, p)| p)),
+        quest,
         marker,
+        corpse,
         map_id,
         ctx.wx,
         ctx.wy,
@@ -305,134 +341,190 @@ pub(super) fn emit_landmarks(
             });
             if let Some(c) = ctx.cursor {
                 if rect.contains(c) {
-                    *hover = MinimapBlipHover::Landmark(poi.name.clone());
+                    hover.push(BlipBlock::Icon, BlipName::Known(poi.name.clone()), false);
                 }
             }
         }
     }
-    for (_d, poi, art) in &sel.arrows {
-        let Some(tex) = arrows.get(*art) else {
-            continue;
-        };
-        let rect = push_rim_arrow(ctx, poi.pos, tex, quads);
+    for (_d, poi, _art) in &sel.arrows {
         if let Some(c) = ctx.cursor {
-            if rect.contains(c) {
-                *hover = MinimapBlipHover::Landmark(poi.name.clone());
+            if rim_arrow_rect(ctx, poi.pos).contains(c) {
+                hover.push(
+                    BlipBlock::RimArrow,
+                    BlipName::Known(poi.name.clone()),
+                    false,
+                );
             }
         }
     }
 }
 
-/// One rim arrow on the 0.8 rim, pointing at its target, drawn in one pass as only one of the
-/// model's layers is ever opaque. Returns its rect for the hover test.
-fn push_rim_arrow(
-    ctx: &BlipCtx,
-    target: [f32; 3],
-    tex: &Handle<Image>,
-    quads: &mut UiQuads,
-) -> Rect {
+/// A rim arrow's square on the 0.8 rim toward its target, for the hover test: the probe tests the
+/// landmark and the group arrow frames alike (`0x4eb3b0`, `0x4eb433`).
+fn rim_arrow_rect(ctx: &BlipCtx, target: [f32; 3]) -> Rect {
     let dir = ctx.offset(target).normalize_or_zero();
     let pos = ctx.center + dir * (ctx.side * 0.5 * BLIP_EDGE_RATIO);
-    // Quad rotation is clockwise on a y-down screen and the art points up at zero.
-    let rotation = dir.x.atan2(-dir.y);
-    let rect = Rect::from_center_size(pos, Vec2::splat(ctx.side * (ARROW_QUAD_PX / BLIP_BASIS_PX)));
-    quads.overlays.push(UiQuad {
-        rect,
-        z_key: ctx.z,
-        texture: Some(tex.clone()),
-        color: [1.0, 1.0, 1.0, ctx.alpha],
-        rotation,
-        ..default()
-    });
-    rect
+    Rect::from_center_size(pos, Vec2::splat(ctx.side * (ARROW_QUAD_PX / BLIP_BASIS_PX)))
+}
+
+/// The bearing from the player to `(x, y)` in radians from north toward west, the reference's
+/// `atan2` of the offset (`0x6d9dd1`, `0x6daf7f`), which is also the arrow's facing.
+pub(super) fn bearing(wx: f32, wy: f32, x: f32, y: f32) -> f32 {
+    (y - wy).atan2(x - wx)
+}
+
+/// A kept landmark's identity, its name and position bits.
+pub(super) type ArrowKey = (String, [u32; 2]);
+
+/// The landmark selection as the render's arrow records (`0x6daa20`), with each record's identity
+/// for the rebuild test: the list is rebuilt when its count or any kept record changes
+/// (`0x6d9d82`–`0x6d9dfb`).
+pub(super) fn rim_arrow_records(
+    sel: &LandmarkSelection<'_>,
+    wx: f32,
+    wy: f32,
+) -> (Vec<MinimapRimArrow>, Vec<ArrowKey>) {
+    sel.arrows
+        .iter()
+        .map(|(_, poi, art)| {
+            (
+                MinimapRimArrow {
+                    bearing: bearing(wx, wy, poi.pos[0], poi.pos[1]),
+                    slot: art.slot(),
+                    // The gossip marker and the corpse show indoors too (`+0x44`, `0x6daaf4`,
+                    // `0x6daafb`); the quest's and the DBC rows' do not.
+                    indoors: matches!(art, RimArrow::Guide | RimArrow::Corpse),
+                },
+                (
+                    poi.name.clone(),
+                    [poi.pos[0].to_bits(), poi.pos[1].to_bits()],
+                ),
+            )
+        })
+        .unzip()
 }
 
 /// A party member's position: the streamed transform, else the `PARTY_MEMBER_STATS` position
 /// (whole yards on the wire).
-pub(crate) fn party_member_pos(
-    m: &benilla_protocol::messages::GroupMemberEntry,
+pub(crate) fn party_member_pos<F: bevy::ecs::query::QueryFilter>(
+    guid: u64,
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,
-    unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
+    unit_pos: &Query<&GlobalTransform, F>,
 ) -> Option<(f32, f32)> {
-    if let Some(tf) = guids.0.get(&m.guid).and_then(|e| unit_pos.get(*e).ok()) {
+    if let Some(tf) = guids.0.get(&guid).and_then(|e| unit_pos.get(*e).ok()) {
         let w = bevy_to_wow(tf.translation());
         return Some((w[0], w[1]));
     }
     group
         .stats
-        .get(&m.guid)
+        .get(&guid)
         .and_then(|s| s.position)
         .map(|(x, y)| (f32::from(x), f32::from(y)))
 }
 
-/// The party and corpse rim arrows, the out-of-range half of the party placement `0x6dad10`,
-/// drawn before the player arrow.
-///
-/// This differs from the reference, not built yet: its slot 4 is the pet (`UNIT_FIELD_CHARM`,
-/// else `UNIT_FIELD_SUMMON`, at `0x6dad60`), and the corpse is static blip slot 2 on the POI path,
-/// at `Importance` -1 and exempt from the 694.444-yd cut, taking one of the three rim slots.
-/// So there is no pet blip here, and four rim arrows can draw where the reference draws three.
-pub(super) fn emit_party_arrows(
-    ctx: &BlipCtx,
+/// The five group records of the party placement `0x6dad10`, each its guid (record `+0`) and
+/// position: slots 0 to 3 the party members, slot 4 the pet, our charm else our summon
+/// (`0x6dad60`–`0x6dad9c`), each fetched as a unit (`0x6dadc8`); a member that is not streamed
+/// falls back to its party-stats position, the pet to nothing (`0x6dae25`).
+pub(super) fn group_records<F: bevy::ecs::query::QueryFilter>(
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,
-    unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
-    corpse: Option<[f32; 3]>,
-    arrows: &RimArrowArt,
-    quads: &mut UiQuads,
-) {
-    let members = group
-        .party_slots()
-        .filter_map(|m| party_member_pos(m, group, guids, unit_pos))
-        .map(|p| (p, RimArrow::Group));
-    let corpse = corpse.map(|c| ((c[0], c[1]), RimArrow::Corpse));
-    for ((x, y), art) in members.chain(corpse) {
-        let d = ((x - ctx.wx).powi(2) + (y - ctx.wy).powi(2)).sqrt();
-        if d / ctx.radius_yd <= BLIP_EDGE_RATIO {
-            continue; // in range: the dot pass draws it
-        }
-        let Some(tex) = arrows.get(art) else {
-            continue;
-        };
-        push_rim_arrow(ctx, [x, y, 0.0], tex, quads);
+    unit_pos: &Query<&GlobalTransform, F>,
+    pet: Option<u64>,
+) -> [Option<(u64, (f32, f32))>; benilla_ui::widget::MINIMAP_GROUP_ARROWS] {
+    let mut records = [None; benilla_ui::widget::MINIMAP_GROUP_ARROWS];
+    for (i, m) in group.party_slots().enumerate().take(4) {
+        records[i] = party_member_pos(m.guid, group, guids, unit_pos).map(|p| (m.guid, p));
     }
+    records[4] = pet.and_then(|g| {
+        let tf = unit_pos.get(*guids.0.get(&g)?).ok()?;
+        let w = bevy_to_wow(tf.translation());
+        Some((g, (w[0], w[1])))
+    });
+    records
 }
 
-/// Show the hovered blip's name; a unit's resolves through the name cache. This is the in-rect
-/// half of the Minimap's probe `0x4eb0c0`, which the hover walk runs on the Minimap while it holds
-/// the hover or the capture ([`UiScript::minimap_probed`]). A new blip shows; no blip where one
-/// was held hides `GameTooltip`, whoever holds it (`0x4eb55f`). The cursor off the Minimap is the
-/// walk's: the probe's miss and the Minimap's leave.
+/// The party and pet arrow frames' bearings, the out-of-range half of the placement: beyond 0.8
+/// of the radius a [`group_records`] record has an arrow at its bearing (`0x6daf5c`–`0x6daf7f`).
+pub(super) fn group_arrow_records<F: bevy::ecs::query::QueryFilter>(
+    wx: f32,
+    wy: f32,
+    radius_yd: f32,
+    group: &crate::ui_party::GroupState,
+    guids: &GuidIndex,
+    unit_pos: &Query<&GlobalTransform, F>,
+    pet: Option<u64>,
+) -> [Option<f32>; benilla_ui::widget::MINIMAP_GROUP_ARROWS] {
+    group_records(group, guids, unit_pos, pet).map(|record| {
+        record
+            .map(|(_, pos)| pos)
+            .filter(|&(x, y)| {
+                ((x - wx).powi(2) + (y - wy).powi(2)).sqrt() / radius_yd > BLIP_EDGE_RATIO
+            })
+            .map(|(x, y)| bearing(wx, wy, x, y))
+    })
+}
+
+/// Show a line for every element under the cursor; a unit's name resolves through its object or
+/// the name cache. This is the in-rect half of the Minimap's probe `0x4eb0c0`, which the hover walk
+/// runs on the Minimap while it holds the hover or the capture ([`UiScript::minimap_probed`]). The
+/// names join in [`MinimapBlipHover::lines`]' order with `\n` between them (`0x835144`), a grey
+/// dot's wrapped in `|cffb0b0b0`…`|r` (`0x84c69c`, `0x844538`), and go up as one gold line
+/// (`0x530380`, `0x4eb856`); a dot whose name does not resolve has no line (`0x4eb785`). A new text
+/// shows; nothing under the cursor where something was held hides `GameTooltip`, whoever holds it
+/// (`0x4eb55f`). The cursor off the Minimap is the walk's: the probe's miss and the Minimap's leave.
 pub(super) fn drive_blip_tooltip(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     hover: Res<MinimapBlipHover>,
     names: Res<NameCache>,
+    objects: crate::net::Objects,
     commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    if !script.minimap_probed() {
-        return;
-    }
-    let show = match &*hover {
-        MinimapBlipHover::None => None,
-        MinimapBlipHover::Landmark(name) => Some((name.clone(), false)),
-        MinimapBlipHover::Npc(npc, grey) => names
-            .resolve(*npc, &commands)
-            .map(|n| (n.to_string(), *grey)),
-        MinimapBlipHover::TrackedGo(name, grey) => Some((name.clone(), *grey)),
-    };
-    match (show, script.minimap_blip()) {
-        // Same blip: the plate, owned in mode 6, follows the cursor in its own update.
-        (Some((t, _)), Some(held)) if t == held => {}
-        (Some((t, grey)), _) => {
-            script.minimap_tooltip(&t, grey);
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        if !script.minimap_probed() {
+            return;
         }
-        (None, Some(_)) => script.minimap_blip_lost(),
-        (None, None) => {}
-    }
+        let lines: Vec<String> = hover
+            .lines()
+            .into_iter()
+            .filter_map(|line| {
+                let name = match &line.name {
+                    BlipName::Known(name) => name.clone(),
+                    // A live object names itself through its name method (`0x4eb31a`, vtable slot
+                    // 28, `GetUnitName` with a callback), which every probe runs, so a refused name
+                    // is asked again about once per answer; a guid with no object only reads
+                    // (`0x4eb33c`), and so does a creature's record (`0x60934b`).
+                    BlipName::Unit(guid) => {
+                        let ask = if objects.store(*guid).is_some() {
+                            Ask::Event(&commands)
+                        } else {
+                            Ask::Read
+                        };
+                        names.resolve(&objects, *guid, ask)?.to_string()
+                    }
+                };
+                Some(if line.grey {
+                    format!("|cffb0b0b0{name}|r")
+                } else {
+                    name
+                })
+            })
+            .collect();
+        let show = (!lines.is_empty()).then(|| lines.join("\n"));
+        match (show, script.minimap_blip()) {
+            // The same text: the plate, owned in mode 6, follows the cursor in its own update.
+            (Some(t), Some(held)) if t == held => {}
+            (Some(t), _) => {
+                script.minimap_tooltip(&t);
+            }
+            (None, Some(_)) => script.minimap_blip_lost(),
+            (None, None) => {}
+        }
+    })
 }
 
 #[cfg(test)]
@@ -442,7 +534,8 @@ mod tooltip_tests;
 mod tests {
     use super::*;
 
-    /// The call site gives only the sequence id; the model says what it draws.
+    /// The VM arms only a sequence id (`0x4ed353`, `0x4ee1de`); the model says what it draws: in
+    /// each looping sequence exactly one arrow layer's stepped alpha is 1.0, untinted.
     #[test]
     fn each_rim_arrow_sequence_lights_exactly_its_own_layer() {
         let data = benilla_formats::wow_data_or_skip!();
@@ -451,21 +544,36 @@ mod tests {
             .read_file("Interface\\Minimap\\Rotating-MinimapArrow.m2")
             .expect("the one rim-arrow model");
 
-        for kind in RimArrow::ALL {
-            let shown = benilla_formats::m2_sequence_visible_textures(&bytes, kind.anim_id())
+        for (anim_id, texture) in [
+            (
+                benilla_ui::script::MINIMAP_GROUP_ARROW,
+                "Interface\\Minimap\\Rotating-MinimapGroupArrow",
+            ),
+            (
+                benilla_ui::script::MINIMAP_LANDMARK_ARROW,
+                "Interface\\Minimap\\Rotating-MinimapArrow",
+            ),
+            (
+                benilla_ui::script::MINIMAP_CORPSE_ARROW,
+                "Interface\\Minimap\\Rotating-MinimapCorpseArrow",
+            ),
+            (
+                benilla_ui::script::MINIMAP_GUIDE_ARROW,
+                "Interface\\Minimap\\Rotating-MinimapGuideArrow",
+            ),
+        ] {
+            let shown = benilla_formats::m2_sequence_visible_textures(&bytes, anim_id)
                 .unwrap_or_else(|| {
                     panic!(
-                        "{kind:?}: the model authors no sequence {:#x} — the id \
-                    is wrong, or this is not the model the reference animates",
-                        kind.anim_id()
+                        "the model authors no sequence {anim_id:#x}: the id is wrong, or this is \
+                         not the model the reference animates"
                     )
                 });
-            let want = format!("{}.BLP", kind.texture().to_uppercase());
+            let want = format!("{}.BLP", texture.to_uppercase());
             assert_eq!(
                 shown,
                 vec![want],
-                "{kind:?} (sequence {:#x}) must light its layer and ONLY its layer",
-                kind.anim_id()
+                "sequence {anim_id:#x} must light its layer and ONLY its layer"
             );
         }
     }
@@ -494,7 +602,7 @@ mod tests {
             poi(3, 0x1d, 556.0, "Stormwind"),
             poi(3, 0x5, 601.0, "Goldshire"),
         ];
-        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(rows.iter(), None, None, None, 0, 0.0, 0.0, 133.0);
         assert!(sel.icons.is_empty(), "no Flags&2 row is in range");
         let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(names, ["Stormwind", "Goldshire"]);
@@ -510,7 +618,7 @@ mod tests {
             poi(3, 1, 400.0, "city-mid"),
             poi(0, 1, 695.0, "beyond-rank"),
         ];
-        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 100.0);
+        let sel = select_landmarks(rows.iter(), None, None, None, 0, 0.0, 0.0, 100.0);
         let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(names, ["minor-near", "minor-far", "city-near"]);
     }
@@ -524,7 +632,7 @@ mod tests {
             poi(3, 0x5, 400.0, "Northshire Abbey"),
         ];
         let marker = poi(0, 0x63, 500.0, "Stormwind Warrior Trainer");
-        let sel = select_landmarks(cities.iter(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(cities.iter(), None, Some(&marker), None, 0, 0.0, 0.0, 133.0);
         let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(
             names,
@@ -539,11 +647,79 @@ mod tests {
         );
     }
 
+    /// The selected quest's point (`0x6dacb0`, static slot 0) is a rim arrow like any landmark: no
+    /// candidacy gate, the 694.444-yd cut, its `PointOpt` as the rank key, the gold guide art, no
+    /// indoors showing; with no `Flags & 2` it draws no icon in range.
+    #[test]
+    fn the_selected_quests_point_is_a_gold_rim_arrow_ranked_by_its_point_opt() {
+        let blip = |x: f32, rank: u32| benilla_ui::script::QuestBlip {
+            x,
+            y: 0.0,
+            rank,
+            name: "Wolves".into(),
+        };
+        let cities = [poi(3, 0x1d, 200.0, "Stormwind")];
+        let quest = quest_landmark(&blip(300.0, 0), 0);
+        assert_eq!((quest.icon, quest.flags), (5, 0));
+        let sel = select_landmarks(cities.iter(), Some(&quest), None, None, 0, 0.0, 0.0, 133.0);
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Wolves", "Stormwind"],
+            "PointOpt 0 outranks the city"
+        );
+        let (rim, _) = rim_arrow_records(&sel, 0.0, 0.0);
+        assert_eq!((rim[0].slot, rim[0].indoors), (0, false));
+        let after = quest_landmark(&blip(300.0, 7), 0);
+        let sel = select_landmarks(cities.iter(), Some(&after), None, None, 0, 0.0, 0.0, 133.0);
+        assert_eq!(
+            sel.arrows[0].1.name, "Stormwind",
+            "a higher rank key sorts later"
+        );
+
+        let far = quest_landmark(&blip(700.0, 0), 0);
+        let sel = select_landmarks(
+            std::iter::empty(),
+            Some(&far),
+            None,
+            None,
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
+        assert!(sel.arrows.is_empty(), "past the rank cut");
+        let near = quest_landmark(&blip(50.0, 0), 0);
+        let sel = select_landmarks(
+            std::iter::empty(),
+            Some(&near),
+            None,
+            None,
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
+        assert!(
+            sel.arrows.is_empty() && sel.icons.is_empty(),
+            "in range, no icon"
+        );
+    }
+
     /// Every 1.12 `points_of_interest` row carries flags 99 (0x63), so `Flags & 2` is set.
     #[test]
     fn the_guard_marker_draws_its_icon_in_range() {
         let marker = poi(0, 0x63, 50.0, "The Bank");
-        let sel = select_landmarks(std::iter::empty(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(
+            std::iter::empty(),
+            None,
+            Some(&marker),
+            None,
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
         assert!(sel.arrows.is_empty(), "in range — no rim arrow");
         assert_eq!(sel.icons.len(), 1);
         assert_eq!(
@@ -558,7 +734,16 @@ mod tests {
     fn the_guard_marker_skips_the_candidacy_filter() {
         let mut marker = poi(0, 0, 300.0, "The Inn"); // Flags bit 0 clear: a DBC row would drop
         marker.continent_id = 571; // and a continent that isn't the displayed one
-        let sel = select_landmarks(std::iter::empty(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(
+            std::iter::empty(),
+            None,
+            Some(&marker),
+            None,
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
         assert_eq!(sel.arrows.len(), 1, "appended unconditionally");
     }
 
@@ -568,7 +753,7 @@ mod tests {
         tower.icon = 9; // col 1, row 1
         let plain = poi(3, 0x5, 50.0, "Northshire Abbey");
         let rows = [tower, plain];
-        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(rows.iter(), None, None, None, 0, 0.0, 0.0, 133.0);
         assert_eq!(sel.arrows.len(), 0);
         assert_eq!(sel.icons.len(), 1, "only the Flags&2 tower draws in range");
         assert_eq!(
@@ -577,5 +762,89 @@ mod tests {
             "icon 9 = col 1 row 1 of the 8x8 atlas"
         );
         assert_eq!(poi_icon_cell(64), None, "the client gates Icon < 0x40");
+    }
+
+    /// The corpse (`0x6dacd0`, rank −1) ranks ahead of every row and the gossip marker, keeps its
+    /// rim slot past 694.444 yd where the marker is cut (`0x6d9cc2`), and so leaves two of the three
+    /// slots; its record is static slot 2, shown indoors. In range it is an icon (flags 2), cell 7.
+    #[test]
+    fn the_corpse_takes_a_rim_slot_first_and_alone_skips_the_rank_cut() {
+        let cities = [
+            poi(0, 0x5, 200.0, "Goldshire"),
+            poi(0, 0x5, 300.0, "Northshire Abbey"),
+            poi(0, 0x5, 400.0, "Stormwind"),
+        ];
+        let far = corpse_landmark([2000.0, 0.0, 0.0], 0, "Corpse".into());
+        let marker = poi(0, 0x63, 700.0, "The Bank");
+        let sel = select_landmarks(
+            cities.iter(),
+            None,
+            Some(&marker),
+            Some(&far),
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
+        assert_eq!(names, ["Corpse", "Goldshire", "Northshire Abbey"]);
+        let (rim, _) = rim_arrow_records(&sel, 0.0, 0.0);
+        assert_eq!((rim[0].slot, rim[0].indoors), (2, true));
+        assert_eq!((rim[1].slot, rim[1].indoors), (-2, false));
+
+        let near = corpse_landmark([50.0, 0.0, 0.0], 0, "Corpse".into());
+        let sel = select_landmarks(
+            std::iter::empty(),
+            None,
+            None,
+            Some(&near),
+            0,
+            0.0,
+            0.0,
+            133.0,
+        );
+        assert!(sel.arrows.is_empty());
+        assert_eq!(sel.icons.len(), 1);
+        assert_eq!(
+            poi_icon_cell(sel.icons[0].icon),
+            Some([0.875, 1.0, 0.0, 0.125])
+        );
+    }
+
+    /// Slot 4 is the pet, our charm else our summon, found only as a streamed unit (`0x6dad60`,
+    /// `0x6dae25`); out of range it has an arrow at its bearing, and no corpse ever lands there.
+    #[test]
+    fn the_fifth_group_arrow_is_the_pet_and_only_a_streamed_one() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let far = world
+            .spawn(GlobalTransform::from_translation(
+                benilla_assets::coords::wow_to_bevy([500.0, 0.0, 0.0]),
+            ))
+            .id();
+        let mut guids = GuidIndex::default();
+        guids.0.insert(0xF140, far);
+        world.insert_resource(guids);
+        world.init_resource::<crate::ui_party::GroupState>();
+        let records = |world: &mut World, pet: Option<u64>| {
+            world
+                .run_system_once(
+                    move |q: Query<&GlobalTransform>,
+                          guids: Res<GuidIndex>,
+                          group: Res<crate::ui_party::GroupState>| {
+                        group_arrow_records(0.0, 0.0, 133.0, &group, &guids, &q, pet)
+                    },
+                )
+                .unwrap()
+        };
+        let got = records(&mut world, Some(0xF140));
+        assert!(got[..4].iter().all(Option::is_none));
+        assert!(got[4].is_some_and(|b| b.abs() < 1e-6), "due north: {got:?}");
+        assert_eq!(
+            records(&mut world, Some(0xF141))[4],
+            None,
+            "not streamed: no arrow"
+        );
+        assert_eq!(records(&mut world, None)[4], None);
     }
 }

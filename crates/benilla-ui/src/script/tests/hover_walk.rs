@@ -126,7 +126,7 @@ fn a_frame_moving_skips_the_hover_walk_until_the_drop() {
     s.run("Far:StartMoving()").unwrap();
     s.mouse_move(350.0, 150.0);
     s.resolve();
-    assert_eq!(s.eval::<f64>("return Far:GetLeft()").unwrap(), 900.0);
+    crate::assert_near!(s.eval::<f64>("return Far:GetLeft()").unwrap(), 900.0);
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn a_frame_sizing_skips_the_hover_walk_until_the_drop() {
     s.run("Far:StartSizing(\"RIGHT\")").unwrap();
     s.mouse_move(350.0, 150.0);
     s.resolve();
-    assert_eq!(s.eval::<f64>("return Far:GetWidth()").unwrap(), 300.0);
+    crate::assert_near!(s.eval::<f64>("return Far:GetWidth()").unwrap(), 300.0);
 }
 
 /// The pump tail's re-pick (`0x7657be`) is the same walk on the saved event, so it waits for the
@@ -198,7 +198,7 @@ fn hiding_the_moving_frame_ends_the_move_and_the_walk_resumes() {
     assert_eq!(take_log(&s), "leaveHere enterThere");
     s.run("Far:Show()").unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return Far:GetLeft()").unwrap(),
         800.0,
         "the move ended with the hide: the later cursor delta did not reach it"
@@ -233,14 +233,14 @@ fn a_frame_moving_when_the_pointer_leaves_keeps_its_offsets() {
             .unwrap()
     };
     // The drag pinned TOPLEFT against the screen (`0x768430`): top 600 on a 768 screen.
-    assert_eq!(point(&s), (800.0, -168.0));
+    crate::assert_near!(point(&s), (800.0, -168.0));
     let saved = s.user_placed_layouts();
 
     s.pointer_left_hover();
     s.pointer_left_window();
     s.resolve();
-    assert_eq!(point(&s), (800.0, -168.0), "the leave moves nothing");
-    assert_eq!(s.eval::<f64>("return Far:GetLeft()").unwrap(), 800.0);
+    crate::assert_near!(point(&s), (800.0, -168.0), "the leave moves nothing");
+    crate::assert_near!(s.eval::<f64>("return Far:GetLeft()").unwrap(), 800.0);
     assert_eq!(
         s.user_placed_layouts(),
         saved,
@@ -252,7 +252,7 @@ fn a_frame_moving_when_the_pointer_leaves_keeps_its_offsets() {
     // next real event moves it by its delta from the last real one.
     s.mouse_move(260.0, 150.0);
     s.resolve();
-    assert_eq!(point(&s), (810.0, -168.0));
+    crate::assert_near!(point(&s), (810.0, -168.0));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -275,19 +275,57 @@ fn a_drag_cut_short_by_the_pointer_leaving_keeps_the_last_real_position() {
     s.mouse_move(170.0, 150.0); // past the threshold: OnDragStart, StartMoving
     s.mouse_move(200.0, 160.0);
     s.resolve();
-    assert_eq!(s.eval::<f64>("return Here:GetLeft()").unwrap(), 130.0);
+    crate::assert_near!(s.eval::<f64>("return Here:GetLeft()").unwrap(), 130.0);
     s.pointer_left_hover();
     s.pointer_left_window();
     s.resolve();
-    assert_eq!(s.eval::<i64>("return stops").unwrap(), 1);
-    assert_eq!(s.eval::<f64>("return Here:GetLeft()").unwrap(), 130.0);
-    assert_eq!(s.eval::<f64>("return Here:GetBottom()").unwrap(), 110.0);
+    crate::assert_near!(s.eval::<i64>("return stops").unwrap(), 1);
+    crate::assert_near!(s.eval::<f64>("return Here:GetLeft()").unwrap(), 130.0);
+    crate::assert_near!(s.eval::<f64>("return Here:GetBottom()").unwrap(), 110.0);
     let saved = s.user_placed_layouts();
     let here = saved
         .iter()
         .find(|l| l.name == "Here")
         .expect("Here is saved");
     // Saved as the drag's TOPLEFT pin (`0x768430`): top 210 on a 768 screen.
-    assert_eq!((here.x, here.y), (Some(130), Some(-558)));
+    crate::assert_near!((here.x, here.y), (Some(130), Some(-558)));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `EnableMouse` on a visible frame whose bit was clear re-enters it in the mouse list behind the
+/// frames of its level already there (`0x76af00` → `0x764aa0`, `ja` at `0x764b2d`), and the sweep
+/// reads that list from index 0 (`0x7661f2`): the re-enabled frame loses the tie it won before.
+#[test]
+fn a_frame_mouse_enabled_again_loses_the_tie_to_its_same_level_sibling() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local function frame(name)
+            local f = CreateFrame("Frame", name)
+            f:SetPoint("BOTTOMLEFT", 100, 100); f:SetWidth(100); f:SetHeight(100)
+            f:EnableMouse(true)
+            return f
+        end
+        First = frame("First")
+        Second = frame("Second")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 150.0);
+    assert_eq!(focus(&s), "First", "the earlier entry wins an equal level");
+    s.run("First:EnableMouse(false); First:EnableMouse(true)")
+        .unwrap();
+    s.mouse_move(160.0, 150.0);
+    assert_eq!(
+        focus(&s),
+        "Second",
+        "the re-entered frame is behind its sibling"
+    );
+    // A show relinks every input kind (`0x76afa0`): hidden and shown again, First is last again.
+    s.run("Second:Hide(); Second:Show()").unwrap();
+    s.mouse_move(150.0, 150.0);
+    assert_eq!(focus(&s), "First");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

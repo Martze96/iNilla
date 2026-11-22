@@ -1,13 +1,12 @@
 //! The world handshake over a real socket against a fake server: packets may precede
-//! `SMSG_AUTH_RESPONSE`. Deviation: `SMSG_WARDEN_DATA` refuses the login, because benilla cannot
-//! answer Warden and the server kicks a client that stays silent about 30 s later.
+//! `SMSG_AUTH_RESPONSE`, `SMSG_WARDEN_DATA` among them, which benilla reads past unanswered.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use benilla_protocol::messages::opcode;
-use benilla_protocol::{messages, WardenRequired, WorldSession};
+use benilla_protocol::{messages, WorldSession};
 use benilla_srp::vanilla_header::HeaderCrypto;
 use benilla_srp::SESSION_KEY_LENGTH;
 
@@ -83,15 +82,46 @@ fn packets_ahead_of_the_auth_response_are_skipped() {
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
 }
 
+/// A Warden request ahead of the auth response is read past, unanswered, and the connect
+/// completes; the session remembers it was asked.
 #[test]
-fn a_warden_server_is_refused_at_the_handshake() {
+fn warden_data_ahead_of_the_auth_response_is_read_past() {
     let addr = fake_server(vec![(opcode::SMSG_WARDEN_DATA, vec![0u8; 16])]);
-    let Err(err) = WorldSession::connect(&addr, "one", SESSION_KEY) else {
-        panic!("a Warden server must not yield a session");
-    };
-    assert!(
-        err.downcast_ref::<WardenRequired>().is_some(),
-        "expected WardenRequired, got: {err:#}"
+    let session = WorldSession::connect(&addr, "one", SESSION_KEY).expect("the connect completes");
+    assert!(session.warden_asked());
+}
+
+/// A queued login as vmangos writes it: the billing group on the first `AUTH_WAIT_QUEUE`
+/// (`World.cpp:374-381`), then a position and the closing `AUTH_OK` without it
+/// (`WorldSession.cpp:961-976`). The session keeps the group the queue gave.
+#[test]
+fn the_billing_group_of_the_queue_outlasts_the_bare_auth_ok() {
+    let addr = fake_server(vec![
+        (
+            opcode::SMSG_AUTH_RESPONSE,
+            // 45 minutes left, trial and restricted, 90 minutes rested, second in line.
+            [
+                &[messages::AUTH_WAIT_QUEUE][..],
+                &45u32.to_le_bytes(),
+                &[0x44],
+                &90u32.to_le_bytes(),
+                &2u32.to_le_bytes(),
+            ]
+            .concat(),
+        ),
+        (
+            opcode::SMSG_AUTH_RESPONSE,
+            vec![messages::AUTH_WAIT_QUEUE, 0x01, 0x00, 0x00, 0x00],
+        ),
+    ]);
+    let session = WorldSession::connect(&addr, "one", SESSION_KEY).expect("the connect completes");
+    assert_eq!(
+        session.billing(),
+        messages::Billing {
+            time_remaining: 45,
+            plan_flags: 0x44,
+            time_rested: 90,
+        }
     );
 }
 
@@ -157,6 +187,79 @@ fn read_client(stream: &mut TcpStream, crypto: &mut HeaderCrypto) -> Option<u16>
     let mut body = vec![0u8; size - 4];
     stream.read_exact(&mut body).ok()?;
     Some(u16::from_le_bytes([header[2], header[3]]))
+}
+
+/// The select build's guild lookup at character select (`0x560e30`): the guild cache's query,
+/// opcode 0x54 and the key with no guid (`0x560f68`), byte for byte, and its answer kept for the
+/// taking from a read that waits on nothing.
+#[test]
+fn a_parked_session_asks_for_a_guild_and_keeps_its_answer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        send(
+            &mut stream,
+            None,
+            opcode::SMSG_AUTH_CHALLENGE,
+            &SERVER_SEED.to_le_bytes(),
+        );
+        read_auth_session(&mut stream);
+        let mut crypto = HeaderCrypto::from_session_key(SESSION_KEY);
+        send(
+            &mut stream,
+            Some(&mut crypto),
+            opcode::SMSG_AUTH_RESPONSE,
+            &[messages::AUTH_OK],
+        );
+        let mut header = [0u8; 6];
+        stream.read_exact(&mut header).unwrap();
+        crypto.decrypter().decrypt(&mut header);
+        let mut body = [0u8; 4];
+        stream.read_exact(&mut body).unwrap();
+        let mut reply = 0x1234u32.to_le_bytes().to_vec();
+        reply.extend_from_slice(b"Legacy\0");
+        reply.extend_from_slice(&[0u8; 10]); // ten empty rank names
+        for field in [1i32, 2, 3, 4, 5] {
+            reply.extend_from_slice(&field.to_le_bytes());
+        }
+        send(
+            &mut stream,
+            Some(&mut crypto),
+            opcode::SMSG_GUILD_QUERY_RESPONSE,
+            &reply,
+        );
+        // Open until the client has read it.
+        let mut end = [0u8; 1];
+        let _ = stream.read(&mut end);
+        (header, body)
+    });
+
+    let mut session = WorldSession::connect(&addr, "one", SESSION_KEY).unwrap();
+    session.guild_query(0x1234).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let answers = loop {
+        session.poll_link().unwrap();
+        let answers = session.take_guild_answers();
+        if !answers.is_empty() {
+            break answers;
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer read");
+        thread::sleep(std::time::Duration::from_millis(2));
+    };
+    assert_eq!(answers.len(), 1);
+    let answer = &answers[0];
+    assert_eq!((answer.guild_id, answer.name.as_str()), (0x1234, "Legacy"));
+    assert_eq!((answer.emblem_style, answer.background_color), (1, 5));
+    assert!(session.take_guild_answers().is_empty(), "taken once");
+    drop(session);
+    let (header, body) = server.join().unwrap();
+    assert_eq!(
+        header,
+        [0x00, 0x08, 0x54, 0x00, 0x00, 0x00],
+        "size and opcode"
+    );
+    assert_eq!(body, [0x34, 0x12, 0x00, 0x00], "the key alone");
 }
 
 /// A session split for the world and joined again after the logout is the same connection: the

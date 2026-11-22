@@ -11,25 +11,53 @@ pub const WARNING: u8 = 1;
 /// A file-level failure: a file that did not open or did not parse (`0x6edad4`, `0x704c15`).
 pub const FAILURE: u8 = 2;
 
+/// The most bytes of a line the record holds: the formatting buffer of `0x41a000` is 256 bytes
+/// (`push 0x100` at `0x41a049`), and its terminator takes one.
+pub const LINE_MAX: usize = 255;
+
+/// `text` as the formatting buffer of `0x41a000` and `0x419ed0` holds it, or `None` for an empty
+/// one, which both drop (`0x41a05f`/`0x419f2f`). Deviation: the cut at 255 bytes backs up to a
+/// character start, where the reference cuts at the byte, mid-character (`0x64a868`, `SStrCopy`
+/// `0x64a5e0`), because a Rust string holds whole characters.
+fn buffered(mut text: String) -> Option<String> {
+    text.truncate(text.floor_char_boundary(LINE_MAX));
+    (!text.is_empty()).then_some(text)
+}
+
 /// One level's record: its lines in order and the running maximum severity (`+0x10`, which the
 /// append `0x41a000` and the prepend `0x419ed0` raise, never a count).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     lines: Vec<String>,
+    /// Each line's severity (`+4` of its entry), which a merge passes on as it re-adds the line.
+    severities: Vec<u8>,
     max: u8,
 }
 
 impl Status {
-    /// Append a line (`0x41a000`).
+    /// Append a line (`0x41a000`), cut at 255 bytes: it formats into a 256-byte stack buffer
+    /// through `0x64a8b0` (`sub esp,0x100` at `0x41a003`, the call at `0x41a04f`), which ends the
+    /// string at the size less one (`0x64a868`); an empty one is dropped, its severity unraised
+    /// (`0x41a05f` → `0x41a0f9`).
     pub fn report(&mut self, severity: u8, text: impl Into<String>) {
-        self.lines.push(text.into());
+        let Some(text) = buffered(text.into()) else {
+            return;
+        };
+        self.lines.push(text);
+        self.severities.push(severity);
         self.max = self.max.max(severity);
     }
 
-    /// Merge `other` in after this record's own lines, as `0x41a100` re-reports each entry.
+    /// Merge `other` in after this record's own lines, as `0x41a100` does: each line is added
+    /// again through this record's Add with its text as the format and no arguments
+    /// (`0x41a129`-`0x41a133`), so a `%%` becomes `%` at every level a line passes up, the cut
+    /// and the empty drop apply again, and the maximum rises with the lines that remain. A
+    /// conversion needing an argument stays as written, where the client reads the words above
+    /// its call (a fault benilla does not copy), through [`crate::strings::fill`].
     pub fn merge(&mut self, other: Status) {
-        self.lines.extend(other.lines);
-        self.max = self.max.max(other.max);
+        for (line, severity) in other.lines.into_iter().zip(other.severities) {
+            self.report(severity, crate::strings::fill(&line, &[]));
+        }
     }
 
     /// Close one level into its caller: its banner goes first (a prepend at severity 0) when
@@ -37,7 +65,11 @@ impl Status {
     /// `jle` on the maximum, `0x6eddb6`/`0x6eddbb`, `0x6ee207`, `0x51f44f`), then the merge.
     pub fn close_into(mut self, parent: &mut Status, debug: bool, banner: String) {
         if debug || self.max > TRACE {
-            self.lines.insert(0, banner);
+            // The prepend formats into the same 256-byte buffer (`0x419ed3`, `0x419f19`).
+            if let Some(banner) = buffered(banner) {
+                self.lines.insert(0, banner);
+                self.severities.insert(0, TRACE);
+            }
         }
         parent.merge(self);
     }
@@ -54,6 +86,7 @@ impl Status {
     /// The lines, leaving the record empty.
     pub fn take_lines(&mut self) -> Vec<String> {
         self.max = TRACE;
+        self.severities.clear();
         std::mem::take(&mut self.lines)
     }
 }
@@ -120,7 +153,7 @@ pub enum LogWrite {
 /// A VM's two load records and the drains they have made. `LoadAddOn` keeps its own record
 /// (`ds:0xb4e3dc`), refcounted (`ds:0xb4e3e0`) so a nested call writes one block, and drained when
 /// the count returns to zero (`0x48eab4`), even inside a UI load, whose own drain comes last.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct LoadLog {
     pub(crate) ui: Status,
     pub(crate) demand: Status,
@@ -131,6 +164,61 @@ pub(crate) struct LoadLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty line is dropped and raises nothing (`0x41a05f` → `0x41a0f9`), and a banner past
+    /// the buffer is cut like a line (`0x419f19`).
+    #[test]
+    fn an_empty_line_is_dropped_and_a_long_banner_is_cut() {
+        let mut level = Status::default();
+        level.report(FAILURE, "");
+        assert!(level.is_empty());
+        let mut parent = Status::default();
+        level.close_into(&mut parent, false, "banner".into());
+        assert!(parent.is_empty(), "an empty failure raised the severity");
+        let mut level = Status::default();
+        level.report(WARNING, "w");
+        level.close_into(&mut parent, false, "b".repeat(300));
+        assert_eq!(parent.lines()[0], "b".repeat(255));
+    }
+
+    /// A line longer than the 256-byte buffer of `0x41a000` is cut at 255 bytes, and a cut inside
+    /// a multi-byte character backs up to the character before it.
+    #[test]
+    fn a_line_is_cut_at_255_bytes() {
+        let mut status = Status::default();
+        status.report(FAILURE, "x".repeat(300));
+        status.report(FAILURE, "y".repeat(255));
+        status.report(FAILURE, format!("{}é", "z".repeat(254)));
+        let lines = status.lines();
+        assert_eq!(lines[0], "x".repeat(255));
+        assert_eq!(lines[1], "y".repeat(255));
+        assert_eq!(lines[2], "z".repeat(254));
+    }
+
+    /// A merge adds each line again with its text as the format (`0x41a129`-`0x41a133`): `%%`
+    /// becomes `%` at every level up, a conversion that needs an argument stays as written, a
+    /// lone `%` stays, and the severity each line carries is the one that rises.
+    #[test]
+    fn a_merge_formats_each_line_again() {
+        let mut file = Status::default();
+        file.report(WARNING, "100%% of %s, %d%");
+        file.report(TRACE, "a%%%%b");
+        let mut toc = Status::default();
+        file.close_into(&mut toc, false, "banner".into());
+        assert_eq!(toc.lines(), ["banner", "100% of %s, %d%", "a%%b"]);
+        let mut addon = Status::default();
+        toc.close_into(&mut addon, false, "toc".into());
+        assert_eq!(addon.lines(), ["toc", "banner", "100% of %s, %d%", "a%b"]);
+        // The severity travels with the line: a trace-only level adds no banner.
+        let mut quiet = Status::default();
+        quiet.report(TRACE, "t%%");
+        let mut parent = Status::default();
+        quiet.close_into(&mut parent, false, "never".into());
+        assert_eq!(parent.lines(), ["t%"]);
+        let mut top = Status::default();
+        parent.close_into(&mut top, false, "never".into());
+        assert_eq!(top.lines(), ["t%"], "a trace raised nothing: no banner");
+    }
 
     /// The install's own log shape (the reference's `Logs\FrameXML.log`, `FrameXML_Debug` 0): the
     /// add-on banner first, then the toc's, then the miss, and a later document with a message

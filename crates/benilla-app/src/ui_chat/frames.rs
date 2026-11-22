@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use benilla_ui::strings::{fill, Arg};
 
-use super::event::{event_name, notice_token, ChatEvent, ChatEventKind};
+use super::event::{event_name, ChatEvent, ChatEventKind};
 
 /// What the app keeps beside the stock chat frames: the default language and the log files.
 #[derive(Resource, Default)]
@@ -15,8 +15,40 @@ pub(crate) struct ChatWindows {
     /// The frame's `this.defaultLanguage`, the faction tongue `GetDefaultLanguage()` answers;
     /// empty until the player and `Languages.dbc` are loaded.
     pub default_language: String,
-    /// The `LoggingChat`/`LoggingCombat` files, teed in [`route`].
+    /// The `LoggingChat`/`LoggingCombat` files, teed in [`route`]; the resource of the same files.
     pub logs: super::logging::ChatLogFiles,
+}
+
+impl ChatWindows {
+    /// The windows teeing to `logs`, the files the verbs' host opens.
+    pub(crate) fn with_logs(logs: super::logging::ChatLogFiles) -> Self {
+        Self {
+            logs,
+            ..Self::default()
+        }
+    }
+}
+
+/// The catalog lines a verb showed in chat itself, such as `GetQuestTimers`' failure line: their
+/// `CHAT_MSG_SYSTEM` fired inside the call, as the reference's does, so the log files and the
+/// row's sound are what is left.
+pub(crate) fn tee_shown_lines(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    windows: Res<ChatWindows>,
+    sounds: Res<crate::sound::MessageSounds>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for (key, line) in script.take_shown_chat_lines() {
+            if let Some(record) = benilla_ui::messages::by_key(key) {
+                sounds.push(record);
+            }
+            // A system line is composed verbatim (`ChatFrame.lua:1395`).
+            windows.logs.record(false, &line);
+        }
+    })
 }
 
 /// Fire one event's `CHAT_MSG_*` at the VM, where the stock `ChatFrame_OnEvent` prints it, and
@@ -37,11 +69,16 @@ pub(crate) fn route(
     }) {
         windows.logs.record(kind.is_combat_log(), &line);
     }
+    // A received whisper, type 6, triggers Replying to Tells ahead of its event (`0x49b0fb`-
+    // `0x49b107`).
+    if kind == ChatEventKind::Whisper {
+        script.queue_tutorial_trigger(crate::tutorial::id::REPLYING_TO_TELLS);
+    }
     script.fire_event(event_name(kind), event.script_args());
 }
 
 /// `ChatFrame_OnEvent`'s composition (`ChatFrame.lua:1369-1468`); `None` for a notice the 1.12 UI
-/// does not print (MODE_CHANGE).
+/// does not print (a MODE_CHANGE event without its token).
 pub(crate) fn compose(
     event: &ChatEvent,
     kind: ChatEventKind,
@@ -69,6 +106,8 @@ pub(crate) fn compose(
             &get("CHAT_IGNORED").unwrap_or_default(),
             &[Arg::S(&event.sender)],
         ),
+        // With no channel, `ListChannels`' line, arg1 alone (`:1411`).
+        K::ChannelList if event.channel.is_empty() => event.text.clone(),
         // `format(CHAT_CHANNEL_LIST_GET .. arg1, arg4)` (`:1409`): arg4 whole, arg1 unescaped.
         K::ChannelList => fill(
             &format!(
@@ -155,16 +194,16 @@ fn strip_zone(channel: &str) -> &str {
     }
 }
 
-/// A channel notice: the notice byte's token ([`notice_token`], the jump table at `0x49c60c`)
+/// A channel notice: the notice byte's token ([`super::event::notice_token`], the jump table at `0x49c60c`)
 /// names `CHAT_<TOKEN>_NOTICE` (`ChatFrame.lua:1416-1424`), filled with arg4, then for
 /// CHANNEL_NOTICE_USER arg2 and any arg5; a string such as `CHAT_INVITE_NOTICE` reorders them with
-/// `%2$s`. `None` for MODE_CHANGE and bytes past the table, which print nothing.
+/// `%2$s`. `None` for a MODE_CHANGE without a token and bytes past the table, which print nothing.
 pub(crate) fn compose_notice(
     event: &ChatEvent,
     kind: ChatEventKind,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let token = notice_token(event.notice_byte()?, event.slot_state)?;
+    let token = event.notice_token()?;
     let template = get(&format!("CHAT_{token}_NOTICE"))?;
     let mut args = vec![Arg::S(event.channel.as_str())];
     if kind == ChatEventKind::ChannelNoticeUser {

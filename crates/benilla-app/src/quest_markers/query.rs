@@ -10,15 +10,12 @@
 //! A quest-flagged GameObject is asked about and never rendered: the answer handler `0x5dc9f0`
 //! resolves the guid with typemask 8 (`0x468460`), so its answer dies at `0x5dca2f`.
 
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 
 use benilla_protocol::EntityKind;
 
 use crate::net::{ClientCommand, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::target::cursor_mode::go_reaction;
-use crate::target::ring::Factions;
 use crate::ui_quest::QuestGiver;
 
 /// `UNIT_NPC_FLAGS` questgiver service bit.
@@ -36,9 +33,12 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 ///
 /// - Sweep: [`self_generation`] (the field watches) XOR [`QuestGiver::reask_epoch`] (the packet
 ///   handlers); a changed generation is a sweep.
-/// - Per unit: asked from the create path and when its service bits (`0x60b490`, `0x60b4c5`) or
-///   reaction inputs (`0x606f0a`) move, our [`unit_ask_key`]. The entry goes when the guid leaves
-///   [`GuidIndex`], as the reference's cache at `unit+0xcb8` dies with the object.
+/// - Per unit: asked from the create path (`0x5fba72`, and `0x5fbe2f` for a reactivated object)
+///   and when its service bits (`0x60b490`, `0x60b4c5`) or reaction inputs (`0x606f0a`) move, our
+///   [`unit_ask_key`]. The key is a component of the unit's entity, so every new entity is a create
+///   whenever it is first seen, and the cached status (`unit+0xcb8`) dies with the object.
+/// - World entry: our own entity is new on every login, relog and worldport, and its first frame
+///   starts this system's memory afresh, so that frame is a sweep.
 /// - GameObject: asked only on a sweep (`0x5eb159`, `0x5eb456`), gated on
 ///   [`GO_FLAG_INTERACT_COND`] and a reaction toward us above 1 ([`go_reaction`], `0x5f7fd0`). Its
 ///   constructor calls no sender, so there is no query at first sight, and with no status slot it
@@ -56,35 +56,53 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 /// faction template, a standing change coming through the reputation sweep.
 #[allow(clippy::type_complexity)] // a Bevy system: one param per resource
 pub(super) fn query_statuses(
-    self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
+    self_q: Query<(Entity, Ref<ObjectStore>), With<SelfPlayer>>,
     objects: Query<
         (
             Entity,
             &crate::net::Guid,
             &NetEntity,
             Ref<ObjectStore>,
+            Option<&AskKey>,
             Option<&crate::ui_taxi::FlightMasterStatus>,
         ),
         Without<SelfPlayer>,
     >,
     index: Res<GuidIndex>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<crate::net::Reputations>,
+    relations: crate::target::RelationWorld,
     mut quest: ResMut<QuestGiver>,
+    refreshes: Option<Res<crate::ui_quest::LatchRefreshes>>,
     commands: Res<NetCommands>,
     mut ecs: Commands,
     mut state: Local<QueryState>,
 ) {
-    let Some(store) = self_q.iter().next() else {
+    // A guid that left the world drops its cached status, with or without a self: a run that
+    // returns below still consumes the index's change.
+    if index.is_changed() {
+        quest.retain_statuses(|npc| index.0.contains_key(&npc));
+    }
+    let Some((me, store)) = self_q.iter().next() else {
         return;
     };
-    // The descriptor walk runs only when our store changed; the epoch is a plain counter.
-    if store.is_changed() {
+    // A new self is a new world. The runs before it was tagged consumed its store's change, so the
+    // walk is keyed on the entity too, not on change detection alone.
+    if state.me != Some(me) {
+        *state = QueryState {
+            me: Some(me),
+            ..default()
+        };
+        state.fields = self_generation(&store.0);
+    } else if store.is_changed() {
+        // The descriptor walk runs only when our store changed; the epoch is a plain counter.
         state.fields = self_generation(&store.0);
     }
-    let generation = state.fields ^ (u64::from(quest.reask_epoch()) << 32);
+    let reasks = quest
+        .reask_epoch()
+        .wrapping_add(refreshes.map_or(0, |r| r.0));
+    let generation = state.fields ^ (u64::from(reasks) << 32);
     // The full sweep's triggers (`0x5eb3c0`): your revive, the `≤0 → >0` crossing (`0x6046f0`),
-    // and your own reaction inputs moving (`0x606e20`). Edges, since death is a light sweep.
+    // and your own reaction inputs moving (`0x606e20`). Edges, since death's light sweep is the
+    // death handler's ([`sweep_statuses`]).
     let alive = store.0.unit_health().unwrap_or(1) != 0;
     // Compared only between frames that both saw the field, or the template's arrival at login
     // would fire a full sweep.
@@ -98,19 +116,15 @@ pub(super) fn query_statuses(
     // A sweep frame, the only time a GameObject is asked about.
     let swept = state.generation != generation || full;
     state.generation = generation;
-    // A guid that left the world drops its ask key and cached status. A sweep never clears the
-    // map: only a unit's own key moving is a `0x607380`. Pruned only when the index moved, as the
-    // `ResMut` retain marks `QuestGiver` changed.
-    if index.is_changed() {
-        state.asked.retain(|guid, _| index.0.contains_key(guid));
-        quest.retain_statuses(|npc| index.0.contains_key(&npc));
-    }
-    // Off a sweep, a unit's verdict depends only on its descriptor and the two reaction
-    // catalogs; with all three still it is a no-op, so the unit is skipped.
-    let catalogs_moved =
-        reputations.is_changed() || factions.as_ref().is_some_and(|f| f.is_changed());
-    for (entity, guid, net, obj, fm) in &objects {
-        if !swept && !full && !catalogs_moved && !obj.is_changed() {
+    // Off a sweep, a unit's verdict depends only on its descriptor and the reaction's other
+    // inputs; with all still it is a no-op, so the unit is skipped.
+    let catalogs_moved = relations.inputs_changed();
+    let (rel, me_unit) = (relations.get(), relations.me());
+    for (entity, guid, net, obj, ask, fm) in &objects {
+        // A unit with no key has not been judged since it was created: its store's change may
+        // have gone to a run with no self.
+        let unjudged = net.kind == EntityKind::Unit && ask.is_none();
+        if !swept && !full && !catalogs_moved && !obj.is_changed() && !unjudged {
             continue;
         }
         // `0x6073f0` zeroes the marker (`+0xb2c`, the green `!` too) and the status (`+0xcb8`)
@@ -125,24 +139,26 @@ pub(super) fn query_statuses(
         match net.kind {
             // Typemask exactly `OBJECT|UNIT` (`0x5eb0d3`): a player, `0x19`, leaves the sweep here.
             EntityKind::Unit => {
-                // The unit's reaction toward us (`0x6061e0`, this = the unit, at `0x5eb12a`), the
-                // direction `ring_reaction` resolves: `<= 1` is Hated or Hostile, and a missing
-                // input reads Neutral, so a cold catalog never blanks a marker.
-                let reaction = crate::target::ring_reaction(
-                    factions.as_deref(),
-                    &reputations,
-                    Some(&*obj),
-                    Some(&store),
-                );
+                // The unit's reaction toward us (`0x6061e0`, this = the unit, at `0x5eb12a`):
+                // `<= 1` is Hated or Hostile, and a missing input reads Neutral, so a cold catalog
+                // never blanks a marker.
+                let reaction = me_unit.map_or(benilla_formats::Reaction::Neutral as u8, |me| {
+                    rel.reaction(&relations.unit_of(guid.0, &obj), &me)
+                });
                 if reaction <= 1 {
-                    // The sweep's one teardown (`0x5eb143`), questgiver or not. Dropping the ask
-                    // key brings the marker back through a `0x607380` when the reaction recovers.
-                    state.asked.remove(&guid.0);
+                    // The sweep's one teardown (`0x5eb143`), questgiver or not. A keyless judgement
+                    // brings the marker back through a `0x607380` when the reaction recovers.
+                    if ask != Some(&AskKey(None)) {
+                        ecs.entity(entity).try_insert(AskKey(None));
+                    }
                     tear_down(&mut quest, &mut ecs);
                     continue;
                 }
-                let key = unit_ask_key(&obj.0);
-                let key_moved = state.asked.insert(guid.0, key) != Some(key);
+                let key = Some(unit_ask_key(&obj.0));
+                let key_moved = ask.map(|a| a.0) != Some(key);
+                if key_moved {
+                    ecs.entity(entity).try_insert(AskKey(key));
+                }
                 // `0x607380`, from the unit's field watches, its create path and the full sweep:
                 // tear down first (`0x607384`), then re-gate. An escort giver's flag drop, with
                 // the quest-log write, moves the ask key and lands here.
@@ -174,7 +190,7 @@ pub(super) fn query_statuses(
                 // faction-less object reads Neutral, and `None` (no catalog yet) passes, as in the
                 // cursor's gate.
                 let reaction = go_reaction(
-                    factions.as_deref(),
+                    relations.factions(),
                     obj.0.gameobject_faction(),
                     Some(&store),
                 );
@@ -190,6 +206,80 @@ pub(super) fn query_statuses(
     }
 }
 
+/// The light sweep `0x5eb070` now, in its caller's place: our own death runs it inside its handler
+/// (`0x5e99b0` at `0x5e9a61`), between the loot close and the cast cancel. Each object takes
+/// `0x5eb0a0`: a creature (typemask exactly `OBJECT|UNIT`, `0x5eb0d3`) Hated or Hostile toward us
+/// loses its marker (`0x5eb143`), else a quest giver is asked (`0x5eb159`); a GameObject with
+/// [`GO_FLAG_INTERACT_COND`] and a reaction toward us above 1 is asked (`0x5eb0ef`-`0x5eb101`).
+/// Nothing with no active player.
+#[allow(clippy::type_complexity)] // a Bevy system: one param per resource
+pub(super) fn sweep_statuses(
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Query<
+        (
+            Entity,
+            &crate::net::Guid,
+            &NetEntity,
+            &ObjectStore,
+            Option<&AskKey>,
+            Option<&crate::ui_taxi::FlightMasterStatus>,
+        ),
+        Without<SelfPlayer>,
+    >,
+    relations: crate::target::RelationWorld,
+    mut quest: ResMut<QuestGiver>,
+    commands: Res<NetCommands>,
+    mut ecs: Commands,
+) {
+    let Some(store) = self_q.iter().next() else {
+        return;
+    };
+    let (rel, me_unit) = (relations.get(), relations.me());
+    for (entity, guid, net, obj, ask, fm) in &objects {
+        match net.kind {
+            EntityKind::Unit => {
+                let reaction = me_unit.map_or(benilla_formats::Reaction::Neutral as u8, |me| {
+                    rel.reaction(&relations.unit_of(guid.0, obj), &me)
+                });
+                if reaction <= 1 {
+                    if ask != Some(&AskKey(None)) {
+                        ecs.entity(entity).try_insert(AskKey(None));
+                    }
+                    quest.clear_status(guid.0);
+                    if fm.is_some() {
+                        ecs.entity(entity)
+                            .remove::<crate::ui_taxi::FlightMasterStatus>();
+                    }
+                } else if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER != 0 {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+                }
+            }
+            EntityKind::GameObject => {
+                let reaction = go_reaction(
+                    relations.factions(),
+                    obj.0.gameobject_faction(),
+                    Some(store),
+                );
+                if obj.0.gameobject_flags() & GO_FLAG_INTERACT_COND != 0
+                    && reaction.is_none_or(|r| r > 1)
+                {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A unit's last judged [`unit_ask_key`], `None` when it was judged Hated or Hostile and torn down.
+/// It lives on the entity, so it dies with the object as the reference's per-unit state does.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct AskKey(Option<u64>);
+
 /// The per-unit ask key: `UNIT_NPC_FLAGS`, which carries both watched service bits, and the
 /// faction template, the reaction input we can see.
 fn unit_ask_key(fields: &benilla_protocol::ObjectFields) -> u64 {
@@ -198,8 +288,8 @@ fn unit_ask_key(fields: &benilla_protocol::ObjectFields) -> u64 {
 }
 
 /// Folds the self descriptor fields the reference watches, one handler each (`0x468070`), into one
-/// value: level, the quest log, money, every skill, `PLAYER_FLAGS`, alive or dead, and the
-/// equipment and bag guids in place of the reference's `ITEM` watch.
+/// value: level, the quest log, money, every skill, `PLAYER_FLAGS`, and the equipment and bag
+/// guids in place of the reference's `ITEM` watch.
 fn self_generation(fields: &benilla_protocol::ObjectFields) -> u64 {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
     let mut h = 0xcbf2_9ce4_8422_2325u64; // FNV offset
@@ -207,11 +297,10 @@ fn self_generation(fields: &benilla_protocol::ObjectFields) -> u64 {
         h ^= v;
         h = h.wrapping_mul(FNV_PRIME);
     };
+    // Health is not folded: the `UNIT_FIELD_HEALTH` watch (`0x6046f0`) sweeps only on a zero
+    // crossing, our own death lightly inside its handler ([`sweep_statuses`], `0x5e9a61`) and the
+    // revive fully (`0x6047f0`, `full` in [`query_statuses`]).
     fold(u64::from(fields.unit_level().unwrap_or(0)));
-    // Health enters as the alive bit: the `UNIT_FIELD_HEALTH` watch (`0x6046f0`) sweeps only on a
-    // zero crossing, death to the light sweep (`0x604774`) and revive to the full one
-    // (`0x6047f0`); damage and regen ticks reach neither.
-    fold(u64::from(fields.unit_health().unwrap_or(1) == 0));
     fold(u64::from(fields.player_flags()));
     fold(u64::from(fields.player_money().unwrap_or(0)));
     for slot in 0..benilla_protocol::messages::PLAYER_QUEST_LOG_SLOTS {
@@ -244,8 +333,8 @@ pub(super) struct QueryState {
     fields: u64,
     /// `fields` combined with the packet epoch; a change here is the sweep.
     generation: u64,
-    /// Each asked guid's [`unit_ask_key`]; pruned by object lifetime only, never by a sweep.
-    asked: HashMap<u64, u64>,
+    /// Our own entity in the world this memory belongs to.
+    me: Option<Entity>,
     /// Last frame's alive state and faction template, the two full-sweep edges; the first frame in
     /// a world is never a full sweep.
     was_dead: bool,
@@ -402,7 +491,7 @@ mod tests {
         };
         let escort = spawn(&mut app, ESCORT);
         spawn(&mut app, PLAIN);
-        app.update(); // both asked, both marked in `asked`
+        app.update(); // both asked, both keyed
 
         // The server's answer: a gold `!` over each.
         for npc in [ESCORT, PLAIN] {
@@ -530,13 +619,14 @@ mod tests {
         assert_eq!(asked(&mut app), 1, "a light sweep re-asks");
         assert_eq!(held(&app), Some(5), "…and does NOT tear the marker down");
 
-        // Death, the `>0 → ≤0` edge, is a light sweep (`0x6046f0`).
+        // Death's light sweep is the death handler's, in place (`0x5e99b0` at `0x5e9a61`): the
+        // `>0 → ≤0` edge asks nothing here.
         set_self(
             &mut app,
             &[(FIELD_LEVEL, 5), (FIELD_HEALTH, 0), (FIELD_FACTION, 1)],
         );
-        assert_eq!(asked(&mut app), 1, "death re-asks");
-        assert_eq!(held(&app), Some(5), "…and is still a light sweep");
+        assert_eq!(asked(&mut app), 0, "death is not the poll's");
+        assert_eq!(held(&app), Some(5), "…and tears nothing down");
 
         // Revive, the `≤0 → >0` edge, is the full sweep.
         set_self(
@@ -1028,7 +1118,6 @@ mod tests {
         assert_eq!(asked(&mut app), 0, "then quiet");
 
         for (label, field, value) in [
-            ("death", FIELD_HEALTH, 0u32), // the alive bit, not the raw value
             ("PLAYER_FLAGS", FIELD_PLAYER_FLAGS, 0x10),
             ("money", FIELD_COINAGE, 900),
             ("a skill rank", FIELD_SKILL_1_1 + 1, 80 | (300 << 16)),
@@ -1064,5 +1153,101 @@ mod tests {
         );
         assert_eq!(asked(&mut app), 1, "its faction template — re-ask that one");
         assert_eq!(asked(&mut app), 0, "exactly once");
+    }
+
+    /// At a world entry the drain spawns our own entity and every creature around it in one frame,
+    /// and `SelfPlayer` is tagged a frame later, so the system's first run sees no self and returns.
+    /// Each creature is still a create (`0x5fb880` calls `0x607380` at `0x5fba72`), and so is each
+    /// one a relog or worldport brings back under the same guid.
+    #[test]
+    fn a_giver_streamed_in_before_we_are_tagged_is_still_asked_on_entry_and_on_relog() {
+        use crate::net::{Guid, NetEntity};
+        use benilla_protocol::ObjectFields;
+
+        const NPC: u64 = 0xf130_0000_1932_0000;
+        const FIELD_LEVEL: u16 = 34;
+        const FIELD_NPC_FLAGS: u16 = 147;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .init_resource::<crate::net::Reputations>()
+            .add_systems(Update, query_statuses);
+
+        let net_entity = || NetEntity {
+            kind: EntityKind::Unit,
+            display_id: None,
+            scale: 1.0,
+        };
+        // One world entry as the drain delivers it: our create and the giver's in one frame, the
+        // self tag in the next.
+        let enter_world = |app: &mut App| -> (Entity, Entity) {
+            let me = app
+                .world_mut()
+                .spawn((
+                    net_entity(),
+                    Guid(1),
+                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_LEVEL, 5)])),
+                ))
+                .id();
+            let npc = app
+                .world_mut()
+                .spawn((
+                    net_entity(),
+                    Guid(NPC),
+                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0x2)])),
+                ))
+                .id();
+            let mut index = app.world_mut().resource_mut::<GuidIndex>();
+            index.0.insert(1, me);
+            index.0.insert(NPC, npc);
+            (me, npc)
+        };
+        let asked = |app: &mut App| -> usize {
+            app.update();
+            rx.try_iter()
+                .filter(
+                    |c| matches!(c, ClientCommand::QuestgiverStatusQuery { npc } if *npc == NPC),
+                )
+                .count()
+        };
+
+        let (me, npc) = enter_world(&mut app);
+        assert_eq!(
+            asked(&mut app),
+            0,
+            "no self yet: nothing to judge reaction against"
+        );
+        app.world_mut().entity_mut(me).insert(SelfPlayer);
+        assert_eq!(
+            asked(&mut app),
+            1,
+            "the first frame with a self asks the giver"
+        );
+        assert_eq!(asked(&mut app), 0, "once");
+
+        // The logout tears the world down; the relog streams the same giver back.
+        app.world_mut()
+            .resource_mut::<QuestGiver>()
+            .set_status(NPC, 2);
+        app.world_mut().resource_mut::<GuidIndex>().0.clear();
+        app.world_mut().entity_mut(me).despawn();
+        app.world_mut().entity_mut(npc).despawn();
+        assert_eq!(asked(&mut app), 0, "between worlds, nothing");
+        assert!(
+            app.world().resource::<QuestGiver>().status(NPC).is_none(),
+            "the old answer dies with the object, self or no self"
+        );
+        let (me, _) = enter_world(&mut app);
+        assert_eq!(asked(&mut app), 0, "no self yet");
+        app.world_mut().entity_mut(me).insert(SelfPlayer);
+        assert_eq!(
+            asked(&mut app),
+            1,
+            "the relogged giver is a new object, asked again"
+        );
+        assert_eq!(asked(&mut app), 0, "once");
     }
 }

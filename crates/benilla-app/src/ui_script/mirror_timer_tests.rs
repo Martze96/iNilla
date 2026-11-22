@@ -25,7 +25,7 @@ fn harness() -> UiScript {
     s
 }
 
-/// `MIRROR_TIMER_START` as `ui_mirror::feed_mirror_timers` fires it: the timer name, ms left,
+/// `MIRROR_TIMER_START` as `ui_mirror::fire_edge` fires it: the timer name, ms left,
 /// ms total, the signed rate, the paused flag, the caption.
 fn start(
     s: &mut UiScript,
@@ -120,7 +120,12 @@ fn breath_takes_the_first_bar_in_the_reference_blue() {
     // MirrorTimerColors["BREATH"]
     let (r, g, b) = bar_color(&s, "MirrorTimer1");
     assert!(
-        (r - 0.0).abs() < 1e-6 && (g - 0.5).abs() < 1e-6 && (b - 1.0).abs() < 1e-6,
+        (r, g, b)
+            == (
+                0.0,
+                benilla_ui::color::quant::read_via_f32(0.5),
+                benilla_ui::color::quant::read_via_f32(1.0)
+            ),
         "reference blue, got ({r}, {g}, {b})"
     );
 }
@@ -136,7 +141,12 @@ fn fatigue_is_the_reference_yellow_under_its_own_caption() {
     assert_eq!(caption(&s, "MirrorTimer1").as_deref(), Some("Fatigue"));
     let (r, g, b) = bar_color(&s, "MirrorTimer1");
     assert!(
-        (r - 1.0).abs() < 1e-6 && (g - 0.9).abs() < 1e-6 && (b - 0.0).abs() < 1e-6,
+        (r, g, b)
+            == (
+                benilla_ui::color::quant::read(1.0),
+                benilla_ui::color::quant::read_via_f32(0.9),
+                0.0
+            ),
         "reference yellow, got ({r}, {g}, {b})"
     );
 }

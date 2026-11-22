@@ -8,6 +8,7 @@ use super::test_ui::load_ui as load_xml;
 /// `CombatText_UpdateDisplayedMessages` registers no events.
 fn load_combat_text() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua"); // ENTERING_COMBAT & co.
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -65,13 +66,16 @@ fn combat_text_damage_scrolls_and_expires() {
             ScriptValue::Str("17".into()),
         ],
     );
+    benilla_ui::test_support::install_law43(&s);
     let ok: bool = s
         .eval(
             r#"
             local t = CombatText1
             local _, h = t:GetFont()
             local y0 = COMBAT_TEXT_TO_ANIMATE[1].yPos
-            return t:IsShown() ~= nil and t:GetText() == "-17" and h == 25 and y0 ~= nil
+            -- The height reads back through the getter steps, `G(S(25))` at 4:3.
+            return t:IsShown() ~= nil and t:GetText() == "-17" and h == law(25)
+                and y0 ~= nil
         "#,
         )
         .unwrap();
@@ -301,7 +305,8 @@ fn combat_text_master_toggle_unregisters() {
 fn the_damage_text_font_is_read_from_the_lua_global() {
     let data = benilla_formats::wow_data_or_skip!();
     let _ = data;
-    let s = UiScript::new().unwrap();
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
 
     // Unassigned, the reference's failure block (`0x704350`) leaves `0x703bf0`'s pre-seeded `""`,
     // which the font factory rejects.

@@ -19,9 +19,10 @@
 //! only the range law and the order of the draws are the reference's.
 //!
 //! The 3-D side, the model build into the frame's scene (`0x470b70`), its dressing in the class's
-//! `CharStartOutfit` (`0x470800`), the bake `UpdateCustomizationScene` runs each frame (`0x471300`)
-//! and the facing's rotation (`0x470a50`), is the host's scene drive; what it reads is kept here
-//! ([`super::UiScript::glue_create_look`], [`super::UiScript::glue_create_facing`]).
+//! `CharStartOutfit` (`0x470800`), the composite and wait `UpdateCustomizationScene` runs each
+//! frame (`0x471300`) and the facing's rotation (`0x470a50`), is the host's scene drive; what it
+//! reads is kept here ([`super::UiScript::glue_create_look`],
+//! [`super::UiScript::glue_create_facing`]).
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -182,6 +183,7 @@ struct Info {
 }
 
 /// The words the draws take.
+#[derive(Clone)]
 struct Words {
     state: u64,
     /// Words given ahead of the generator's, consumed first.
@@ -228,7 +230,7 @@ fn scale(r: u32, n: u32) -> u32 {
 }
 
 /// The name generator (`0xb420b8`): a trigram table learned from one race's `NameGen` rows.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NameGen {
     /// Each key, one to three bytes of a lowered `_name`, and how often it was seen, sorted by key
     /// (`0x4753fb`, comparator `0x475420`).
@@ -330,6 +332,7 @@ impl NameGen {
 }
 
 /// The create screen's state.
+#[derive(Clone)]
 pub(crate) struct GlueCreate {
     catalog: Rc<GlueCreateCatalog>,
     /// `[0xb420f0]`: the name `SetCharCustomizeFrame` found.
@@ -886,8 +889,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `0x471810` → `0x471300`: the character bake (`0x477860`) and the scene's advance
-    // (`0x710450`), once per `OnUpdateModel` (`CharacterCreate.lua:325`): the scene drive's.
+    // `0x471810` → `0x471300`: the character's forced composite (`0x477860(1)`, `0x471308`) and
+    // the wait for the whole scene (`IsReady(1, 1)`, `0x710450`, `0x471320`), once per
+    // `OnUpdateModel` (`CharacterCreate.lua:287`): the host's glue stage, after each look change.
     g.set(
         "UpdateCustomizationScene",
         lua.create_function(|_, _: MultiValue| Ok(()))?,
@@ -968,14 +972,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetRandomName",
         lua.create_function(|lua, _: MultiValue| {
-            let lists = model(lua).glue.name_lists();
+            let lists = model(lua).name_lists();
             let mut m = model(lua);
+            let charsets = m.name_charsets();
             let c = &mut m.glue.create;
             for _ in 0..NAME_TRIES {
                 let name = c.names.generate(&mut c.words, NAME_BUFFER);
                 let name = String::from_utf8_lossy(&name).into_owned();
                 if (4..=10).contains(&name.len())
-                    && check_char_name(Some(&name), &*lists) == CHAR_NAME_SUCCESS
+                    && check_char_name(Some(&name), &*lists, charsets) == CHAR_NAME_SUCCESS
                 {
                     return text(lua, Some(&name));
                 }
@@ -1004,7 +1009,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (status, request) = {
                 let m = model(lua);
                 let status = match &name {
-                    Some(n) => check_char_name(Some(n), &*m.glue.name_lists()),
+                    Some(n) => check_char_name(Some(n), &*m.name_lists(), m.name_charsets()),
                     None => 0x45,
                 };
                 let c = &m.glue.create;

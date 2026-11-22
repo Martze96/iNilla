@@ -27,7 +27,7 @@ fn setpoint_explicit_nil_relative_to_keeps_offsets() {
         })
         .expect("resolved frame rect");
     // screen [0,0,600,800], TOPLEFT+(40,-40): left 40, top 560, size 300×200.
-    assert_eq!(rect, Rect::new(360.0, 40.0, 560.0, 340.0));
+    crate::assert_near!(rect, Rect::new(360.0, 40.0, 560.0, 340.0));
 }
 
 #[test]
@@ -164,6 +164,101 @@ fn the_other_setpoint_raises() {
     );
 }
 
+/// A target whose anchors reach the receiver through any chain is refused before anything is
+/// stored: `0x768010(relative, self)` at `0x7a27b3` raises `%s:SetPoint(): %s is dependent on
+/// this` (`0x87cc80`), and `SetAllPoints` the same at `0x7a2af9` (`0x87cd28`). Regions walk too.
+#[test]
+fn a_target_anchored_to_the_receiver_is_refused() {
+    let s = script();
+    s.run(
+        r#"
+        A = CreateFrame("Frame", "ChainA")
+        B = CreateFrame("Frame", "ChainB")
+        C = CreateFrame("Frame", "ChainC")
+        B:SetPoint("TOPLEFT", A, "BOTTOMLEFT", 0, 0)
+        C:SetPoint("TOPLEFT", B, "BOTTOMLEFT", 0, 0)
+        Root = CreateFrame("Frame", "ChainRoot")
+        A:SetPoint("CENTER", Root, "CENTER", 0, 0)
+        L = C:CreateFontString(nil, "ARTWORK")
+        L:SetPoint("CENTER", C, "CENTER", 0, 0)
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            r#"A:SetPoint("TOPLEFT", B, "BOTTOMLEFT", 0, 0)"#,
+            "ChainA:SetPoint(): ChainB is dependent on this",
+        ),
+        (
+            r#"A:SetPoint("TOPLEFT", C, "BOTTOMLEFT", 0, 0)"#,
+            "ChainA:SetPoint(): ChainC is dependent on this",
+        ),
+        (
+            "A:SetAllPoints(C)",
+            "ChainA:SetAllPoints(): ChainC is dependent on this",
+        ),
+        (
+            r#"A:SetPoint("TOPLEFT", L, "BOTTOMLEFT", 0, 0)"#,
+            "ChainA:SetPoint(): <unnamed> is dependent on this",
+        ),
+    ] {
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(e.contains(line), "{call}: {e}");
+    }
+    // Nothing was stored: A keeps its one anchor to the root.
+    assert_eq!(s.eval::<i64>("return A:GetNumPoints()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("local _, r = A:GetPoint(1) return r:GetName()")
+            .unwrap(),
+        "ChainRoot"
+    );
+    // A target that does not reach the receiver is taken.
+    s.run(r#"C:SetPoint("TOPLEFT", A, "BOTTOMLEFT", 0, 0)"#)
+        .unwrap();
+}
+
+/// The relative point's "Unknown region point" is the ladder's last raise (`0x7a2810`,
+/// `0x7a2848`): a missing target (`0x7a274d`), an anchor to itself (`0x7a2764`) and a dependent
+/// target (`0x7a27b3`) raise first, and the receiver's own point (`0x7a2674`) before them all.
+#[test]
+fn the_relative_point_is_checked_after_the_target() {
+    let s = script();
+    s.run(
+        r#"
+        A = CreateFrame("Frame", "OrderA")
+        B = CreateFrame("Frame", "OrderB")
+        B:SetPoint("TOP", A, "BOTTOM", 0, 0)
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            r#"A:SetPoint("TOP", "NoSuchFrame", "NOWHERE")"#,
+            "OrderA:SetPoint(): Couldn't find region named 'NoSuchFrame'",
+        ),
+        (
+            r#"A:SetPoint("TOP", A, "NOWHERE")"#,
+            "OrderA:SetPoint(): trying to anchor to itself",
+        ),
+        (
+            r#"A:SetPoint("TOP", B, "NOWHERE")"#,
+            "OrderA:SetPoint(): OrderB is dependent on this",
+        ),
+        (
+            r#"A:SetPoint("NOWHERE", "NoSuchFrame", "TOP")"#,
+            "OrderA:SetPoint(): Unknown region point",
+        ),
+        (
+            r#"B:SetPoint("TOP", A, "NOWHERE")"#,
+            "OrderB:SetPoint(): Unknown region point",
+        ),
+    ] {
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(e.contains(line), "{call}: {e}");
+    }
+    assert_eq!(s.eval::<i64>("return A:GetNumPoints()").unwrap(), 0);
+}
+
 /// `lua_type(L,3)` tells `LUA_TNIL` (0, the screen root) from `LUA_TNONE` (-1, Usage), so the
 /// raise ladder must see the argument count Lua saw, not a padded or trimmed tuple.
 #[test]
@@ -245,7 +340,7 @@ fn a_region_resolves_even_when_its_owner_frame_has_no_rect() {
         Some(105.0),
         "a fully-anchored region needs nothing from its owner"
     );
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<Option<f32>>("return BareMark:GetBottom()")
             .unwrap(),
         Some(57.0)
@@ -378,25 +473,31 @@ fn get_width_answers_the_set_size_else_the_rect_span_unscaled() {
     .unwrap();
     s.resolve();
     let num = |e: &str| s.eval::<f64>(&format!("return {e}")).unwrap();
+    // Each through the law at 4:3: `G(S(100))`, and the spans `G(S(400))` and `G(S(200))`.
+    let (w100, w400, h200) = (99.99999850988391, 399.99999403953564, 199.99999701976782);
     assert_eq!(
         num("SizeSet:GetWidth()"),
-        100.0,
+        w100,
         "the set width, not the span"
     );
-    assert_eq!(num("SizeSet:GetRight() - SizeSet:GetLeft()"), 400.0);
-    assert_eq!(num("SizeSet:GetHeight()"), 200.0, "no set height: the span");
+    assert_eq!(num("SizeSet:GetRight() - SizeSet:GetLeft()"), w400);
+    assert_eq!(num("SizeSet:GetHeight()"), h200, "no set height: the span");
     assert_eq!(
         num("SizeTex:GetWidth()"),
-        400.0,
+        w400,
         "a size-less texture: its rect"
     );
-    assert_eq!(num("SizeTex:GetHeight()"), 200.0);
+    assert_eq!(num("SizeTex:GetHeight()"), h200);
     assert_eq!(
         num("SizeHalf:GetWidth()"),
-        400.0,
+        w400,
         "the span, not over the scale"
     );
-    assert_eq!(num("SizeHalf:GetRight() - SizeHalf:GetLeft()"), 800.0);
+    assert_eq!(
+        num("SizeHalf:GetRight() - SizeHalf:GetLeft()"),
+        2.0 * w400,
+        "the edges over the scale"
+    );
     assert_eq!(num("SizeLoose:GetWidth()"), 0.0, "no size and no rect");
     assert_eq!(num("SizeLooseTex:GetHeight()"), 0.0);
 }
@@ -435,13 +536,14 @@ fn get_width_resolves_only_at_a_zero_size() {
     "#,
     )
     .unwrap();
+    // The set width and the span through the law, as 1.12.1 prints them at 4:3.
     assert_eq!(
         s.eval::<String>("return table.concat(log, ',')").unwrap(),
-        "w 20,span,w 200"
+        "w 19.999999701977,span,w 199.99999701977"
     );
     s.resolve();
     assert_eq!(
         s.eval::<String>("return table.concat(log, ',')").unwrap(),
-        "w 20,span,w 200,fixed"
+        "w 19.999999701977,span,w 199.99999701977,fixed"
     );
 }

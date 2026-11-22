@@ -9,21 +9,22 @@ use super::{
     ExplorationXp, FriendEntry, FriendStatusUpdate, GameObjectQueryInfo, GmTicket, GossipOption,
     GossipPoi, GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
     GuildQueryResponse, GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult,
-    JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll,
-    MailListEntry, MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo,
-    PeriodicAuraLog, PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
-    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept,
-    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
-    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
-    SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, SplineMode,
-    StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
-    VendorItem, WhoResults, XpGain,
+    JumpInfo, LevelUpInfo, LfgResults, LootAllPassed, LootItem, LootRoll, LootRollWon,
+    LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object, PartyKillLog,
+    PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PetitionQueryResponse,
+    PetitionRename, PetitionShowList, PetitionShowSignatures, PetitionSignResults, PvpCredit,
+    QuestComplete, QuestConfirmAccept, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
+    QuestPushResult, QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind,
+    SpellChainTargets, SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo,
+    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart,
+    SplineMode, StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, WowTime, XpGain,
 };
 
-/// The final facing a `SMSG_MONSTER_MOVE` dictates (`moveType`), applied as a hard snap, not a
-/// turn (`0x6018f0`); `Spot` and `Target` resolve once, from positions at receipt.
-#[derive(Debug, Clone, Copy)]
+/// The final facing a `SMSG_MONSTER_MOVE` dictates (`moveType`): kept for the path's end when a
+/// path installs, else the unit's raw facing at once (`0x6018f0`, `0x601fee`). `Spot` and `Target`
+/// resolve when applied, from the positions then.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MonsterMoveFacing {
     /// `moveType` 0 or a stop: the unit faces its travel direction.
     None,
@@ -49,6 +50,9 @@ pub struct CreatureQueryInfo {
     pub rank: u32,
     /// Bit `0x10` (HIDE_FACTION_TOOLTIP) drops the tooltip's faction line (`0x612610`).
     pub type_flags: u32,
+    /// `CreatureSpellData.dbc` id of the abilities a tamed one brings, `0` for none: the
+    /// studied-creature block's ability line (`0x529d56`).
+    pub pet_spell_list: u32,
     /// The tooltip's green CIVILIAN line and the dishonorable-kill mark.
     pub civilian: bool,
     /// The tooltip's white LEADER line (`0x6125c0`).
@@ -67,12 +71,14 @@ pub enum ServerPacket {
         result: u8,
         /// Our login-queue place; only for [`super::AUTH_WAIT_QUEUE`] with a long enough body.
         queue_position: Option<u32>,
-        /// Rested billing minutes (`PlayerFrame.lua:246` divides by 60), returned unconverted by
-        /// `GetBillingTimeRested()` (`0x48ec50`); `None` on a body too short for the group.
-        billing_time_rested: Option<u32>,
+        /// The billing fields read; `None` when under 5 bytes follow the result (`0x5b41f9`).
+        billing: Option<super::BillingRead>,
     },
     CharEnum {
         characters: Vec<Character>,
+        /// The list failed, `characters` then empty: the flag `0x5b42a0` passes to `0x5ab300`,
+        /// which completes the query `0x2c` for `0x2b` (`0x5b4574`).
+        failed: bool,
     },
     CharCreate {
         result: u8,
@@ -91,7 +97,10 @@ pub enum ServerPacket {
     CharacterLoginFailed {
         result: u8,
     },
+    /// `SMSG_UPDATE_OBJECT`, or `SMSG_COMPRESSED_UPDATE_OBJECT` inflated: the header byte, which
+    /// runs the first pass ([`crate::guid::first_pass`]), and the blocks in packet order.
     UpdateObject {
+        first_pass: bool,
         objects: Vec<Object>,
     },
     /// `SMSG_COMPRESSED_MOVES`: a `u32` size, then deflated records `[u8 size][u16 opcode][body]`,
@@ -177,12 +186,22 @@ pub enum ServerPacket {
         position: Vector3d,
         orientation: f32,
     },
+    /// `SMSG_LOGIN_SETTIMESPEED`: the date to set the clock to and the rate, as sent.
     TimeSpeed {
-        hours: u8,
-        minutes: u8,
-        /// Day count from the packed date, `year·372 + month·31 + day`; drives the moon phase.
-        day_serial: u32,
-        timescale: f32,
+        time: WowTime,
+        speed: f32,
+    },
+    /// `SMSG_GAMESPEED_SET`: the rate, as sent.
+    GameSpeedSet {
+        speed: f32,
+    },
+    /// `SMSG_GAMETIME_UPDATE`: the date to sync the clock to.
+    GameTimeUpdate {
+        time: WowTime,
+    },
+    /// `SMSG_GAMETIME_SET`: the date to set the clock to.
+    GameTimeSet {
+        time: WowTime,
     },
     /// `SMSG_QUERY_TIME_RESPONSE`: wall-clock unix seconds, the base of absolute descriptor stamps.
     QueryTimeResponse {
@@ -194,9 +213,10 @@ pub enum ServerPacket {
         map: u32,
         area: u32,
     },
-    /// `SMSG_GMTICKET_GETTICKET`: our open ticket, `None` for "no ticket". Also pushed unasked
-    /// when a GM views, escalates or completes it (`GMTicketMgr.cpp:153-159`).
+    /// `SMSG_GMTICKET_GETTICKET`: the status and our open ticket, `None` for "no ticket". Also
+    /// pushed unasked when a GM views, escalates or completes it (`GMTicketMgr.cpp:153-159`).
     GmTicketAnswer {
+        status: u32,
         ticket: Option<Box<GmTicket>>,
     },
     /// `SMSG_GMTICKET_CREATE`: 2 created, 3 refused, 1 already have one; vmangos never sends 1
@@ -274,6 +294,10 @@ pub enum ServerPacket {
     },
     /// `0x297`/`0x298`/`0x299`/`0x2BB`: the meeting stone's display-only replies.
     MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// `SMSG_ACCOUNT_DATA_MD5`: the server's digest of each account-data section.
+    AccountDataMd5(crate::messages::AccountDataMd5),
+    /// `SMSG_UPDATE_ACCOUNT_DATA`: one account-data section's file, compressed.
+    UpdateAccountData(crate::messages::UpdateAccountData),
     /// `SMSG_TUTORIAL_FLAGS`: the account's tutorial bank.
     TutorialFlags(crate::messages::TutorialFlags),
     /// `SMSG_SUMMON_REQUEST`: someone asks to pull us to them; nothing moves until
@@ -311,6 +335,12 @@ pub enum ServerPacket {
     SetFactionVisible {
         list_id: u32,
     },
+    /// `SMSG_SET_FACTION_ATWAR`: one slot and a flag byte, whose bit `0x02` alone is the slot's
+    /// new at-war bit (`0x4d56d9`).
+    SetFactionAtWar {
+        list_id: u32,
+        flags: u8,
+    },
     /// `SMSG_NAME_QUERY_RESPONSE`: guid, name, realm (empty on one realm), race/gender/class as
     /// `u32`s (`NameQueryResponse::AppendBodyTo`); an unknown guid gets an empty name.
     NameQueryResponse {
@@ -327,7 +357,7 @@ pub enum ServerPacket {
         info: Option<CreatureQueryInfo>,
     },
     /// `SMSG_PET_NAME_QUERY_RESPONSE`: keyed by pet number, as the client's pet-name cache is; the
-    /// `nameTimestamp` tail, which only ages that on-disk cache, is read and dropped.
+    /// `nameTimestamp` tail is read and dropped.
     PetNameQueryResponse {
         pet_number: u32,
         name: String,
@@ -368,6 +398,26 @@ pub enum ServerPacket {
     GameObjectDespawnAnim {
         guid: u64,
     },
+    /// `SMSG_GAMEOBJECT_RESET_STATE`: a bare `u64` guid; the client re-applies the object's
+    /// descriptor state to its animation (`0x6e9790` → `0x5f8c00`).
+    GameObjectResetState {
+        guid: u64,
+    },
+    /// `SMSG_GAMEOBJECT_PAGETEXT`: a bare `u64` guid, the object whose page the reader opens on.
+    GameObjectPageText {
+        guid: u64,
+    },
+    /// `SMSG_READ_ITEM_OK`: the book may be read (the item's guid).
+    ReadItemOk {
+        guid: u64,
+    },
+    /// `SMSG_READ_ITEM_FAILED`: the item's guid, the reason byte and, for reason 1, the translation
+    /// time in milliseconds (`items::read_read_item_failed`).
+    ReadItemFailed {
+        guid: u64,
+        reason: u8,
+        milliseconds: i32,
+    },
     /// `SMSG_FISH_NOT_HOOKED`: the channel ended unhooked (empty body; `ERR_FISH_NOT_HOOKED`).
     FishNotHooked,
     /// `SMSG_FISH_ESCAPED`: the skill roll failed on the click (empty body; `ERR_FISH_ESCAPED`).
@@ -404,6 +454,11 @@ pub enum ServerPacket {
     Emote {
         guid: u64,
         emote_id: u32,
+    },
+    /// `SMSG_ITEM_NAME_QUERY_RESPONSE`: an item's name by entry; `None` is a refusal.
+    ItemNameQueryResponse {
+        entry: u32,
+        name: Option<String>,
     },
     /// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`: the full item template, boxed for size; `None` is a miss.
     ItemQueryResponse {
@@ -639,7 +694,7 @@ pub enum ServerPacket {
     /// left. It arrives before the delta naming the slot's spell, so buffer it by slot.
     UpdateAuraDuration {
         slot: u8,
-        remaining_ms: u32,
+        remaining_ms: i32,
     },
     /// `SMSG_PLAY_SPELL_VISUAL`: a spell-visual kit on a unit outside a cast, at the fixed stage 0.
     PlaySpellVisual {
@@ -879,6 +934,11 @@ pub enum ServerPacket {
     CorpseReclaimDelay {
         delay_ms: u32,
     },
+    /// `SMSG_PLAYER_SKINNED`: whether its one byte is nonzero, which the handler hands on as is
+    /// (`0x5e7d54`); vmangos sends `freeRepop` 0 (`Packets/Misc.h:816`).
+    PlayerSkinned {
+        free_repop: bool,
+    },
     /// `SMSG_DURABILITY_DAMAGE_DEATH` (empty): the 10% death durability loss, a red error line.
     DurabilityDamageDeath,
     /// `SMSG_RESURRECT_REQUEST`: a resurrection offer.
@@ -921,6 +981,8 @@ pub enum ServerPacket {
     },
     /// `SMSG_LOGOUT_CANCEL_ACK` (empty): the logout was cancelled; it takes the countdown down.
     LogoutCancelAck,
+    /// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE` (empty): end far sight on the active player (`0x5e43f8`).
+    ClearFarSightImmediate,
     /// `SMSG_PONG`: our `CMSG_PING`'s sequence echoed back, timed for the round trip.
     Pong {
         sequence: u32,
@@ -937,6 +999,8 @@ pub enum ServerPacket {
     GroupInvite {
         inviter: String,
     },
+    /// `SMSG_GROUP_CANCEL`: the inviter withdrew; the body (a name) is read and dropped (`0x5e6770`).
+    GroupCancel,
     /// `SMSG_GROUP_DECLINE`: an invite we sent was declined.
     GroupDecline {
         name: String,
@@ -1071,6 +1135,8 @@ pub enum ServerPacket {
     FriendStatus(FriendStatusUpdate),
     /// `SMSG_WHO`: the `/who` answer, up to 49 rows plus the true match total.
     WhoResults(WhoResults),
+    /// `MSG_LOOKING_FOR_GROUP`'s reply (`0x4e8dc0`): up to 50 records and the total.
+    LookingForGroup(LfgResults),
     /// `SMSG_GUILD_QUERY_RESPONSE`: a guild's name, ten rank names and tabard, cached by guild id.
     GuildQueryResponse(GuildQueryResponse),
     /// `SMSG_GUILD_ROSTER`: a complete snapshot, resent on any change: MOTD, info, ranks, members.
@@ -1152,7 +1218,8 @@ pub enum ServerPacket {
         allow_move: bool,
     },
     /// `SMSG_SHOWTAXINODES` (`TaxiHandler.cpp:82-96`): the taxi map; vmangos always writes
-    /// `window` 1, and `nearest_node` is the flight master's own node.
+    /// `window` 1, and `nearest_node` is the flight master's own node. A `window` of 0 carries
+    /// the mask alone, with no flight master or node (`0x5ece97`).
     ShowTaxiNodes {
         window: u32,
         flightmaster: u64,
@@ -1297,6 +1364,9 @@ impl ServerPacket {
             ServerPacket::TransferAborted { .. } => "SMSG_TRANSFER_ABORTED".into(),
             ServerPacket::LoginVerifyWorld { .. } => "SMSG_LOGIN_VERIFY_WORLD".into(),
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
+            ServerPacket::GameSpeedSet { .. } => "SMSG_GAMESPEED_SET".into(),
+            ServerPacket::GameTimeUpdate { .. } => "SMSG_GAMETIME_UPDATE".into(),
+            ServerPacket::GameTimeSet { .. } => "SMSG_GAMETIME_SET".into(),
             ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
             ServerPacket::GmTicketAnswer { .. } => "SMSG_GMTICKET_GETTICKET".into(),
@@ -1338,12 +1408,15 @@ impl ServerPacket {
             ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::JoinFailed {
                 ..
             }) => "SMSG_MEETINGSTONE_JOIN_FAILED".into(),
+            ServerPacket::AccountDataMd5(_) => "SMSG_ACCOUNT_DATA_MD5".into(),
+            ServerPacket::UpdateAccountData(_) => "SMSG_UPDATE_ACCOUNT_DATA".into(),
             ServerPacket::TutorialFlags(_) => "SMSG_TUTORIAL_FLAGS".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
             ServerPacket::SetForcedReactions { .. } => "SMSG_SET_FORCED_REACTIONS".into(),
             ServerPacket::SetFactionVisible { .. } => "SMSG_SET_FACTION_VISIBLE".into(),
+            ServerPacket::SetFactionAtWar { .. } => "SMSG_SET_FACTION_ATWAR".into(),
             ServerPacket::NameQueryResponse { .. } => "SMSG_NAME_QUERY_RESPONSE".into(),
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),
             ServerPacket::PetNameQueryResponse { .. } => "SMSG_PET_NAME_QUERY_RESPONSE".into(),
@@ -1351,6 +1424,10 @@ impl ServerPacket {
             ServerPacket::PageTextQueryResponse { .. } => "SMSG_PAGE_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
             ServerPacket::GameObjectDespawnAnim { .. } => "SMSG_GAMEOBJECT_DESPAWN_ANIM".into(),
+            ServerPacket::GameObjectResetState { .. } => "SMSG_GAMEOBJECT_RESET_STATE".into(),
+            ServerPacket::GameObjectPageText { .. } => "SMSG_GAMEOBJECT_PAGETEXT".into(),
+            ServerPacket::ReadItemOk { .. } => "SMSG_READ_ITEM_OK".into(),
+            ServerPacket::ReadItemFailed { .. } => "SMSG_READ_ITEM_FAILED".into(),
             ServerPacket::OpenContainer { .. } => "SMSG_OPEN_CONTAINER".into(),
             ServerPacket::Inspect { .. } => "SMSG_INSPECT".into(),
             ServerPacket::StandStateUpdate { .. } => "SMSG_STANDSTATE_UPDATE".into(),
@@ -1363,6 +1440,7 @@ impl ServerPacket {
             ServerPacket::TextEmote { .. } => "SMSG_TEXT_EMOTE".into(),
             ServerPacket::Emote { .. } => "SMSG_EMOTE".into(),
             ServerPacket::ItemQueryResponse { .. } => "SMSG_ITEM_QUERY_SINGLE_RESPONSE".into(),
+            ServerPacket::ItemNameQueryResponse { .. } => "SMSG_ITEM_NAME_QUERY_RESPONSE".into(),
             ServerPacket::InventoryChangeFailure { .. } => "SMSG_INVENTORY_CHANGE_FAILURE".into(),
             ServerPacket::MessageChat(_) => "SMSG_MESSAGECHAT".into(),
             ServerPacket::ChannelNotify(_) => "SMSG_CHANNEL_NOTIFY".into(),
@@ -1494,6 +1572,7 @@ impl ServerPacket {
             ServerPacket::ItemPushResult(_) => "SMSG_ITEM_PUSH_RESULT".into(),
             ServerPacket::CorpseQuery(_) => "MSG_CORPSE_QUERY".into(),
             ServerPacket::CorpseReclaimDelay { .. } => "SMSG_CORPSE_RECLAIM_DELAY".into(),
+            ServerPacket::PlayerSkinned { .. } => "SMSG_PLAYER_SKINNED".into(),
             ServerPacket::DurabilityDamageDeath => "SMSG_DURABILITY_DAMAGE_DEATH".into(),
             ServerPacket::ResurrectRequest(_) => "SMSG_RESURRECT_REQUEST".into(),
             ServerPacket::SpiritHealerConfirm { .. } => "SMSG_SPIRIT_HEALER_CONFIRM".into(),
@@ -1526,11 +1605,13 @@ impl ServerPacket {
             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),
             ServerPacket::LogoutResponse { .. } => "SMSG_LOGOUT_RESPONSE".into(),
             ServerPacket::LogoutCancelAck => "SMSG_LOGOUT_CANCEL_ACK".into(),
+            ServerPacket::ClearFarSightImmediate => "SMSG_CLEAR_FAR_SIGHT_IMMEDIATE".into(),
             ServerPacket::Pong { .. } => "SMSG_PONG".into(),
             ServerPacket::ForceSpeedChange { kind, .. } => {
                 format!("SMSG_FORCE_{kind:?}_SPEED_CHANGE")
             }
             ServerPacket::GroupInvite { .. } => "SMSG_GROUP_INVITE".into(),
+            ServerPacket::GroupCancel => "SMSG_GROUP_CANCEL".into(),
             ServerPacket::GroupDecline { .. } => "SMSG_GROUP_DECLINE".into(),
             ServerPacket::GroupUninvited => "SMSG_GROUP_UNINVITE".into(),
             ServerPacket::GroupLeaderChanged { .. } => "SMSG_GROUP_SET_LEADER".into(),
@@ -1570,6 +1651,7 @@ impl ServerPacket {
             ServerPacket::IgnoreList { .. } => "SMSG_IGNORE_LIST".into(),
             ServerPacket::FriendStatus(..) => "SMSG_FRIEND_STATUS".into(),
             ServerPacket::WhoResults(..) => "SMSG_WHO".into(),
+            ServerPacket::LookingForGroup(..) => "MSG_LOOKING_FOR_GROUP".into(),
             ServerPacket::GuildQueryResponse(..) => "SMSG_GUILD_QUERY_RESPONSE".into(),
             ServerPacket::GuildRoster(..) => "SMSG_GUILD_ROSTER".into(),
             ServerPacket::GuildEvent(..) => "SMSG_GUILD_EVENT".into(),

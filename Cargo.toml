@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["sam <samuv.eth@gmail.com>"]
@@ -35,13 +35,16 @@ wgpu = "27"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
-# lua-src builds the addon VM's Lua 5.1.5, patched to accept exactly the 1.12 client's grammar;
-# the hunks and the command that checks them: `third_party/lua-src/BENILLA.md`.
 [patch.crates-io]
-lua-src = { path = "third_party/lua-src" }
 # kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
+# A lock-only stand-in: bevy_audio's unbuilt cpal 0.15 would otherwise hold `alsa-sys` 0.3 against
+# cpal 0.17's 0.4, and a lock holds one `links = "alsa"` (`third_party/alsa-0.9/BENILLA.md`).
+alsa = { path = "third_party/alsa-0.9" }
+# wgpu-hal 27.0.4, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
+# and not turned into a lost device (`third_party/wgpu-hal/BENILLA.md`).
+wgpu-hal = { path = "third_party/wgpu-hal" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
@@ -50,6 +53,11 @@ opt-level = 3
 # units: at 16 units the dependencies cost +1.2 cpu_ms at the leg pin, at one nothing, and a cold
 # build is no slower.
 codegen-units = 1
+
+# The movie decoder at opt-level 3 in dev as well: at 1, decoding the 1024-wide intro takes its
+# install test 29 s, at 3 under 6 s.
+[profile.dev.package.benilla-movie]
+opt-level = 3
 
 # Our crates at opt-level 1: Bevy's generic hot paths monomorphize into them, and at opt-level 0
 # Stormwind drops from a pinned 60 fps to ~45.

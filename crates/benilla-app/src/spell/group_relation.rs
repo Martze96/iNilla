@@ -3,28 +3,23 @@
 //! (`6e5cf1`-`6e5d2f`) `0x606d20(caster, unit)` and `CanAssist`, and the world pick's party leg
 //! (`480686`, `4806b8`) asks `0x606c20`.
 //!
-//! - [`GroupRoster`]: the guids the reference's two tables hold, and [`publish_group_roster`],
-//!   which copies them out of `GroupState` before the input pass, so no cast or hover system
-//!   reads that resource and orders against the drains that write it.
+//! - [`GroupRoster`]: the guids the reference's two tables hold, copied out of `GroupState` by the
+//!   group packets' handlers as each writes them ([`publish_group_roster`]), so a listener inside
+//!   the packet reads the tables it left, and no cast or hover system reads `GroupState` and orders
+//!   against the drains that write it.
 //! - [`GroupInputs`]: what a [`TargetRelations`] carries beside its stores for the two
 //!   predicates, and [`TargetRelations::in_party`] and [`TargetRelations::in_group`], which ask
 //!   them.
 
 use bevy::prelude::*;
 
-use benilla_protocol::messages::{ObjectType, OwnerFallback};
-
 use super::cast_target::TargetRelations;
-use crate::net::{ObjectStore, SelfGuid};
+use crate::net::ObjectStore;
 use crate::ui_party::{raid_row_guids, GroupState};
 
-/// `UNIT_FIELD_FLAGS & 0x8`, `UNIT_FLAG_PLAYER_CONTROLLED` (vmangos `UnitDefines.h:548`), which
-/// both predicates test on both units (`606c5e`, `606c76`, `606d5e`, `606d76`).
-const UNIT_FLAG_PLAYER_CONTROLLED: u32 = 0x8;
-
 /// The two tables `0x4e7f70` and `0x4baee0` read: the guids in the party slots and in the raid
-/// roster, as the frame began.
-#[derive(Resource, Default, Debug, PartialEq, Eq)]
+/// roster, as the feed last published them.
+#[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupRoster {
     /// The party slots `[0xbc6f48 + 8i]`, `i < 4` (`4e7f96`-`4e7fb0`); none once an opcode emptied
     /// them.
@@ -40,37 +35,61 @@ impl GroupRoster {
         guid != 0 && (me == Some(guid) || self.party.contains(&guid))
     }
 
+    /// The party slots alone, as `partyN` reads them (`GroupState::party_slots`), none after a
+    /// leave or a kick (`slots_emptied`, `0x4e84a0`).
+    pub(crate) fn party_of(group: &GroupState) -> Self {
+        Self {
+            party: if group.slots_emptied {
+                Vec::new()
+            } else {
+                group.party_slots().map(|m| m.guid).collect()
+            },
+            raid: Vec::new(),
+        }
+    }
+
+    /// The two tables as `group` holds them: the party slots [`Self::party_of`] and the raid
+    /// roster's rows `raidN` reads ([`raid_row_guids`]).
+    pub(crate) fn of(group: &GroupState) -> Self {
+        Self {
+            raid: raid_row_guids(group),
+            ..Self::party_of(group)
+        }
+    }
+
+    /// The two tables as `cells` hold them, the roster as of a packet's place.
+    pub(crate) fn of_cells(cells: crate::ui_party::Cells<'_>) -> Self {
+        Self {
+            party: cells.party_slots().map(|m| m.guid).collect(),
+            raid: cells.raid_rows().collect(),
+        }
+    }
+
     /// `0x4918e0`: [`Self::in_party`], or a nonzero guid in the raid roster (`4918ee`).
     fn in_group(&self, me: Option<u64>, guid: u64) -> bool {
         self.in_party(me, guid) || guid != 0 && self.raid.contains(&guid)
     }
 }
 
-/// Publish [`GroupRoster`] before the input pass, beside the pick's other published inputs. The
-/// party slots are the ones `partyN` reads (`GroupState::party_slots`), none after a leave or a
-/// kick (`slots_emptied`, `0x4e84a0`); the raid roster is the rows `raidN` reads
-/// ([`raid_row_guids`]).
-pub(crate) fn publish_group_roster(
-    group: Option<Res<GroupState>>,
-    self_guid: Res<SelfGuid>,
-    mut roster: ResMut<GroupRoster>,
-) {
-    let Some(group) = group else { return };
-    if !group.is_changed() && !self_guid.is_changed() {
-        return;
+/// Copy the two tables out of `group` into `roster` where a group packet's handler wrote them: the
+/// reference's handlers write the tables themselves (the party slots in `0x4e82d0` and
+/// `0x4e84a0`, the raid rows in `0x4ba5f0`), so what a listener inside the packet reads, and the
+/// next input record, is the packet's. Unchanged tables are not written, so the readers' change
+/// gates stay shut.
+pub(crate) fn publish_group_roster(group: &GroupState, roster: Option<&mut ResMut<GroupRoster>>) {
+    let Some(roster) = roster else { return };
+    let now = GroupRoster::of(group);
+    if **roster != now {
+        **roster = now;
     }
-    let party = if group.slots_emptied {
-        Vec::new()
-    } else {
-        group.party_slots().map(|m| m.guid).collect()
-    };
-    let now = GroupRoster {
-        party,
-        raid: raid_row_guids(&group, self_guid.0),
-    };
-    if *roster != now {
-        *roster = now;
-    }
+}
+
+/// [`publish_group_roster`] off the world's `GroupState`, for a test that writes the group in place
+/// of a packet.
+#[cfg(test)]
+pub(crate) fn publish_in(world: &mut World) {
+    let now = GroupRoster::of(world.resource::<GroupState>());
+    world.insert_resource(now);
 }
 
 /// What the two predicates read beside a [`TargetRelations`]' stores.
@@ -101,53 +120,31 @@ impl TargetRelations<'_> {
     }
 
     /// The shape both predicates share: the caster is the candidate, or both are player-controlled
-    /// (`606c4f`-`606c79`), each answers to a player ([`controller`]), and one of the two
-    /// controllers is the active player and the other a member (`606ca3`-`606d02`), tried both
-    /// ways round. A member's pet is such a unit. Whoever has not streamed answers no controller
-    /// and no relation.
+    /// (`606c4f`-`606c79`), each answers to a player (`0x606170`, [`crate::target::Relations::controller`]), and
+    /// one of the two controllers is the active player and the other a member (`606ca3`-`606d02`),
+    /// tried both ways round. A member's pet is such a unit. Whoever has not streamed answers no
+    /// controller and no relation.
     fn related(&self, is_self: bool, member: fn(&GroupRoster, Option<u64>, u64) -> bool) -> bool {
         if is_self {
             return true;
         }
-        let group = &self.group;
-        let (Some(me), Some(target), Some(me_store), Some(store)) = (
-            group.self_guid,
-            group.target_guid,
-            self.self_store,
-            self.target_store,
-        ) else {
+        let (Some(me), Some((caster, target))) = (self.group.self_guid, self.pair()) else {
             return false;
         };
-        if me_store.0.unit_flags() & store.0.unit_flags() & UNIT_FLAG_PLAYER_CONTROLLED == 0 {
+        if !caster.player_controlled() || !target.player_controlled() {
             return false;
         }
-        let (Some(mine), Some(theirs)) = (
-            controller(me_store, me, group.self_owner_store),
-            controller(store, target, self.target_owner_store),
-        ) else {
+        let rel = self.relations();
+        let (Some(mine), Some(theirs)) = (rel.controller(&caster), rel.controller(&target)) else {
             return false;
         };
         let member = |guid| {
-            group
+            self.group
                 .roster
                 .is_some_and(|roster| member(roster, Some(me), guid))
         };
-        mine == me && member(theirs) || theirs == me && member(mine)
+        mine.guid == me && member(theirs.guid) || theirs.guid == me && member(mine.guid)
     }
-}
-
-/// `0x606170`: the player a unit answers to, its charmer else its creator (`606170`-`60619f`)
-/// or the unit itself when neither is set, and only when that object is a player (`6061c6`-
-/// `6061cf`, `TYPEMASK_PLAYER`). `owner_store` is the charmer's or creator's descriptor, `None`
-/// while it has not streamed.
-fn controller(store: &ObjectStore, guid: u64, owner_store: Option<&ObjectStore>) -> Option<u64> {
-    let (owner, owner_store) = match store.0.unit_owner(OwnerFallback::CreatedBy) {
-        Some(owner) => (owner, owner_store),
-        None => (guid, Some(store)),
-    };
-    owner_store
-        .is_some_and(|s| s.0.object_type() == Some(ObjectType::Player))
-        .then_some(owner)
 }
 
 /// The stores the group tests stand up, over the faction rows of [`super::targeting::corpse_fixture`]
@@ -217,12 +214,11 @@ mod tests {
     use super::*;
     use crate::net::Reputations;
     use crate::spell::cast_target::{
-        cast_target_mask, resolve_cast_target, unit_binds, CastCandidates, CastWireTarget,
+        cast_target_mask, resolve_cast_target, unit_bind, CastCandidates, CastWireTarget,
     };
     use crate::spell::targeting::corpse_fixture as fx;
     use benilla_formats::SpellDisplay;
     use benilla_protocol::messages::GroupMemberEntry;
-    use bevy::ecs::system::RunSystemOnce;
 
     const ME: u64 = 1;
     const MEMBER: u64 = 2;
@@ -231,6 +227,7 @@ mod tests {
     const MEMBER_PET: u64 = 5;
     const NPC: u64 = 6;
     const ORC_MEMBER: u64 = 7;
+    const ORC_RAIDER: u64 = 8;
 
     /// `TARGET_FLAG_UNIT_RAID` and `TARGET_FLAG_UNIT_PARTY`, the words implicit targets 57 and 35
     /// set.
@@ -241,7 +238,7 @@ mod tests {
     fn roster() -> GroupRoster {
         GroupRoster {
             party: vec![MEMBER],
-            raid: vec![ME, MEMBER, RAIDER],
+            raid: vec![MEMBER, RAIDER, ME],
         }
     }
 
@@ -478,18 +475,20 @@ mod tests {
 
     /// The party bit `0x8` and the raid bit `0x4` clear for the group the predicates name and
     /// `CanAssist` passes (`6e5cad`-`6e5d2f`), and only the raid bit for a raid member outside
-    /// the party.
+    /// the party. A party member of the other faction is friendly by `UnitReaction`'s party rung
+    /// (`0x6062b0`), which reads the party slots alone, so it binds both and a raid member of
+    /// the other faction neither.
     #[test]
     fn the_party_and_raid_bits_clear_for_the_group_and_only_when_assistable() {
         let factions = fx::factions();
         let reputations = Reputations::default();
         let roster = GroupRoster {
             party: vec![MEMBER, ORC_MEMBER],
-            raid: vec![ME, MEMBER, RAIDER, ORC_MEMBER],
+            raid: vec![MEMBER, RAIDER, ORC_MEMBER, ORC_RAIDER, ME],
         };
         let me = player(1);
         let (member, raider, stranger) = (player(1), player(1), player(1));
-        let orc_member = player(2);
+        let (orc_member, orc_raider) = (player(2), player(2));
         let member_pet = pet_of(MEMBER, 1, false);
         // A friendly creature that can be assisted but answers to nobody.
         let npc = npc(1, PVP);
@@ -508,7 +507,7 @@ mod tests {
                     roster: Some(&roster),
                 },
             };
-            unit_binds(None, word, is_self, &rel)
+            unit_bind(None, word, is_self, &rel) == Some(0)
         };
         // (label, guid, store, owner, binds under the party word, under the raid word)
         type Case<'a> = (
@@ -519,7 +518,7 @@ mod tests {
             bool,
             bool,
         );
-        let cases: [Case; 6] = [
+        let cases: [Case; 7] = [
             ("a party member", MEMBER, &member, None, true, true),
             (
                 "a raid member of another group",
@@ -546,11 +545,19 @@ mod tests {
                 true,
             ),
             ("a friendly creature", NPC, &npc, None, false, false),
-            // In the party, and no friend: `CanAssist` refuses after the predicate passes.
             (
-                "a member of the other faction",
+                "a party member of the other faction",
                 ORC_MEMBER,
                 &orc_member,
+                None,
+                true,
+                true,
+            ),
+            // In the raid, and no friend: `CanAssist` refuses after the predicate passes.
+            (
+                "a raid member of the other faction",
+                ORC_RAIDER,
+                &orc_raider,
                 None,
                 false,
                 false,
@@ -608,8 +615,13 @@ mod tests {
             };
             let candidates = CastCandidates {
                 selection: Some(target.0),
+                selected: true,
+                selection_held: true,
                 caster: Some(ME),
+                auto_self: Some(ME),
+                auto_self_store: rel.self_store,
                 main_hand_item: None,
+                long_range: false,
             };
             resolve_cast_target(Some(&shield), &candidates, auto_self_cast, &rel)
         };
@@ -681,8 +693,13 @@ mod tests {
                 };
                 let candidates = CastCandidates {
                     selection: Some(target.0),
+                    selected: true,
+                    selection_held: true,
                     caster: Some(ME),
+                    auto_self: Some(ME),
+                    auto_self_store: rel.self_store,
                     main_hand_item: None,
+                    long_range: false,
                 };
                 resolve_cast_target(Some(def), &candidates, false, &rel)
             };
@@ -709,20 +726,17 @@ mod tests {
     }
 
     /// The published tables: the party slots are our own subgroup, at most four, and the raid
-    /// roster every row, us first, none outside a raid. A leave or a kick empties the slots and
+    /// roster every row, us last, none outside a raid. A leave or a kick empties the slots and
     /// keeps the roster.
     #[test]
     fn the_roster_publishes_the_slots_and_rows_the_reference_holds() {
         let publish = |world: &mut World| {
-            world
-                .run_system_once(publish_group_roster)
-                .expect("the roster publishes");
+            publish_in(world);
             std::mem::take(&mut *world.resource_mut::<GroupRoster>())
         };
         let mut world = World::new();
         world.init_resource::<GroupRoster>();
         world.init_resource::<GroupState>();
-        world.insert_resource(SelfGuid(Some(ME)));
         assert_eq!(publish(&mut world), GroupRoster::default(), "no group");
 
         // A party: everyone in our subgroup, and no raid roster.
@@ -736,17 +750,18 @@ mod tests {
             }
         );
 
-        // A raid: the party slots are our subgroup's, the roster all rows with us first.
+        // A raid: the party slots are our subgroup's, the roster all rows with us last.
         {
             let mut group = world.resource_mut::<GroupState>();
             group.group_type = crate::ui_party::GROUPTYPE_RAID;
             group.members = vec![entry(MEMBER, 0), entry(RAIDER, 1), entry(STRANGER, 0)];
+            group.rebuild_raid(ME);
         }
         assert_eq!(
             publish(&mut world),
             GroupRoster {
                 party: vec![MEMBER, STRANGER],
-                raid: vec![ME, MEMBER, RAIDER, STRANGER],
+                raid: vec![MEMBER, RAIDER, STRANGER, ME],
             }
         );
 
@@ -756,7 +771,7 @@ mod tests {
             publish(&mut world),
             GroupRoster {
                 party: Vec::new(),
-                raid: vec![ME, MEMBER, RAIDER, STRANGER],
+                raid: vec![MEMBER, RAIDER, STRANGER, ME],
             }
         );
     }

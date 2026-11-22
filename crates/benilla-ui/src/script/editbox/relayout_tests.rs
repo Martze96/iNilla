@@ -1,7 +1,7 @@
 //! The text region's rect (`0x77b8c0`, re-seated on every resize by `0x77a8d0`) and a multi-line
 //! box's own height (`0x77d4d0` @`0x77d8ad`), driven through the Lua methods and the tick.
 
-use crate::script::{MeasureRequest, QuadContent, TextMeasure, UiScript};
+use crate::script::{JustifyH, JustifyV, MeasureRequest, QuadContent, TextMeasure, UiScript};
 
 /// A stand-in font engine: each character [`CW`] wide and each line `.0` tall. Hard breaks split
 /// lines, a trailing one opening none as in the host's line law, and each line wraps by
@@ -74,14 +74,14 @@ fn inset_box(s: &mut UiScript) {
 fn a_multi_line_box_is_as_tall_as_its_text_and_its_insets() {
     let mut s = script();
     inset_box(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         200.0,
         "the authored height, before any flush"
     );
 
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         f64::from(5.0 + LH),
         "an empty box is one line tall: the first flush replaces the authored 200"
@@ -89,12 +89,12 @@ fn a_multi_line_box_is_as_tall_as_its_text_and_its_insets() {
 
     s.run(r#"E:SetText("one\ntwo\nthree")"#).unwrap();
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + 3.0 * LH), "three lines");
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + 3.0 * LH), "three lines");
 
     // 30 characters are 210 wide against the 172 between the side insets: two rows.
     s.run(r#"E:SetText(string.rep("x", 30))"#).unwrap();
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         f64::from(5.0 + 2.0 * LH),
         "a line wraps at the box's width less its side insets"
@@ -102,7 +102,7 @@ fn a_multi_line_box_is_as_tall_as_its_text_and_its_insets() {
 
     s.run(r#"E:SetText("")"#).unwrap();
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + LH), "it shrinks back");
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + LH), "it shrinks back");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -117,7 +117,7 @@ fn on_text_changed_sees_the_height_the_flush_just_set() {
     frame(&mut s);
     s.run(r#"E:SetText("a\nb\nc\nd")"#).unwrap();
     s.tick(0.016);
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return SEEN").unwrap(),
         f64::from(5.0 + 4.0 * LH)
     );
@@ -130,11 +130,11 @@ fn a_new_raster_re_measures_the_empty_boxs_line() {
     let mut s = script();
     inset_box(&mut s);
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + LH));
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + LH));
     s.set_text_measurer(Box::new(Lines(2.0 * LH)));
     s.invalidate_text_measures();
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
 }
 
 /// A `SetHeight` lasts until the next flush, which writes the text's height back over it.
@@ -145,13 +145,13 @@ fn a_scripted_height_is_written_over_at_the_next_flush() {
     s.run(r#"E:SetText("a\nb")"#).unwrap();
     frame(&mut s);
     s.run("E:SetHeight(300)").unwrap();
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         300.0,
         "the script's height, until the flush"
     );
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
 }
 
 /// A trailing newline opens no line: the text's measure folds it into the line it ends, and the
@@ -168,7 +168,7 @@ fn a_trailing_newline_alone_adds_no_line() {
     assert_eq!(height(&s, "E"), one, "the break alone");
     s.run(r#"E:SetText("abc\nd")"#).unwrap();
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         one + f64::from(LH),
         "the first character on the new line"
@@ -213,7 +213,7 @@ fn the_text_region_is_pinned_top_left_as_wide_as_the_box_and_as_tall_as_its_text
         })
         .expect("the text draws");
     // The box is 5 + 14 tall from y 50: its top is 69.
-    assert_eq!(
+    crate::assert_near!(
         (rect.left, rect.right, rect.top, rect.bottom),
         (115.0, 287.0, 67.0, 53.0)
     );
@@ -234,17 +234,22 @@ fn on_size_changed_fires_when_the_text_moves_the_height() {
     .unwrap();
     frame(&mut s);
     let fires = |s: &UiScript| s.eval::<i64>("return table.getn(fires)").unwrap();
+    // The fired size is the layout rect's (`0x76b623`); over one root unit's store it reads in
+    // root units.
     let last = |s: &UiScript| {
-        s.eval::<(f64, f64)>("local f = fires[table.getn(fires)] return f.w, f.h")
-            .unwrap()
+        let (w, h) = s
+            .eval::<(f64, f64)>("local f = fires[table.getn(fires)] return f.w, f.h")
+            .unwrap();
+        let per = f64::from(s.model_ref().layout_units().store(1.0));
+        (w / per, h / per)
     };
     assert_eq!(fires(&s), 1, "the first flush replaces the authored height");
-    assert_eq!(last(&s), (200.0, f64::from(5.0 + LH)));
+    crate::assert_near!(last(&s), (200.0, f64::from(5.0 + LH)));
 
     s.run(r#"E:SetText("a\nb\nc")"#).unwrap();
     frame(&mut s);
     assert_eq!(fires(&s), 2);
-    assert_eq!(last(&s), (200.0, f64::from(5.0 + 3.0 * LH)));
+    crate::assert_near!(last(&s), (200.0, f64::from(5.0 + 3.0 * LH)));
 
     frame(&mut s);
     s.run(r#"E:SetText("x\ny\nz")"#).unwrap();
@@ -280,7 +285,7 @@ fn a_scroll_frame_ranges_over_the_whole_text_of_a_multi_line_box() {
     .unwrap();
     s.resolve();
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return MailScroll:GetVerticalScrollRange()")
             .unwrap(),
         0.0,
@@ -296,18 +301,18 @@ fn a_scroll_frame_ranges_over_the_whole_text_of_a_multi_line_box() {
     )
     .unwrap();
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "MailBody"),
         f64::from(30.0 * LH),
         "the box itself spans the text, not only its text region"
     );
     let want = f64::from((10.0 + 30.0 * LH).max(255.0) - 257.0);
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return RANGE").unwrap(),
         want,
         "the range ScrollingEdit_OnTextChanged's recompute reports"
     );
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return MailScroll:GetVerticalScrollRange()")
             .unwrap(),
         want
@@ -323,6 +328,56 @@ fn text_rect(s: &UiScript, text: &str) -> Option<(f32, f32, f32, f32)> {
         }
         _ => None,
     })
+}
+
+/// The text quad's drawn justify as `(h, v)`.
+fn text_justify(s: &UiScript, text: &str) -> Option<(JustifyH, JustifyV)> {
+    s.extract().into_iter().find_map(|q| match &q.content {
+        QuadContent::Text {
+            text: Some(t),
+            justify_h,
+            justify_v,
+            ..
+        } if t == text => Some((*justify_h, *justify_v)),
+        _ => None,
+    })
+}
+
+/// The label follows the box's font horizontally (`0x779c27`, `0x797a17` → `0x79fc20`), so
+/// `SetJustifyH` draws; its vertical justify is the box's own (`0x77a4a0`), whatever
+/// `SetJustifyV` says.
+#[test]
+fn the_text_draws_by_the_boxs_justify_h_and_its_own_justify_v() {
+    let mut s = script();
+    s.run(
+        r#"
+        E = CreateFrame("EditBox", "E")
+        E:SetAutoFocus(false)
+        E:SetPoint("BOTTOMLEFT", 100, 50)
+        E:SetWidth(200); E:SetHeight(32)
+        E:SetFont("Fonts\\FRIZQT__.TTF", 14)
+        E:SetText("1")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        text_justify(&s, "1"),
+        Some((JustifyH::Left, JustifyV::Middle))
+    );
+    for (h, want) in [("RIGHT", JustifyH::Right), ("CENTER", JustifyH::Center)] {
+        s.run(&format!(r#"E:SetJustifyH("{h}") E:SetJustifyV("BOTTOM")"#))
+            .unwrap();
+        s.resolve();
+        assert_eq!(text_justify(&s, "1"), Some((want, JustifyV::Middle)), "{h}");
+    }
+    s.run("E:SetMultiLine(true)").unwrap();
+    s.resolve();
+    assert_eq!(
+        text_justify(&s, "1"),
+        Some((JustifyH::Center, JustifyV::Top))
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// A box built in Lua, with no `<FontString>` and no `SetTextInsets`, has its text seated at its
@@ -343,7 +398,7 @@ fn a_lua_box_with_a_font_seats_its_text_at_its_first_resolve() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(text_rect(&s, "hello"), Some((100.0, 300.0, 82.0, 50.0)));
+    crate::assert_near!(text_rect(&s, "hello"), Some((100.0, 300.0, 82.0, 50.0)));
 }
 
 /// A later resize re-seats the text of any box: a multi-line box re-wraps at its new width, and a
@@ -356,16 +411,16 @@ fn a_resized_box_re_seats_its_text() {
     s.run(r#"E:SetText(string.rep("x", 30))"#).unwrap();
     frame(&mut s);
     frame(&mut s);
-    assert_eq!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
+    crate::assert_near!(height(&s, "E"), f64::from(5.0 + 2.0 * LH));
     s.run("E:SetWidth(300)").unwrap();
     frame(&mut s);
     frame(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         text_rect(&s, &"x".repeat(30)).map(|r| (r.0, r.1)),
         Some((115.0, 387.0)),
         "the text region takes the new width less the side insets"
     );
-    assert_eq!(
+    crate::assert_near!(
         height(&s, "E"),
         f64::from(5.0 + LH),
         "and the text re-wraps in it"
@@ -397,7 +452,7 @@ fn a_resized_box_re_seats_its_text() {
     );
     s.run("S:SetWidth(250)").unwrap();
     frame(&mut s);
-    assert_eq!(text_rect(&s, "single"), Some((100.0, 350.0, 232.0, 200.0)));
+    crate::assert_near!(text_rect(&s, "single"), Some((100.0, 350.0, 232.0, 200.0)));
 }
 
 /// A single-line box at `(100, 200)`, 200×32 with insets (10, 20, 3, 5), whose text region a
@@ -415,7 +470,7 @@ fn moved_text_region(s: &mut UiScript) {
     )
     .unwrap();
     frame(s);
-    assert_eq!(text_rect(s, "single"), Some(SEATED));
+    crate::assert_near!(text_rect(s, "single"), Some(SEATED));
     move_text_region(s);
 }
 
@@ -447,7 +502,7 @@ fn get_text_insets_puts_a_moved_text_region_back() {
         .unwrap();
     assert_eq!(insets, (10.0, 20.0, 3.0, 5.0));
     frame(&mut s);
-    assert_eq!(text_rect(&s, "single"), Some(SEATED));
+    crate::assert_near!(text_rect(&s, "single"), Some(SEATED));
 }
 
 /// A new face or size notifies the box (`0x79f342` → `0x77e2a0`), which re-seats its text
@@ -458,7 +513,7 @@ fn set_font_puts_a_moved_text_region_back_when_the_font_changes() {
     moved_text_region(&mut s);
     s.run(r#"S:SetFont("Fonts\\FRIZQT__.TTF", 14)"#).unwrap();
     frame(&mut s);
-    assert_eq!(text_rect(&s, "single"), Some(SEATED));
+    crate::assert_near!(text_rect(&s, "single"), Some(SEATED));
 
     move_text_region(&mut s);
     s.run(r#"S:SetFont("Fonts\\FRIZQT__.TTF", 14)"#).unwrap();
@@ -480,5 +535,5 @@ fn set_font_object_puts_a_moved_text_region_back() {
     moved_text_region(&mut s);
     s.run("S:SetFontObject(F)").unwrap();
     frame(&mut s);
-    assert_eq!(text_rect(&s, "single"), Some(SEATED));
+    crate::assert_near!(text_rect(&s, "single"), Some(SEATED));
 }

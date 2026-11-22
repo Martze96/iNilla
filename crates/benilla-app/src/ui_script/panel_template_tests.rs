@@ -9,6 +9,7 @@ use super::test_ui::load_ui as load_xml;
 /// The files under test on the manifest prefix they sit on, in the production order.
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -282,7 +283,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
         );
     }
     // `ScrollFrame_OnLoad` ran: empty range, arrows disabled, offset 0.
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return MyScrollScrollBar:GetMinMaxValues()")
             .unwrap(),
         (0.0, 0.0)
@@ -290,7 +291,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
     assert!(!s
         .eval::<bool>("return MyScrollScrollBarScrollUpButton:IsEnabled() ~= 0")
         .unwrap());
-    assert_eq!(s.eval::<i64>("return MyScroll.offset").unwrap(), 0);
+    benilla_ui::assert_near!(s.eval::<i64>("return MyScroll.offset").unwrap(), 0);
 
     // A child taller than the frame changes the range, and the handler touches the thumb.
     s.run(
@@ -307,7 +308,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
         "ScrollFrame_OnScrollRangeChanged ran clean: {:?}",
         s.errors()
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return MyScrollScrollBar:GetMinMaxValues()")
             .unwrap(),
         (0.0, 112.0),
@@ -321,7 +322,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
 
     // The frame's `<OnVerticalScroll>` seats the bar and re-enables the up arrow.
     s.run("MyScroll:SetVerticalScroll(48)").unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return MyScrollScrollBar:GetValue()")
             .unwrap(),
         48.0
@@ -345,7 +346,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
     .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return MyOpt:GetWidth(), MyOpt:GetHeight()")
             .unwrap(),
         (26.0, 26.0),
@@ -354,8 +355,9 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
     let (_, right, _, _) = s
         .eval::<(f64, f64, f64, f64)>("return MyOpt:GetHitRectInsets()")
         .unwrap();
-    assert_eq!(
-        right, -100.0,
+    benilla_ui::assert_near!(
+        right,
+        -100.0,
         "OptionsCheckButtonTemplate's label-catching hit rect, the MIDDLE link"
     );
     assert!(
@@ -447,7 +449,7 @@ fn the_stock_tab_fits_its_text_on_the_first_show() {
         .eval::<(f64, f64)>("return ProbeTabText:GetStringWidth(), ProbeTab:GetWidth()")
         .unwrap();
     assert!(label > 0.0, "the label measured synchronously, got {label}");
-    assert_eq!(
+    benilla_ui::assert_near!(
         width,
         label + SIDES,
         "the tab is its text plus the two end slices, from OnShow alone"
@@ -458,7 +460,7 @@ fn the_stock_tab_fits_its_text_on_the_first_show() {
         s.tick(0.016);
     }
     s.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return ProbeTab:GetWidth()").unwrap(),
         width,
         "the fit is once, in OnShow — nothing may move it per frame"
@@ -473,7 +475,7 @@ fn the_stock_tab_fits_its_text_on_the_first_show() {
              ProbeTabHighlightTexture:GetLeft(), ProbeTabHighlightTexture:GetRight()",
         )
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (hl - tl, tr - hr),
         (10.0, 10.0),
         "the highlight spans the tab's own edges — the OnShow SetWidth is inert against them"

@@ -9,8 +9,7 @@ use crate::script::{Model, SCREEN};
 
 use super::{decode_id, point_from_str, prefetch_named_target, resolve_named_target, NamedTarget};
 
-/// The name the reference prints for a widget that has none (the literal at `0x84c7f0`).
-pub(crate) const UNNAMED: &str = "<unnamed>";
+pub(crate) use crate::script::binding_abi::UNNAMED;
 
 /// `relativeTo` by the four tags `lua_type(L,3)` accepts (`0x7a25e6`..`0x7a2620`); any other tag,
 /// absent included, raises Usage in `SetPoint`.
@@ -29,9 +28,20 @@ pub(crate) enum RelTarget {
 pub(crate) struct PointArgs {
     pub(crate) point: Point,
     pub(crate) target: RelTarget,
-    pub(crate) rel_point: Point,
+    /// The relative point: `None` for an unknown name, raised only after the target's checks
+    /// ([`Self::rel_point`]).
+    rel_point: Option<Point>,
     pub(crate) x: f32,
     pub(crate) y: f32,
+}
+
+impl PointArgs {
+    /// The relative point, or `Unknown region point` (`0x7a2848`): the last raise of the ladder,
+    /// after the target is found and passes the self and dependency checks (`0x7a2810`), so the
+    /// caller asks for it after [`resolve_rel_target`].
+    pub(crate) fn rel_point(&self, who: &str) -> mlua::Result<Point> {
+        self.rel_point.ok_or_else(|| unknown_point(who))
+    }
 }
 
 /// The reference's `Usage:` raise (`0x87cc28`).
@@ -59,6 +69,51 @@ fn anchor_to_self(who: &str, verb: &str) -> mlua::Error {
     mlua::Error::runtime(format!("{who}:{verb}(): trying to anchor to itself"))
 }
 
+/// `0x87cc80` / `0x87cd28`, from the dependency walk at `0x7a27b3` / `0x7a2af9`: the receiver's
+/// name, then the target's.
+fn dependent_on_this(who: &str, verb: &str, target: &str) -> mlua::Error {
+    mlua::Error::runtime(format!("{who}:{verb}(): {target} is dependent on this"))
+}
+
+/// `0x768010` on `target` with `me`: whether a relative frame of any of `target`'s points is `me`,
+/// or reaches `me` the same way (`0x76802f`, `0x768036`).
+fn depends_on(model: &Model, target: u32, me: u32) -> bool {
+    // The chain up from a target is short (a few frames to the screen), so a list beats a set.
+    let mut seen: Vec<u32> = Vec::new();
+    let mut stack = vec![target];
+    while let Some(id) = stack.pop() {
+        // XML anchors are stored unchecked (`0x767c70`), so a loaded cycle is walked once here.
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        let anchors = crate::script::layout::node_anchors(
+            &model.layout_inputs,
+            &model.region_data,
+            &model.id_to_frame,
+            &model.id_to_region,
+            id,
+        );
+        for a in anchors.iter() {
+            if a.relative_to == me {
+                return true;
+            }
+            stack.push(a.relative_to);
+        }
+    }
+    false
+}
+
+/// The name a widget's `GetName` slot gives (`vtbl+4`), `<unnamed>` for none (`0x84c7f0`).
+fn node_name(model: &Model, id: u32) -> String {
+    use crate::script::binding_abi::{frame_name, region_name};
+    match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
+        (Some(&h), _) => frame_name(model, h),
+        (_, Some(&rh)) => region_name(model, rh),
+        _ => UNNAMED.to_string(),
+    }
+}
+
 /// `lua_isnumber` (`0x6f34d0`): a number, or a string Lua reads as one.
 fn as_number(lua: &Lua, v: &Value) -> Option<f32> {
     lua.coerce_number(v.clone())
@@ -79,9 +134,11 @@ fn as_string(lua: &Lua, v: &Value) -> Option<String> {
     }
 }
 
-/// Parse `SetPoint` in the reference's order: both tag gates (Usage), the point-name scan,
-/// `relativePoint`, the offsets; so an unknown point with no `relativeTo` raises Usage. The caller
-/// computes `who` and `parent_base` first, since an `__index` on `_G` can call back into a binding.
+/// Parse `SetPoint` in the reference's order: both tag gates (Usage), the point-name scan
+/// (`0x7a2674`), then `relativePoint` and the offsets, whose unknown name raises only once the
+/// target has passed its checks ([`PointArgs::rel_point`]); so an unknown point with no
+/// `relativeTo` raises Usage. The caller computes `who` and `parent_base` first, since an
+/// `__index` on `_G` can call back into a binding.
 pub(crate) fn parse_set_point(
     lua: &Lua,
     args: &MultiValue,
@@ -116,10 +173,10 @@ pub(crate) fn parse_set_point(
     } else {
         2
     };
-    let mut rel_point = point;
+    let mut rel_point = Some(point);
     if let Some(Value::String(s)) = args.get(cur) {
         let name = s.to_str()?;
-        rel_point = point_from_str(name.as_ref()).ok_or_else(|| unknown_point(who))?;
+        rel_point = point_from_str(name.as_ref());
         cur += 1;
     }
 
@@ -157,8 +214,9 @@ pub(crate) fn parse_set_all_points(lua: &Lua, arg: Option<&Value>, parent_base: 
 }
 
 /// Resolve a [`RelTarget`] to the layout id to anchor to, raising the reference's errors; `me` is
-/// the receiver, for the self-anchor check. Deviation: a wrapper that decodes to no live widget
-/// takes `default_parent`, because the reference, with no `IsA` check, reads a wild pointer.
+/// the receiver, for the self-anchor check and the dependency walk, which keep an anchor cycle out
+/// (`0x7a2764`, `0x7a27b3`). Deviation: a wrapper that decodes to no live widget takes
+/// `default_parent`, because the reference, with no `IsA` check, reads a wild pointer.
 pub(crate) fn resolve_rel_target(
     model: &Model,
     target: &RelTarget,
@@ -180,6 +238,9 @@ pub(crate) fn resolve_rel_target(
     };
     if id == me {
         return Err(anchor_to_self(who, verb));
+    }
+    if depends_on(model, id, me) {
+        return Err(dependent_on_this(who, verb, &node_name(model, id)));
     }
     Ok(id)
 }
@@ -208,10 +269,12 @@ pub(crate) fn get_point_index(lua: &Lua, n: Value) -> mlua::Result<usize> {
 }
 
 /// `GetPoint`'s answer for `anchor` (`0x7a2416`..`0x7a24d6`): point, `relativeTo`, relative point
-/// and the two offsets; no anchor at the index pushes no value at all (`0x7a240d`).
+/// and the two offsets as `SetPoint` stored them, through the getter steps (`0x7a2483`); no anchor
+/// at the index pushes no value at all (`0x7a240d`).
 pub(crate) fn get_point_values(
     lua: &Lua,
     anchor: Option<crate::layout::Anchor>,
+    units: crate::layout::LayoutUnits,
     rel: impl FnOnce(u32) -> mlua::Result<Value>,
 ) -> mlua::Result<MultiValue> {
     let Some(a) = anchor else {
@@ -221,7 +284,7 @@ pub(crate) fn get_point_values(
         Value::String(lua.create_string(super::point_name(a.point))?),
         rel(a.relative_to)?,
         Value::String(lua.create_string(super::point_name(a.relative_point))?),
-        Value::Number(f64::from(a.x_off)),
-        Value::Number(f64::from(a.y_off)),
+        Value::Number(a.x_off.get(units)),
+        Value::Number(a.y_off.get(units)),
     ]))
 }

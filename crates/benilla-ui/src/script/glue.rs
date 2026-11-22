@@ -25,95 +25,80 @@ pub enum VmKind {
     Glue,
 }
 
-/// The glue event table by id (`0xb41e70`, written by `0x46cc60`), `reference/1.12-glue-events.tsv`.
-/// While the glue state runs these are the only events: `RegisterEvent` matches a name against
-/// them case-insensitively (`0x702140` with `0x64a4c0`) and drops one they lack without an error.
-pub const GLUE_EVENTS: [&str; 26] = [
-    "SET_GLUE_SCREEN",
-    "START_GLUE_MUSIC",
-    "DISCONNECTED_FROM_SERVER",
-    "OPEN_STATUS_DIALOG",
-    "UPDATE_STATUS_DIALOG",
-    "CLOSE_STATUS_DIALOG",
-    "ADDON_LIST_UPDATE",
-    "CHARACTER_LIST_UPDATE",
-    "UPDATE_SELECTED_CHARACTER",
-    "OPEN_REALM_LIST",
-    "GET_PREFERRED_REALM_INFO",
-    "UPDATE_SELECTED_RACE",
-    "SELECT_LAST_CHARACTER",
-    "SELECT_FIRST_CHARACTER",
-    "GLUE_SCREENSHOT_SUCCEEDED",
-    "GLUE_SCREENSHOT_FAILED",
-    "PATCH_UPDATE_PROGRESS",
-    "PATCH_DOWNLOADED",
-    "SUGGEST_REALM",
-    "SUGGEST_REALM_WRONG_PVP",
-    "SUGGEST_REALM_WRONG_CATEGORY",
-    "SHOW_SERVER_ALERT",
-    "FRAMES_LOADED",
-    "FORCE_RENAME_CHARACTER",
-    "SHOW_SURVEY_NOTIFICATION",
-    "PLAYER_ENTER_PIN",
-];
+/// The glue event table (`0xb41e70`, written by `0x46cc60`), `reference/glue_events.tsv`, compiled in.
+const GLUE_EVENT_TABLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../reference/glue_events.tsv"
+));
 
 /// The in-game event table: the 549-slot name array `UI_Init` loads (`0x703d90` at `0x48feab`),
-/// `reference/1.12-event-catalog.tsv`. The 130 slots the client never writes stay nameless, and
-/// `0x703d90` skips a null name (`0x703e0c`), so the 419 names here are all it holds.
+/// `reference/events.tsv`, compiled in. The 130 slots the client never writes stay nameless, and
+/// `0x703d90` skips a null name (`0x703e0c`), so the 419 rows here are all it holds.
 const IN_GAME_EVENT_TABLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../reference/1.12-event-catalog.tsv"
+    "/../../reference/events.tsv"
 ));
+
+/// A table's distinct event names, in id order (the `name` column, the header row dropped). A name
+/// two slots share (`UNIT_PET`) is one event to a name match.
+fn event_names(table: &'static str) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for line in table.lines().skip(1) {
+        let name = line.split('\t').nth(1).expect("event table row: id, name");
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The glue event table's names by id. While the glue state runs these 26 are the only events:
+/// `RegisterEvent` matches a name against them case-insensitively (`0x702140` with `0x64a4c0`) and
+/// drops one they lack without an error.
+pub fn glue_events() -> &'static [&'static str] {
+    static NAMES: std::sync::LazyLock<Vec<&'static str>> =
+        std::sync::LazyLock::new(|| event_names(GLUE_EVENT_TABLE));
+    &NAMES
+}
 
 /// The in-game table's distinct names, in id order.
 pub(crate) fn in_game_events() -> &'static [&'static str] {
-    static NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
-        let mut names: Vec<&'static str> = Vec::new();
-        for line in IN_GAME_EVENT_TABLE.lines() {
-            // `id<TAB>NAME`; a name two slots share (`UNIT_PET`) is one event to a name match.
-            let Some((_, name)) = line.split_once('\t') else {
-                continue;
-            };
-            if !line.starts_with('#') && !names.contains(&name) {
-                names.push(name);
-            }
-        }
-        names
-    });
+    static NAMES: std::sync::LazyLock<Vec<&'static str>> =
+        std::sync::LazyLock::new(|| event_names(IN_GAME_EVENT_TABLE));
     &NAMES
 }
 
 impl VmKind {
+    /// This VM's event table: every name `RegisterEvent` can match, in id order.
+    pub(crate) fn events(self) -> &'static [&'static str] {
+        match self {
+            VmKind::InGame => in_game_events(),
+            VmKind::Glue => glue_events(),
+        }
+    }
+
     /// The event table's own spelling of `name` for `RegisterEvent`/`UnregisterEvent` (`0x702140`,
-    /// `0x702280`), or `None` for a name the table lacks, which registers nothing.
+    /// `0x702280`), or `None` for a name the table lacks, which registers nothing. Events fire by
+    /// id (`0x703e50`), so a name off the table reaches no frame, `RegisterAllEvents` ones
+    /// included.
     ///
     /// The reference compares the name with every table entry's, ASCII case folded (`0x64a4c0` →
     /// `0x414310`), and a miss returns without an error. A name two slots share registers on both,
     /// which a name-keyed listener list is one entry for.
-    pub(crate) fn event_key(self, name: &str) -> Option<&'static str> {
-        let table: &'static [&'static str] = match self {
-            VmKind::InGame => in_game_events(),
-            VmKind::Glue => &GLUE_EVENTS,
-        };
-        table.iter().copied().find(|e| e.eq_ignore_ascii_case(name))
-    }
-
-    /// Whether the host may fire `event` into this VM. The reference fires by id
-    /// (`0x703e50`), so the glue state can only ever see one of its 26; a host's in-game event sent
-    /// to the glue VM reaches no frame, `RegisterAllEvents` ones included.
-    pub(crate) fn fires(self, event: &str) -> bool {
-        match self {
-            VmKind::InGame => true,
-            VmKind::Glue => GLUE_EVENTS.contains(&event),
-        }
+    pub fn event_key(self, name: &str) -> Option<&'static str> {
+        self.events()
+            .iter()
+            .copied()
+            .find(|e| e.eq_ignore_ascii_case(name))
     }
 }
 
 /// The glue core's screen verbs (registrar `0x46ddf0`, table `0x8373b8`): the screen root's size
 /// and the cursor in it. The glue and in-game states share the root, `0x41ad10`'s, 768 units tall
 /// and `768·a` wide for the aspect `a` (the glue builder sets it at `0x46a828`, from `0x46ab40`:
-/// `gxResolution`'s width over height with `widescreen` on, its default, else 4:3). The glue has
-/// no `UIParent` and so no UI scale: `GetScreenWidth` (`0x46dd30`) and `GetScreenHeight`
+/// `gxResolution`'s width over height with `widescreen` on, its default, else 4:3); here it is
+/// the host's [`super::UiScript::set_screen_size`], the window's, as the in-game root is. The glue
+/// has no `UIParent` and so no UI scale: `GetScreenWidth` (`0x46dd30`) and `GetScreenHeight`
 /// (`0x46dd80`) are the in-game pair (`0x48b480`, `0x48b4d0`) without its `0x494590` division,
 /// and `GetCursorPosition` (`0x46dad0`) is byte for byte the in-game `0x48b820`.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -122,21 +107,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetScreenWidth",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.width())
+            Ok(model.layout_space().screen_size(None).0)
         })?,
     )?;
     g.set(
         "GetScreenHeight",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.height())
+            Ok(model.layout_space().screen_size(None).1)
         })?,
     )?;
     g.set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.cursor_pos)
+            Ok(super::pointer::cursor_position(&model))
         })?,
     )?;
     super::glue_core::install(lua)?;

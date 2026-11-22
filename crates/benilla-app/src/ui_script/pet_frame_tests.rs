@@ -13,6 +13,7 @@ use super::test_ui::load_ui as load_xml;
 /// (PetFrame.xml:4), and `UnitFrame_Update` hides a frame whose unit does not exist.
 fn load_pet_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
@@ -70,7 +71,14 @@ fn pet(name: &str, health: u32, power: u32, max_power: u32, power_type: u8) -> U
         (POWER1 + slot, power),
         (MAXPOWER1 + slot, max_power),
     ]));
-    crate::ui_unit::snapshot(&store, 0, Some(name.into()), 0, None, Default::default())
+    crate::ui_unit::snapshot(
+        &store,
+        0,
+        Some(name.into()),
+        0,
+        Default::default(),
+        Default::default(),
+    )
 }
 
 /// Every texture path drawn this frame, with its vertex tint.
@@ -101,6 +109,7 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count,
+        level: 0,
         debuff_type: None,
         // Only your own auras carry a duration on the 1.12 wire.
         duration: 0.0,
@@ -109,6 +118,10 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         cancelable: false,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
+        vision_hidden: false,
     }
 }
 
@@ -141,7 +154,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
         .unwrap();
     assert!(ok, "the summoned pet's name, health and power all draw");
 
-    // The dismiss, as `feed_pet_unit` sends it: the token clears, then `UNIT_PET`.
+    // The dismiss: the token clears, then `UNIT_PET`.
     s.set_unit("pet", None);
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(!s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
@@ -202,7 +215,15 @@ fn a_powerless_pet_wears_the_no_mana_plate() {
         )
         .unwrap();
     assert!(visible);
-    assert_eq!((r, g, b), (1.0, 0.5, 0.25), "FOCUS, not the mana default");
+    assert_eq!(
+        (r, g, b),
+        (
+            benilla_ui::color::quant::read(1.0),
+            benilla_ui::color::quant::read(0.5),
+            benilla_ui::color::quant::read(0.25)
+        ),
+        "FOCUS, not the mana default"
+    );
     assert!(draws(&mut s, PLAIN), "the plate with a mana rail");
     assert!(!draws(&mut s, NO_MANA));
 
@@ -276,7 +297,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     });
     s.set_unit_auras(
         PET,
-        Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)]),
+        Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)].into()),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
 
@@ -303,7 +324,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     );
     assert!(draws(&mut s, "Interface\\Icons\\Spell_1001"));
 
-    s.set_unit_auras(PET, Some(vec![]));
+    s.set_unit_auras(PET, Some(vec![].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
     assert!(!s
         .eval::<bool>("return PetFrameDebuff1:IsVisible()")
@@ -346,7 +367,7 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
         "SpellTargetUnit",
     ] {
         assert!(
-            s.eval::<bool>(&format!("return _G[\"{global}\"] ~= nil"))
+            s.eval::<bool>(&format!("return getfenv(0)[\"{global}\"] ~= nil"))
                 .unwrap_or(false),
             "{global} is not registered — the pet frame's click calls it"
         );
@@ -356,7 +377,7 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
     s.set_container(
         0,
         Some(benilla_ui::script::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([(
                 1,
@@ -378,8 +399,10 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
     s.run("PetFrame_OnClick(\"LeftButton\")")
         .expect("the cursor-holds-an-item leg must not error");
     assert_eq!(
-        s.take_drop_item_on_unit(),
-        vec!["pet".to_string()],
+        s.take_script_calls(),
+        vec![benilla_ui::script::ScriptCall::DropItemOnUnit(
+            "pet".to_string()
+        )],
         "a held item + a pet click queues the drop"
     );
     // The drop leg alone: the reference's if/elseif is exclusive.

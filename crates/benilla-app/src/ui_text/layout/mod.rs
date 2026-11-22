@@ -11,13 +11,16 @@ use crate::ui_pass::{UiQuad, UvRect};
 use super::engine::{GlyphRef, TextEngine};
 use super::markup::{fontstring_lines, ColorRun};
 
+mod breaks;
 mod measure;
 mod overflow;
 mod wrap;
+#[cfg(test)]
+mod wrap_laws;
 
 pub(crate) use measure::{
-    ellipsize_to_fit, line_advances, line_origin, line_rows, measure_text, measure_wrapped_rows,
-    string_width, unwrapped_height,
+    ellipsize_text, ellipsize_to_fit, line_advances, line_origin, line_rows, measure_text,
+    measure_wrapped_rows, string_width, unwrapped_height,
 };
 
 /// A rect this narrow is no wrap constraint: an unsized single-point `FontString` resolves to ~0.
@@ -55,6 +58,9 @@ pub(crate) struct FontSpec<'a> {
     /// The glyph outline: it picks the ring-and-fill cell and, for THICK only, the step law's
     /// extra `+1` (`GlyphStepBase` `0x5ca2b0`), so it changes measured width too.
     pub outline: Outline,
+    /// The `monochrome` flag: glyphs draw from the 1-bit raster and its bakes
+    /// ([`super::outline::mono_cell`]); widths do not change.
+    pub monochrome: bool,
     /// The gap between lines in logical px, scaled like [`Self::height`]; the line step adds it
     /// rounded up to a whole device pixel ([`line_gap`]).
     pub spacing: f32,
@@ -64,6 +70,13 @@ pub(crate) struct FontSpec<'a> {
     pub shadow_x: f32,
     /// The `SetAlphaGradient` reveal `(start, length)`; on the spec, shadows fade with their fill.
     pub alpha_gradient: Option<(f32, f32)>,
+    /// `nonspacewrap` (ui flag `0x1000`, the line kernel's flag `0x40`): a force-broken line then
+    /// leaves the next its first break opportunity, and the ellipsis fit walk goes on past it
+    /// (`0x5c76ea`-`0x5c76f5`, `0x5c22e8`-`0x5c22f5`).
+    pub non_space_wrap: bool,
+    /// `maxLines` (`+0x128`): the ellipsis fits the text into this many lines, with or without a
+    /// height (`0x771f0f`, `0x771f48`-`0x771f61`); 0 for none.
+    pub max_lines: u32,
 }
 
 /// The step law's bias over the whole-pixel advance ([`TextEngine::step`]): `+1` (glyph rasterizer
@@ -87,21 +100,26 @@ fn line_gap(spacing: f32, dpi: f32) -> f32 {
     }
 }
 
-/// The block top a UI `FontString` takes: the reference's snap plus [`UI_SEAT_NUDGE`].
-fn snap_block_top(y: f32) -> f32 {
-    snap_block_top_law(y) + UI_SEAT_NUDGE
+/// The block top a UI `FontString` takes, in logical px: the reference's snap on the device grid
+/// plus [`UI_SEAT_NUDGE`] device px, `dpi` device px per logical px.
+fn snap_block_top(y: f32, dpi: f32) -> f32 {
+    (snap_block_top_law(y * dpi) + UI_SEAT_NUDGE) / dpi
 }
 
-/// The reference's one vertical anchor snap (`0x5cdf70` at `0x5ce051`): the block top rounds once,
-/// and the line ladder and ascender add as integers after it. Rounding in y-up, a half-pixel tie
-/// moves the block up: `ceil(y - 0.5)` in y-down, in logical units on the 768-tall design grid.
-fn snap_block_top_law(y: f32) -> f32 {
-    (y - 0.5).ceil()
+/// Layout noise the snap forgives, in device px: a block that sits on a row boundary stays on it.
+const SNAP_EPS: f32 = 1e-3;
+
+/// The reference's one vertical anchor snap (`0x5cdf70`, `0x5ce01d` to `0x5ce056`): the anchor
+/// takes `floor(H · y)` in y-up device px, so the block top, in y-down device px, is the ceiling of
+/// its exact row. The ladder and the ascender add as integers after it.
+fn snap_block_top_law(y_dev: f32) -> f32 {
+    (y_dev - SNAP_EPS).ceil()
 }
 
-/// Deviation: every UI text block sits 1 px below the reference's row, because at that row UI text
-/// reads high. It moves the drawn ink only: measure, wrap and the Lua metrics never see it, and the
-/// message-band scissor in [`crate::ui_script`] widens by it to admit the ink.
+/// Deviation: every UI text block sits 1 device px below the reference's snapped row, because at
+/// that row UI text reads high. It moves the drawn ink only: measure, wrap and the Lua metrics
+/// never see it, and the message-band scissor in [`crate::ui_script`] widens by it to admit the
+/// ink.
 pub(crate) const UI_SEAT_NUDGE: f32 = 1.0;
 
 /// `SetAlphaGradient`'s alpha at a character: opaque before `start`, linear to 0 over `length`.
@@ -178,7 +196,7 @@ fn layout_text_quads_inner(
     let gradient = font.alpha_gradient;
     let r = measure::resolve(e, &font);
     // One pass fills the caches, as `AllGlyphsCached` (`0x5c9fa0`); the layout below is lookups.
-    e.ensure_str(r.face, r.ppem, r.radius, text);
+    e.ensure_str(r.face, r.ppem, r.bake, text);
     let e = &*e;
     let dpi = e.dpi();
     let sheet = e.sheet_image();
@@ -195,7 +213,7 @@ fn layout_text_quads_inner(
     // Wrap only within a pinned width; `rect` is in the pen's own space, so no conversion. Each
     // row keeps the source character after it, which prices its last glyph for the justify.
     let mut render_lines: Vec<(Vec<ColorRun>, Option<char>)> = if rect.width() > WRAP_MIN_WIDTH {
-        measure::wrap_rows(e, r, &lines, rect.width())
+        measure::wrap_rows(e, r, &lines, rect.width(), font.non_space_wrap)
     } else {
         lines.into_iter().map(|line| (line, None)).collect()
     };
@@ -221,13 +239,19 @@ fn layout_text_quads_inner(
     } else {
         0.0
     };
-    // The first baseline hangs at the face's pixel ascender, `[CGxFont+0x17c] = round(size ·
-    // asc/(asc+|desc|))`, as the placement kernel `0x5d1360` sets `baseline = cellTop + ascender`;
-    // the FreeType hhea `asc/upem` is not on that path and seats text ~3 px low.
+    // The first baseline hangs at the face's pixel ascender, `[CGxFont+0x17c] = round(ppem ·
+    // asc/(asc+|desc|))` device px, as the placement kernel `0x5d1360` sets `baseline = cellTop +
+    // ascender`; the FreeType hhea `asc/upem` is not on that path and seats text ~3 px low. A world
+    // overlay keeps its approved seat, the ascender rounded in logical px.
     let ascent_ratio = e.ascent_ratio_of(r.face);
-    let baseline_in_cell = (f64::from(r.size) * f64::from(ascent_ratio) + 0.5).floor() as f32;
-    let block_top = if seat == TextSeat::UiGrid && rect.height() > f32::EPSILON {
-        snap_block_top(rect.min.y + v_offset)
+    let ui_grid = seat == TextSeat::UiGrid;
+    let baseline_in_cell = if ui_grid {
+        (f64::from(r.ppem) * f64::from(ascent_ratio) + 0.5).floor() as f32 / dpi
+    } else {
+        (f64::from(r.size) * f64::from(ascent_ratio) + 0.5).floor() as f32
+    };
+    let block_top = if ui_grid && rect.height() > f32::EPSILON {
+        snap_block_top(rect.min.y + v_offset, dpi)
     } else {
         rect.min.y + v_offset
     };
@@ -281,7 +305,7 @@ fn layout_text_quads_inner(
                     color[3] *= gradient_alpha(char_index, start, length);
                 }
                 for g in &cc.glyphs {
-                    if let Some(info) = e.cell(r.face, r.ppem, r.radius, g.glyph_id) {
+                    if let Some(info) = e.cell(r.face, r.ppem, r.bake, g.glyph_id) {
                         pending.push(PendingGlyph {
                             x_dev: pen_dev + info.bearing_x,
                             y_dev: g.y_off - info.bearing_top,
@@ -359,28 +383,51 @@ mod seat_tests {
     }
 
     #[test]
-    fn middle_seat_matches_the_three_verified_cases() {
+    fn middle_seat_matches_the_verified_cases() {
         // Friz 12 in the 12-tall bag title.
         assert_eq!(middle_d(12.0, 12.0), 0.0);
         // Friz 10 in the 10-tall unit-frame name.
         assert_eq!(middle_d(10.0, 10.0), 0.0);
-        // Arial Narrow 14 in the 13-tall money row, no outline pad: the cell top 1 px above it.
-        assert_eq!(middle_d(13.0, 14.0), -1.0);
+        // Arial Narrow 14 in the 13-tall money row: the exact row is -0.5, which ceils to 0.
+        assert_eq!(middle_d(13.0, 14.0), 0.0);
     }
 
     #[test]
-    fn the_tie_rounds_up_on_screen() {
-        // The reference rounds half away in y-up, so a .5 tie moves the block up: down in y-down.
-        assert_eq!(snap_block_top_law(10.5), 10.0);
-        assert_eq!(snap_block_top_law(-0.5), -1.0);
-        assert_eq!(snap_block_top_law(10.4), 10.0);
-        assert_eq!(snap_block_top_law(10.6), 11.0);
+    fn the_snap_is_the_ceiling_of_the_exact_row() {
+        // `floor(H·y)` in y-up is the ceiling in y-down: any part of a row moves the block down.
+        assert_eq!(snap_block_top_law(10.5), 11.0);
+        assert_eq!(snap_block_top_law(10.1), 11.0);
+        assert_eq!(snap_block_top_law(10.9), 11.0);
+        assert_eq!(snap_block_top_law(-0.5), 0.0);
+        // The login's password label: 625.125 is row 626, where rounding to nearest said 625.
+        assert_eq!(snap_block_top_law(625.125), 626.0);
+        // A block on a row boundary stays there through layout noise either side of it.
+        assert_eq!(snap_block_top_law(10.0), 10.0);
+        assert_eq!(snap_block_top_law(10.0004), 10.0);
+        assert_eq!(snap_block_top_law(9.9996), 10.0);
+        assert_eq!(snap_block_top_law(10.002), 11.0);
     }
 
     #[test]
-    fn the_seat_is_the_law_plus_a_one_pixel_nudge() {
-        assert_eq!(snap_block_top(10.5), snap_block_top_law(10.5) + 1.0);
-        assert_eq!(snap_block_top(0.0), 1.0);
+    fn the_seat_is_the_law_plus_a_one_device_pixel_nudge() {
+        assert_eq!(snap_block_top(10.5, 1.0), snap_block_top_law(10.5) + 1.0);
+        assert_eq!(snap_block_top(0.0, 1.0), 1.0);
+    }
+
+    /// The same exact device row seats on the same device row at every density: the snap counts
+    /// device px, never logical ones, so a login label does not move with the display's scale.
+    #[test]
+    fn the_seat_is_the_same_device_row_at_every_density() {
+        for y_dev in [485.156f32, 519.656, 590.625, 625.125, 1031.9375, 1048.9375] {
+            let want = snap_block_top_law(y_dev) + UI_SEAT_NUDGE;
+            for dpi in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+                let got = snap_block_top(y_dev / dpi, dpi) * dpi;
+                assert!(
+                    (got - want).abs() < 1e-2,
+                    "{y_dev} at {dpi}: {got} not {want}"
+                );
+            }
+        }
     }
 }
 
@@ -432,9 +479,12 @@ mod measure_fits_render {
             path: Some(FACE),
             height: Some(h),
             outline: Outline::None,
+            monochrome: false,
             spacing: 0.0,
             shadow_x: 0.0,
             alpha_gradient: None,
+            non_space_wrap: false,
+            max_lines: 0,
         }
     }
 
@@ -457,8 +507,7 @@ mod measure_fits_render {
                     let r = measure::resolve(&mut e, &s);
                     e.ensure_metrics(r.face, r.ppem, label);
                     let runs = parse_markup(label, [1.0, 1.0, 1.0, 1.0]);
-                    let line = runs.first().expect("one line");
-                    let rows = measure::wrap_line(&e, r, line, measured);
+                    let rows = measure::wrap_lines(&e, r, &runs, measured, false, usize::MAX).rows;
                     assert_eq!(
                         rows.len(),
                         1,
@@ -495,14 +544,16 @@ mod measure_fits_render {
             ] {
                 e.ensure_metrics(r.face, r.ppem, title);
                 e.ensure_metrics(r.face, r.ppem, "...");
-                // The cap bites: uncapped the title is one line, capped it needs more.
+                let own = measure_text(&mut e, title, None, s).0;
+                // The cap bites: in its own measured width, indent included (`0x5c7470` skips no
+                // leading whitespace), the title is one line; capped it needs more.
                 assert_eq!(
-                    measure::wrapped_rows_for_test(&e, r, title, 275.0),
+                    measure::wrapped_rows_for_test(&e, r, title, own, true),
                     1,
                     "{title:?} fits the uncapped row"
                 );
                 assert!(
-                    measure::wrapped_rows_for_test(&e, r, title, cap) > 1,
+                    measure::wrapped_rows_for_test(&e, r, title, cap, true) > 1,
                     "{title:?} must overflow the {cap}px cap for this test to mean anything"
                 );
                 // The line stack: a 10-tall box emits one line whatever the wrap says.
@@ -515,7 +566,7 @@ mod measure_fits_render {
                 let cap_rows = overflow::lines_fitting(BOX_H.max(r.size), r.size, r.gap) + 1;
                 let display =
                     overflow::ellipsize_in_box(title, BOX_H, r.size, r.gap, |candidate| {
-                        measure::wrapped_rows_capped_for_test(&e, r, candidate, cap, cap_rows)
+                        measure::fit_rows_for_test(&e, r, candidate, cap, cap_rows, true)
                     })
                     .unwrap_or_else(|| panic!("{title:?} at cap {cap} must ellipsize"));
                 assert!(
@@ -523,7 +574,7 @@ mod measure_fits_render {
                     "the truncation marker is three dots, got {display:?}"
                 );
                 assert_eq!(
-                    measure::wrapped_rows_for_test(&e, r, &display, cap),
+                    measure::wrapped_rows_for_test(&e, r, &display, cap, true),
                     1,
                     "{display:?} must fit the row's single line at cap {cap}"
                 );
@@ -532,39 +583,45 @@ mod measure_fits_render {
     }
 
     /// The V-plate moves on the device grid ([`crate::vplates::device_snap`]), half a logical px
-    /// per step at dpi 2, and its name must move with it; under [`TextSeat::UiGrid`] the
-    /// whole-pixel snap would hold the ink for one step and jump it the next.
+    /// per step at dpi 2, and its name must move with it, and a UI block seats on the device row
+    /// the reference's snap names (`0x5cdf70`: the ceiling of the exact row), a quarter-logical
+    /// step of the rect at dpi 2 being half a row.
     #[test]
-    fn a_world_seated_block_tracks_its_rect_and_a_ui_one_snaps() {
+    fn a_world_seated_block_tracks_its_rect_and_a_ui_one_snaps_to_device_rows() {
         let Some(mut e) = test_engine(2.0) else {
             eprintln!("skipping: no install / font chain");
             return;
         };
         let s = spec(13.0);
-        let (mut exact, mut grid) = (Vec::new(), Vec::new());
-        for step in 0..24 {
-            #[allow(clippy::cast_precision_loss)]
-            let top = 100.0 + step as f32 * 0.5;
+        let top_of = |e: &mut TextEngine, top: f32, v: JustifyV, seat: TextSeat| -> f32 {
             let rect = Rect::new(40.0, top, 140.0, top + 14.0);
-            for (seat, out) in [(TextSeat::Exact, &mut exact), (TextSeat::UiGrid, &mut grid)] {
-                let quads = layout_text_quads(
-                    &mut e,
-                    "Twilight Avenger",
-                    rect,
-                    [1.0; 4],
-                    Justify {
-                        h: JustifyH::Center,
-                        v: JustifyV::Middle,
-                    },
-                    0,
-                    s,
-                    seat,
-                );
-                assert!(!quads.is_empty(), "the name drew");
-                out.push(quads.iter().map(|q| q.rect.min.y).fold(f32::MAX, f32::min));
-            }
-        }
+            let quads = layout_text_quads(
+                e,
+                "Twilight Avenger",
+                rect,
+                [1.0; 4],
+                Justify {
+                    h: JustifyH::Center,
+                    v,
+                },
+                0,
+                s,
+                seat,
+            );
+            assert!(!quads.is_empty(), "the name drew");
+            quads.iter().map(|q| q.rect.min.y).fold(f32::MAX, f32::min)
+        };
         // Rigid: every half-pixel step of the rect is a half-pixel step of the ink.
+        let exact: Vec<f32> = (0..24)
+            .map(|step| {
+                top_of(
+                    &mut e,
+                    100.0 + step as f32 * 0.5,
+                    JustifyV::Middle,
+                    TextSeat::Exact,
+                )
+            })
+            .collect();
         for (i, w) in exact.windows(2).enumerate() {
             assert!(
                 (w[1] - w[0] - 0.5).abs() < 1e-3,
@@ -572,14 +629,18 @@ mod measure_fits_render {
                 w[1] - w[0]
             );
         }
-        // The UI grid quantizes the same walk to whole pixels: no step moves 0.5.
+        // The UI grid: the ink sits a fixed number of device rows under the ceiling of the rect's
+        // exact row, whatever fraction of a row the rect lands on.
+        let rows: Vec<f32> = (0..24)
+            .map(|step| {
+                let top = 100.0 + step as f32 * 0.25;
+                top_of(&mut e, top, JustifyV::Top, TextSeat::UiGrid) * 2.0
+                    - (top * 2.0 - 1e-3).ceil()
+            })
+            .collect();
         assert!(
-            grid.windows(2).any(|w| w[1] - w[0] > 0.9),
-            "the UI grid must actually quantize, else this test proves nothing: {grid:?}"
-        );
-        assert!(
-            grid.windows(2).all(|w| (w[1] - w[0] - 0.5).abs() > 1e-3),
-            "a UI-grid seat never lands between two logical pixels: {grid:?}"
+            rows.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-3),
+            "a UI-grid seat is the ceiling of its device row: {rows:?}"
         );
     }
 
@@ -644,8 +705,8 @@ mod measure_fits_render {
     }
 
     /// One line is one baseline at every DPI, size and seat, where rounding each glyph's own sum
-    /// splits half-pixel ties by bearing at a fractional DPI. FRIZQT's hinted cells all end on the
-    /// baseline (`px_h == bearing_top` at every ppem 8..64), so one baseline is one `rect.max.y`.
+    /// splits half-pixel ties by bearing at a fractional DPI. A glyph's baseline is its quad's top
+    /// plus its cell's `bearing_top`; the unhinted `o`, `C` and `b` overshoot it below.
     #[test]
     fn one_line_is_one_baseline_at_every_dpi() {
         let Some(mut e) = test_engine(1.0) else {
@@ -656,6 +717,18 @@ mod measure_fits_render {
             e.set_dpi_for_test(dpi);
             for base in [10.0f32, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0] {
                 let s = spec(base * ERA);
+                // Each letter's `bearing_top`, in quad order: every letter of "Combat" has ink.
+                let r = measure::resolve(&mut e, &s);
+                e.ensure_str(r.face, r.ppem, r.bake, "Combat");
+                let tops: Vec<f32> = "Combat"
+                    .chars()
+                    .map(|c| {
+                        let g = e.char_cell(r.face, r.ppem, c).expect("shaped").glyphs[0];
+                        e.cell(r.face, r.ppem, r.bake, g.glyph_id)
+                            .expect("inked")
+                            .bearing_top
+                    })
+                    .collect();
                 // A quarter-pixel walk, as a scaled frame's text takes every offset.
                 for step in 0..320 {
                     let top = step as f32 * 0.25;
@@ -673,14 +746,10 @@ mod measure_fits_render {
                         s,
                         TextSeat::UiGrid,
                     );
-                    let lo = quads
-                        .iter()
-                        .map(|q| q.rect.max.y)
-                        .fold(f32::INFINITY, f32::min);
-                    let hi = quads
-                        .iter()
-                        .map(|q| q.rect.max.y)
-                        .fold(f32::NEG_INFINITY, f32::max);
+                    assert_eq!(quads.len(), tops.len());
+                    let baselines = quads.iter().zip(&tops).map(|(q, t)| q.rect.min.y + t / dpi);
+                    let lo = baselines.clone().fold(f32::INFINITY, f32::min);
+                    let hi = baselines.fold(f32::NEG_INFINITY, f32::max);
                     assert!(
                         (hi - lo) * dpi < 1e-3,
                         "dpi {dpi}, height {base}, seat {top}: the letters of \"Combat\" \
@@ -755,6 +824,7 @@ mod measure_fits_render {
             ] {
                 let s = FontSpec {
                     outline,
+                    monochrome: false,
                     shadow_x,
                     ..spec(16.0 * ERA)
                 };
@@ -954,9 +1024,12 @@ mod ellipsis_cost {
             path: Some(FACE),
             height: Some(SIZE),
             outline: Outline::None,
+            monochrome: false,
             spacing: 0.0,
             shadow_x: 0.0,
             alpha_gradient: None,
+            non_space_wrap: false,
+            max_lines: 0,
         };
         let r = measure::resolve(&mut e, &s);
         let fits = overflow::lines_fitting(BOX_H, r.size, r.gap);
@@ -965,7 +1038,7 @@ mod ellipsis_cost {
             let text = page_body(page);
             e.ensure_metrics(r.face, r.ppem, &text);
             e.ensure_metrics(r.face, r.ppem, "...");
-            let full = measure::wrapped_rows_for_test(&e, r, &text, BOX_W);
+            let full = measure::wrapped_rows_for_test(&e, r, &text, BOX_W, false);
             eprintln!(
                 "[ellipsis-cost] {label:<11} {:>4} chars -> {full:>2} rows in a {fits}-row box",
                 text.chars().count(),
@@ -981,7 +1054,7 @@ mod ellipsis_cost {
                 let got = overflow::ellipsize_in_box(&text, BOX_H, r.size, r.gap, |candidate| {
                     probes.set(probes.get() + 1);
                     chars.set(chars.get() + candidate.chars().count());
-                    measure::wrapped_rows_capped_for_test(&e, r, candidate, BOX_W, cap)
+                    measure::fit_rows_for_test(&e, r, candidate, BOX_W, cap, false)
                 });
                 let us = t.elapsed().as_secs_f64() * 1e6;
                 eprintln!(

@@ -6,6 +6,7 @@ use super::movement::ObjectType;
 
 // Descriptor field indices for build 5875.
 const FIELD_OBJECT_TYPE: u16 = 2;
+pub const FIELD_OBJECT_ENTRY: u16 = 3;
 const FIELD_OBJECT_SCALE_X: u16 = 4;
 // The creator of a spell-spawned object (bobber, ritual portal); 0 for a world spawn.
 const FIELD_GAMEOBJECT_CREATED_BY: u16 = 6;
@@ -44,6 +45,8 @@ const FIELD_UNIT_CHARMEDBY: u16 = 10;
 /// The summoner of a pet, guardian or totem; with CREATEDBY, the "owned by me" test of `0x5efea0`.
 const FIELD_UNIT_SUMMONEDBY: u16 = 12;
 const FIELD_UNIT_CREATEDBY: u16 = 14;
+/// The unit that persuaded this one (`UpdateFields_1_12_1.h:47`), descriptor byte `0x30`.
+const FIELD_UNIT_PERSUADED: u16 = 18;
 /// The channel's target, possibly the caster (`UpdateFields_1_12_1.h:48`). Public, so another
 /// unit's channel renders from it; `MSG_CHANNEL_START`/`UPDATE` reach only the caster.
 const FIELD_UNIT_CHANNEL_OBJECT: u16 = 20;
@@ -74,7 +77,7 @@ const FIELD_UNIT_BOUNDINGRADIUS: u16 = 129;
 const FIELD_UNIT_COMBATREACH: u16 = 130;
 const FIELD_UNIT_BASE_MANA: u16 = 162;
 const FIELD_UNIT_BASE_HEALTH: u16 = 163;
-const FIELD_UNIT_DISPLAYID: u16 = 131;
+pub const FIELD_UNIT_DISPLAYID: u16 = 131;
 /// The unshifted appearance, untouched by forms, morphs and polymorph (`UpdateFields_1_12_1.h:77`).
 /// The client sizes the mover collision box from it (`0x60b270`), so a shapeshift keeps the box.
 const FIELD_UNIT_NATIVEDISPLAYID: u16 = 132;
@@ -97,6 +100,8 @@ const FIELD_UNIT_TRAINING_POINTS: u16 = 149;
 pub const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
 /// The spell being channeled, 0 for none (`UpdateFields_1_12_1.h:89`).
 pub const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
+/// The cast-time factor, a float (`UpdateFields_1_12_1.h:90`).
+const FIELD_UNIT_MOD_CAST_SPEED: u16 = 145;
 /// The summoning spell, 0 for none; the first gate of the client's feed-pet path `0x6ea1e0`.
 const FIELD_UNIT_CREATED_BY_SPELL: u16 = 146;
 pub const FIELD_UNIT_NPC_FLAGS: u16 = 147;
@@ -131,6 +136,8 @@ const FIELD_UNIT_RANGED_ATTACK_POWER_MODS: u16 = 169; // +0xA3, TWO_SHORT as abo
 const FIELD_UNIT_RANGED_ATTACK_POWER_MULTIPLIER: u16 = 170; // +0xA4, FLOAT
 const FIELD_UNIT_MINRANGEDDAMAGE: u16 = 171; // +0xA5, FLOAT
 const FIELD_UNIT_MAXRANGEDDAMAGE: u16 = 172; // +0xA6, FLOAT
+const FIELD_UNIT_POWER_COST_MODIFIER: u16 = 173; // +0xA7 ×7, INT, by school
+const FIELD_UNIT_POWER_COST_MULTIPLIER: u16 = 180; // +0xAE ×7, FLOAT, by school
 
 /// Aura slots per unit (vmangos `MAX_AURAS`, `SpellAuraDefines.h:25`).
 pub const UNIT_AURA_SLOTS: u8 = 48;
@@ -187,10 +194,12 @@ pub mod field {
     /// The bit a watcher tests on a raw `UNIT_DYNAMIC_FLAGS` edge (feign death).
     pub use super::unit::UNIT_DYNFLAG_DEAD;
     pub use super::{
-        FIELD_CORPSE_DYNAMIC_FLAGS, FIELD_GAMEOBJECT_STATE, FIELD_PLAYER_FIELD_COINAGE,
-        FIELD_PLAYER_FLAGS, FIELD_PLAYER_INV_SLOT_HEAD, FIELD_PLAYER_QUEST_LOG_1_1,
-        FIELD_PLAYER_SKILL_INFO_1_1, FIELD_UNIT_AURA, FIELD_UNIT_AURAAPPLICATIONS,
-        FIELD_UNIT_AURAFLAGS, FIELD_UNIT_BYTES_1, FIELD_UNIT_CHANNEL_SPELL,
+        FIELD_CONTAINER_SLOT_1, FIELD_CORPSE_DYNAMIC_FLAGS, FIELD_GAMEOBJECT_STATE,
+        FIELD_ITEM_ENCHANTMENT, FIELD_ITEM_SPELL_CHARGES, FIELD_ITEM_STACK_COUNT,
+        FIELD_OBJECT_ENTRY, FIELD_PLAYER_FIELD_COINAGE, FIELD_PLAYER_FLAGS,
+        FIELD_PLAYER_INV_SLOT_HEAD, FIELD_PLAYER_QUEST_LOG_1_1, FIELD_PLAYER_SKILL_INFO_1_1,
+        FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR, FIELD_UNIT_AURA, FIELD_UNIT_AURAAPPLICATIONS,
+        FIELD_UNIT_AURAFLAGS, FIELD_UNIT_BYTES_1, FIELD_UNIT_CHANNEL_SPELL, FIELD_UNIT_DISPLAYID,
         FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH,
         FIELD_UNIT_LEVEL, FIELD_UNIT_MAXHEALTH, FIELD_UNIT_MOUNTDISPLAYID, FIELD_UNIT_NPC_FLAGS,
     };
@@ -219,14 +228,15 @@ pub mod quest_slot_state {
     pub const FAIL: u8 = 0x02;
 }
 // Inventory fields. The PLAYER slot arrays are private, and each slot is a 2-field guid.
-const FIELD_ITEM_STACK_COUNT: u16 = 14; // OBJECT_END + 0x8
-const FIELD_ITEM_ENCHANTMENT: u16 = 22; // OBJECT_END + 0x10; 7 slots × 3 (id, duration, charges)
+pub const FIELD_ITEM_STACK_COUNT: u16 = 14; // OBJECT_END + 0x8
+pub const FIELD_ITEM_SPELL_CHARGES: u16 = 16; // OBJECT_END + 0xA; 5 spells
+pub const FIELD_ITEM_ENCHANTMENT: u16 = 22; // OBJECT_END + 0x10; 7 slots × 3 (id, duration, charges)
 const FIELD_CONTAINER_NUM_SLOTS: u16 = 48; // ITEM_END = 6 + 0x2A
-const FIELD_CONTAINER_SLOT_1: u16 = 50; // ITEM_END + 0x2; 36 slots × 2
+pub const FIELD_CONTAINER_SLOT_1: u16 = 50; // ITEM_END + 0x2; 36 slots × 2
 
 // From the CONTAINER block on, the hex comments in vmangos `UpdateFields_1_12_1.h` run 6 low. The
 // indices here follow its enum arithmetic, which the server compiles: INV_SLOT_HEAD = 188 + 0x12A.
-const FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR: u16 = 258; // UNIT_END + 0x46; 12 fields per slot
+pub const FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR: u16 = 258; // UNIT_END + 0x46; 12 fields per slot
 pub const FIELD_PLAYER_INV_SLOT_HEAD: u16 = 486; // 23 slots × 2 (equipment 0–18, bags 19–22)
 const FIELD_PLAYER_PACK_SLOT_1: u16 = 532; // 16 slots × 2 (the backpack)
 const FIELD_PLAYER_BANK_SLOT_1: u16 = 564; // 24 slots × 2
@@ -275,6 +285,8 @@ const FIELD_PLAYER_TRACK_CREATURES: u16 = 1104;
 const FIELD_PLAYER_TRACK_RESOURCES: u16 = 1105;
 const FIELD_PLAYER_AMMO_ID: u16 = 1223; // UNIT_END+0x40B, INT: the equipped ammo item id
 const FIELD_PLAYER_SELF_RES_SPELL: u16 = 1224;
+// The medal bits an item's required medal tests: bit `n - 1` for medal `n`.
+const FIELD_PLAYER_PVP_MEDALS: u16 = 1225;
 // Bit 0x10 is PLAYER_FLAGS_GHOST (`Player.h:319`), held by the ghost aura 8326 until resurrection.
 pub const FIELD_PLAYER_FLAGS: u16 = 190;
 // The client's player block base `[player+0xe68]` is field 188: the arbiter at +0x0, PLAYER_FLAGS
@@ -285,6 +297,8 @@ const FIELD_PLAYER_DUEL_TEAM: u16 = 196;
 // visible player; a guild id of 0 is guildless.
 const FIELD_PLAYER_GUILDID: u16 = 191;
 const FIELD_PLAYER_GUILDRANK: u16 = 192;
+// Block +0x24, the stamp the guild record's watcher keys its refresh on (`0x5e28c1`).
+const FIELD_PLAYER_GUILD_TIMESTAMP: u16 = 197;
 // `GetComboPoints` (`0x51a190`) reads the target at block +0x838 and the count byte at +0x1029.
 const FIELD_PLAYER_FIELD_COMBO_TARGET: u16 = 714;
 const FIELD_PLAYER_FIELD_BYTES: u16 = 1222; // UNIT_END+0x40A: flags, combo points, action bars,
@@ -644,7 +658,7 @@ impl ObjectFields {
             .flatten()
     }
 
-    /// No fields carried; the codec skips an empty `Values` delta.
+    /// No fields carried.
     pub fn is_empty(&self) -> bool {
         self.present.iter().all(|&w| w == 0)
     }

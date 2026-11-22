@@ -1,14 +1,15 @@
 //! The shared item-template store every item tooltip renders through, as the reference's one
 //! renderer (`0x52b650`, behind 8 of the 9 `Set*Item` bindings) reads one template cache.
 //!
-//! The app pushes each template as it lands; a read of an unknown id records an ask that the app
-//! turns into `CMSG_ITEM_QUERY`, the reference's uncached-item early-out. The app resolves every
-//! DBC string, as the engine reads no DBCs.
+//! The app seats the VM's copy at its load and pushes each template as it lands; a getter's miss
+//! asks the item cache inside its call through the lent host (`0x55ba30`), the reference's
+//! uncached-item early-out. The app resolves every DBC string, as the engine reads no DBCs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::Model;
 
 /// An item template's tooltip view: the `SMSG_ITEM_QUERY_SINGLE_RESPONSE` fields the tooltip reads,
@@ -32,6 +33,14 @@ pub struct ItemTemplateView {
     /// prerequisite, or its postrequisite when the prerequisite is -1. A weapon with only the
     /// alternate's bit reds the slot cell, not the type cell.
     pub proficiency_alt: Option<u32>,
+    /// `ItemSubClass.dbc`'s prerequisite proficiency alone (row `+0x08`, `None` for -1):
+    /// `GetTradeSkillItemStats` reads this field where the tooltip walks on to the postrequisite.
+    pub proficiency_prereq: Option<u32>,
+    /// The template's item level (`+0x38`).
+    pub item_level: u32,
+    /// `(spell name, charges)` for each of the five spell slots whose id names a `Spell.dbc` row,
+    /// in slot order (`+0x11c`, `+0x144`): `GetTradeSkillItemStats`' `ITEM_SPELL_EFFECT` lines.
+    pub spell_slots: Vec<(String, i32)>,
     /// `ItemSubClass.dbc` displayFlags bit 0: the type cell never prints (rings, trinkets, …).
     pub hide_subclass: bool,
     /// Template flags; `0x2` prints "Conjured Item".
@@ -65,21 +74,23 @@ pub struct ItemTemplateView {
     pub required_skill_name: Option<String>,
     pub required_spell: u32,
     pub required_spell_name: Option<String>,
-    /// No tooltip line in 1.12; only the usable gate (`0x5ea930`) reads it.
+    /// The required spell and every later rank of it: knowing any meets the requirement
+    /// (`0x60c740`, `0x60c8d0` at `0x52d618`, `0x5eaa42`). Empty reads as the spell alone.
+    pub required_spell_ranks: Vec<u32>,
+    /// The required honor rank (`+0x4c`): an `ITEM_REQ_SKILL` line naming the rank (`0x52d694`)
+    /// and a leg of the usable gate (`0x5ea930`).
     pub required_honor_rank: u32,
-    /// Usable gate only; nonzero always fails, as the `PVP_MEDALS` bits it tests are never set.
+    /// The required medal (`+0x50`), `PVP_MEDAL<n>`: an `ITEM_REQ_SKILL` line (`0x52d6ff`) and a
+    /// leg of the usable gate, both testing bit `n - 1` of `PLAYER_FIELD_PVP_MEDALS`.
     pub required_city_rank: u32,
     /// "Requires <Faction> - <Standing>", app-resolved; the raw faction and rank drive its red.
     pub required_rep_line: Option<String>,
     pub required_rep_faction: u32,
     pub required_rep_rank: u32,
-    /// Green trigger-spell lines `(trigger, spell id, text)` in wire order: 0 and 5 "Use:",
-    /// 1 "Equip:", 2 "Chance on hit:", 6 a taught spell (no line, only the "Already known" red).
-    pub spell_triggers: Vec<(u32, u32, String)>,
+    /// The spell blocks' lines in block order, each block whose spell has a non-empty
+    /// description (`0x52d992`..`0x52dd4d`).
+    pub spell_lines: Vec<ItemSpellLine>,
     pub lock_id: u32,
-    /// "N Charge(s)" for the first spell slot past the builder's gate (`0x52db51`: 0 and -1
-    /// print nothing, else the absolute value); 0 prints no line.
-    pub charges: i32,
     pub description: String,
     pub page_text: u32,
     /// Copper: the merchant money row, or `ITEM_UNSELLABLE` when 0 in a sell context.
@@ -91,6 +102,75 @@ pub struct ItemTemplateView {
     /// `RandomProperty` (template `+0x1b8`): the item can roll a suffix, so a template tooltip
     /// prints `<Random enchantment>` (`0x52cc33`).
     pub random_property: u32,
+    /// Block 0's template charges, unfiltered (`+0x144`): below -1 the merchant price scales by
+    /// the item's charges over them (`0x52e432`).
+    pub spell_charges_0: i32,
+    /// The record's area (`+0x1c8`) by its `AreaTable.dbc` name, app-resolved; `None` for an id
+    /// of 0 or below, one with no row, or an empty name (`0x52bac9`..`0x52bb01`).
+    pub area_name: Option<String>,
+    /// The record's map (`+0x1cc`) by its `Map.dbc` name, as [`Self::area_name`]
+    /// (`0x52bb06`..`0x52bb3e`).
+    pub map_name: Option<String>,
+    /// The record's area and map ids as they stand, 0 for none: either nonzero refuses the
+    /// auction sell slot (`0x5da500`, `0x5da570`).
+    pub area: u32,
+    pub map: u32,
+    /// What the first spell slot (`+0x11c`, any trigger) teaches when that spell's first effect is
+    /// 36, learn spell (`0x52d500`..`0x52d532`): the "Already known" line's subject.
+    pub teaches: Option<TaughtSpell>,
+}
+
+impl ItemTemplateView {
+    /// Whether the player knows the required spell or a later rank of it, `knows` asking of each
+    /// (`0x60c740`, then `0x60c8d0` along the chain, at `0x52d614` and `0x5eaa42`).
+    pub(crate) fn knows_required_spell(&self, knows: impl Fn(u32) -> bool) -> bool {
+        match self.required_spell_ranks.as_slice() {
+            [] => knows(self.required_spell),
+            ranks => ranks.iter().any(|&id| knows(id)),
+        }
+    }
+}
+
+/// One spell block's tooltip lines (`0x52d992`..`0x52dd4d`), app-resolved from the template and
+/// `Spell.dbc`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemSpellLine {
+    /// The block's ordinal, 0..=4: which of an item object's charges its line reads
+    /// (`0x52d9f4`).
+    pub block: u8,
+    /// `ItemSpelltriggerType`: 0 "Use:", 1 "Equip:", 2 "Chance on hit:", any other the text
+    /// alone (`0x52da37`..`0x52da61`).
+    pub trigger: u32,
+    pub spell_id: u32,
+    /// The spell's `$`-expanded description, never empty (`0x52da29`).
+    pub text: String,
+    /// The block's template charges (`+0x144`): 0 reads as -1 (`0x52da06`), and -1 prints no
+    /// charges line (`0x52db51`).
+    pub charges: i32,
+    /// The block's spell teaches a spell that creates an item: its line goes white, and the
+    /// product's tooltip and the reagents follow (`0x52daf5`..`0x52dd38`).
+    pub recipe: Option<ItemRecipe>,
+}
+
+/// A recipe's product and reagents, from the taught spell (`0x52dba7`, `0x52dbee`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemRecipe {
+    /// The created item, the taught spell's EffectItemType[0] (`+0x19c`).
+    pub product: u32,
+    /// The taught spell's reagents with an id above 0, `(item, count)` in slot order (`+0xa8`,
+    /// `+0xc8`).
+    pub reagents: Vec<(u32, i32)>,
+}
+
+/// A learn spell's subject, app-resolved from `Spell.dbc` and `SkillLineAbility.dbc`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaughtSpell {
+    /// The taught spell, the first effect's trigger spell (`+0x1b4`), then each higher rank in its
+    /// chain: knowing any is "known" (`0x60c740`, `0x60c8d0`).
+    pub ranks: Vec<u32>,
+    /// The first effect targets the pet (implicit target A or B 5, `0x52d538`..`0x52d547`): the
+    /// pet's book is asked, not the player's (`0x52d56d`).
+    pub pet: bool,
 }
 
 /// The player state the tooltip's red lines and the usable gate compare against.
@@ -113,6 +193,12 @@ pub struct PlayerReqState {
     pub can_dual_wield: bool,
     /// The highest lifetime honor rank (`PLAYER_FIELD_BYTES` byte 3).
     pub honor_rank: u8,
+    /// `PLAYER_FIELD_PVP_MEDALS` (player block `+0x1034`): medal `n` is bit `n - 1`.
+    pub pvp_medals: u32,
+    /// The learned skinning spell's (`[0xb700e4]`) `SKINNING` effect points, `0x6e3760` at the
+    /// player's skill (`0x529f4e`), which the unit tooltip's skinnable line colours by; `None`
+    /// without the spell, or at 0 or below (`0x529f58`).
+    pub skinning: Option<i32>,
 }
 
 /// The icon an item-texture getter answers while the item's template is unknown or its display
@@ -136,19 +222,36 @@ pub(super) fn gated_quality(quality: Option<u32>, inventory_type: u32) -> i64 {
 
 /// [`item_usable`] by item entry: entry 0 and a template not yet answered are usable, as the
 /// merchant getter skips an uncached record (`0x4fb298`).
-pub(super) fn item_usable_by_id(model: &super::Model, item_id: u32) -> bool {
-    item_refusal_by_id(model, item_id).is_none()
+pub(super) fn item_usable_by_id(lua: &Lua, model: &super::Model, item_id: u32) -> bool {
+    item_refusal_by_id(lua, model, item_id).is_none()
 }
 
-/// [`item_refusal`] by item entry, with the same fail-open for entry 0 and an unanswered template.
-pub(super) fn item_refusal_by_id(model: &super::Model, item_id: u32) -> Option<&'static str> {
+/// [`item_refusal`] by item entry, with the same fail-open for entry 0 and an unanswered template,
+/// against the player as the call runs.
+pub(super) fn item_refusal_by_id(
+    lua: &Lua,
+    model: &super::Model,
+    item_id: u32,
+) -> Option<&'static str> {
     if item_id == 0 {
         return None;
     }
-    model.item_templates.get(&item_id).and_then(|v| {
-        item_refusal(v, &model.player_req, |id| {
-            model.spellbook.slots.iter().any(|s| s.spell_id == id)
-        })
+    record_refusal(lua, model, model.item_templates.get(&item_id)?)
+}
+
+/// [`item_refusal`] on the record `v`, against the player as the call runs.
+pub(super) fn record_refusal(
+    lua: &Lua,
+    model: &super::Model,
+    v: &ItemTemplateView,
+) -> Option<&'static str> {
+    let req = super::requirements::player_req(lua, model);
+    // With no active player every predicate caller reads the item usable (`0x4fb293`).
+    if matches!(req, super::requirements::ReqNow::NoPlayer) {
+        return None;
+    }
+    item_refusal(v, &req, |id| {
+        super::requirements::knows_spell(lua, model, id)
     })
 }
 
@@ -156,7 +259,7 @@ pub(super) fn item_refusal_by_id(model: &super::Model, item_id: u32) -> Option<&
 /// `isUsable` (`0x4fb2a3`, `0x4fb4f7`).
 pub fn item_usable(
     v: &ItemTemplateView,
-    req: &PlayerReqState,
+    req: &dyn super::ReqRead,
     knows_spell: impl Fn(u32) -> bool,
 ) -> bool {
     item_refusal(v, req, knows_spell).is_none()
@@ -165,63 +268,66 @@ pub fn item_usable(
 /// `0x5ea930`'s refusal, as the key of the error line its caller shows (`0x5d8e0e`, `0x5d926d`),
 /// its legs in the reference's order: the proficiency leg is `ERR_PROFICIENCY_NEEDED` (`0x7`,
 /// `0x5ea9b3`), every other failure `ERR_CANT_USE_ITEM` (`0x9c`, `0x5eaace`). Proficiency tests the
-/// item's own subclass bit, with no alternate walk. A nonzero city rank always fails: it tests
-/// `PLAYER_FIELD_PVP_MEDALS`, which is never written. Reputation compares ranks, equivalent to the
-/// reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank 0. An
+/// item's own subclass bit, with no alternate walk. A required medal tests its bit of
+/// `PLAYER_FIELD_PVP_MEDALS` (`0x5eaa89`..`0x5eaaa0`). Reputation compares ranks, equivalent to
+/// the reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank
+/// 0. The required spell is met by the spell or a later rank, `knows_spell` asked of each. An
 /// unpushed state (level 0) declines to judge, answering usable.
 pub fn item_refusal(
     v: &ItemTemplateView,
-    req: &PlayerReqState,
+    req: &dyn super::ReqRead,
     knows_spell: impl Fn(u32) -> bool,
 ) -> Option<&'static str> {
     const CANT_USE: Option<&str> = Some("ERR_CANT_USE_ITEM");
-    if req.level == 0 {
+    let head = req.head();
+    if head.level == 0 {
         return None;
     }
-    if v.required_level > req.level {
+    if v.required_level > head.level {
         return CANT_USE;
     }
-    if req.class_id == 0 || v.allowable_class as u32 & (1 << (req.class_id - 1)) == 0 {
+    if head.class_id == 0 || v.allowable_class as u32 & (1 << (head.class_id - 1)) == 0 {
         return CANT_USE;
     }
-    if req.race_id == 0 || v.allowable_race as u32 & (1 << (req.race_id - 1)) == 0 {
+    if head.race_id == 0 || v.allowable_race as u32 & (1 << (head.race_id - 1)) == 0 {
         return CANT_USE;
     }
-    if let Some(&mask) = req.proficiency.get(&v.class) {
+    if let Some(mask) = req.proficiency(v.class) {
         if mask & (1 << v.subclass) == 0 {
             return Some("ERR_PROFICIENCY_NEEDED");
         }
     }
     if v.required_skill != 0 {
-        match req.skills.get(&v.required_skill) {
+        match req.skill(v.required_skill) {
             None => return CANT_USE,
-            Some(&val) => {
+            Some(val) => {
                 if val < v.required_skill_rank {
                     return CANT_USE;
                 }
             }
         }
     }
-    if v.required_spell != 0 && !knows_spell(v.required_spell) {
+    if v.required_spell != 0 && !v.knows_required_spell(knows_spell) {
         return CANT_USE;
     }
-    if v.required_honor_rank != 0 && u32::from(req.honor_rank) < v.required_honor_rank {
+    if v.required_honor_rank != 0 && u32::from(head.honor_rank) < v.required_honor_rank {
         return CANT_USE;
     }
-    if v.required_city_rank != 0 {
+    if v.required_city_rank != 0 && head.pvp_medals & medal_bit(v.required_city_rank) == 0 {
         return CANT_USE;
     }
-    if v.required_rep_faction != 0 {
-        let rank = req
-            .rep_ranks
-            .get(&v.required_rep_faction)
-            .copied()
-            .unwrap_or(0);
-        if u32::from(rank) < v.required_rep_rank {
-            return CANT_USE;
-        }
+    if v.required_rep_faction != 0
+        && u32::from(req.rep_rank(v.required_rep_faction)) < v.required_rep_rank
+    {
+        return CANT_USE;
     }
     None
+}
+
+/// Medal `n`'s bit of `PLAYER_FIELD_PVP_MEDALS`: `1 << (n - 1)` by `shl`, whose count is taken
+/// mod 32 (`0x52d70a`..`0x52d712`, `0x5eaa9e`).
+pub(in crate::script) fn medal_bit(medal: u32) -> u32 {
+    1u32.wrapping_shl(medal.wrapping_sub(1))
 }
 
 /// An item set's tooltip block (`0x854b1c`), app-resolved from `ItemSet.dbc`: member names from
@@ -240,40 +346,228 @@ pub struct ItemSetView {
     pub required_skill_name: Option<String>,
 }
 
+/// The question: set `0`'s block as the call runs, built off `ItemSet.dbc`, the item-name cache
+/// (`0x52df5a` on `0xc0e2dc`, only read) and the bonuses' descriptions against the active player;
+/// `None` for a set with no row.
+pub struct ItemSetQuery(pub u32);
+
+/// A set's block as the host builds it: its view, whose bonuses are left empty, and the bonuses'
+/// texts, each template read from the VM's strings where the block shows (`0x5075f0`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveItemSet {
+    pub view: ItemSetView,
+    pub bonuses: Vec<(u32, super::TooltipText)>,
+}
+
+impl super::live::LiveQuery for ItemSetQuery {
+    type Answer = Option<LiveItemSet>;
+}
+
+/// Set `id`'s block now: the host's, its bonuses read from the VM's strings, a description that
+/// comes out empty dropping its line (`0x52da29`), `Some(None)` for no row; `None` with no host
+/// lent or no active player held, where the VM's copy answers, which a harness or a capture
+/// seats.
+pub(crate) fn live_item_set(lua: &Lua, id: u32) -> Option<Option<ItemSetView>> {
+    let live = super::live::ask(lua, &ItemSetQuery(id))?;
+    Some(live.map(|set| {
+        ItemSetView {
+            bonuses: set
+                .bonuses
+                .iter()
+                .filter_map(|(n, text)| Some((*n, text.line(lua)?)))
+                .collect(),
+            ..set.view
+        }
+    }))
+}
+
+/// Set `id`'s block now ([`live_item_set`]), else the VM's copy.
+pub(crate) fn item_set(lua: &Lua, model: &Model, id: u32) -> Option<ItemSetView> {
+    live_item_set(lua, id).unwrap_or_else(|| model.item_sets.get(&id).cloned())
+}
+
+/// The question: item `0`'s record as the call finds it in the item cache (`0x55ba30`), its spell
+/// lines expanded against the active player as it stands, as the tooltip build expands each at the
+/// build (`0x5075f0` at `0x52da24`), and its reputation line's label gendered by it (`0x52d80f`);
+/// `None` for a record the cache lacks.
+pub struct ItemViewQuery(pub u32);
+
+/// A record's view as the host builds it at the call: the view, its spell lines' texts and its
+/// reputation line left to the VM's strings where they show.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveItemView {
+    /// The record, each spell line's text empty and the reputation line `None`.
+    pub view: ItemTemplateView,
+    /// Each spell line's expanded description, in [`ItemTemplateView::spell_lines`]' order.
+    pub spell_texts: Vec<super::TooltipText>,
+    /// The reputation requirement's faction name (`UNKNOWN` for a faction with no row,
+    /// `0x838044`) and whether its standing label is the female one.
+    pub rep: Option<(String, bool)>,
+}
+
+impl super::live::LiveQuery for ItemViewQuery {
+    type Answer = Option<LiveItemView>;
+}
+
+impl LiveItemView {
+    /// The view with its texts read from the VM's strings now: a description that comes out empty
+    /// drops its line (`0x52da29`), and an install without `ITEM_REQ_REPUTATION` shows no
+    /// reputation line.
+    pub(crate) fn resolve(self, lua: &Lua) -> ItemTemplateView {
+        let LiveItemView {
+            mut view,
+            spell_texts,
+            rep,
+        } = self;
+        view.spell_lines = std::mem::take(&mut view.spell_lines)
+            .into_iter()
+            .zip(spell_texts)
+            .filter_map(|(line, text)| {
+                Some(ItemSpellLine {
+                    text: text.line(lua)?,
+                    ..line
+                })
+            })
+            .collect();
+        view.required_rep_line = rep.and_then(|(faction, female)| {
+            reputation_line(
+                crate::strings::Strings::Vm(lua),
+                &faction,
+                view.required_rep_rank,
+                female,
+            )
+        });
+        view
+    }
+}
+
+/// Item `id`'s record as the call runs, through the lent host: `Some(None)` for a record the
+/// cache lacks, `None` with no host lent, where the VM's copy answers, which a harness or a
+/// capture seats. The texts are read from the VM's strings now.
+pub(crate) fn live_record(lua: &Lua, id: u32) -> Option<Option<ItemTemplateView>> {
+    let live = super::live::ask(lua, &ItemViewQuery(id))?;
+    Some(live.map(|v| v.resolve(lua)))
+}
+
+/// Item `id`'s record as the call finds it in the item cache (`0x55ba30`), its texts unread:
+/// through the lent host, else the VM's copy in `model`. The equip questions read no text.
+pub(crate) fn cached_record(lua: &Lua, model: &Model, id: u32) -> Option<ItemTemplateView> {
+    match super::live::ask(lua, &ItemViewQuery(id)) {
+        Some(live) => live.map(|v| v.view),
+        None => model.item_templates.get(&id).cloned(),
+    }
+}
+
+/// "Requires <Faction> - <Standing>" (`ITEM_REQ_REPUTATION`, `0x854b8c`): the faction, then the
+/// standing's label, gendered (`0x52d80f`) and empty for an absent one; `None` when the install
+/// lacks the key.
+pub fn reputation_line(
+    strings: crate::strings::Strings<'_>,
+    faction: &str,
+    rank: u32,
+    female: bool,
+) -> Option<String> {
+    let standing = crate::strings::standing_label(strings, rank, female);
+    Some(crate::strings::fill(
+        &strings.global("ITEM_REQ_REPUTATION")?,
+        &[
+            crate::strings::Arg::S(faction),
+            crate::strings::Arg::S(&standing),
+        ],
+    ))
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl super::UiScript {
-    /// Stores or replaces an item's template view, clearing its ask.
+    /// A fixture's stand-in for the app's record feed: seat the item cache for the views a test
+    /// pushed, a record for every bag item with a quality and every player-slot item with an
+    /// inventory type, the two marks a fed view carries once its record landed, with the view's
+    /// bonding and a bag view's class. A record already seated stays.
+    pub fn seat_item_records(&mut self) {
+        let mut model = self.model_mut();
+        let bags = model
+            .containers
+            .values()
+            .flat_map(|c| c.slots.values())
+            .filter(|s| s.item_id != 0 && s.quality.is_some())
+            .map(|s| (s.item_id, s.bonding, s.item_class.unwrap_or(0)));
+        let worn = model
+            .inventory_slots
+            .iter()
+            .chain(model.bank_bag_slots.iter())
+            .flatten()
+            .filter(|v| v.item_id != 0 && v.inventory_type.is_some())
+            .map(|v| (v.item_id, v.bonding, 0));
+        let records: Vec<(u32, u32, u32)> = bags.chain(worn).collect();
+        for (item_id, bonding, class) in records {
+            model
+                .item_templates
+                .entry(item_id)
+                .or_insert_with(|| ItemTemplateView {
+                    bonding,
+                    class,
+                    ..Default::default()
+                });
+        }
+    }
+}
+
+impl super::UiScript {
+    /// Stores or replaces an item's template view, clearing its read.
     pub fn set_item_template(&mut self, item_id: u32, view: ItemTemplateView) {
         let mut model = self.model_mut();
-        model.item_stat_asks.remove(&item_id);
+        model.item_stat_reads.remove(&item_id);
         model.item_templates.insert(item_id, view);
+        model.quest_store.item_landed(item_id);
     }
 
-    /// Asks for the templates of `ids` the store lacks, for the trade-skill and craft lists,
-    /// whose link verbs never query: the reference has them cached before the list shows.
-    pub fn ask_item_templates(&mut self, ids: impl IntoIterator<Item = u32>) {
+    /// Removes an item's template view: the app's cache lost the record to a refusal.
+    pub fn drop_item_template(&mut self, item_id: u32) {
+        self.model_mut().item_templates.remove(&item_id);
+    }
+
+    /// Reads the templates of `ids` the store lacks off the app's cache, asking nothing: the
+    /// trade-skill and craft link verbs pass no callback (`0x4ff8da`, `0x4f780a`), so a template
+    /// the cache holds is the store's, and one it lacks waits for a getter's own ask.
+    pub fn read_item_templates(&mut self, ids: impl IntoIterator<Item = u32>) {
         let mut model = self.model_mut();
         for id in ids {
             if id != 0 && !model.item_templates.contains_key(&id) {
-                model.item_stat_asks.insert(id);
+                model.item_stat_reads.insert(id);
             }
         }
     }
 
-    /// Drains the ids read or asked for that the store did not hold.
-    pub fn take_item_stat_asks(&mut self) -> Vec<u32> {
-        self.model_mut().item_stat_asks.drain().collect()
+    /// The guids of the creators and givers the item builds a harness's VM kept the calls of
+    /// ([`Self::keep_calls`]) missed in the name cache, in ask order.
+    #[cfg(test)]
+    pub fn take_item_name_asks(&mut self) -> Vec<u64> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::RecordAsk(super::RecordAsk::ItemBuildName(guid)) => Some(*guid),
+            _ => None,
+        })
     }
 
-    /// Stores or replaces a set's view, re-pushed as member names resolve.
+    /// The charter item guids whose petition record or owner the item builds a harness's VM kept
+    /// the calls of missed, in ask order.
+    #[cfg(test)]
+    pub fn take_petition_asks(&mut self) -> Vec<u64> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::RecordAsk(super::RecordAsk::Petition(item)) => Some(*item),
+            _ => None,
+        })
+    }
+
+    /// Drains the ids `GetItemInfo` read that the store did not hold, which the app serves from
+    /// its cache and never asks the server for.
+    pub fn take_item_stat_reads(&mut self) -> Vec<u32> {
+        self.model_mut().item_stat_reads.drain().collect()
+    }
+
+    /// Seats a set's view, which the set block reads with no host lent; a test's stand-in for the
+    /// live read ([`ItemSetQuery`]).
     pub fn set_item_set(&mut self, set_id: u32, view: ItemSetView) {
-        let mut model = self.model_mut();
-        model.item_set_asks.remove(&set_id);
-        model.item_sets.insert(set_id, view);
-    }
-
-    /// Drains the set ids the renderer asked for that the store did not hold.
-    pub fn take_item_set_asks(&mut self) -> Vec<u32> {
-        self.model_mut().item_set_asks.drain().collect()
+        self.model_mut().item_sets.insert(set_id, view);
     }
 
     /// Pushes the whole `ItemRandomProperties` table once, at load: a clicked tooltip cannot
@@ -285,7 +579,20 @@ impl super::UiScript {
         self.model_mut().random_properties = rows;
     }
 
-    /// Pushes the player state the red lines compare against.
+    /// Pushes the `SpellItemEnchantment` names once, at load, keyed by id: a chat link carries a
+    /// bare enchant id, and a clicked tooltip cannot repaint on a late answer.
+    pub fn set_enchant_names(&mut self, names: HashMap<u32, String>) {
+        self.model_mut().enchant_names = names;
+    }
+
+    /// Seats every spell the player knows, the set the known-recipe line asks (`0x60c740`'s bits
+    /// at `0xb710fc`), passives and recipes included: what the reads with no host lent find.
+    pub fn set_known_spells(&mut self, spells: HashSet<u32>) {
+        self.model_mut().known_spells = spells;
+    }
+
+    /// Seats the player state the red lines and the usable gate compare against: what the reads
+    /// with no host lent find, the app's own inside a call's apply among them.
     pub fn set_player_req_state(&mut self, state: PlayerReqState) {
         self.model_mut().player_req = state;
     }
@@ -350,7 +657,8 @@ fn equip_loc_token(inventory_type: u32) -> &'static str {
         "INVTYPE_QUIVER",
         "INVTYPE_RELIC",
     ];
-    // Deviation: bounds-checked where the reference indexes unguarded, so none reads past it.
+    // Deviation: bounds-checked where the reference indexes unguarded, because that way none reads
+    // past it.
     TOKENS.get(inventory_type as usize).copied().unwrap_or("")
 }
 
@@ -358,15 +666,10 @@ fn equip_loc_token(inventory_type: u32) -> &'static str {
 /// string `lua_isnumber` (`0x6f34d0`) coerces, is the id alone; another string (`0x6f3510`) must
 /// pass `strnicmp(s, "item:", 5)` (`0x64a4c0`) for its four fields, else it is id 0, so a name or
 /// a hyperlink finds nothing; anything else raises the usage error (`0x842d24`, via `0x6f4940`).
-fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
-    let as_number = match v {
-        Value::Integer(i) => Some(*i as f64),
-        Value::Number(n) => Some(*n),
-        Value::String(s) => s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()),
-        _ => None,
-    };
-    if let Some(n) = as_number {
-        return Ok((n as i64, 0, 0, 0));
+fn parse_item_arg(lua: &Lua, v: &Value) -> mlua::Result<(i64, i32, i32, i32)> {
+    if let Some(n) = binding_abi::is_number(lua, v.clone()) {
+        // Truncated by `_ftol` (`0x48e0b8`).
+        return Ok((i64::from(binding_abi::ftol(n)), 0, 0, 0));
     }
     // An `item:` string; any other string is id 0.
     let Value::String(s) = v else {
@@ -387,9 +690,39 @@ fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
     let mut fields = rest
         .splitn(4, ':')
         .map(crate::script::binding_abi::s_str_to_int);
-    let id = fields.next().unwrap_or(0);
-    let mut next = || u32::try_from(fields.next().unwrap_or(0)).unwrap_or(0);
+    let id = i64::from(fields.next().unwrap_or(0));
+    // Signed, as `SStrToInt` answers them (`0x48e11d`, `0x48e140`, `0x48e16a`).
+    let mut next = || fields.next().unwrap_or(0);
     Ok((id, next(), next(), next()))
+}
+
+/// `0x5d8b00`'s join: with an `ItemRandomProperties` row for `property` (a positive id in the
+/// table, `0x5d8b47`-`0x5d8b51`), whose suffix the app loads only when it is not empty (`0x5d8b6e`),
+/// `SStrPrintf(ITEM_SUFFIX_TEMPLATE, name, suffix)` (`0x5d8b78`-`0x5d8b8c`); else the name alone
+/// (`0x5d8ba5`).
+pub(in crate::script) fn suffixed_name(lua: &Lua, name: &str, property: i32) -> String {
+    let suffix = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        u32::try_from(property)
+            .ok()
+            .filter(|&p| p != 0)
+            .and_then(|p| model.random_properties.get(&p))
+            .map(|row| row.suffix.clone())
+    };
+    match suffix {
+        Some(suffix) => {
+            // `FrameScript_GetText` (`0x703bf0`): "" for a missing key, which formats "".
+            let template = super::glue_core::global_text(lua, "ITEM_SUFFIX_TEMPLATE");
+            crate::strings::fill(
+                &template,
+                &[
+                    crate::strings::Arg::S(name),
+                    crate::strings::Arg::S(&suffix),
+                ],
+            )
+        }
+        None => name.to_string(),
+    }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -398,7 +731,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `ITEM_QUALITY_COLORS[-1]` is white, the colour of an uncached loot row (`0x4c2435`).
     lua.globals().set(
         "GetItemQualityColor",
-        lua.create_function(|lua, quality: i64| {
+        lua.create_function(|lua, quality: Value| {
+            // `is-number` else `Usage: GetItemQualityColor(index)` (`0x842d00`, `0x48dfc5`).
+            let quality = i64::from(binding_abi::number_arg(
+                lua,
+                quality,
+                "Usage: GetItemQualityColor(index)",
+            )?);
             // A 32-bit int (`__ftol`), compared unsigned.
             let i = match quality as i32 as u32 {
                 q if q >= 7 => 1,
@@ -417,44 +756,64 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetItemInfo(itemID | "item:id:enchant:randomProperty:suffix") → itemName, itemLink,
     // itemQuality, itemMinLevel, itemType, itemSubType, itemStackCount, itemEquipLoc, itemTexture:
     // nine values (`0x48e070` ends `mov eax,0x9`); later clients insert `itemLevel` at 4. The name
-    // is the bare template name, where the reference appends the random suffix (`0x5d8b00`); the
-    // link is the item string (`0x48e1c9`, literal `0x842d4c`), not a hyperlink; the level is the
+    // is `0x5d8b00(entry, property)` (`0x48e1a7`), the record's name with the property row's
+    // suffix through `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78`); the link is the item string (`0x48e1c9`, literal `0x842d4c`), not a hyperlink; the level is the
     // required one (`[record+0x3c]`; `ItemLevel` at `+0x38` is never pushed). An uncached
-    // template answers no values and records the ask, as the reference's lookup (`0x55ba30`)
-    // queries and returns null, sending the binding to `xor eax,eax; ret`.
+    // template answers no values and asks nothing: the lookup passes no callback (`0x48e172`), so
+    // the cache (`0x55ba30`) returns null without a query (`0x55baac`), sending the binding to
+    // `xor eax,eax; ret`. The miss is recorded as a read, which the app answers from its cache.
     lua.globals().set(
         "GetItemInfo",
         lua.create_function(|lua, arg: Value| {
-            let (id, enchant, random_property, suffix) = parse_item_arg(&arg)?;
+            let (id, enchant, random_property, suffix) = parse_item_arg(lua, &arg)?;
             let Ok(item_id) = u32::try_from(id) else {
                 return Ok(MultiValue::new()); // no record holds a negative or past-u32 id
             };
-            let view = {
+            {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let v = model.item_templates.get(&item_id).cloned();
-                if v.is_none() && item_id != 0 {
-                    model.item_stat_asks.insert(item_id);
+                if item_id != 0 && !model.item_templates.contains_key(&item_id) {
+                    model.item_stat_reads.insert(item_id);
                 }
-                v
+            }
+            // The record as the cache holds it now, the snapshot's copy only with no host lent.
+            // The base name: the suffix is the VM's own `ITEM_SUFFIX_TEMPLATE` fill, below.
+            let key = (item_id != 0).then_some(super::ItemKey::Record {
+                entry: item_id,
+                roll: super::ItemRoll::default(),
+            });
+            let read = |r: &dyn super::ItemRead| {
+                Some((
+                    r.name()?,
+                    r.quality()?,
+                    r.info()?,
+                    r.inventory_type(),
+                    r.texture(),
+                ))
             };
-            let Some(v) = view else {
+            let answer = super::item_read::read_item_or(lua, key, read, |read| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.item_templates.get(&item_id).map(|v| read(v))
+            });
+            let Some((base, quality, info, inventory_type, icon)) = answer.flatten() else {
                 return Ok(MultiValue::new());
             };
+            let name = suffixed_name(lua, &base, random_property);
             let str_or_empty = |s: &Option<String>| s.clone().unwrap_or_default();
             Ok(MultiValue::from_vec(vec![
-                Value::String(lua.create_string(&v.name)?),
+                Value::String(lua.create_string(&name)?),
                 Value::String(lua.create_string(format!(
                     "item:{item_id}:{enchant}:{random_property}:{suffix}"
                 ))?),
-                Value::Integer(i64::from(v.quality)),
-                Value::Integer(i64::from(v.required_level)),
-                Value::String(lua.create_string(str_or_empty(&v.item_type))?),
-                Value::String(lua.create_string(str_or_empty(&v.item_sub_type))?),
-                Value::Integer(i64::from(v.stackable)),
-                Value::String(lua.create_string(equip_loc_token(v.inventory_type))?),
-                // Deviation: nil for a display row with no icon, where the reference answers the
-                // unloadable `Interface\Icons\`, because `SetTexture` shows no icon for either.
-                match &v.icon {
+                Value::Integer(i64::from(quality)),
+                Value::Integer(i64::from(info.required_level)),
+                Value::String(lua.create_string(str_or_empty(&info.item_type))?),
+                Value::String(lua.create_string(str_or_empty(&info.item_sub_type))?),
+                Value::Integer(i64::from(info.stackable)),
+                Value::String(lua.create_string(equip_loc_token(inventory_type))?),
+                // Deviation: nil for a display row with no icon, because the reference answers the
+                // unloadable `Interface\Icons\`, on which `SetTexture` keeps the previous image
+                // (`0x7702ac`), so a reused button would show its old icon.
+                match &icon {
                     Some(icon) => Value::String(lua.create_string(icon)?),
                     None => Value::Nil,
                 },
@@ -559,11 +918,15 @@ mod tests {
         assert!(item_usable(&v, &PlayerReqState::default(), knows_none));
     }
 
+    /// A miss records a read, never an ask: `GetItemInfo`'s lookup passes no callback
+    /// (`0x48e172`).
     #[test]
-    fn miss_records_ask_and_push_serves_the_stats() {
+    fn miss_records_a_read_and_push_serves_the_stats() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert!(s.eval::<bool>("return GetItemInfo(25) == nil").unwrap());
-        assert_eq!(s.take_item_stat_asks(), vec![25]);
+        assert_eq!(s.take_item_stat_reads(), vec![25]);
+        assert!(s.take_record_asks().is_empty(), "no ask of the server");
 
         s.set_item_template(
             25,
@@ -582,10 +945,10 @@ mod tests {
             .eval("local n, _, q = GetItemInfo(25) return n, q")
             .unwrap();
         assert_eq!((name.as_str(), quality), ("Worn Shortsword", 1));
-        assert!(s.take_item_stat_asks().is_empty(), "push cleared the ask");
-        // Id 0 records no ask.
+        assert!(s.take_item_stat_reads().is_empty(), "push cleared the read");
+        // Id 0 records no read.
         assert!(s.eval::<bool>("return GetItemInfo(0) == nil").unwrap());
-        assert!(s.take_item_stat_asks().is_empty());
+        assert!(s.take_item_stat_reads().is_empty());
     }
 }
 
@@ -649,6 +1012,54 @@ mod get_item_info_tests {
         assert_eq!(stack, 1);
         assert_eq!(equip, "INVTYPE_WEAPONMAINHAND");
         assert_eq!(texture.as_deref(), Some("Interface\\Icons\\INV_Sword_04"));
+    }
+
+    /// The name is `0x5d8b00(entry, property)` (`0x48e194`-`0x48e1a7`): an `ItemRandomProperties`
+    /// row with a suffix joins it through `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78`); id 0, a negative id
+    /// and an unknown one take the plain name (`0x5d8b47`-`0x5d8b51`).
+    #[test]
+    fn get_item_info_names_the_links_random_suffix() {
+        let mut s = UiScript::new().unwrap();
+        s.set_item_template(25, worn_shortsword());
+        s.set_random_properties(std::collections::HashMap::from([(
+            584,
+            crate::script::RandomPropertyView {
+                suffix: "of the Monkey".into(),
+                enchants: Vec::new(),
+            },
+        )]));
+        s.run(r#"ITEM_SUFFIX_TEMPLATE = "%s %s""#).unwrap();
+        let name = |s: &UiScript, arg: &str| {
+            s.eval::<String>(&format!("return (GetItemInfo({arg:?}))"))
+                .unwrap()
+        };
+        assert_eq!(name(&s, "item:25:0:584:0"), "Worn Shortsword of the Monkey");
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:25:0:584:0") return l"#)
+                .unwrap(),
+            "item:25:0:584:0"
+        );
+        for plain in ["item:25:0:0:0", "item:25:0:-584:0", "item:25:0:585:0", "25"] {
+            assert_eq!(name(&s, plain), "Worn Shortsword", "{plain}");
+        }
+    }
+
+    /// Each `item:` field is `SStrToInt`'s signed answer (`0x64ac60`), printed back through
+    /// `"item:%d:%d:%d:%d"` (`0x842d4c`, `0x48e1da`), so a negative field keeps its sign.
+    #[test]
+    fn get_item_info_keeps_the_links_signed_fields() {
+        let mut s = UiScript::new().unwrap();
+        s.set_item_template(5, worn_shortsword());
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:5:-1:-3:0") return l"#)
+                .unwrap(),
+            "item:5:-1:-3:0"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:5:7:0:-9") return l"#)
+                .unwrap(),
+            "item:5:7:0:-9"
+        );
     }
 
     /// Ashbringer, item 13262: required level 60, item level 76 in vmangos `item_template`.
@@ -719,15 +1130,21 @@ mod get_item_info_tests {
     }
 
     #[test]
-    fn an_uncached_id_returns_nothing_and_records_the_ask() {
+    fn an_uncached_id_returns_nothing_and_records_a_read() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(
             s.arity("GetItemInfo(2589)").unwrap(),
             0,
             "an unseen template returns NO values"
         );
         assert!(s.eval::<bool>("return (GetItemInfo(2589)) == nil").unwrap());
-        assert_eq!(s.take_item_stat_asks(), vec![2589], "the ask was recorded");
+        assert_eq!(
+            s.take_item_stat_reads(),
+            vec![2589],
+            "the read was recorded"
+        );
+        assert!(s.take_record_asks().is_empty(), "and no ask");
 
         s.set_item_template(
             2589,
@@ -742,17 +1159,19 @@ mod get_item_info_tests {
             "Linen Cloth",
             "the app's push answers the next read"
         );
-        assert!(s.take_item_stat_asks().is_empty(), "the push cleared it");
+        assert!(s.take_item_stat_reads().is_empty(), "the push cleared it");
 
         // Id 0 and a negative id record no ask.
         assert_eq!(s.arity("GetItemInfo(0)").unwrap(), 0);
         assert_eq!(s.arity("GetItemInfo(-5)").unwrap(), 0);
-        assert!(s.take_item_stat_asks().is_empty());
+        assert!(s.take_record_asks().is_empty());
+        assert!(s.take_item_stat_reads().is_empty());
     }
 
     #[test]
     fn the_argument_forms_are_the_references_own() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_item_template(25, worn_shortsword());
 
         for arg in ["25", "\"25\"", "25.7"] {
@@ -789,7 +1208,7 @@ mod get_item_info_tests {
                 "argument {arg} resolves to item id 0"
             );
         }
-        assert!(s.take_item_stat_asks().is_empty());
+        assert!(s.take_record_asks().is_empty());
 
         // Neither a number nor a string raises the usage error (`0x842d24`).
         let err = s

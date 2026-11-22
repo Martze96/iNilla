@@ -8,23 +8,38 @@
 use mlua::{Lua, Table};
 
 use crate::script::tooltip::{append_line, duration_text, plural_template};
-use crate::script::{ItemTemplateView, Model};
-use crate::strings::{fill, fill_with, Arg};
+use crate::script::{ItemTemplateView, Model, ReqRead};
+use crate::strings::{fill, Arg, Strings};
 
+use super::build::{note_miss, CacheWait};
 use super::names::*;
 
 /// What a source knows beyond the template: an item object's fields, or a block source's name and
 /// roll. A template source passes `None`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::script) struct ItemInstance {
     /// The name with its random suffix joined, which the reference composes in the builder
-    /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's.
+    /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's,
+    /// joined to [`Self::roll`]'s suffix.
     pub name: Option<String>,
+    /// The block's random property (`+0x424`), whose suffix the builder joins to the template's
+    /// name (`0x52b7bf`, `0x5d8b00`) when no [`Self::name`] is given; 0 for none.
+    pub roll: i32,
     /// Live `(current, max)`; `None` for an indestructible item or one not yet streamed.
     pub durability: Option<(u32, u32)>,
     /// The resolved `ITEM_FIELD_CREATOR` name (the reference's `0x55f080`); `None` while it is
     /// unresolved, which prints no line either (`0x52e209`).
     pub creator: Option<String>,
+    /// The resolved `ITEM_FIELD_GIFTCREATOR` name (`0x55f080` at `0x52e29d`) of a wrapped item;
+    /// `None` while it is unresolved (`0x52e2a4`) or the field is 0 (`0x52e288`): no line either way.
+    pub gift_creator: Option<String>,
+    /// The creator's and the giver's guids (`+0x410`, `+0x418`, or the object's fields), 0 for
+    /// none: a name still unresolved behind a nonzero one is a name-cache miss.
+    pub creator_guid: u64,
+    pub gift_creator_guid: u64,
+    /// The item object's guid, the builder's p3 (`+0x380`), 0 for a block or template source:
+    /// what a rebuild finds the live object by.
+    pub guid: u64,
     /// `ITEM_FIELD_ITEM_TEXT_ID` ≠ 0, a letter's copy: the creator line reads WRITTEN_BY
     /// (`0x52e223`) and READABLE shows (`0x52e348`).
     pub has_text: bool,
@@ -47,13 +62,115 @@ pub(in crate::script) struct ItemInstance {
     /// `ITEM_FIELD_DURATION`: the client displays from the packet (`Objects/Item.cpp:1093`).
     pub duration_ms: Option<u64>,
     /// The source holds a live item object (the guid arguments of `0x52b650`): the LOCKED gate
-    /// reads its UNLOCKED flag (`0x52bdb3`..`0x52bdc4`). A block source, a template source and an
-    /// inspected unit's item have none.
+    /// reads its UNLOCKED flag (`0x52bdb3`..`0x52bdc4`), and only it shows the open and read
+    /// hints (`0x52e2e0`). A block source, a template source and an inspected unit's item have
+    /// none.
     pub object: bool,
     /// The block's lock id (`[this+0x430]`, set by the trade target's setter, `0x534563`), 0 for
     /// none or no block. With no lock row from the template it names one (`0x52bd78`..`0x52bda9`),
     /// and a nonzero one draws LOCKED even without an object (`0x52bdd2`).
     pub block_lock_id: u32,
+    /// The block's wrapped word (`[this+0x42c]`, set by the trade target's setter, `0x534559`): it
+    /// takes the gift arm and the no-id-source fork like an object's WRAPPED flag (`0x52b789`,
+    /// `0x52c991`).
+    pub block_wrapped: bool,
+    /// The name of the spell proposed on the item (`[this+0x40c]` names a `Spell.dbc` row), which
+    /// only the trade window's seventh slot sets (`0x534397`, `0x53459a`).
+    pub proposed_enchant: Option<String>,
+    /// The remaining use cooldown in ms (`[this+0x408]`, `start + duration - now`), 0 for none. Only
+    /// the three setters that query the item's cooldown fill it, `SetBagItem` (`0x53488c`),
+    /// `SetInventoryItem` (`0x533226`) and `SetAction`'s item leg (`0x5324d5`), and each does so
+    /// with p6 = 1; every other source stores 0 there (`0x5326e0`).
+    pub cooldown_ms: u32,
+    /// The object's `ITEM_FIELD_SPELL_CHARGES`, one per spell block (`flds+0x28`): the charges
+    /// lines (`0x52d9e9`) and the merchant price's scale (`0x52e43d`) read them, only with
+    /// [`Self::object`].
+    pub object_charges: [i32; 5],
+    /// The block's charges (`+0x428`). `None` is the -1 every setter's clear stores (`0x5326e0`,
+    /// `0x5321bf`); a record source stores its own (the trade partner's slot `0x534595`, a mail
+    /// item `0x53566f`, an auction `0x535a4a`), and `SetAction` the summed charges of every copy
+    /// (`0x532558`).
+    pub block_charges: Option<i32>,
+    /// The block's `(current, max)` durability (`+0x438`, `+0x434`): the trade partner's slot
+    /// (`0x5345b4`, `0x5345c0`) and a mail item (`0x53568d`, `0x535699`) carry one, every other
+    /// setter stores zeros (`0x5321cc`).
+    pub block_durability: (u32, u32),
+}
+
+impl ItemInstance {
+    /// The wrapped test the builder runs once: the object's WRAPPED flag, or the block's word.
+    pub(super) fn wrapped(&self) -> bool {
+        self.flags & 0x8 != 0 || self.block_wrapped
+    }
+
+    /// The instance fields are valid, the reference's p6 (`[this+0x440]`).
+    fn block_valid(&self) -> bool {
+        !self.openable_source
+    }
+
+    /// What a recipe's product build reads (`0x52dbce`): no item object, as its p3 is zero, and
+    /// the instance fields this build set, which an incremental build keeps (`0x52b6ca` skips
+    /// the stores at `0x52b6cc`..`0x52b70a`). `None` with no fields to keep, a template source.
+    /// A setter that builds from an item object with the fields valid leaves the block's enchant
+    /// slots and roll zero (`0x5326e0`, `0x534308`), so the product of such a build has no
+    /// enchant to show.
+    fn nested_block(&self) -> Option<ItemInstance> {
+        self.block_valid().then(|| ItemInstance {
+            creator: self.creator.clone(),
+            gift_creator: self.gift_creator.clone(),
+            creator_guid: self.creator_guid,
+            gift_creator_guid: self.gift_creator_guid,
+            enchants: match self.object {
+                true => Vec::new(),
+                false => self.enchants.clone(),
+            },
+            block_lock_id: self.block_lock_id,
+            block_wrapped: self.wrapped(),
+            proposed_enchant: self.proposed_enchant.clone(),
+            cooldown_ms: self.cooldown_ms,
+            block_charges: self.block_charges,
+            block_durability: self.block_durability,
+            ..Default::default()
+        })
+    }
+
+    /// The count block `block`'s line prints, `None` for none (`0x52d9bd`..`0x52da06`): with the
+    /// fields valid and no item object, or with an object and a block value other than -1, the
+    /// block's `+0x428`, one value for every block; with an object, its own
+    /// `ITEM_FIELD_SPELL_CHARGES` for the block; else the template's. A template 0 is -1 whatever
+    /// the source, and -1 prints nothing (`0x52db51`).
+    fn charges(&self, block: u8, template: i32) -> Option<i32> {
+        let kept = self.block_charges.unwrap_or(-1);
+        let n = match template {
+            0 => -1,
+            _ if self.block_valid() && (!self.object || kept != -1) => kept,
+            _ if self.object => self
+                .object_charges
+                .get(usize::from(block))
+                .copied()
+                .unwrap_or(0),
+            _ => template,
+        };
+        (n != -1).then_some(n)
+    }
+
+    /// The durability line's `(current, max)` (`0x52cc5b`..`0x52cdc3`), `None` for no line: a
+    /// wrapped gift has none (`0x52cc60`); an item object with a max shows its own
+    /// (`0x52cc92`..`0x52cca6`), else valid fields with a max show the block's
+    /// (`0x52cca8`..`0x52ccb8`). A block max of -1 reads the template's (`0x52cc73`). The current
+    /// is clamped to the max (`0x52cd7c`).
+    fn durability(&self, template_max: u32) -> Option<(u32, u32)> {
+        if self.wrapped() {
+            return None;
+        }
+        let object = self.durability.filter(|&(_, max)| self.object && max > 0);
+        let block = || {
+            let (cur, max) = self.block_durability;
+            let max = if max == u32::MAX { template_max } else { max };
+            (self.block_valid() && max > 0).then_some((cur, max))
+        };
+        object.or_else(block).map(|(cur, max)| (cur.min(max), max))
+    }
 }
 
 /// The set block's blank gold line, the reference's literal `0x854b2c`: a space and a newline. An
@@ -64,7 +181,7 @@ const SET_SPACER: &str = " \n";
 
 /// The builder's two independent render flags, p4 and p5 of `0x52b650`.
 #[derive(Clone, Copy, Default)]
-pub(super) struct BuilderFlags {
+pub(in crate::script) struct BuilderFlags {
     /// p5 `[arg+0x18]`: prepend the gray `CURRENTLY_EQUIPPED` line. Only the two compare bindings
     /// set it, and both pass [`name_only`](Self::name_only) zero.
     pub currently_equipped: bool,
@@ -73,7 +190,17 @@ pub(super) struct BuilderFlags {
     /// and the stat body are cut, and all after the cooldown line is skipped; the slot/type cell,
     /// durability, duration, requirements, spell triggers and set block still print.
     pub name_only: bool,
+    /// p7, how deep in a recipe's product this build runs, 0 for a build of its own: an
+    /// incremental build neither clears nor keeps its inputs and separates its name with a
+    /// newline (`0x52b874`). Only a recipe's spell line makes one (`0x52dbce`).
+    pub product_depth: u8,
 }
+
+/// The deepest product build a recipe line nests. Deviation: the reference recurses without a
+/// bound (`0x52dbce` builds the product whatever the depth), so a product that teaches a recipe
+/// for itself would recurse until the stack overflows; benilla stops here because that way a cyclic
+/// `Spell.dbc` chain cannot crash the client.
+const MAX_PRODUCT_DEPTH: u8 = 4;
 
 /// Render one item into the tooltip in `0x52b650`'s order, and answer the builder's return value
 /// (`[ebp-0x38]`): whether a line that changes while the tooltip stays up was written, the
@@ -81,8 +208,8 @@ pub(super) struct BuilderFlags {
 /// (`0x52ce0d`). The
 /// setters push it as 1 or nil; the stock buttons arm `updateTooltip` from it. The LOCKED line
 /// sets it on every lock path (`0x52bfa6`, after `0x52be58`, whether or not a `LOCKED_WITH_*`
-/// sub-line follows), as ITEM_COOLDOWN_TIME does (`0x52e140`). Not built: ITEM_COOLDOWN_TIME,
-/// ITEM_WRAPPED_BY and the `LOCKED_WITH_*` sub-line.
+/// sub-line follows), as ITEM_COOLDOWN_TIME does (`0x52e140`). `None` is a build that ended at a
+/// petition miss, which returns 0 before the sell price and the show (`0x52b94e`).
 pub(super) fn render_view_flagged(
     lua: &Lua,
     this: &Table,
@@ -90,45 +217,85 @@ pub(super) fn render_view_flagged(
     flags: BuilderFlags,
     // `None`: a template source, with no item object and no instance block.
     inst: Option<&ItemInstance>,
-) -> mlua::Result<bool> {
+) -> mlua::Result<Option<bool>> {
     let mut live = false;
-    let (req, known_spell, taught_known, set_view, equipped) = {
+    // The pet's book as it stands, which a pet teach's known test reads (`0x52d5ad` → `0x60c740`).
+    let pet_book = crate::script::live::ask(lua, &crate::script::PetBookNow);
+    let (req, known_spell, taught_known, set_view, equipped, rank_title) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let knows = |id: u32| model.spellbook.slots.iter().any(|s| s.spell_id == id);
-        let known = v.required_spell != 0 && knows(v.required_spell);
-        // A taught spell (trigger 6, learn) the player knows: the always-red ITEM_SPELL_KNOWN.
-        let taught = v
-            .spell_triggers
-            .iter()
-            .any(|&(t, id, _)| t == 6 && id != 0 && knows(id));
-        // The set view (a miss records the ask) and the equipped ids the set block counts.
+        let pet_slots = &pet_book.as_ref().unwrap_or(&model.pet_book).slots;
+        // The known-spell list as the call runs (`0x60c740`).
+        let knows = |id| crate::script::requirements::knows_spell(lua, &model, id);
+        let known = v.required_spell != 0 && v.knows_required_spell(knows);
+        // The first slot's taught spell, or a higher rank of it, known to the player, or to the
+        // pet for a pet-target teach (`0x52d54f`..`0x52d5bb`): the always-red ITEM_SPELL_KNOWN.
+        let taught = v.teaches.as_ref().is_some_and(|t| {
+            t.ranks.iter().any(|id| match t.pet {
+                true => pet_slots.iter().any(|s| s.spell_id == *id),
+                false => knows(*id),
+            })
+        });
+        // The required rank's title for the player's side and gender (`0x5efe60` on the active
+        // player): `PVP_RANK_<rank>_<side>`, its `_FEMALE` twin first (`0x612bf0`).
+        let rank_title = (v.required_honor_rank != 0).then(|| {
+            let (side, female) = crate::script::unit::view(lua, &model, "player")
+                .map_or((0, false), |u| (u.pvp_team, u.sex == 3));
+            (format!("PVP_RANK_{}_{side}", v.required_honor_rank), female)
+        });
+        // The set view, read as the call runs, and the equipped ids the set block counts. A member
+        // still unnamed skips its line (`0x52df5a`) and waits for its answer; with no host lent, a
+        // set the VM's copy lacks waits for its push.
         let set_view = (v.item_set != 0)
             .then(|| {
-                let view = model.item_sets.get(&v.item_set).cloned();
-                if view.is_none() {
-                    model.item_set_asks.insert(v.item_set);
+                let view = match crate::script::item_stats::live_item_set(lua, v.item_set) {
+                    Some(view) => view,
+                    None => {
+                        let view = model.item_sets.get(&v.item_set).cloned();
+                        if view.is_none() {
+                            note_miss(&mut model, CacheWait::Set(v.item_set));
+                        }
+                        view
+                    }
+                };
+                match &view {
+                    None => {}
+                    Some(view) => {
+                        for &(item, _) in view.members.iter().filter(|(_, n)| n.is_none()) {
+                            let set = v.item_set;
+                            note_miss(&mut model, CacheWait::MemberName { set, item });
+                        }
+                    }
                 }
                 view
             })
             .flatten();
-        let equipped: std::collections::HashSet<u32> = model
-            .inventory_slots
-            .iter()
-            .flatten()
-            .map(|s| s.item_id)
-            .collect();
-        (model.player_req.clone(), known, taught, set_view, equipped)
+        // The worn item ids as the call runs (`0x6228a0`), off the doll's keys, for a set alone.
+        let equipped: std::collections::HashSet<u32> = if set_view.is_some() {
+            crate::script::worn::worn_keys(lua, &model)
+                .iter()
+                .flatten()
+                .map(|&(_, id)| id)
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        (
+            crate::script::requirements::player_req(lua, &model),
+            known,
+            taught,
+            set_view,
+            equipped,
+            rank_title,
+        )
     };
     let add = |l: (String, [f32; 4])| append_line(lua, this, l, None, false);
     let addw = |l: (String, [f32; 4])| append_line(lua, this, l, None, true);
     let add2 =
         |l: (String, [f32; 4]), r: (String, [f32; 4])| append_line(lua, this, l, Some(r), false);
     let get = |key: &str| crate::strings::global(lua, key);
-    // iNilla: the reals below take the interface's decimal separator (`SetEuropeanNumbers`).
-    let dec = crate::strings::decimal(lua);
     let keyed = |key: &str, args: &[Arg<'_>], color: [f32; 4], wrap: bool| -> mlua::Result<()> {
         match get(key) {
-            Some(t) => append_line(lua, this, (fill_with(&t, args, dec), color), None, wrap),
+            Some(t) => append_line(lua, this, (fill(&t, args), color), None, wrap),
             None => Ok(()),
         }
     };
@@ -138,9 +305,10 @@ pub(super) fn render_view_flagged(
     if flags.currently_equipped {
         keyed("CURRENTLY_EQUIPPED", &[], GRAY, false)?;
     }
-    let name = inst
-        .and_then(|i| i.name.clone())
-        .unwrap_or_else(|| v.name.clone());
+    let name = match inst {
+        Some(ItemInstance { name: Some(n), .. }) => n.clone(),
+        _ => crate::script::item_stats::suffixed_name(lua, &v.name, inst.map_or(0, |i| i.roll)),
+    };
     // `nameOnly` paints the name white (`0x52b8b3`), else the quality arm colours it (`0x52b8ca`);
     // nothing else recolors it, not even for an unusable item.
     let name_color = if flags.name_only {
@@ -148,21 +316,55 @@ pub(super) fn render_view_flagged(
     } else {
         quality_color(v.quality)
     };
+    // An incremental build's name is `"\n%s"` (`0x52b87b`..`0x52b8ab`).
+    let name = match flags.product_depth {
+        0 => name,
+        _ => format!("\n{name}"),
+    };
     add((name, name_color))?;
     // The petition lines, below the name: a charter's `GUILD_CHARTER_*` pair or a petition's
     // `PETITION_*`, by the record's charter bit (`GetPetitionInfo`'s first return). A line whose
-    // source is unresolved waits for the repaint, as the creator line does.
+    // source is unresolved waits for its answer's rebuild, as the creator line does.
+    // A charter's live object asks the petition cache (`0x52b92f`) and its owner the name cache
+    // (`0x52b9c5`), each with the tooltip as the answer's cookie.
+    // A petition miss ends the build at the name, unshown (`0x52b944`..`0x52b94e`).
+    if let Some(i) = inst.filter(|i| v.flags & 0x2000 != 0 && i.object && i.guid != 0) {
+        let wait = match &i.petition {
+            None => Some(CacheWait::Petition(i.guid)),
+            Some(p) if p.owner.is_none() => Some(CacheWait::PetitionOwner(i.guid)),
+            Some(_) => None,
+        };
+        if let Some(wait) = wait {
+            let ends = matches!(wait, CacheWait::Petition(_));
+            note_miss(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                wait,
+            );
+            // Asked inside the build, as both lookups pass the callback (`0x52b93b`, `0x52b9d2`).
+            crate::script::calls::ask(lua, crate::script::RecordAsk::Petition(i.guid))?;
+            if ends {
+                return Ok(None);
+            }
+        }
+    }
     if let Some(p) = inst.and_then(|i| i.petition.as_ref()) {
         let (title_key, creator_key) = if p.is_charter {
             ("GUILD_CHARTER_TITLE", "GUILD_CHARTER_CREATOR")
         } else {
             ("PETITION_TITLE", "PETITION_CREATOR")
         };
-        if !p.title.is_empty() {
-            keyed(title_key, &[Arg::S(&p.title)], WHITE, false)?;
-        }
+        // Formatted and added whatever the title, and wrapped (`0x52b99c`, `0x52b9a4`).
+        keyed(title_key, &[Arg::S(&p.title)], WHITE, true)?;
         if let Some(owner) = p.owner.as_deref().filter(|o| !o.is_empty()) {
             keyed(creator_key, &[Arg::S(owner)], WHITE, false)?;
+        }
+        // The count, white, with itself as the plural ordinal; none at 0 (`0x52ba51`..`0x52ba8d`).
+        if p.signatures != 0 {
+            if let Some(t) =
+                plural_template("PETITION_NUM_SIGNATURES", p.signatures, Strings::Vm(lua))
+            {
+                add((fill(&t, &[Arg::D(i64::from(p.signatures))]), WHITE))?;
+            }
         }
     }
     // ITEM_SIGNABLE: template flag `0x2000`, a petition.
@@ -172,6 +374,11 @@ pub(super) fn render_view_flagged(
     // p4's first cut (`0x52babe`, skipping `[0x52bac9, 0x52bfad)` at `0x52bac3`): the bind/lock
     // region. ITEM_SIGNABLE above survives it.
     if !flags.name_only {
+        // The area and map the record binds the item to, each white by its DBC name
+        // (`0x52bac9`..`0x52bb3e`).
+        for name in [&v.area_name, &v.map_name].into_iter().flatten() {
+            add((name.clone(), WHITE))?;
+        }
         if v.flags & 0x2 != 0 {
             keyed("ITEM_CONJURED", &[], WHITE, false)?;
         }
@@ -196,16 +403,17 @@ pub(super) fn render_view_flagged(
         if v.start_quest != 0 {
             keyed("ITEM_STARTS_QUEST", &[], WHITE, false)?;
         }
-        // LOCKED, red (`0x52bdde`..`0x52be58`), for a lock row the template or the block names
-        // (`0x52bd57`..`0x52bda9`) and a source that passes the gate (`0x52bdb3`..`0x52bdd8`): an
-        // item object lacking UNLOCKED `0x4`, or a block with a lock id of its own. A template
-        // source has neither, so it draws no LOCKED. Every lock path then sets the builder's
-        // return value (`0x52bfa6`).
-        let block_lock = inst.map_or(0, |i| i.block_lock_id);
-        let has_row = v.lock_id != 0 || block_lock != 0;
-        let passes = block_lock != 0 || inst.is_some_and(|i| i.object && i.flags & 0x4 == 0);
-        if has_row && passes {
-            keyed("LOCKED", &[], RED, false)?;
+        // LOCKED (`0x52bdde`..`0x52be58`) and the line under it. The lock row is the record's own,
+        // else the block's (`0x52bd57`..`0x52bda9`): a row the store lacks falls through to the
+        // block, and with neither there is no lock. The source must pass the gate (`0x52bdb3`..
+        // `0x52bdd8`): an item object lacking UNLOCKED `0x4`, or a block with a lock id of its
+        // own. A template source has neither, so it draws no LOCKED. Every lock path then sets
+        // the builder's return value (`0x52bfa6`).
+        if let Some(lock) = lock_lines(lua, v, inst) {
+            keyed("LOCKED", &[], lock.color, false)?;
+            if let Some(sub) = &lock.sub {
+                keyed(sub.key, &[Arg::S(&sub.arg)], sub.color, false)?;
+            }
             live = true;
         }
     }
@@ -246,7 +454,7 @@ pub(super) fn render_view_flagged(
         };
         let mut left_red = false;
         let mut right_red = false;
-        if let Some(&mask) = req.proficiency.get(&v.class) {
+        if let Some(mask) = req.proficiency(v.class) {
             if mask & (1 << v.subclass) == 0 {
                 let alt_ok =
                     v.class == 2 && v.proficiency_alt.is_some_and(|a| mask & (1 << a) != 0);
@@ -257,7 +465,7 @@ pub(super) fn render_view_flagged(
                 }
             }
         }
-        if v.inventory_type == 22 && !req.can_dual_wield {
+        if v.inventory_type == 22 && !req.can_dual_wield() {
             left_red = true;
         }
         match (slot, ty) {
@@ -325,11 +533,11 @@ pub(super) fn render_view_flagged(
             let speed = (first && v.class == 2).then(|| {
                 let word = get("SPEED").unwrap_or_default();
                 let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
-                fill_with("%s %.2f", &[Arg::S(&word), Arg::F(secs)], dec)
+                format!("{word} {secs:.2}")
             });
             // White in both cells, even for an unusable item (`0x52c4fa..0x52c516`).
             if let Some(t) = get(&key) {
-                let line = (fill_with(&t, &args, dec), WHITE);
+                let line = (fill(&t, &args), WHITE);
                 match speed {
                     Some(s) => add2(line, (s, WHITE))?,
                     None => add(line)?,
@@ -364,7 +572,7 @@ pub(super) fn render_view_flagged(
         }
         // Stats in the display order of `0x808e88` (4,3,7,5,6,1,0, then 8,9,2,10 and zero padding;
         // `0x52c6b0..0x52c801`), not wire order. Deviation: the reference's padding repeats a mana
-        // stat once per zero entry; not emulated, since only the internal test ring 6674 has one.
+        // stat once per zero entry; not emulated, because only the internal test ring 6674 has one.
         const STAT_DISPLAY_ORDER: [u32; 7] = [4, 3, 7, 5, 6, 1, 0];
         for &want in &STAT_DISPLAY_ORDER {
             for &(t, val) in &v.stats {
@@ -419,7 +627,7 @@ pub(super) fn render_view_flagged(
         // No id source (`0x52c991`): a wrapped gift, or no item object and no instance block
         // (`+0x440 == 0`), here a hover passing no [`ItemInstance`]. The fork tests the block's
         // presence, not its contents (`0x52c9a3`), so a block source never shows the placeholder.
-        let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
+        let no_id_source = inst.is_none_or(ItemInstance::wrapped);
         if no_id_source && !signable && v.random_property != 0 {
             keyed("ITEM_RANDOM_ENCHANT", &[], GREEN, false)?;
         }
@@ -434,7 +642,7 @@ pub(super) fn render_view_flagged(
             let mut text = match e.remaining_ms {
                 // A missing template skips the slot, not falling back to the bare name: the
                 // reference formats an empty string, which `AddLine` drops.
-                Some(ms) => match enchant_time_left(&e.name, ms, &get) {
+                Some(ms) => match enchant_time_left(&e.name, ms, Strings::Vm(lua)) {
                     Some(t) => {
                         live = true;
                         t
@@ -444,28 +652,34 @@ pub(super) fn render_view_flagged(
                 None => e.name.clone(),
             };
             // The slot's charges: ITEM_SPELL_CHARGES inside the literal `" (%s)"` (`0x854820`,
-            // `0x52caa6..0x52cb38`).
-            if let Some(charges) = charges_phrase(e.charges, &get) {
+            // `0x52caa6..0x52cb38`), none at 0 (`0x52cac9`).
+            if let Some(charges) = (e.charges != 0)
+                .then(|| charges_phrase(e.charges, Strings::Vm(lua)))
+                .flatten()
+            {
                 text.push_str(&format!(" ({charges})"));
             }
             add((text, color))?;
         }
+        // The proposed enchantment ends the slot arm (`0x52cb72`..`0x52cc2c`), never the
+        // placeholder's: `ITEM_PROPOSED_ENCHANT` with the spell's name in green, then
+        // `ITEM_ENCHANT_DISCLAIMER` in pure red.
+        if let Some(spell) = inst
+            .filter(|_| !no_id_source)
+            .and_then(|i| i.proposed_enchant.as_deref())
+        {
+            keyed("ITEM_PROPOSED_ENCHANT", &[Arg::S(spell)], GREEN, false)?;
+            keyed("ITEM_ENCHANT_DISCLAIMER", &[], ENCHANT_RED, false)?;
+        }
     }
-    if let Some((cur, max)) = inst.and_then(|i| i.durability).filter(|&(_, max)| max > 0) {
+    // A template source has neither an object nor a block: no line (`0x52cca8`).
+    if let Some((cur, max)) = inst.and_then(|i| i.durability(v.max_durability)) {
         // Red (`0xc0d390`) only when broken.
         let color = if cur == 0 { RED } else { WHITE };
         keyed(
             "DURABILITY_TEMPLATE",
             &[Arg::D(cur.into()), Arg::D(max.into())],
             color,
-            false,
-        )?;
-    } else if v.max_durability > 0 {
-        let full = i64::from(v.max_durability);
-        keyed(
-            "DURABILITY_TEMPLATE",
-            &[Arg::D(full), Arg::D(full)],
-            WHITE,
             false,
         )?;
     }
@@ -476,59 +690,39 @@ pub(super) fn render_view_flagged(
     // 49.7 days saturates here; no 1.12 item lasts past a fortnight.
     if let Some(ms) = inst.and_then(|i| i.duration_ms) {
         let ms = u32::try_from(ms).unwrap_or(u32::MAX);
-        if let Some(line) = duration_text(ms, "ITEM_DURATION", true, &get) {
+        if let Some(line) = duration_text(ms, "ITEM_DURATION", true, Strings::Vm(lua)) {
             add((line, WHITE))?;
             live = true;
         }
     }
-    if v.allowable_class > 0
-        && (v.allowable_class & full_mask(&CLASS_NAMES)) != full_mask(&CLASS_NAMES)
-    {
-        let list: Vec<&str> = CLASS_NAMES
-            .iter()
-            .filter(|&&(id, _)| v.allowable_class & (1 << (id - 1)) != 0)
-            .map(|&(_, n)| n)
-            .collect();
-        if !list.is_empty() {
-            let ok = req.class_id > 0 && v.allowable_class & (1 << (req.class_id - 1)) != 0;
-            keyed(
-                "ITEM_CLASSES_ALLOWED",
-                &[Arg::S(&list.join(", "))],
-                req_color(ok),
-                false,
-            )?;
-        }
-    }
-    if v.allowable_race > 0 && (v.allowable_race & full_mask(&RACE_NAMES)) != full_mask(&RACE_NAMES)
-    {
-        let list: Vec<&str> = RACE_NAMES
-            .iter()
-            .filter(|&&(id, _)| v.allowable_race & (1 << (id - 1)) != 0)
-            .map(|&(_, n)| n)
-            .collect();
-        if !list.is_empty() {
-            let ok = req.race_id > 0 && v.allowable_race & (1 << (req.race_id - 1)) != 0;
-            keyed(
-                "ITEM_RACES_ALLOWED",
-                &[Arg::S(&list.join(", "))],
-                req_color(ok),
-                false,
-            )?;
-        }
+    // The race and class lines (`0x52ce14`..`0x52d2c9`), white when met, else red.
+    let race_class = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let head = req.head();
+        race_class_lines(
+            &model.item_req_names,
+            v.allowable_race,
+            v.allowable_class,
+            head.race_id,
+            head.class_id,
+        )
+    };
+    for line in &race_class {
+        keyed(line.key, &[Arg::S(&line.text)], req_color(line.ok), false)?;
     }
     // Only a required level above 1 prints (`0x52d2cf`).
     if v.required_level > 1 {
         keyed(
             "ITEM_MIN_LEVEL",
             &[Arg::D(v.required_level.into())],
-            req_color(req.level >= v.required_level),
+            req_color(req.head().level >= v.required_level),
             false,
         )?;
     }
     // ITEM_MIN_SKILL with a rank, ITEM_REQ_SKILL without (`0x52d34e`, `0x52d355`); the required
     // spell takes ITEM_REQ_SKILL too (`0x52d650`).
     if let Some(skill) = &v.required_skill_name {
-        let have = req.skills.get(&v.required_skill).copied().unwrap_or(0);
+        let have = req.skill(v.required_skill).unwrap_or(0);
         let color = req_color(have >= v.required_skill_rank.max(1));
         if v.required_skill_rank > 0 {
             let args = [Arg::S(skill), Arg::D(v.required_skill_rank.into())];
@@ -536,6 +730,10 @@ pub(super) fn render_view_flagged(
         } else {
             keyed("ITEM_REQ_SKILL", &[Arg::S(skill)], color, false)?;
         }
+    }
+    // The known-recipe line sits between the skill and the required spell (`0x52d4fd`..`0x52d5de`).
+    if taught_known {
+        keyed("ITEM_SPELL_KNOWN", &[], RED, false)?;
     }
     if v.required_spell != 0 {
         if let Some(name) = &v.required_spell_name {
@@ -547,35 +745,65 @@ pub(super) fn render_view_flagged(
             )?;
         }
     }
+    // The honor rank and the medal reuse ITEM_REQ_SKILL (`0x52d694`..`0x52d796`): the rank white
+    // at or above the requirement (`fields+0x102b`), the medal white when bit `n - 1` of
+    // `PLAYER_FIELD_PVP_MEDALS` is set (`fields+0x1034`). A missing name key reads as "".
+    if let Some((key, female)) = &rank_title {
+        let gendered = female
+            .then(|| get(&format!("{key}_FEMALE")))
+            .flatten()
+            .filter(|t| !t.is_empty());
+        let title = gendered.or_else(|| get(key)).unwrap_or_default();
+        let ok = u32::from(req.head().honor_rank) >= v.required_honor_rank;
+        keyed("ITEM_REQ_SKILL", &[Arg::S(&title)], req_color(ok), false)?;
+    }
+    if v.required_city_rank != 0 {
+        let medal = get(&format!("PVP_MEDAL{}", v.required_city_rank)).unwrap_or_default();
+        let medals = req.head().pvp_medals;
+        let ok = medals & crate::script::item_stats::medal_bit(v.required_city_rank) != 0;
+        keyed("ITEM_REQ_SKILL", &[Arg::S(&medal)], req_color(ok), false)?;
+    }
     if let Some(rep) = &v.required_rep_line {
         // Red (`0xc0d390`) below the required rank (`[+0x58]`); an unfed faction reads as unmet.
-        let rank = req
-            .rep_ranks
-            .get(&v.required_rep_faction)
-            .copied()
-            .unwrap_or(0);
+        let rank = req.rep_rank(v.required_rep_faction);
         add((
             rep.clone(),
             req_color(u32::from(rank) >= v.required_rep_rank),
         ))?;
     }
-    if taught_known {
-        keyed("ITEM_SPELL_KNOWN", &[], RED, false)?;
-    }
-    // Green, wrapped trigger lines: the prefix key and the app-resolved text joined by the
-    // literal `"%s %s"` (`0x82ef08`, `0x52da7e`).
-    for &(trigger, _, ref text) in &v.spell_triggers {
-        let key = match trigger {
-            0 | 5 => "ITEM_SPELL_TRIGGER_ONUSE",
-            1 => "ITEM_SPELL_TRIGGER_ONEQUIP",
-            2 => "ITEM_SPELL_TRIGGER_ONPROC",
-            _ => continue,
+    // Each spell block (`0x52d992`..`0x52dd4d`): a wrapped trigger line, triggers 0 to 2 joining
+    // their prefix key and the text by the literal `"%s %s"` (`0x82ef08`, `0x52da37`..`0x52dae2`),
+    // a missing key reading as the empty string, any other trigger the text alone
+    // (`0x52da49`..`0x52da61`); green, or white for a recipe (`0x52db25`..`0x52db35`). Then the
+    // block's charges, and a recipe's product and reagents.
+    for line in &v.spell_lines {
+        let key = match line.trigger {
+            0 => Some("ITEM_SPELL_TRIGGER_ONUSE"),
+            1 => Some("ITEM_SPELL_TRIGGER_ONEQUIP"),
+            2 => Some("ITEM_SPELL_TRIGGER_ONPROC"),
+            _ => None,
         };
-        let Some(prefix) = get(key) else { continue };
-        addw((format!("{prefix} {text}"), GREEN))?;
-    }
-    if let Some(charges) = charges_phrase(v.charges.max(0) as u32, &get) {
-        add((charges, WHITE))?;
+        let text = match key {
+            Some(key) => format!("{} {}", get(key).unwrap_or_default(), line.text),
+            None => line.text.clone(),
+        };
+        let color = if line.recipe.is_some() { WHITE } else { GREEN };
+        addw((text, color))?;
+        // The absolute count, white, itself the plural ordinal (`0x52db51`..`0x52db8f`), 0
+        // included.
+        let charges = match inst {
+            Some(i) => i.charges(line.block, line.charges),
+            None => (line.charges != 0 && line.charges != -1).then_some(line.charges),
+        };
+        if let Some(phrase) =
+            charges.and_then(|n| charges_phrase(n.unsigned_abs(), Strings::Vm(lua)))
+        {
+            add((phrase, WHITE))?;
+        }
+        if let Some(recipe) = &line.recipe {
+            let outer = inst.and_then(ItemInstance::nested_block);
+            add_recipe(lua, this, recipe, flags.product_depth, outer.as_ref())?;
+        }
     }
     // The set block (`0x52d8a0..0x52e0f5`), above p4's cut at `0x52e14c`: a blank gold line, the
     // gold "name (owned/total)" header, the set's skill line, the members (cream `0xc0d368` when
@@ -601,7 +829,7 @@ pub(super) fn render_view_flagged(
             false,
         )?;
         let skill_met = set.required_skill == 0 || {
-            let have = req.skills.get(&set.required_skill).copied().unwrap_or(0);
+            let have = req.skill(set.required_skill).unwrap_or(0);
             have >= set.required_skill_rank
         };
         if let Some(skill) = &set.required_skill_name {
@@ -615,7 +843,12 @@ pub(super) fn render_view_flagged(
         }
         // The two-space indent is the literal `"  %s"` (`0x854b14`), not a key.
         for (id, name) in &set.members {
-            let Some(name) = name else { continue };
+            // A member still unnamed is asked where its line would go, inside the build
+            // (`0x52df4b`), and skipped (`0x52df5a`).
+            let Some(name) = name else {
+                crate::script::calls::ask(lua, crate::script::RecordAsk::ItemName(*id))?;
+                continue;
+            };
             let color = if equipped.contains(id) { CREAM } else { GRAY };
             add((format!("  {name}"), color))?;
         }
@@ -631,36 +864,70 @@ pub(super) fn render_view_flagged(
             }
         }
     }
+    // ITEM_COOLDOWN_TIME (`0x854adc`), white and unwrapped, after the set block and above p4's cut
+    // (`0x52e0fd..0x52e13b`): the instance fields valid and `+0x408` above 0, with no floor on the
+    // recovery, unlike the spell's. `0x52fa50` rounds days, hours and minutes up and seconds down.
+    // The return value is set after the add whether or not the install's strings gave a line.
+    if let Some(ms) = inst.map(|i| i.cooldown_ms).filter(|&ms| ms > 0) {
+        if let Some(line) = duration_text(ms, "ITEM_COOLDOWN_TIME", true, Strings::Vm(lua)) {
+            add((line, WHITE))?;
+        }
+        live = true;
+    }
     // p4's early return (`0x52e147..0x52e14c`): compact falls through to `0x52e14e`, lays out and
     // returns, so nothing from `0x52e170` on runs: flavor text, creator, open or read line, money.
     if flags.name_only {
-        return Ok(live);
+        return Ok(Some(live));
     }
     if !v.description.is_empty() {
         addw((format!("\"{}\"", v.description), GOLD))?;
     }
-    // The reference gates the rest on an item object (`0x52e1c7`, `0x52e2e0`). Here only a template
-    // source (`None`) stops, so a link, loot, mail or auction hover, which has an instance but no
-    // object, still reaches READABLE.
-    let Some(inst) = inst else { return Ok(live) };
-    // The creator line (`0x52e1b1..0x52e2db`), white `0xc0cf60`: ITEM_WRITTEN_BY for a letter, else
-    // ITEM_CREATED_BY, green by its own `|cff00ff00`. A wrapped instance (`0x8`, gate `0x52b7b0`)
-    // takes ITEM_WRAPPED_BY off `ITEM_FIELD_GIFTCREATOR` in the reference; that is not built, so a
-    // wrapped instance prints no creator line.
-    if inst.flags & 0x8 == 0 {
-        if let Some(name) = &inst.creator {
-            let key = if inst.has_text {
-                "ITEM_WRITTEN_BY"
-            } else {
-                "ITEM_CREATED_BY"
-            };
-            keyed(key, &[Arg::S(name)], WHITE, false)?;
-        }
+    // The creator line needs an item object or a block (`0x52e1c1`, `0x52e1c7`), so a template
+    // source (`None`) stops here; the open and read hints need the object itself (`0x52e2e0`).
+    let Some(inst) = inst else {
+        return Ok(Some(live));
+    };
+    // The creator line (`0x52e1b1..0x52e2db`), white `0xc0cf60`. The arm is picked once, at
+    // `0x52b78f`..`0x52b7b0`: an item object with WRAPPED `0x8` (`0x52b789`) takes the gift arm,
+    // and so does a block whose `+0x42c` is set (the trade target's). The gift arm adds
+    // ITEM_WRAPPED_BY off `ITEM_FIELD_GIFTCREATOR` (`0x52e32a`) or the block's `+0x418`, and never
+    // the creator's line. Any other source adds
+    // ITEM_WRITTEN_BY for a letter, else ITEM_CREATED_BY, green by its own `|cff00ff00`.
+    // A nonzero guid with no name yet is a name-cache miss (`0x52e28d`, `0x52e1f4`); a zero one
+    // asks nothing.
+    let (asked, guid) = match inst.wrapped() {
+        true => (&inst.gift_creator, inst.gift_creator_guid),
+        false => (&inst.creator, inst.creator_guid),
+    };
+    if asked.is_none() && guid != 0 {
+        note_miss(
+            &mut lua.app_data_mut::<Model>().expect("model app_data"),
+            CacheWait::Name(guid),
+        );
+        // Asked inside the build, with the callback (`0x52e204`, `0x52e29d`).
+        crate::script::calls::ask(lua, crate::script::RecordAsk::ItemBuildName(guid))?;
     }
-    // One green line, OPENABLE winning (`0x52e2f2..0x52e35d`). Openable: a p6=0 source and either
-    // the loot flag `0x4` behind its lock gate (a lock needs UNLOCKED) or a wrapped gift (`0x200`
-    // and WRAPPED `0x8`). Readable: PageText (`0x5d9e10`) or the letter text. The lock gate is the
+    if inst.wrapped() {
+        if let Some(name) = &inst.gift_creator {
+            keyed("ITEM_WRAPPED_BY", &[Arg::S(name)], WHITE, false)?;
+        }
+    } else if let Some(name) = &inst.creator {
+        let key = if inst.has_text {
+            "ITEM_WRITTEN_BY"
+        } else {
+            "ITEM_CREATED_BY"
+        };
+        keyed(key, &[Arg::S(name)], WHITE, false)?;
+    }
+    // One green line, OPENABLE winning (`0x52e2f2..0x52e35d`), only with an item object
+    // (`0x52e2e0 test edi,edi; je 0x52e376`): a link, loot, roll, mail, auction or trade-partner
+    // source passes a zero guid and shows neither. Openable: a p6=0 source and either the loot
+    // flag `0x4` behind its lock gate (a lock needs UNLOCKED) or a wrapped gift (`0x200` and
+    // WRAPPED `0x8`). Readable: PageText (`0x5d9e10`) or the letter text. The lock gate is the
     // line's only: the click tests the bare flag (`ItemInfo::opens_loot`), and READABLE wins there.
+    if !inst.object {
+        return Ok(Some(live));
+    }
     let openable = inst.openable_source
         && ((v.flags & 0x4 != 0 && (v.lock_id == 0 || inst.flags & 0x4 != 0))
             || (v.flags & 0x200 != 0 && inst.flags & 0x8 != 0));
@@ -669,7 +936,90 @@ pub(super) fn render_view_flagged(
     } else if v.page_text != 0 || inst.has_text {
         keyed("ITEM_READABLE", &[], GREEN, false)?;
     }
-    Ok(live)
+    Ok(Some(live))
+}
+
+/// What the lock block draws: `LOCKED`'s colour and the line under it.
+struct LockLines {
+    color: [f32; 4],
+    sub: Option<LockSubLine>,
+}
+
+/// The line under `LOCKED`, `key` filled with `arg`.
+struct LockSubLine {
+    key: &'static str,
+    arg: String,
+    color: [f32; 4],
+}
+
+/// The lock block of the item builder (`0x52bd57`..`0x52bfa6`), `None` when it draws nothing.
+///
+/// `LOCKED`'s colour is red unless the lock check `0x5da5e0` finds an opener, then the margin ramp
+/// `0x529fa0` for a known spell, else the green `0xc0d420` for a held key or a lock with no key or
+/// skill slot (`0x52bdde`..`0x52be3d`). The first slot's type then picks the line under it
+/// (`0x52be5d`):
+/// - a key (1) names the key item from the item cache, in white, and nothing on a miss
+///   (`0x52bf30`..`0x52bfa1`); a miss asks for the template with the tooltip as the answer's
+///   cookie (`0x52bf48`), and the answer rebuilds the tooltip;
+/// - a skill (2) walks the lock a second time (`0x52be98`) and names the lock type in the ramp's
+///   colour for the last open-lock spell it tried, even one whose skill falls short; no known
+///   opener of the type adds nothing (`0x52bea2`);
+/// - anything else adds nothing.
+fn lock_lines(lua: &Lua, v: &ItemTemplateView, inst: Option<&ItemInstance>) -> Option<LockLines> {
+    use crate::script::lock_check::walk_lock;
+    use crate::script::{check_lock, LockCheck};
+    let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
+    let model = &mut *guard;
+    let block_lock = inst.map_or(0, |i| i.block_lock_id);
+    let row = if model.lock_rows.contains_key(&v.lock_id) {
+        v.lock_id
+    } else if block_lock != 0 && model.lock_rows.contains_key(&block_lock) {
+        block_lock
+    } else {
+        return None;
+    };
+    let passes = block_lock != 0 || inst.is_some_and(|i| i.object && i.flags & 0x4 == 0);
+    if !passes {
+        return None;
+    }
+    let slots = &model.lock_rows[&row];
+    let openers = crate::script::lock_check::lock_openers(lua, model);
+    let openers = openers.as_deref();
+    let color = match check_lock(slots, v.item_level, openers) {
+        LockCheck::Closed => RED,
+        LockCheck::Open => LOCK_GREEN,
+        LockCheck::Skill { required, points } => skill_color(required, points),
+    };
+    let sub =
+        match slots.first() {
+            Some(first) if first.key_type == 1 => {
+                let entry = first.index;
+                let name = model.item_templates.get(&entry).map(|t| t.name.clone());
+                if name.is_none() && entry != 0 {
+                    note_miss(model, CacheWait::Template(entry));
+                }
+                name.map(|arg| LockSubLine {
+                    key: "LOCKED_WITH_ITEM",
+                    arg,
+                    color: WHITE,
+                })
+            }
+            Some(first) if first.key_type == 2 => walk_lock(slots, v.item_level, openers)
+                .spell
+                .map(|t| LockSubLine {
+                    key: "LOCKED_WITH_SPELL_KNOWN",
+                    // `UNKNOWN` (`0x838044`) only for a missing row (`0x52bede`..`0x52bef2`); a
+                    // blank name stays blank (`0x52bef4`).
+                    arg: model
+                        .lock_type_names
+                        .get(&first.index)
+                        .cloned()
+                        .unwrap_or_else(|| "UNKNOWN".to_string()),
+                    color: skill_color(t.required, t.points),
+                }),
+            _ => None,
+        };
+    Some(LockLines { color, sub })
 }
 
 /// [`render_view_flagged`] for a caller that does not answer the flag.
@@ -686,9 +1036,9 @@ pub(super) fn render_view(
 /// A temporary enchant's name with its countdown (`0x52fa50`): `ITEM_ENCHANT_TIME_LEFT_<unit>`, its
 /// `_P1` twin picked by [`plural_template`]. Two holes, the name then the count, so not
 /// `duration_text`; `None` when the install lacks the family, and the caller draws no line.
-fn enchant_time_left(name: &str, ms: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+fn enchant_time_left(name: &str, ms: u64, strings: Strings<'_>) -> Option<String> {
     let (suffix, n) = time_bucket(ms);
-    let template = plural_template(&format!("ITEM_ENCHANT_TIME_LEFT_{suffix}"), n, get)?;
+    let template = plural_template(&format!("ITEM_ENCHANT_TIME_LEFT_{suffix}"), n, strings)?;
     Some(fill(&template, &[Arg::S(name), Arg::D(i64::from(n))]))
 }
 
@@ -709,13 +1059,63 @@ fn time_bucket(ms: u64) -> (&'static str, u32) {
     (suffix, u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// `ITEM_SPELL_CHARGES` or its `_P1` twin (`0x84e3b4`), pushed at `0x52cae8` for the enchant
-/// suffix and `0x52db61` for the charges line; zero charges have no phrase.
-fn charges_phrase(n: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    if n == 0 {
-        return None;
+/// A recipe line's tail: the product's tooltip from an incremental build (`0x52dbce`: p1 the
+/// product, no object, p7 = 1) over `outer`, the instance fields the outer build kept
+/// ([`ItemInstance::nested_block`]), its result unread, then the reagents as one
+/// white, wrapped `"\n%s"` of `ITEM_REQ_SKILL` (`0x52dcf0`..`0x52dd38`): each reagent's name,
+/// `"%s (%d)"` above a count of 1 (`0x854b30`), joined by `", "` (`0x84480c`). A reagent whose
+/// record is not cached is asked, with the tooltip as the answer's cookie, and the line waits
+/// (`0x52dc27`..`0x52dc32`); no reagent at all is no line (`0x52dcd1`).
+fn add_recipe(
+    lua: &Lua,
+    this: &Table,
+    recipe: &crate::script::ItemRecipe,
+    depth: u8,
+    outer: Option<&ItemInstance>,
+) -> mlua::Result<()> {
+    if depth < MAX_PRODUCT_DEPTH {
+        // A product not cached asks and adds nothing; the answer rebuilds the whole tooltip
+        // (`0x52b72e`, no hide with p7 set).
+        if let Some(product) = super::view_of(lua, recipe.product) {
+            let flags = BuilderFlags {
+                product_depth: depth + 1,
+                ..Default::default()
+            };
+            render_view_flagged(lua, this, &product, flags, outer)?;
+        }
     }
-    let template = plural_template("ITEM_SPELL_CHARGES", n, get)?;
+    let mut list: Option<String> = None;
+    let mut waiting = false;
+    for &(item, count) in &recipe.reagents {
+        let Some(reagent) = super::view_of(lua, item) else {
+            waiting = true;
+            continue;
+        };
+        let part = match count {
+            c if c > 1 => format!("{} ({c})", reagent.name),
+            _ => reagent.name.clone(),
+        };
+        list = Some(match list {
+            None => part,
+            Some(head) => format!("{head}, {part}"),
+        });
+    }
+    match (list, waiting) {
+        (Some(list), false) => match crate::strings::global(lua, "ITEM_REQ_SKILL") {
+            Some(t) => {
+                let line = format!("\n{}", fill(&t, &[Arg::S(&list)]));
+                append_line(lua, this, (line, WHITE), None, true)
+            }
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// `ITEM_SPELL_CHARGES` or its `_P1` twin (`0x84e3b4`), pushed at `0x52cae8` for the enchant
+/// suffix and `0x52db61` for the charges line, `n` its own plural ordinal.
+fn charges_phrase(n: u32, strings: Strings<'_>) -> Option<String> {
+    let template = plural_template("ITEM_SPELL_CHARGES", n, strings)?;
     Some(fill(&template, &[Arg::D(i64::from(n))]))
 }
 
@@ -745,7 +1145,7 @@ mod tests {
     /// The `0x52fa50` ladder: minutes and seconds have no `_P1` twin, so each reaches one key.
     #[test]
     fn enchant_countdown_buckets_and_rounding() {
-        let t = |ms| enchant_time_left("Rockbiter", ms, &table);
+        let t = |ms| enchant_time_left("Rockbiter", ms, Strings::Host(&table));
         // Seconds truncate: 1900 ms is 1, not 2.
         assert_eq!(t(1_900).as_deref(), Some("<Rockbiter :: 1 S>"));
         assert_eq!(t(59_999).as_deref(), Some("<Rockbiter :: 59 S>"));
@@ -769,11 +1169,12 @@ mod tests {
     #[test]
     fn the_builder_flag_is_true_for_an_expiry_or_an_enchant_countdown() {
         let s = crate::script::UiScript::new().unwrap();
+        crate::script::tests::common::load_tooltip_template(&s);
         s.run(
             r#"
             ITEM_DURATION_HOURS = "[DURATION %d h]"
             ITEM_ENCHANT_TIME_LEFT_MIN = "<%s :: %d M>"
-            CreateFrame("GameTooltip", "TT")
+            CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         "#,
         )
         .unwrap();
@@ -783,7 +1184,9 @@ mod tests {
             ..Default::default()
         };
         let flagged = |inst: Option<&ItemInstance>| {
-            render_view_flagged(s.lua(), &tt, &v, BuilderFlags::default(), inst).unwrap()
+            render_view_flagged(s.lua(), &tt, &v, BuilderFlags::default(), inst)
+                .unwrap()
+                .unwrap()
         };
         let enchant = |slot, remaining_ms| crate::script::EnchantView {
             slot,
@@ -809,14 +1212,26 @@ mod tests {
 
     #[test]
     fn a_missing_countdown_family_draws_nothing() {
-        assert_eq!(enchant_time_left("Rockbiter", 60_000, &|_| None), None);
-        assert_eq!(charges_phrase(3, &|_| None), None);
+        assert_eq!(
+            enchant_time_left("Rockbiter", 60_000, Strings::Host(&|_| None)),
+            None
+        );
+        assert_eq!(charges_phrase(3, Strings::Host(&|_| None)), None);
     }
 
     #[test]
     fn charges_phrase_picks_the_plural() {
-        assert_eq!(charges_phrase(1, &table).as_deref(), Some("<1 chg>"));
-        assert_eq!(charges_phrase(5, &table).as_deref(), Some("<5 chgs>"));
-        assert_eq!(charges_phrase(0, &table), None);
+        assert_eq!(
+            charges_phrase(1, Strings::Host(&table)).as_deref(),
+            Some("<1 chg>")
+        );
+        assert_eq!(
+            charges_phrase(5, Strings::Host(&table)).as_deref(),
+            Some("<5 chgs>")
+        );
+        assert_eq!(
+            charges_phrase(0, Strings::Host(&table)).as_deref(),
+            Some("<0 chgs>")
+        );
     }
 }

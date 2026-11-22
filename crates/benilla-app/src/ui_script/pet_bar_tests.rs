@@ -114,13 +114,23 @@ fn texture_rect(
 fn the_shipped_pet_bar_drives_end_to_end() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
+    // The active player, whose language walk the chat's `PLAYER_ENTERING_WORLD` handler counts
+    // (`ChatFrame.lua:2395`), with no value without one (`0x49fb60`).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            ..Default::default()
+        }),
+    );
 
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&s.extract(), "Interface\\PetActionBar\\UI-PetBar"),
         0,
         "no pet, no shelf"
@@ -133,45 +143,45 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     s.resolve();
     let quads = s.extract();
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\PetActionBar\\UI-PetBar"),
         2,
         "the two shelf strips"
     );
 
     // A token slot's texture names a global, resolved by `getglobal` (PetActionBarFrame.lua:102).
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Icons\\Ability_GhoulFrenzy"),
         1,
         "Attack's icon came from PET_ATTACK_TEXTURE"
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Icons\\Ability_Defend"),
         1,
         "Defensive's icon came from PET_DEFENSIVE_TEXTURE"
     );
-    assert_eq!(textures(&quads, "Interface\\Icons\\Ability_Druid_Rake"), 1);
+    benilla_ui::assert_near!(textures(&quads, "Interface\\Icons\\Ability_Druid_Rake"), 1);
 
     // An unnamed slot's button hides outright (PetActionBarFrame.lua:122-128).
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Buttons\\UI-Quickslot2"),
         3,
         "one filled ring per occupied slot"
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Buttons\\UI-Quickslot"),
         0,
         "an unnamed pet slot hides; it does not draw the empty ring"
     );
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Buttons\\CheckButtonHilight"),
         2,
         "Attack + Defensive are lit; Claw is not"
     );
 
     // The shine is the `$parentAutoCast` model; a hidden pane is not extracted.
-    assert_eq!(
+    benilla_ui::assert_near!(
         textures(&quads, "Interface\\Buttons\\UI-AutoCastableOverlay"),
         1,
         "only Claw can autocast"
@@ -182,7 +192,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         .filter(|q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), model_scale, .. }
             if p == "Interface\\Buttons\\UI-AutoCastButton.mdx" && (*model_scale - 1.2).abs() < 1e-6))
         .collect();
-    assert_eq!(
+    benilla_ui::assert_near!(
         shines.len(),
         1,
         "the shine pane on Claw alone — enabled, not merely allowed"
@@ -192,7 +202,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     // frame spans y[54,97], and button 1 at (36, 2) in it is x[72,102] y[56,86].
     let attack =
         texture_rect(&quads, "Interface\\Icons\\Ability_GhoulFrenzy").expect("Attack icon");
-    assert_eq!(
+    benilla_ui::assert_near!(
         (attack.left, attack.bottom, attack.right, attack.top),
         (72.0, 56.0, 102.0, 86.0)
     );
@@ -205,7 +215,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     }
     s.resolve();
     let gone = s.extract();
-    assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
+    benilla_ui::assert_near!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
     assert!(
         !gone.iter().any(
             |q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), .. }
@@ -222,6 +232,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
 fn clicks_route_through_the_attack_toggle_fork() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -272,6 +283,7 @@ fn clicks_route_through_the_attack_toggle_fork() {
 fn a_click_drops_the_ring_and_the_repaint_restores_it() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -313,6 +325,7 @@ fn a_click_drops_the_ring_and_the_repaint_restores_it() {
 fn a_disabled_bar_greys_rather_than_hides() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -346,6 +359,7 @@ fn a_disabled_bar_greys_rather_than_hides() {
 /// The pet bar with the bottom-left multibar up or not: shelf strips drawn, top of Attack's icon.
 fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     if with_multibar {
@@ -400,6 +414,7 @@ fn the_pet_bar_rises_and_sheds_its_shelf_over_the_bottom_left_bar() {
 fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -465,6 +480,7 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
 fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -513,6 +529,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
 fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -544,6 +561,7 @@ fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
 fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
@@ -585,12 +603,13 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     s.run("PetActionButtonUp(1)").unwrap();
     assert_eq!(s.take_pet_actions(), vec![1], "one press, one cast");
 
-    // Slot 2 is empty: `CastPetAction`'s own guard makes it inert.
+    // Slot 2 is empty: `CastPetAction` presses it all the same, its zero word sent (`0x4bd233`).
     s.run("PetActionButtonDown(2) PetActionButtonUp(2)")
         .unwrap();
-    assert!(
-        s.take_pet_actions().is_empty(),
-        "an unnamed slot queues nothing"
+    assert_eq!(
+        s.take_pet_actions(),
+        vec![2],
+        "an empty slot is pressed too"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -601,6 +620,7 @@ const CLAW_BUTTON: (f32, f32) = (201.0, 71.0);
 
 fn hovered_pet_bar() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The app's registries: `BONUSACTIONBUTTON1` binds CTRL-1 and `UberTooltips` reads "1".
     crate::ui_script::load_stock_bindings(&mut s);

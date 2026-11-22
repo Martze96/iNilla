@@ -1,10 +1,21 @@
 //! `SendChatMessage(text [, chatType [, language [, target]]])` (`0x49f1e0`): the engine verb an
 //! addon speaks through, with no FrameXML between it and the wire. `chatType` defaults to
-//! `"SAY"`; the fourth argument is the whisper target or the channel's number.
+//! `"SAY"`, also when it is not a string or a number; the fourth argument is the whisper target or
+//! the channel's number.
 //!
-//! It queues a [`ChatSend`] rather than going through the edit box, whose drain runs the slash
-//! grammar: an addon's `SendChatMessage("/dance")` says the characters. The reference splits the
-//! same way, `ChatEdit_SendText` parsing and `SendChatMessage` not.
+//! The call returns quietly with no local player (`0x49f223`) and raises the usage error for a text
+//! that is no string (`0x49f77c`). The binding raises where the reference does, ahead of the
+//! rest: a string `chatType` outside [`SEND_CHAT_TOKENS`] raises `Unknown chat type`
+//! (`0x49f27f`); an empty line of any type but AFK and DND ends the call (`0x49f2a1`); past it and
+//! the language, a WHISPER with no target raises `Whisper message missing target player!`
+//! (`0x49f325`) and a CHANNEL with none `Channel send missing channel number` (`0x49f535`). The
+//! rest of the verb, from the group gates to the packet, is the host's, applied inside the call
+//! ([`super::ScriptCall::SendChat`]), which raises [`INVALID_ESCAPE`] there after what the verb did
+//! before its escape scan.
+//!
+//! The line goes out as a [`ChatSend`] rather than through the edit box, whose drain runs the
+//! slash grammar: an addon's `SendChatMessage("/dance")` says the characters. The reference splits
+//! the same way, `ChatEdit_SendText` parsing and `SendChatMessage` not.
 //!
 //! `language` starts as the speaker's race base language (`0x5ec890`, at `0x49f2aa`). A string or
 //! number third argument is matched by name, case-insensitively, against every `Languages.dbc`
@@ -20,42 +31,150 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
+mod text;
+
+pub use text::{expand_target_tokens, validate_escapes, InvalidEscape, INVALID_ESCAPE};
+
 impl super::UiScript {
-    /// Push the name `GetDefaultLanguage()` answers. `None` is the reference's no-player state,
-    /// which returns zero values, not `nil`; the app resolves it per world entry from
-    /// `ChrRaces.BaseLanguage` and `Languages.dbc`.
+    /// Seat the name `GetDefaultLanguage()` answers with no host to ask, or while the host holds no
+    /// player ([`DefaultLanguageQuery`]). `None` is the reference's no-player state, which returns
+    /// zero values, not `nil`, and the one a VM starts with.
     pub fn set_default_language(&mut self, name: Option<String>) {
         self.model_mut().default_language = name;
     }
 }
 
-/// One queued `SendChatMessage` line, plain data: this crate holds no wire types.
+/// `GetDefaultLanguage`'s question of the lent host ([`super::live::ask`]): the `Languages.dbc`
+/// name of the active player's race's base language as of the call (`0x49fcd0` → `0x5ec890`, the
+/// race byte `[player+0x110]+0x78`), `None` for a race with no row or no name. The host declines
+/// it while it holds no player, where the seat answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultLanguageQuery;
+
+impl super::live::LiveQuery for DefaultLanguageQuery {
+    type Answer = Option<String>;
+}
+
+/// `GetNumLaguages` and `GetLanguageByIndex`'s question of the lent host: the names, in
+/// `Languages.dbc` row order, of the rows the active player understands as of the call, each row
+/// tested by `0x5ec720` (`0x49fb30`, `0x49fbe0`); `None` with no active player held (`0x49fb50`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownLanguagesQuery;
+
+impl super::live::LiveQuery for KnownLanguagesQuery {
+    type Answer = Option<Vec<String>>;
+}
+
+/// The known languages at the call, `None` with no active player: the lent host's, else the
+/// VM's seat.
+fn known_languages(lua: &Lua) -> Option<Vec<String>> {
+    super::live::ask(lua, &KnownLanguagesQuery).unwrap_or_else(|| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        super::battlefield_queue::player_exists(lua, &model).then(|| model.known_languages.clone())
+    })
+}
+
+/// The chat types a string `chatType` names (the table `0x49f7a0` builds, tested at `0x49f276`),
+/// matched ignoring case (`SStrCmpI` `0x64a4c0`). `RAID_LEADER` and `BATTLEGROUND_LEADER` are
+/// not in it: the reference derives those types itself from `RAID` and `BATTLEGROUND`
+/// (`0x49f3bf`, `0x49f48b`).
+pub const SEND_CHAT_TOKENS: [&str; 13] = [
+    "SAY",
+    "PARTY",
+    "RAID",
+    "GUILD",
+    "OFFICER",
+    "YELL",
+    "WHISPER",
+    "EMOTE",
+    "CHANNEL",
+    "AFK",
+    "DND",
+    "RAID_WARNING",
+    "BATTLEGROUND",
+];
+
+/// `Usage: SendChatMessage(text [,type] [,language] [,targetPlayer])`, `0x844a08`.
+const USAGE_SEND_CHAT_MESSAGE: &str =
+    "Usage: SendChatMessage(text [,type] [,language] [,targetPlayer])";
+
+/// `Unknown chat type`, `0x844b10`.
+const UNKNOWN_CHAT_TYPE: &str = "Unknown chat type";
+
+/// `Whisper message missing target player!`, `0x844ad4`.
+const WHISPER_MISSING_TARGET: &str = "Whisper message missing target player!";
+
+/// `Channel send missing channel number`, `0x844a7c`.
+const CHANNEL_MISSING_NUMBER: &str = "Channel send missing channel number";
+
+/// One `SendChatMessage` line past the binding's checks, plain data: this crate holds no wire
+/// types.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatSend {
-    /// The line, verbatim: a leading `/` is text, not a command.
+    /// The line, verbatim: a leading `/` is text, not a command. Past the empty-line gate, so its
+    /// first byte is no NUL unless its type is AFK or DND.
     pub text: String,
     /// The chat type token (`"SAY"`, `"WHISPER"`, `"CHANNEL"`, …), uppercased, since the
-    /// reference's compare ignores case.
+    /// reference's compare ignores case; always one of [`SEND_CHAT_TOKENS`].
     pub chat_type: String,
     /// The fourth argument as `lua_tostring` gives it (`0x49f306`): the whisper target, or the
-    /// channel number the app resolves to a joined channel's name.
+    /// channel number the host resolves to a joined channel's name. For WHISPER and CHANNEL it is
+    /// never absent or empty: the binding raises without one.
     pub target: Option<String>,
     /// The `Languages.dbc` id the third argument named; `None` is the speaker's default.
     pub language: Option<u32>,
+    /// The group as it stood at the call, which the gates the host applies read.
+    pub group: ChatGroup,
 }
 
-impl ChatSend {
-    /// The empty-line gate (`0x49f28d`-`0x49f2a1`): a line whose first byte is NUL ends the call,
-    /// before the language is read or anything is sent, unless its type is AFK (`0x14`) or DND
-    /// (`0x15`). The chat-type lookup and its "Unknown chat type" (`0x49f27f`) come first.
-    pub fn ends_at_empty_line(&self) -> bool {
-        ends_at_empty_line(&self.text, &self.chat_type)
+/// The empty-line gate (`0x49f28d`-`0x49f2a1`): a line whose first byte is NUL ends the call,
+/// before the language is read or anything is sent, unless its type is AFK (`0x14`) or DND
+/// (`0x15`). The chat-type lookup and its "Unknown chat type" (`0x49f27f`) come first.
+fn ends_at_empty_line(text: &str, chat_type: &str) -> bool {
+    text.bytes().next().unwrap_or(0) == 0 && !matches!(chat_type, "AFK" | "DND")
+}
+
+/// What `SendChatMessage` reads of the group before it sends: the party, raid and leader tests of
+/// `0x49f343`-`0x49f4b2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatGroup {
+    /// The first party GUID `[0xbc6f48]` is non-zero (`0x49f343`).
+    pub in_party: bool,
+    /// The raid member count `[0xb713e0]` (`0x49f379`).
+    pub raid_members: usize,
+    /// The player's GUID is the group leader's `[0xbc75f8]` (`0x49f3a4`, `0x49f463`): a party
+    /// leader leads too, and a zero GUID matches nobody.
+    pub leads: bool,
+    /// `IsRaidLeaderOrAssistant` (`0x4bb080`) on the player: a raid member of rank above 0, or the
+    /// leader.
+    pub leads_or_assists: bool,
+}
+
+/// The group facts `SendChatMessage`'s gates and leader promotion read, as the group stands at
+/// the call: through the lent host, else off the pushed roster.
+fn chat_group(lua: &Lua) -> ChatGroup {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let cells = super::roster_read::cells(lua, &model.party);
+    let own = cells.own_guid;
+    let leads = own != 0 && cells.is_raid_leader();
+    // `0x4bb080`: a zero GUID or one off the roster fails; a member above rank 0 passes, and one
+    // at rank 0 passes only as the group leader.
+    let leads_or_assists = super::roster_read::membership(lua, &model.party, own)
+        .rank
+        .is_some_and(|rank| rank > 0 || leads);
+    ChatGroup {
+        in_party: cells.party[0] != 0,
+        raid_members: cells.raid_count as usize,
+        leads,
+        leads_or_assists,
     }
 }
 
-/// [`ChatSend::ends_at_empty_line`] on the binding's arguments, before the line is built.
-fn ends_at_empty_line(text: &str, chat_type: &str) -> bool {
-    text.bytes().next().unwrap_or(0) == 0 && !matches!(chat_type, "AFK" | "DND")
+impl super::UiScript {
+    /// The group facts `SendChatMessage`'s gates and leader promotion read ([`chat_group`]).
+    pub fn chat_group(&self) -> ChatGroup {
+        chat_group(self.lua())
+    }
 }
 
 impl super::UiScript {
@@ -76,45 +195,40 @@ fn language_id(table: &[(u32, String)], name: &str) -> Option<u32> {
 }
 
 impl super::UiScript {
-    /// The languages this character knows, in `Languages.dbc` row order: a language counts when a
-    /// known spell with `Effect_1 == 39` teaches it (`0x4b25b0`) and its skill line is in the skill
-    /// block (`0x5ec720`). A change fires `LANGUAGE_LIST_CHANGED` (`0x49b970`, event 0x102).
+    /// Seat the languages this character knows, in `Languages.dbc` row order, which the walk reads
+    /// with no host to ask ([`KnownLanguagesQuery`]). It fires nothing: `LANGUAGE_LIST_CHANGED` is
+    /// the spell registrar's, at each language spell it adds (`0x4b2641` → `0x49b970`).
     pub fn set_known_languages(&mut self, names: Vec<String>) {
-        let changed = {
-            let mut model = self.model_mut();
-            if model.known_languages == names {
-                false
-            } else {
-                model.known_languages = names;
-                true
-            }
-        };
-        if changed {
-            self.fire_event("LANGUAGE_LIST_CHANGED", vec![]);
-        }
+        self.model_mut().known_languages = names;
     }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    // GetNumLaguages(), `0x49fb30`: one number, the known languages. The misspelling is the
-    // reference's registered name (`0x843628`); the correct spelling is nowhere in the binary.
+    // GetNumLaguages(), `0x49fb30`: one number, the known languages, and no value with no active
+    // player (`0x49fb5e` → `0x49fb60`). The misspelling is the reference's registered name
+    // (`0x843628`); the correct spelling is nowhere in the binary.
     lua.globals().set(
         "GetNumLaguages",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.known_languages.len() as i64)
+            Ok(match known_languages(lua) {
+                Some(known) => MultiValue::from_vec(vec![Value::Integer(known.len() as i64)]),
+                None => MultiValue::new(),
+            })
         })?,
     )?;
     // GetLanguageByIndex(i), `0x49fbe0`: the `Name_lang` of the i-th known language, positional,
     // never a row number or a language id; past the end it pushes nothing.
     lua.globals().set(
         "GetLanguageByIndex",
-        lua.create_function(|lua, index: Option<i64>| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let name = index
-                .and_then(|i| usize::try_from(i).ok())
-                .and_then(|i| i.checked_sub(1))
-                .and_then(|i| model.known_languages.get(i));
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetLanguageByIndex(index)` (`0x844b9c`, `0x49fbfc`).
+            let index = crate::script::binding_abi::index_arg(
+                lua,
+                index,
+                "Usage: GetLanguageByIndex(index)",
+            )?;
+            let known = known_languages(lua).unwrap_or_default();
+            let name = index.checked_sub(1).and_then(|i| known.get(i));
             Ok(match name {
                 Some(n) => MultiValue::from_vec(vec![Value::String(lua.create_string(n)?)]),
                 None => MultiValue::new(),
@@ -127,10 +241,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetDefaultLanguage",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let name = {
+            let name = super::live::ask(lua, &DefaultLanguageQuery).unwrap_or_else(|| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.default_language.clone()
-            };
+            });
             Ok(match name {
                 Some(n) => MultiValue::from_vec(vec![Value::String(lua.create_string(&n)?)]),
                 None => MultiValue::new(),
@@ -141,16 +255,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SendChatMessage",
         lua.create_function(
-            |lua, (text, chat_type, language, target): (String, Option<String>, Value, Value)| {
-                let chat_type = chat_type
+            |lua, (text, chat_type, language, target): (Value, Value, Value, Value)| {
+                // No local player ends the call quietly, ahead of every check (`0x49f219`-
+                // `0x49f223` to `0x49f78a`).
+                if !super::battlefield_queue::player_exists(
+                    lua,
+                    &lua.app_data_ref::<Model>().expect("model app_data"),
+                ) {
+                    return Ok(());
+                }
+                // `lua_isstring(1)` (`0x49f230`): a string or a number, else the usage error
+                // (`0x844a08`, at `0x49f77c`).
+                let text = super::binding_abi::string_arg(lua, text, USAGE_SEND_CHAT_MESSAGE)?;
+                // `lua_isstring(2)` (`0x49f25c`): anything that is not a string or a number leaves
+                // the type at 0, SAY (`0x49f255`).
+                let chat_type = super::binding_abi::optional_string(lua, &chat_type)
                     .unwrap_or_else(|| "SAY".into())
                     .to_ascii_uppercase();
-                // The language is read only past the empty-line gate. The line is queued
-                // anyway: the type check that precedes the gate is the app's, and the drain
-                // applies the gate after it.
-                let reads_language = !ends_at_empty_line(&text, &chat_type);
+                // The type check precedes the empty-line gate (`0x49f276`-`0x49f285`).
+                if !SEND_CHAT_TOKENS.contains(&chat_type.as_str()) {
+                    return Err(mlua::Error::runtime(UNKNOWN_CHAT_TYPE));
+                }
+                if ends_at_empty_line(&text, &chat_type) {
+                    return Ok(());
+                }
+                // The language is read only past the empty-line gate (`0x49f2aa`-`0x49f2e1`).
                 let language = match super::binding_abi::optional_string(lua, &language) {
-                    Some(name) if reads_language => {
+                    Some(name) => {
                         let model = lua.app_data_ref::<Model>().expect("model app_data");
                         let id = language_id(&model.language_table, &name);
                         Some(
@@ -162,16 +293,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // `lua_isstring` then `lua_tostring` (`0x49f2f6`, `0x49f306`): a number is its
                 // text, so `2.7` reaches the channel's `SStrToInt` as "2.7", which reads 2.
                 let target = super::binding_abi::optional_string(lua, &target);
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .chat_sends
-                    .push(ChatSend {
+                // Past the gate and the language, a WHISPER or CHANNEL with a NULL or empty
+                // target raises (`0x49f310`-`0x49f32b`, `0x49f4ca`-`0x49f4d6`, `0x49f535`).
+                // NULL, or a first byte of NUL (`cmp byte [esi],0`), as the empty-line gate reads.
+                if target
+                    .as_deref()
+                    .is_none_or(|t| t.bytes().next().unwrap_or(0) == 0)
+                {
+                    match chat_type.as_str() {
+                        "WHISPER" => return Err(mlua::Error::runtime(WHISPER_MISSING_TARGET)),
+                        "CHANNEL" => return Err(mlua::Error::runtime(CHANNEL_MISSING_NUMBER)),
+                        _ => {}
+                    }
+                }
+                super::calls::submit(
+                    lua,
+                    super::ScriptCall::SendChat(ChatSend {
                         text,
                         chat_type,
                         target,
                         language,
-                    });
-                Ok(())
+                        // Read before the send, as the binding reads it (`0x49f343`-`0x49f4b2`).
+                        group: chat_group(lua),
+                    }),
+                )
             },
         )?,
     )?;
@@ -179,9 +324,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl super::UiScript {
-    /// Drain the lines `SendChatMessage` queued since the last call.
+    /// The `SendChatMessage` lines a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_chat_sends(&mut self) -> Vec<ChatSend> {
-        std::mem::take(&mut self.model_mut().chat_sends)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::SendChat(send) => Some(send.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -190,9 +338,25 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
+    /// A VM with a local player, as every in-world `SendChatMessage` has (`0x49f223`), that keeps
+    /// its calls.
+    fn vm() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_unit(
+            "player",
+            Some(crate::script::UnitState {
+                exists: true,
+                name: Some("Probe".into()),
+                ..Default::default()
+            }),
+        );
+        s
+    }
+
     #[test]
     fn send_chat_message_queues_a_line_without_parsing_it() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         s.run(r#"SendChatMessage("hello")"#).unwrap();
         s.run(r#"SendChatMessage("/dance", "say")"#).unwrap();
         assert_eq!(
@@ -203,12 +367,14 @@ mod tests {
                     chat_type: "SAY".into(),
                     target: None,
                     language: None,
+                    group: ChatGroup::default(),
                 },
                 ChatSend {
                     text: "/dance".into(),
                     chat_type: "SAY".into(),
                     target: None,
                     language: None,
+                    group: ChatGroup::default(),
                 },
             ]
         );
@@ -217,7 +383,7 @@ mod tests {
 
     #[test]
     fn the_target_argument_is_its_lua_tostring_text() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         s.run(r#"SendChatMessage("hi", "WHISPER", nil, "Bob")"#)
             .unwrap();
         s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, 1)"#)
@@ -226,8 +392,6 @@ mod tests {
             .unwrap();
         s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, 2.7)"#)
             .unwrap();
-        s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, {})"#)
-            .unwrap();
         let sent = s.take_chat_sends();
         assert_eq!(sent[0].target.as_deref(), Some("Bob"));
         assert_eq!(sent[1].target.as_deref(), Some("1"));
@@ -235,10 +399,240 @@ mod tests {
         assert_eq!(
             sent[3].target.as_deref(),
             Some("2.7"),
-            "not rounded: the app's `SStrToInt` reads 2"
+            "not rounded: the host's `SStrToInt` reads 2"
         );
-        assert_eq!(sent[4].target, None, "a table is no string");
         assert_eq!(sent[1].chat_type, "CHANNEL");
+    }
+
+    /// What `pcall` leaves of `SendChatMessage(args)`: `Ok(())` or the error text.
+    fn call(s: &UiScript, args: &str) -> Result<(), String> {
+        let (ok, err): (bool, String) = s
+            .eval(&format!(
+                "local ok, err = pcall(function() SendChatMessage({args}) end) \
+                 return ok, tostring(err)"
+            ))
+            .unwrap();
+        if ok {
+            Ok(())
+        } else {
+            Err(err)
+        }
+    }
+
+    /// `0x49f276`-`0x49f285`: a string outside the table at `0x49f7a0` raises in the call.
+    #[test]
+    fn an_unknown_chat_type_raises_and_queues_nothing() {
+        let mut s = vm();
+        with_languages(&mut s);
+        for ty in [
+            r#""INSTANCE_CHAT""#,
+            r#""BOGUS""#,
+            r#""""#,
+            r#""SAY ""#,
+            r#""RAID_LEADER""#,
+            r#""BATTLEGROUND_LEADER""#,
+            "7",
+        ] {
+            let err = call(&s, &format!(r#""hi", {ty}"#)).expect_err(ty);
+            assert!(err.contains("Unknown chat type"), "{ty}: {err}");
+        }
+        // Ahead of the empty-line gate (`0x49f28d`) and the language (`0x49f2c5`).
+        let err = call(&s, r#""", "BOGUS""#).expect_err("an empty line still checks the type");
+        assert!(err.contains("Unknown chat type"), "{err}");
+        let err = call(&s, r#""hi", "BOGUS", "Klingon""#).expect_err("type before language");
+        assert!(err.contains("Unknown chat type"), "{err}");
+        assert!(s.take_chat_sends().is_empty());
+        // The compare ignores case (`SStrCmpI`), and every table entry passes.
+        for token in SEND_CHAT_TOKENS {
+            let target = if matches!(token, "WHISPER" | "CHANNEL") {
+                r#", nil, "1""#
+            } else {
+                ""
+            };
+            let args = format!(r#""hi", "{}"{target}"#, token.to_lowercase());
+            call(&s, &args).expect(token);
+        }
+        assert_eq!(s.take_chat_sends().len(), SEND_CHAT_TOKENS.len());
+    }
+
+    /// `lua_isstring(2)` (`0x49f25c`) refuses anything but a string or a number, which leaves the
+    /// type at SAY (`0x49f255`): no error, no conversion failure.
+    #[test]
+    fn a_chat_type_that_is_no_string_is_say() {
+        let mut s = vm();
+        for ty in ["nil", "true", "false", "{}", "print"] {
+            call(&s, &format!(r#""hi", {ty}"#)).unwrap_or_else(|e| panic!("{ty}: {e}"));
+        }
+        let sent = s.take_chat_sends();
+        assert_eq!(sent.len(), 5);
+        assert!(sent.iter().all(|c| c.chat_type == "SAY"), "{sent:?}");
+    }
+
+    /// `0x4bb080` and the leader compares (`0x49f3a4`, `0x49f463`).
+    #[test]
+    fn the_group_facts_follow_the_references_tests() {
+        use crate::script::{PartyMemberInfo, PartyState, RaidMemberInfo};
+        let member = |guid, rank| RaidMemberInfo {
+            guid,
+            rank,
+            ..Default::default()
+        };
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.chat_group(), ChatGroup::default(), "ungrouped");
+        let state = |own, leader, rank| PartyState {
+            members: vec![PartyMemberInfo {
+                name: "B".into(),
+                guid: 2,
+            }],
+            own_guid: own,
+            leader_guid: leader,
+            raid: vec![member(own, rank), member(2, 0)],
+            ..Default::default()
+        };
+        s.set_party(state(1, 9, 0));
+        let g = s.chat_group();
+        assert!(g.in_party && g.raid_members == 2);
+        assert!(!g.leads && !g.leads_or_assists, "a plain member");
+        s.set_party(state(1, 9, 1));
+        let g = s.chat_group();
+        assert!(!g.leads && g.leads_or_assists, "an assistant");
+        s.set_party(state(1, 1, 0));
+        let g = s.chat_group();
+        assert!(g.leads && g.leads_or_assists, "the leader at rank 0");
+        let mut off_roster = state(1, 1, 0);
+        off_roster.raid = vec![member(2, 2)];
+        s.set_party(off_roster);
+        let g = s.chat_group();
+        assert!(
+            g.leads && !g.leads_or_assists,
+            "`0x4bb080` fails off the roster"
+        );
+        s.set_party(state(0, 0, 0));
+        let g = s.chat_group();
+        assert!(
+            !g.leads && !g.leads_or_assists,
+            "a zero guid matches nobody"
+        );
+    }
+
+    /// `0x49f219`-`0x49f223`: with no local player the call ends quietly, ahead of the usage,
+    /// type and language checks; with one, a text that is no string raises the usage error.
+    #[test]
+    fn no_player_ends_quietly_and_a_non_string_text_raises_usage() {
+        let mut bare = UiScript::new().unwrap();
+        call(&bare, "nil").expect("no player: no usage error either");
+        call(&bare, r#""hi", "BOGUS", "Klingon""#).expect("no player: nothing is checked");
+        assert!(bare.take_chat_sends().is_empty());
+
+        let mut s = vm();
+        for text in ["nil", "true", "{}", ""] {
+            let err = call(&s, text).expect_err(text);
+            assert!(
+                err.contains("Usage: SendChatMessage(text [,type] [,language] [,targetPlayer])"),
+                "{text:?}: {err}"
+            );
+        }
+        call(&s, "42").expect("a number is a text");
+        assert_eq!(s.take_chat_sends()[0].text, "42");
+        s.set_unit("player", None);
+        call(&s, "nil").expect("the player gone: quiet again");
+    }
+
+    /// `cmp byte [esi],0` (`0x49f31c`, `0x49f4d3`): a target whose first byte is NUL is empty.
+    #[test]
+    fn a_target_that_starts_with_nul_is_empty() {
+        let mut s = vm();
+        let err = call(&s, r#""hi", "WHISPER", nil, "\0Bob""#).expect_err("whisper");
+        assert!(
+            err.contains("Whisper message missing target player!"),
+            "{err}"
+        );
+        let err = call(&s, r#""hi", "CHANNEL", nil, "\0001""#).expect_err("channel");
+        assert!(err.contains("Channel send missing channel number"), "{err}");
+        call(&s, r#""hi", "WHISPER", nil, "B\0ob""#).expect("a later NUL ends nothing");
+        assert_eq!(s.take_chat_sends().len(), 1);
+    }
+
+    /// `0x49f310`-`0x49f32b` and `0x49f4ca`-`0x49f4d6`, `0x49f535`: a WHISPER or CHANNEL whose
+    /// fourth argument is not a non-empty string raises, past the empty-line gate and the language.
+    #[test]
+    fn a_whisper_or_channel_without_a_target_raises_and_queues_nothing() {
+        let mut s = vm();
+        with_languages(&mut s);
+        let whisper = "Whisper message missing target player!";
+        let channel = "Channel send missing channel number";
+        for target in ["", ", nil, nil", r#", nil, """#, ", nil, {}", ", nil, true"] {
+            let err = call(&s, &format!(r#""hi", "WHISPER"{target}"#)).expect_err(target);
+            assert!(err.contains(whisper), "{target:?}: {err}");
+            let err = call(&s, &format!(r#""hi", "channel"{target}"#)).expect_err(target);
+            assert!(err.contains(channel), "{target:?}: {err}");
+        }
+        assert!(s.take_chat_sends().is_empty());
+        // The empty-line gate (`0x49f28d`) and the language (`0x49f2e1`) come first.
+        call(&s, r#""", "WHISPER""#).expect("an empty line ends quietly");
+        call(&s, r#""", "CHANNEL""#).expect("an empty line ends quietly");
+        let err = call(&s, r#""hi", "WHISPER", "Klingon""#).expect_err("language first");
+        assert!(err.contains("Unknown language"), "{err}");
+        s.take_chat_sends();
+        // No other type needs a target, and a target naming no channel is the host's quiet end
+        // (`0x49f4ea`), not an error here.
+        call(&s, r#""hi", "SAY""#).unwrap();
+        call(&s, r#""hi", "GUILD""#).unwrap();
+        call(&s, r#""hi", "CHANNEL", nil, "General""#).unwrap();
+        call(&s, r#""hi", "WHISPER", nil, "Bob""#).unwrap();
+        let sent = s.take_chat_sends();
+        assert_eq!(
+            sent.iter()
+                .map(|c| c.chat_type.as_str())
+                .collect::<Vec<_>>(),
+            ["SAY", "GUILD", "CHANNEL", "WHISPER"]
+        );
+    }
+
+    /// The empty-line gate ends the call in the binding (`0x49f28d`-`0x49f2a1`), so nothing
+    /// reaches the host, but for AFK and DND, whose arms take an empty text.
+    #[test]
+    fn an_empty_line_ends_the_call_but_for_afk_and_dnd() {
+        let mut s = vm();
+        for args in [
+            r#""""#,
+            r#""", "PARTY""#,
+            r#""\0hidden", "YELL""#,
+            r#""", "WHISPER", nil, "Bob""#,
+            r#""", "CHANNEL", nil, 1"#,
+        ] {
+            call(&s, args).unwrap_or_else(|e| panic!("{args}: {e}"));
+        }
+        assert!(s.take_chat_sends().is_empty());
+        call(&s, r#""", "AFK""#).unwrap();
+        call(&s, r#""", "dnd""#).unwrap();
+        let sent = s.take_chat_sends();
+        assert_eq!(
+            sent.iter()
+                .map(|c| c.chat_type.as_str())
+                .collect::<Vec<_>>(),
+            ["AFK", "DND"]
+        );
+    }
+
+    /// The line past the binding's checks is the host's, applied before the verb returns.
+    #[test]
+    fn the_line_applies_inside_the_verb() {
+        let mut s = vm();
+        let applied = crate::script::host::test_support::applied_in_call(
+            &mut s,
+            r#"SendChatMessage("hi", "GUILD")"#,
+        );
+        assert_eq!(
+            applied,
+            vec![crate::script::ScriptCall::SendChat(ChatSend {
+                text: "hi".into(),
+                chat_type: "GUILD".into(),
+                target: None,
+                language: None,
+                group: ChatGroup::default(),
+            })]
+        );
     }
 
     /// Three `Languages.dbc` rows, in the shipped file's order.
@@ -252,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_language_name_sends_its_languages_dbc_id() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         with_languages(&mut s);
         s.run(r#"SendChatMessage("hi", "SAY", "Darnassian")"#)
             .unwrap();
@@ -273,7 +667,7 @@ mod tests {
 
     #[test]
     fn no_language_argument_speaks_the_default() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         with_languages(&mut s);
         s.run(r#"SendChatMessage("hi")"#).unwrap();
         s.run(r#"SendChatMessage("hi", "SAY", nil)"#).unwrap();
@@ -289,7 +683,7 @@ mod tests {
 
     #[test]
     fn an_unknown_language_raises_and_sends_nothing() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         with_languages(&mut s);
         for arg in [r#""Klingon""#, r#""""#, "7", r#""Darnassian ""#] {
             let err = s
@@ -340,6 +734,18 @@ mod language_tests {
     #[test]
     fn the_language_walk_is_positional_over_the_known_rows() {
         let mut s = UiScript::new().unwrap();
+        assert_eq!(
+            s.arity("GetNumLaguages()").unwrap(),
+            0,
+            "no player: no value, not 0 (`0x49fb60`)"
+        );
+        s.set_unit(
+            "player",
+            Some(crate::script::UnitState {
+                exists: true,
+                ..Default::default()
+            }),
+        );
         assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 0);
         assert_eq!(
             s.arity("GetLanguageByIndex(1)").unwrap(),
@@ -352,16 +758,15 @@ mod language_tests {
         )
         .unwrap();
         s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
-        s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
         assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 2);
         assert_eq!(
             s.eval::<String>("return GetLanguageByIndex(2)").unwrap(),
             "Common"
         );
         assert_eq!(
-            s.eval::<i64>("return FIRED").unwrap(),
-            1,
-            "the list changing fires once; the same list again is silent"
+            s.eval::<Option<i64>>("return FIRED").unwrap(),
+            None,
+            "a seat fires nothing: the event is the registrar's"
         );
     }
 }

@@ -94,18 +94,18 @@ fail() {
 
 # Before the timeout check, which it usually explains: a WOW_CHAR not on the account leaves the
 # client waiting at the roster.
-printf '%s' "$plain" | grep -q "not on this account" &&
+grep -q "not on this account" <<<"$plain" &&
     fail "$char is not on $user — the client sat at the roster (make it, or rig it: WOW_RIG=…)"
 [ $code -eq 124 ] && fail "the client did not exit within the timeout"
-printf '%s' "$plain" | grep -q "logout-smoke: empty roster" &&
+grep -q "logout-smoke: empty roster" <<<"$plain" &&
     fail "$user has no characters — the re-entry leg cannot run (make one, or rig it: WOW_RIG=…)"
-printf '%s' "$plain" | grep -q "logout-smoke: done" ||
+grep -q "logout-smoke: done" <<<"$plain" ||
     fail "the round trip never completed (no 'logout-smoke: done')"
 # The logout returns to character select on the link the world was entered by and re-lists there
 # (`0x5aaeb0` → `0x46b880`): a roster on that world session, and one realmd logon for the walk.
-printf '%s' "$plain" | grep -q "logout-smoke: FAILED" &&
+grep -q "logout-smoke: FAILED" <<<"$plain" &&
     fail "$(printf '%s\n' "$plain" | sed -n 's/.*logout-smoke: FAILED — //p' | tail -1)"
-printf '%s' "$plain" | grep -q "logout-smoke: roster after the logout on the same link" ||
+grep -q "logout-smoke: roster after the logout on the same link" <<<"$plain" ||
     fail "no roster came on the same link after the logout"
 logons="$(printf '%s\n' "$plain" | grep -cF "net: parked at the realm list")"
 [ "$logons" -eq 1 ] ||
@@ -122,7 +122,7 @@ printf '  %-24s %s\n' "re-entry suppressors" "${sup:-<unreported>}"
 # vmangos skips the logout root when resting, on a taxi or at account security >= `InstantLogout`
 # (`MiscHandler.cpp`, `CMSG_LOGOUT_REQUEST`); probe accounts are GM, so report whether the check
 # above met a real root. `player::wire_in::session_end_tests` forces the rooted case.
-if printf '%s\n' "$plain" | grep -q "mover mode Root granted"; then
+if grep -q "mover mode Root granted" <<<"$plain"; then
     printf '  %-24s %s\n' "rooted logout" "yes — the drivable check above is a real pass"
 else
     printf '  %-24s %s\n' "rooted logout" \
@@ -136,20 +136,24 @@ panics="$(printf '%s\n' "$plain" | grep -cE 'panicked at')"
 
 # A marker counts once per edge it fires on. Each world entry builds a world VM beside the
 # character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so the VM marker counts
-# twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s.
-sessions=2            # world entries in this walk
-vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each
+# twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s. One more
+# is built once at startup: the boot strings beside the glue VM, read for the slash-command table
+# (`ui_chat::commands::build_slash_commands`).
+sessions=2                # world entries in this walk
+vms=$((sessions * 2 + 1)) # …and the Lua states they cost: a glue VM and a world VM each
 for marker in "new VM, session"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$vms" ] ||
-        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login; \
-$sessions would mean the entry adopted the character screen's VM and inherited its spent VmMemos"
+        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login and \
+the startup strings; $((sessions + 1)) would mean the entry adopted the character screen's VM and \
+inherited its spent VmMemos"
 done
 # The in-game UI, `FrameXML.toc`'s `Fonts.xml` included, and the key-binding commands (the core's
 # `Bindings.xml`, loaded after the toc) build once per login; one count for two logins means the
-# second reused the first's frame tree.
-for marker in "Fonts.xml loaded" "UIParent.xml loaded" "commands registered"; do
+# second reused the first's frame tree. The `Fonts.xml` marker names its folder: the glue's
+# `GlueFonts.xml` ends the same way.
+for marker in 'FrameXML\Fonts.xml loaded' "UIParent.xml loaded" "commands registered"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$sessions" ] ||
@@ -200,7 +204,7 @@ fi
 # fails anything but a completed walk.
 echo "smoke: running the realm-list boundary walk (~12 s, opens a window)…"
 rlog="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-realm.XXXXXX")"
-# No WOW_CHAR: the walk drives character select, and `realm_select::smoke` refuses a seated body.
+# No WOW_CHAR: the walk drives character select, and `glue_session::realm_smoke` refuses a seated body.
 WOW_UNATTENDED=1 WOW_NOSOUND=1 WOW_USER="$user" WOW_PASS="$pass" WOW_REALM_SMOKE=1 \
     timeout 120 cargo run -q -p benilla >"$rlog" 2>&1
 rcode=$?
@@ -213,9 +217,9 @@ realm_fail() {
     exit 1
 }
 [ $rcode -eq 124 ] && realm_fail "the realm walk did not finish within the timeout"
-printf '%s' "$rplain" | grep -q "realm-smoke: FAILED" &&
+grep -q "realm-smoke: FAILED" <<<"$rplain" &&
     realm_fail "$(printf '%s\n' "$rplain" | sed -n 's/.*realm-smoke: FAILED — //p' | tail -1)"
-printf '%s' "$rplain" | grep -q "realm-smoke: done" ||
+grep -q "realm-smoke: done" <<<"$rplain" ||
     realm_fail "the walk never completed (no 'realm-smoke: done')"
 rp="$(printf '%s\n' "$rplain" | grep -cE 'panicked at')"
 [ "$rp" -ne 0 ] && realm_fail "$rp panic(s)"

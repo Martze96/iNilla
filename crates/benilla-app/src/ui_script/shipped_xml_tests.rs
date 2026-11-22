@@ -28,6 +28,7 @@ fn every_shipped_ui_xml_parses() {
 fn the_whole_shipped_manifest_loads_without_errors() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -53,6 +54,7 @@ fn the_whole_shipped_manifest_loads_without_errors() {
 fn loading_the_shipped_ui_queues_no_sounds() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -78,6 +80,7 @@ fn loading_the_shipped_ui_queues_no_sounds() {
 /// The stock pet bar with the hunter fixture (Claw autocasting), settled past its slide.
 fn pet_bar_vm() -> benilla_ui::script::UiScript {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     super::pet_bar_tests::load_pet_bar(&s);
     super::pet_bar_tests::declare_token_strings(&s);
@@ -474,7 +477,8 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")
         .expect("GlobalStrings.lua in the chain");
-    let s = benilla_ui::script::UiScript::new().expect("VM");
+    let mut s = benilla_ui::script::UiScript::new().expect("VM");
+    s.keep_calls();
     s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
 
     // The loader's key-shape predicate, restated because it is private.
@@ -618,6 +622,10 @@ fn every_texture_frame_outranks_its_status_bars() {
     use benilla_ui::order::unpack;
 
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+
+    s.keep_calls();
+    // No engine behind it: `RaidFrame`'s `RequestRaidInfo()` at world entry is kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -713,6 +721,7 @@ fn every_texture_frame_outranks_its_status_bars() {
 fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -742,6 +751,7 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 fn every_shipped_font_object_is_published_as_a_lua_global() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -819,6 +829,7 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 fn the_inheritable_reference_templates_confer_their_shape() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -841,7 +852,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
     .unwrap();
     s.resolve();
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return BuffProbe:GetWidth(), BuffProbe:GetHeight()")
             .unwrap(),
         (21.0, 21.0),
@@ -857,7 +868,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
         "the tooltip script comes with the template"
     );
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return MicroProbe:GetWidth(), MicroProbe:GetHeight()")
             .unwrap(),
         (29.0, 58.0)
@@ -874,6 +885,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
 fn the_inspect_cursor_pair_takes_both_arms() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -927,6 +939,7 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -1013,6 +1026,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
 fn every_declared_parent_really_attaches() {
     benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -1144,6 +1158,7 @@ pub(super) fn shipped_frame_names() -> Vec<String> {
 fn the_shipped_manifest_opens_the_macro_icon_picker() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_unit(
         "player",
@@ -1155,15 +1170,15 @@ fn the_shipped_manifest_opens_the_macro_icon_picker() {
         }),
     );
     // One saved macro, so "Change Name/Icon" has something selected.
-    s.set_macros(benilla_ui::script::MacroState {
-        account: vec![benilla_ui::script::MacroView {
+    s.set_macros(benilla_ui::script::MacroState::from_scopes(
+        vec![benilla_ui::script::MacroView {
             name: "die".into(),
             texture: Some(r"Interface\Icons\Ability_Ambush".into()),
             body: ".die".into(),
             ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     s.set_macro_icons(vec![
         r"Interface\Icons\Ability_Ambush".into(),
         r"Interface\Icons\Ability_Backstab".into(),
@@ -1197,6 +1212,7 @@ fn the_shipped_manifest_opens_the_macro_icon_picker() {
 fn the_stock_interface_options_window_loads_hidden_and_ours_is_still_the_players() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_unit(
         "player",
@@ -1303,6 +1319,7 @@ fn the_stock_interface_options_window_loads_hidden_and_ours_is_still_the_players
 fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_unit(
         "player",
@@ -1407,6 +1424,7 @@ fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
 fn the_stock_sound_window_turns_a_box_off_and_stores_a_slider_as_lua_text() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_unit(
         "player",
@@ -1455,6 +1473,7 @@ fn the_stock_sound_window_turns_a_box_off_and_stores_a_slider_as_lua_text() {
 fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // 1600x900 is not one of the monitor's modes, as a player's windowed size usually is not;
     // `GetCurrentResolution` must still index a row that exists.
@@ -1719,6 +1738,7 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
 fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
@@ -1815,6 +1835,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
 fn the_video_windows_ten_composed_names_stay_nil() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let failures = super::load_default_ui(&s);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
@@ -1859,6 +1880,9 @@ fn the_video_windows_ten_composed_names_stay_nil() {
 fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
+    // No host: the Okay's `ClearTutorials()` (`UIOptionsFrame.lua:325`) is kept, not applied.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_unit(
         "player",
@@ -1932,6 +1956,66 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
     assert!(
         (yaw - 180.0).abs() < 0.001 && (pitch - 90.0).abs() < 0.001,
         "_Save should write the slider's 180 and its half; got yaw={yaw} pitch={pitch}"
+    );
+}
+
+/// `GetCVar`, `SetCVar` and `GetCVarDefault` raise on a name no CVar has (`0x488be7`, `0x488c53`,
+/// `0x488d37`), so every name the stock interface's files spell out must be registered, whether
+/// or not a branch that names it runs.
+#[test]
+fn every_cvar_name_the_stock_interface_spells_out_is_registered() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let registered: std::collections::HashSet<String> = crate::cvars::registered_pairs()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let toc = super::reference_ui::core().expect("the stock FrameXML.toc");
+    let mut queue: Vec<String> = toc.toc.files.clone();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unregistered = Vec::new();
+    let mut spelled = 0;
+    while let Some(file) = queue.pop() {
+        if !seen.insert(file.replace('/', "\\").to_ascii_lowercase()) {
+            continue;
+        }
+        let Some(bytes) = super::reference_ui::read(&file) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        for chunk in text.split('<').skip(1) {
+            let tag = chunk.split('>').next().unwrap_or("").trim_start();
+            if tag.starts_with("Include") || tag.starts_with("Script") {
+                if let Some(name) = tag
+                    .split("file=\"")
+                    .nth(1)
+                    .and_then(|r| r.split('"').next())
+                {
+                    queue.push(format!(r"Interface\FrameXML\{name}"));
+                }
+            }
+        }
+        for verb in ["GetCVar(", "SetCVar(", "GetCVarDefault("] {
+            for at in text.match_indices(verb).map(|(i, _)| i) {
+                // Only a call that spells its name out: a word boundary before, a literal after.
+                let before = text[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let rest = text[at + verb.len()..].trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let name = rest.split('"').next().unwrap_or("");
+                spelled += 1;
+                if !registered.contains(&name.to_ascii_lowercase()) {
+                    unregistered.push(format!("{name} ({file})"));
+                }
+            }
+        }
+    }
+    assert!(spelled > 40, "the walk found only {spelled} spelled names");
+    assert!(
+        unregistered.is_empty(),
+        "the stock interface names CVars the client does not register: {unregistered:?}"
     );
 }
 

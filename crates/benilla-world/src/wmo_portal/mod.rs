@@ -28,13 +28,14 @@ mod seed;
 use fog::select_wmo_fog;
 pub use fog::{CameraWmoFog, WmoFogTarget};
 pub use interior::{
-    indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, LightAttach,
+    indoor_verdict_at, indoors_at, seat_wmo_areas, terrain_z_local, IndoorVerdict, LightAttach,
     INTERIOR_PROBE_HEIGHT,
 };
 pub(crate) use interior::{surface_terrain_sample, WmoAreas, POSITION_PROBE_LIFT};
 use interior::{track_area_interior, track_current_interior, track_unit_interiors};
 pub use interior::{
-    CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom, WmoInteriorKeys,
+    CurrentAreaInterior, CurrentWmoInterior, EntityOutdoors, PlayerWmoRoom, UnitWmoRoom,
+    WmoInteriorKeys,
 };
 use probe::TraceLog;
 pub use probe::WmoCullProbe;
@@ -77,9 +78,10 @@ const PORTAL_NEAR_PARALLEL: f32 = 1.0e-4;
 /// The snap window (yd) for a near-parallel portal (the `0.1` pushed at `0x6a40c0`): a vertical
 /// doorway counts as crossed only while the eye is this close to its plane.
 const PORTAL_PLANE_SNAP: f32 = 0.1;
-/// Nearest-crossing accept eps for the portal leg (`0x80c4f4`, about `1e-4`): a portal crossing
-/// this close to the nearest face hit still wins, so a floor-hole portal flips the room.
-const NEAREST_TIE_EPS: f32 = 1.0e-4;
+/// Nearest-crossing accept for the portal leg (`0x6be421`-`0x6be434`): a crossing whose fraction
+/// is less than `0x80c4f4`'s `1e-4` past the best hit so far still wins, so a floor-hole portal
+/// flips the room. The fraction is of the 1760 yd ray ([`MAX_FLOOR_DROP`]): about 0.176 yd.
+const NEAREST_TIE_YD: f32 = 1.0e-4 * MAX_FLOOR_DROP;
 /// MOGI/MOGP `0x10000`, the callback-pass group: drawn in a third pass (`0x6b3d6f..0x6b3dbc`)
 /// against the full camera frustum, gated on nothing, and skipped by Pass 2 (`0x6b3d0b`). Both
 /// passes read MOGI; [`WmoGroupNav::flags`] is MOGP, which differs only by
@@ -178,10 +180,6 @@ pub struct WmoPortalInstance {
     /// draws the group and its doodads with the building's MFOG triple, `false` with the scene fog.
     /// Seeded all-false, which a portal-less prop keeps.
     pub interior_fog: Vec<bool>,
-    /// Per-group ever-visited latch: once the flood visits a group, its MLIQ surface draws for the
-    /// rest of the placement's residency, whatever this frame's PVS. Latched by
-    /// [`compute_wmo_pvs`]; starts all-false.
-    pub liquid_visited: Vec<bool>,
     /// Per-group whole-group submersion from MOGP `groupLiquid`: `Some(kind)` means anywhere in the
     /// group is under liquid, at every z. Baked at spawn; empty on a placement spawned before its
     /// model resolved.
@@ -271,7 +269,7 @@ const MAX_FLOOR_DROP: f32 = 1760.0;
 
 /// Recompute each resident WMO's per-group visible set from the camera; a portal-less prop stays
 /// all-visible.
-fn compute_wmo_pvs(
+pub(crate) fn compute_wmo_pvs(
     wmos: Res<Assets<WmoModel>>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     mut instances: Query<(Entity, &mut WmoPortalInstance)>,
@@ -423,23 +421,6 @@ fn compute_wmo_pvs(
                     windows = Some(std::mem::take(&mut fresh.windows));
                 }
             }
-        }
-        // The `liquid_visited` latch, through the change gate: only a slot that flips marks the
-        // instance changed.
-        let held = inst.bypass_change_detection();
-        let mut latched = false;
-        if held.liquid_visited.len() != groups {
-            held.liquid_visited = vec![false; groups];
-            latched = true;
-        }
-        for g in 0..groups {
-            if held.visible.get(g).copied().unwrap_or(false) && !held.liquid_visited[g] {
-                held.liquid_visited[g] = true;
-                latched = true;
-            }
-        }
-        if latched {
-            inst.set_changed();
         }
     }
     if camera_fog.0 != fog_target {
@@ -1015,7 +996,6 @@ mod tests {
             name_set: 0,
             visible: vec![false, true, false],
             interior_fog: vec![false; 3],
-            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
         };
         let key = |groups: &[u16]| WmoGroupVis {
@@ -1045,7 +1025,6 @@ mod tests {
             name_set: 0,
             visible: vec![true; 3],
             interior_fog: vec![false, true, false],
-            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
         };
         let key = |groups: &[u16]| WmoGroupVis {
@@ -1485,6 +1464,7 @@ mod tests {
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
             doodad_groups: Default::default(),
+            convex_volume: Vec::new(),
         }
     }
 }

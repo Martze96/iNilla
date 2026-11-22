@@ -46,6 +46,105 @@ pub(crate) fn env_login() -> bool {
         .all(|k| std::env::var_os(k).is_some())
 }
 
+/// The PIN an unattended run answers the keypad with, in place of a key press: `$WOW_PIN`, the
+/// digits, or `$WOW_PIN_TOTP`, a base32 secret whose current RFC 6238 code is the PIN, the scheme
+/// vmangos verifies (`AuthSocket.cpp:720`). Both set is an error, never a pick. An empty value is
+/// none. The variables are read once, when the app builds ([`Self::process`]); a TOTP code is
+/// derived from the clock at each prompt ([`Self::digits_now`]) and never kept, so a park longer
+/// than the server's window sends a fresh one. It never prints: not the digits, the secret or a
+/// code.
+#[derive(Resource, Clone)]
+pub(crate) struct EnvPin {
+    pin: Option<String>,
+    totp: Option<String>,
+    /// Unix seconds now; the system clock, or a test's.
+    clock: fn() -> u64,
+}
+
+impl Default for EnvPin {
+    fn default() -> Self {
+        Self {
+            pin: None,
+            totp: None,
+            clock: system_unix_secs,
+        }
+    }
+}
+
+impl std::fmt::Debug for EnvPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EnvPin(<redacted>)")
+    }
+}
+
+fn system_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+impl EnvPin {
+    /// The answer as this process's environment makes it.
+    pub(crate) fn from_env() -> Self {
+        let var = |k| std::env::var(k).ok().filter(|v| !v.is_empty());
+        Self {
+            pin: var("WOW_PIN"),
+            totp: var("WOW_PIN_TOTP"),
+            ..Self::default()
+        }
+    }
+
+    /// The environment as read at the first ask, for the process: the glue manager's prompts and
+    /// the IO thread's re-dials share one reading.
+    pub(crate) fn process() -> &'static Self {
+        static READ: std::sync::OnceLock<EnvPin> = std::sync::OnceLock::new();
+        READ.get_or_init(Self::from_env)
+    }
+
+    /// An answer as a test makes it, on the clock `clock`.
+    #[cfg(test)]
+    pub(crate) fn new(pin: Option<&str>, totp: Option<&str>, clock: fn() -> u64) -> Self {
+        Self {
+            pin: pin.map(str::to_string),
+            totp: totp.map(str::to_string),
+            clock,
+        }
+    }
+
+    /// The PIN's digits, one per key, for the clock at `unix_secs`: `Ok(None)` when neither
+    /// variable is set, `Err(why)` for a setting that cannot answer (the text never holds a
+    /// value). `$WOW_PIN` goes as typed, 4 to 10 digits like the keypad's keys
+    /// (`PINEntered`); the code of a TOTP goes as vmangos reads it ([`pin::code_digits`]).
+    ///
+    /// [`pin::code_digits`]: benilla_protocol::auth::pin::code_digits
+    pub(crate) fn digits(&self, unix_secs: u64) -> Result<Option<Vec<u8>>, &'static str> {
+        use benilla_protocol::auth::pin;
+        match (&self.pin, &self.totp) {
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => Err("WOW_PIN and WOW_PIN_TOTP are both set; set one of them"),
+            (Some(pin), None) => {
+                if (4..=10).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit()) {
+                    Ok(Some(pin.bytes().map(|b| b - b'0').collect()))
+                } else {
+                    Err("WOW_PIN is not 4 to 10 digits")
+                }
+            }
+            (None, Some(secret)) => {
+                let key =
+                    pin::base32_decode(secret).ok_or("WOW_PIN_TOTP is not a base32 secret")?;
+                pin::totp_digits(&key, unix_secs)
+                    .map(Some)
+                    .ok_or("WOW_PIN_TOTP gave no code of 4 digits")
+            }
+        }
+    }
+
+    /// [`Self::digits`] for the clock now: asked at each PIN prompt, a re-dial's included.
+    pub(crate) fn digits_now(&self) -> Result<Option<Vec<u8>>, &'static str> {
+        self.digits((self.clock)())
+    }
+}
+
 /// Is nobody at the keyboard? `false` unless the run declares itself with `$WOW_UNATTENDED`, or is
 /// a capture (`$WOW_CAPTURE`) or a rig (`$WOW_RIG`), which cannot be a person. Env login
 /// credentials alone never make a run unattended: a player may launch with them. The doubt goes
@@ -63,8 +162,8 @@ pub(crate) fn unattended() -> bool {
 
 /// A run stuck on a dialog: `true` (exit) only when the run is [`unattended`], logging the `FATAL`
 /// marker a leg runner greps for; otherwise the dialog stays up, with a hint when the credentials
-/// came from the environment. The call sites in [`crate::login`] and [`crate::char_select`] share
-/// it so the verdict and the marker cannot drift apart.
+/// came from the environment. Its call sites share it so the verdict and the marker cannot drift
+/// apart.
 pub(crate) fn fatal_when_driverless(why: &str) -> bool {
     if unattended() {
         error!("login: FATAL — {why}; exiting");
@@ -83,14 +182,14 @@ pub(crate) fn fatal_when_driverless(why: &str) -> bool {
 /// The screen the client starts on: a player at the login screen, a capture straight in the world,
 /// a glue capture on the screen it photographs. Needed before the plugins build, so it forwards
 /// into the dev half rather than reading a resource.
-pub(crate) fn start_state() -> crate::char_select::ClientState {
+pub(crate) fn start_state() -> crate::client_state::ClientState {
     #[cfg(feature = "dev")]
     {
         crate::capture::start_state()
     }
     #[cfg(not(feature = "dev"))]
     {
-        crate::char_select::ClientState::Login
+        crate::client_state::ClientState::Login
     }
 }
 
@@ -141,7 +240,7 @@ pub(crate) fn dev_source_dir() -> Option<&'static std::path::Path> {
     }
 }
 
-/// The pre-connect account guard on the env fast path ([`crate::login`]): `Err(explanation)` when
+/// The pre-connect account guard on the env fast path ([`crate::glue_session::login`]): `Err(explanation)` when
 /// this checkout declares an account ([`declared_identity`]) and the login is for another, because
 /// a login kicks whoever holds the account. Inert without a declaration. `WOW_ALLOW_ACCOUNT=1`
 /// turns the refusal into a warning.
@@ -230,6 +329,7 @@ mod tests {
             "debug_panel/",
             "asset_churn.rs",
             "dev.rs",
+            "devtools/",
             "hover_log.rs",
             "perf/",
             "preflight.rs",
@@ -360,5 +460,53 @@ mod tests {
         assert_eq!(suffix_of("Tester"), "tester");
         assert_eq!(suffix_of("Longcharname"), "longch");
         assert_eq!(suffix_of("Probe"), "probe");
+    }
+
+    /// The SHA-1 secret of the RFC 6238 vectors, base32.
+    const TOTP_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    #[test]
+    fn the_env_pin_is_the_digits_or_a_totp_code_never_both() {
+        let none = EnvPin::new(None, None, || 59);
+        assert_eq!(none.digits(59), Ok(None));
+        assert_eq!(
+            EnvPin::new(Some("0123"), None, || 59).digits(59),
+            Ok(Some(vec![0, 1, 2, 3])),
+            "a typed PIN goes as typed"
+        );
+        // RFC 6238 at t=59 is 287082; at t=1111111109 it is 081804, whose number is 81804.
+        let totp = EnvPin::new(None, Some(TOTP_SECRET), || 59);
+        assert_eq!(totp.digits(59), Ok(Some(vec![2, 8, 7, 0, 8, 2])));
+        assert_eq!(totp.digits(1_111_111_109), Ok(Some(vec![8, 1, 8, 0, 4])));
+        let both = EnvPin::new(Some("1234"), Some(TOTP_SECRET), || 59);
+        assert!(both.digits(59).unwrap_err().contains("both set"));
+        for bad in ["123", "12345678901", "12a4", "12 34"] {
+            assert!(
+                EnvPin::new(Some(bad), None, || 59).digits(59).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(EnvPin::new(None, Some("not base32!"), || 59)
+            .digits(59)
+            .is_err());
+    }
+
+    #[test]
+    fn the_env_pin_reads_its_two_variables_and_prints_neither() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _p = EnvGuard::set("WOW_PIN", "4821");
+        let _t = EnvGuard::set("WOW_PIN_TOTP", "");
+        let read = EnvPin::from_env();
+        assert_eq!(read.digits(0), Ok(Some(vec![4, 8, 2, 1])), "empty is none");
+        assert!(!format!("{read:?}").contains("4821"));
+        drop(_t);
+        let _t = EnvGuard::set("WOW_PIN_TOTP", TOTP_SECRET);
+        assert!(EnvPin::from_env().digits(0).is_err(), "both set is refused");
+        drop(_p);
+        let _p = EnvGuard::unset("WOW_PIN");
+        assert!(!format!("{:?}", EnvPin::from_env()).contains("GEZD"));
     }
 }

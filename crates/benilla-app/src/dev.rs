@@ -51,6 +51,8 @@ impl Plugin for DevToolsPlugin {
                 // A probe account's body gets vmangos `.cheat god` (damage stops at 1 hp) and GM
                 // mode off on every world entry; inert on any other account.
                 .add_plugins(crate::probe_shield::ProbeShieldPlugin);
+            // Hot reload, the addon profiler and the Lua inspector.
+            app.add_plugins(crate::devtools::DevtoolsPlugin);
         }
     }
 }
@@ -113,9 +115,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_HOVER").is_ok() {
                 app.add_plugins(crate::capture::ProbeHoverPlugin);
             }
-            // `WOW_PROBE_KEY="Space@14"`: presses keys once in-world.
+            // `WOW_PROBE_KEY="Space@14;text=hi@16"`: presses keys and types text once in-world.
             if std::env::var("WOW_PROBE_KEY").is_ok() {
                 app.add_plugins(crate::capture::ProbeKeyPlugin);
+            }
+            // `WOW_PROBE_CLICK="Frame@14"`: clicks a frame's centre through the window's events.
+            if std::env::var("WOW_PROBE_CLICK").is_ok() {
+                app.add_plugins(crate::capture::ProbeClickPlugin);
             }
             // `WOW_PROBE_EXIT_AT=<secs>`: bounds any scripted live probe's lifetime.
             if std::env::var("WOW_PROBE_EXIT_AT").is_ok() {
@@ -291,6 +297,113 @@ impl Plugin for DevProbesPlugin {
             app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
             // The FPS journal (`WOW_FPS_JOURNAL`) is registered from `lib.rs` in every build.
+        }
+    }
+}
+
+/// Every instrument and probe the binary can add, whatever the environment, for the tests that
+/// read the whole client's schedule; nothing in a player build. The capture harness is left out:
+/// it builds its scenario from `WOW_CAPTURE`.
+#[cfg(test)]
+#[cfg_attr(not(feature = "dev"), allow(unused_variables))]
+pub(crate) fn add_every_instrument(app: &mut App) {
+    #[cfg(feature = "dev")]
+    {
+        app.add_plugins(DevToolsPlugin);
+        app.add_plugins(crate::capture::LiveShotPlugin);
+        app.add_plugins(crate::capture::ProbeRigPlugin);
+        app.add_plugins(crate::capture::ProbeFocusPlugin);
+        app.add_plugins(crate::capture::ProbeChatPlugin);
+        app.add_plugins(crate::capture::ProbeLuaPlugin);
+        app.add_plugins(crate::capture::ProbeGlueLuaPlugin);
+        app.add_plugins(crate::capture::ProbeDragPlugin);
+        app.add_plugins(crate::capture::ProbeHoverPlugin);
+        app.add_plugins(crate::capture::ProbeKeyPlugin);
+        app.add_plugins(crate::capture::ProbeClickPlugin);
+        app.add_plugins(crate::capture::ProbeExitPlugin);
+        app.add_plugins(crate::capture::PickProbePlugin);
+        app.add_plugins(crate::capture::PhaseProbePlugin);
+        app.add_plugins(crate::capture::DepthProbePlugin);
+        app.add_plugins(crate::capture::NodeProbePlugin);
+        app.add_plugins(crate::capture::ProbeResizePlugin);
+        app.add_plugins(crate::capture::ParticleCensusPlugin);
+        app.add_plugins(crate::capture::GroundCensusPlugin);
+        app.add_plugins(crate::capture::LiftCensusPlugin);
+        app.add_plugins(crate::capture::StallPlugin);
+        app.add_plugins(crate::capture::TrailCensusPlugin);
+        app.add_plugins(crate::capture::UnitVisualsPlugin);
+        app.add_plugins(crate::capture::JitterMeterPlugin);
+        app.add_plugins(crate::capture::DressCensusPlugin);
+        app.add_plugins(crate::capture::RevealAuditPlugin);
+        app.add_plugins(crate::capture::EntityCensusPlugin);
+        app.add_plugins(crate::capture::SchedCensusPlugin);
+        app.add_plugins(crate::capture::ProbeMeleePlugin);
+        app.add_plugins(crate::capture::ProbePartnerPlugin);
+        app.add_plugins(crate::capture::ProbeCrossingPlugin);
+        app.add_plugins(crate::capture::ProbeTaxiPlugin);
+        app.add_plugins(crate::capture::ProbeGuardPoiPlugin);
+        app.add_plugins(crate::capture::ProbeBgQueuePlugin);
+        app.add_plugins(crate::capture::ProbeBgPlugin);
+        app.add_plugins(crate::capture::ProbeMailPlugin);
+        app.add_plugins(crate::capture::ProbeAuctionPlugin);
+        app.add_plugins(crate::capture::ProbeBankPlugin);
+        app.add_plugins(crate::capture::ProbeBinderPlugin);
+        app.add_plugins(crate::capture::ProbeServicePlugin);
+        app.add_plugins(crate::capture::ProbeVendorSwapPlugin);
+        app.add_plugins(crate::capture::ProbeModelCameraPlugin);
+        app.add_plugins(crate::capture::ProbeGmTicketPlugin);
+        app.add_plugins(crate::capture::ProbeCharterPlugin);
+        app.add_plugins(crate::capture::ProbeBookPlugin);
+        app.add_plugins(crate::capture::ProbeStonePlugin);
+        app.add_plugins(crate::capture::ProbeChestPlugin);
+        app.add_plugins(crate::capture::ProbeGoQuestPlugin);
+        app.add_plugins(crate::capture::ProbeClamPlugin);
+        app.add_plugins(crate::capture::ProbeCastCancelPlugin);
+        app.add_plugins(crate::capture::ProbeCharCreatePlugin);
+        app.add_plugins(crate::capture::LiveFpsPlugin);
+        app.add_plugins(crate::capture::ProbeLookPlugin);
+        app.add_plugins(crate::capture::ProbePitchPlugin);
+        app.add_plugins(crate::capture::ProbeCamPlugin);
+    }
+}
+
+#[cfg(all(test, feature = "dev"))]
+mod tests {
+    /// [`super::add_every_instrument`] adds every probe [`super::DevProbesPlugin`] can add but the
+    /// capture harness, so a test over it reads the fleet as the binary can build it.
+    #[test]
+    fn every_instrument_lists_the_whole_probe_fleet() {
+        let src = include_str!("dev.rs");
+        let plugins = |from: &str, to: &str| -> std::collections::BTreeSet<&str> {
+            let at = src.find(from).expect("the start marker");
+            let body = &src[at..at + src[at..].find(to).expect("the end marker")];
+            body.match_indices("crate::capture::")
+                .map(|(i, m)| {
+                    let rest = &body[i + m.len()..];
+                    &rest[..rest
+                        .find(|c: char| !c.is_alphanumeric())
+                        .unwrap_or(rest.len())]
+                })
+                .filter(|n| n.ends_with("Plugin"))
+                .collect()
+        };
+        let mut fleet = plugins("impl Plugin for DevProbesPlugin", "\n/// Every instrument");
+        fleet.remove("CapturePlugin");
+        let listed = plugins("pub(crate) fn add_every_instrument", "\n}\n");
+        assert_eq!(
+            fleet, listed,
+            "`add_every_instrument` lists the probe fleet"
+        );
+    }
+
+    /// The fleet builds into a second app in the same process, as a test binary that runs its
+    /// tests on threads builds many: an instrument with process-wide state keeps one copy of it.
+    #[test]
+    fn the_instrument_fleet_builds_twice_in_one_process() {
+        for _ in 0..2 {
+            let _app = crate::game_plugins::schedule_tests::headless_client_with(
+                super::add_every_instrument,
+            );
         }
     }
 }

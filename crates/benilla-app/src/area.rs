@@ -5,6 +5,10 @@
 //! - A zone id change fires `ZONE_CHANGED_NEW_AREA` alone; else a text change fires
 //!   `ZONE_CHANGED_INDOORS` or `ZONE_CHANGED` by the indoor bit. The first world-enter is a zone
 //!   id change from the zeroed cache.
+//! - The leaf is the area query's answer (`0x6703a0`): on a map whose WDT holds one global WMO,
+//!   `Map.dbc` field 19 for every entity; elsewhere the down-ray's WMO row, else the terrain. The
+//!   indoor naming below still applies on such a map, as `0x67e510` takes the indoor arm by the
+//!   indoor bit alone.
 //! - The zone is the leaf's single-hop parent (AreaTable field 2, itself when 0).
 //! - The indoor bit is the faces-only down-ray (`0x6a87f0`): the surface below is a WMO face whose
 //!   group lacks MOGP `0x8` EXTERIOR.
@@ -27,15 +31,14 @@
 //! index, because the raw index can alias across adjacent buildings.
 //!
 //! `GetZonePVPInfo`'s type and faction show only on a PvP realm or in one of the six capitals
-//! (zone Flags `0x10`); elsewhere they are nil and the stock zone texts stay uncoloured.
+//! (zone Flags `0x10`); elsewhere they are nil and the stock zone texts stay uncoloured. The
+//! commit pushes the zone's row; the realm flag here and our faction template (`crate::ui_unit`)
+//! are pushed as they change, and the getter reads all three at the call (`0x48d540`).
 
-use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 
 use benilla_formats::{AreaTableCatalog, AreaTableRow};
-use benilla_ui::script::UiScript;
 
-use crate::net::{ObjectStore, SelfPlayer};
 use crate::target::Factions;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
@@ -59,11 +62,31 @@ fn load_area_table(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     }
 }
 
+/// `s_zoneId` (`0xb4e314`): the zone the last zone-text commit stored, the leaf's parent zone
+/// (`AreaTable +0x8`) else the leaf. Committed on the tenth-tick poll while our player is held,
+/// so an area id with no row keeps the last commit; `None` until the first commit of a world
+/// session, and only the session's teardown (`0x491180`) zeroes it, so a reload keeps it.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CommittedZone(pub(crate) Option<u32>);
+
+/// `s_realZoneText` (`0xb4b404`): the real zone name the last commit stored. Its change walks the
+/// zone channels (`0x4948b7` → `0x494931`). Like the zone it outlives a reload and is cleared only
+/// at the session's end (`0x491180`); an empty name leaves it as it was (`0x49489a`).
+#[derive(Resource, Default)]
+pub(crate) struct CommittedZoneText(String);
+
+/// The session's end, standing in for `ShutdownGame`'s zeroing of `0xb4e314` and `0xb4b404`
+/// (`0x491180`).
+fn clear_committed_zone(mut zone: ResMut<CommittedZone>, mut text: ResMut<CommittedZoneText>) {
+    zone.set_if_neq(CommittedZone(None));
+    text.0.clear();
+}
+
 /// The client's zone-text cache: the compare targets of `0x494780`, the minimap line's cache
 /// (`0x494970`) and the indoor dedup pair (`[0x868608]`, `[0x86860c]`). It lives per VM, so every
 /// login starts zeroed and its first resolve is a NEW_AREA.
 #[derive(Default)]
-struct ZoneCache {
+pub(crate) struct ZoneCache {
     /// `None` until the first resolve.
     zone_id: Option<u32>,
     zone_text: String,
@@ -74,6 +97,24 @@ struct ZoneCache {
     /// The previous hit group (`[0x86860c]`, keyed as the module doc's deviation says).
     wmo_id: u32,
     wmo_group: u32,
+    /// The realm flag last pushed to this VM.
+    realm_pvp: Option<bool>,
+    /// The zone the VM's channel catalog was last fed for ([`crate::ui_chat::ZoneCommit`]).
+    catalog: Option<Option<u32>>,
+}
+
+/// What a commit leaves for the steps after the stores: the walk and the events.
+struct Committed {
+    /// `0x494780` ran. A hit group the indoor dedup passes stops short of it (`0x67e510`), with
+    /// nothing after to do.
+    called: bool,
+    zone: u32,
+    /// The real zone text changed to a nonempty one.
+    real_changed: bool,
+    event: Option<&'static str>,
+    /// `MINIMAP_ZONE_CHANGED`'s new text.
+    minimap: Option<String>,
+    texts: (String, String),
 }
 
 /// One resolve's compare inputs.
@@ -99,183 +140,218 @@ fn elect_event(cache: &ZoneCache, next: &ZoneSignal) -> Option<&'static str> {
     None
 }
 
-/// Resolves the texts and PvP info, pushes the zone caches, then fires the elected zone event and,
-/// independently, `MINIMAP_ZONE_CHANGED`.
-fn feed_zone_events(
-    script: Option<NonSendMut<UiScript>>,
+/// Resolves the texts and PvP info, pushes the zone caches, then walks the zone channels and fires
+/// the elected zone event and, independently, `MINIMAP_ZONE_CHANGED`. The poll `0x5db900` counts
+/// every tick in `ticks` (`0xc4d790`), which nothing resets, and reports only on the tenth,
+/// subtracting ten (`0x5db906`, `0x5db917`); the other nine return at once. It reports the active
+/// mover's position, else the active player's, and nothing with neither held (`0x5db937`,
+/// `0x5db956`, `0x5db95d`): after a worldport frees every object, the commit waits for our
+/// player's create. It runs on the tick after the tick's packets (category 6's drain `0x403620`,
+/// then category 5's `0x401ec0`), so it reads a player that arrived this frame.
+///
+/// The walk is `UpdateZoneText`'s own (`0x494931`), after the caches and ahead of the event
+/// (`0x49493f`, `0x49495f`), when the real zone text changed; the zone feeds the verbs' catalog
+/// as it is stored (`0x49479a`).
+#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
+pub(crate) fn feed_zone_events(
+    mut ticks: Local<u32>,
+    mut vm: crate::script_calls::VmWith<crate::ui_chat::ZoneCommit<'static, 'static>>,
+    me: Query<(), (With<crate::net::SelfPlayer>, With<crate::net::ObjectStore>)>,
     world: benilla_world::world_point::WorldPoint,
     areas: Option<Res<AreaTableRes>>,
     factions: Option<Res<Factions>>,
-    self_store: Query<&ObjectStore, With<SelfPlayer>>,
     realm_pvp: Option<Res<RealmPvp>>,
     mut cache: Local<crate::ui_script::VmMemo<ZoneCache>>,
+    mut real_text: ResMut<CommittedZoneText>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
+    mut cascade: Option<ResMut<crate::ui_chat::GuildRecruitmentCascade>>,
 ) {
-    let (Some(mut script), Some(areas)) = (script, areas) else {
-        return;
-    };
-    let cache = cache.get(&script);
-    let Some(leaf) = world.area() else { return };
-    let Some(leaf_row) = areas.0.get(leaf) else {
+    *ticks += 1;
+    let due = *ticks >= 10;
+    if due {
+        *ticks -= 10;
+    }
+    let done = vm.run(|script| {
+        let script = script?;
+        let cache = cache.get(script);
+        let realm_pvp = realm_pvp.is_some_and(|r| r.0);
+        if cache.realm_pvp != Some(realm_pvp) {
+            cache.realm_pvp = Some(realm_pvp);
+            script.set_realm_pvp(realm_pvp);
+        }
+        if !due {
+            return None;
+        }
+        let areas = areas.as_deref()?;
+        if me.is_empty() {
+            return None;
+        }
+        let leaf = world.area()?;
         // An unknown id keeps the last state, as the resolver does for areaId 0.
-        return;
-    };
-    let zone = if leaf_row.zone_id == 0 {
-        leaf
-    } else {
-        leaf_row.zone_id
-    };
-    let real_zone_text = areas.0.name(zone).unwrap_or_default().to_string();
-    let indoor = world.area_interior().is_some();
+        let leaf_row = areas.0.get(leaf)?;
+        let zone = if leaf_row.zone_id == 0 {
+            leaf
+        } else {
+            leaf_row.zone_id
+        };
+        let real_zone_text = areas.0.name(zone).unwrap_or_default().to_string();
+        let indoor = world.area_interior().is_some();
 
-    // The outdoor texts `0x67e670` starts from.
-    let mut zone_text = real_zone_text.clone();
-    let mut subzone_text = if leaf == zone {
-        String::new()
-    } else {
-        leaf_row.name.clone()
-    };
+        // The outdoor texts `0x67e670` starts from.
+        let mut zone_text = real_zone_text.clone();
+        let mut subzone_text = if leaf == zone {
+            String::new()
+        } else {
+            leaf_row.name.clone()
+        };
 
-    let mut wmo_group = 0u32;
-    if let Some((k, group, default)) = world.area_interior_rows() {
-        // The client keys `[groupRec+0x7c]`, nonzero-gated; see the module doc's deviation.
-        wmo_group = k.group_area_id;
-        if cache.indoor
-            && k.group_area_id != 0
-            && (cache.wmo_id, cache.wmo_group) == (k.wmo_id, wmo_group)
-        {
-            return;
-        }
-        cache.wmo_id = k.wmo_id;
-        // The whole-WMO -1 row. An unnamed one with `AreaTableID` 0 takes the leaf's name, which
-        // is the terrain areaId the client's area-0 arm reads.
-        let a_name = default.as_ref().map(|d| {
-            if !d.name.is_empty() {
-                d.name.clone()
-            } else if d.area_table_id != 0 {
-                areas
-                    .0
-                    .name(d.area_table_id)
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                leaf_row.name.clone()
+        let mut wmo_group = 0u32;
+        if let Some((k, group, default)) = world.area_interior_rows() {
+            // The client keys `[groupRec+0x7c]`, nonzero-gated; see the module doc's deviation.
+            wmo_group = k.group_area_id;
+            if cache.indoor
+                && k.group_area_id != 0
+                && (cache.wmo_id, cache.wmo_group) == (k.wmo_id, wmo_group)
+            {
+                return Some(Committed {
+                    called: false,
+                    zone,
+                    real_changed: false,
+                    event: None,
+                    minimap: None,
+                    texts: Default::default(),
+                });
             }
-        });
-        if let Some(a) = a_name.filter(|n| !n.is_empty()) {
-            if a != subzone_text {
-                zone_text = a;
-                subzone_text = String::new();
+            cache.wmo_id = k.wmo_id;
+            // The whole-WMO -1 row. An unnamed one with `AreaTableID` 0 takes the leaf's name,
+            // which is the terrain areaId the client's area-0 arm reads.
+            let a_name = default.as_ref().map(|d| {
+                if !d.name.is_empty() {
+                    d.name.clone()
+                } else if d.area_table_id != 0 {
+                    areas
+                        .0
+                        .name(d.area_table_id)
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    leaf_row.name.clone()
+                }
+            });
+            if let Some(a) = a_name.filter(|n| !n.is_empty()) {
+                if whole_wmo_name_takes_the_zone(&a, &subzone_text) {
+                    zone_text = a;
+                    subzone_text = String::new();
+                }
+            }
+            // The hit group's own row refills the subzone.
+            if let Some(b) = group
+                .as_ref()
+                .map(|r| r.name.as_str())
+                .filter(|n| !n.is_empty())
+            {
+                subzone_text = b.to_string();
             }
         }
-        // The hit group's own row refills the subzone.
-        if let Some(b) = group
-            .as_ref()
-            .map(|r| r.name.as_str())
-            .filter(|n| !n.is_empty())
-        {
-            subzone_text = b.to_string();
+        let signal = ZoneSignal {
+            zone_id: zone,
+            zone_text,
+            subzone_text,
+            indoor,
+        };
+        let minimap_text = if signal.subzone_text.is_empty() {
+            signal.zone_text.clone()
+        } else {
+            signal.subzone_text.clone()
+        };
+
+        let event = elect_event(cache, &signal);
+        let minimap_changed = cache.minimap_text != minimap_text;
+        // An empty name stores nothing and walks nothing (`0x49489a` → `0x494936`); the compare
+        // ignores case (`0x4948b0` → `0x64a4c0`).
+        let real_changed =
+            !real_zone_text.is_empty() && !real_text.0.eq_ignore_ascii_case(&real_zone_text);
+        let texts = (signal.zone_text.clone(), signal.subzone_text.clone());
+        if event.is_some() || minimap_changed || real_changed {
+            script.set_zone_texts(benilla_ui::script::ZoneTexts {
+                zone: signal.zone_text.clone(),
+                real_zone: real_zone_text.clone(),
+                subzone: signal.subzone_text.clone(),
+                minimap: minimap_text.clone(),
+                pvp_zone: zone_pvp(areas.0.get(zone), factions.as_deref()),
+                is_arena: leaf_row.flags & 0x80 != 0,
+            });
         }
-    }
-    let signal = ZoneSignal {
-        zone_id: zone,
-        zone_text,
-        subzone_text,
-        indoor,
-    };
-    let minimap_text = if signal.subzone_text.is_empty() {
-        signal.zone_text.clone()
-    } else {
-        signal.subzone_text.clone()
-    };
-
-    let event = elect_event(cache, &signal);
-    let minimap_changed = cache.minimap_text != minimap_text;
-    if event.is_none() && !minimap_changed {
-        return;
-    }
-
-    let zone_row = areas.0.get(zone);
-    let template = factions
-        .as_ref()
-        .zip(self_store.single().ok())
-        .and_then(|(f, store)| f.catalog().template(store.0.unit_faction_template()?))
-        .map(|t| (t.friend_group_mask, t.enemy_group_mask));
-    let realm_pvp = realm_pvp.is_some_and(|r| r.0);
-    let (ty, is_arena) = zone_pvp_info(realm_pvp, leaf_row, zone_row, template);
-    // factionName is FactionGroup.dbc's Name for the zone's mask bit.
-    let pvp = ty.map(|ty| {
-        let mask = zone_row.map_or(0, |r| r.faction_group_mask);
-        let name = factions
-            .as_ref()
-            .and_then(|f| f.catalog().faction_group_name(mask))
-            .unwrap_or("");
-        (ty, name)
+        cache.zone_id = Some(signal.zone_id);
+        cache.zone_text = signal.zone_text;
+        cache.subzone_text = signal.subzone_text;
+        if real_changed {
+            real_text.0 = real_zone_text;
+        }
+        cache.minimap_text.clone_from(&minimap_text);
+        cache.indoor = signal.indoor;
+        cache.wmo_group = wmo_group;
+        Some(Committed {
+            called: true,
+            zone,
+            real_changed,
+            event,
+            minimap: minimap_changed.then_some(minimap_text),
+            texts,
+        })
     });
-    let pvp_type = pvp.map_or("", |(ty, _)| ty);
+    let Some(done) = done else { return };
 
-    script.set_zone_texts(benilla_ui::script::ZoneTexts {
-        zone: signal.zone_text.clone(),
-        real_zone: real_zone_text,
-        subzone: signal.subzone_text.clone(),
-        minimap: minimap_text.clone(),
-        pvp_type: pvp.map(|(ty, _)| ty.to_string()),
-        pvp_faction: pvp_faction_text(pvp),
-        is_arena,
+    // The zone is stored (`0x49479a`) outside the host's reads, feeds the verbs, and the walk
+    // follows the caches (`0x494931`).
+    let walked = vm.turn(|script, mut commit| {
+        if done.called {
+            commit.store_zone(done.zone);
+        }
+        let Some(script) = script else { return false };
+        commit.feed_catalog(script, Some(done.zone), &mut cache.get(script).catalog);
+        done.called
+            && commit.walk_on_commit(script, done.zone, done.real_changed, cinematic.as_deref())
     });
-
-    if let Some(event) = event {
-        script.fire_event(event, vec![]);
-        debug!(
-            "area: {event} → zone {:?} / sub {:?} ({pvp_type})",
-            signal.zone_text, signal.subzone_text
-        );
-    }
-    if minimap_changed {
-        script.fire_event("MINIMAP_ZONE_CHANGED", vec![]);
-        debug!("area: minimap zone text → {minimap_text:?}");
-    }
-    cache.zone_id = Some(signal.zone_id);
-    cache.zone_text = signal.zone_text;
-    cache.subzone_text = signal.subzone_text;
-    cache.minimap_text = minimap_text;
-    cache.indoor = signal.indoor;
-    cache.wmo_group = wmo_group;
+    vm.run(|script| {
+        let Some(script) = script else { return };
+        if walked {
+            if let Some(cascade) = cascade.as_deref_mut() {
+                cascade.tail(script);
+            }
+        }
+        if let Some(event) = done.event {
+            script.fire_event(event, vec![]);
+            debug!(
+                "area: {event} → zone {:?} / sub {:?}",
+                done.texts.0, done.texts.1
+            );
+        }
+        if let Some(minimap) = done.minimap {
+            script.fire_event("MINIMAP_ZONE_CHANGED", vec![]);
+            debug!("area: minimap zone text → {minimap:?}");
+        }
+    });
 }
 
-/// `GetZonePVPInfo`'s second value: with a type answered, the faction name is always a string,
-/// starting as the empty string (`0x48d633`, `0x882748`) and pushed by `lua_pushstring`
-/// (`0x48d68f`) whether or not a FactionGroup row supplied one; only the bail (`0x48d6b5`) pushes
-/// nil.
-fn pvp_faction_text(pvp: Option<(&str, &str)>) -> Option<String> {
-    pvp.map(|(_, faction)| faction.to_string())
-}
-
-/// `GetZonePVPInfo` (`0x48d540`): `(pvpType, isArena)`. isArena is the leaf's Flags `0x80`, read
-/// before any bail. The type is nil with no zone row, no faction template, or the display gate
-/// closed: it opens on a PvP realm ([`RealmPvp`]) or in a zone whose Flags carry `0x10`, the six
-/// capitals (`0x48d5c2`/`0x48d5cc`). Open, it is the zone's FactionGroupMask against the template's
-/// `(friend, enemy)` masks, "contested" when neither, never "arena".
-fn zone_pvp_info(
-    realm_pvp: bool,
-    leaf: &AreaTableRow,
+/// What `GetZonePVPInfo` (`0x48d540`) reads of the committed zone's row `zone`: the capital bit
+/// (Flags `0x10`, `0x48d5cc`), the `FactionGroupMask` (`+0x50`) and the faction name,
+/// `FactionGroup.dbc`'s for the mask, `""` when no row names one (`0x48d633`). `None` with no row
+/// (`0x48d5b4`).
+fn zone_pvp(
     zone: Option<&AreaTableRow>,
-    template: Option<(u32, u32)>,
-) -> (Option<&'static str>, bool) {
-    let is_arena = leaf.flags & 0x80 != 0;
-    let ty = zone
-        .filter(|z| realm_pvp || z.flags & 0x10 != 0)
-        .zip(template)
-        .map(|(z, (friend, enemy))| {
-            let mask = z.faction_group_mask;
-            if mask & friend != 0 {
-                "friendly"
-            } else if mask & enemy != 0 {
-                "hostile"
-            } else {
-                "contested"
-            }
-        });
-    (ty, is_arena)
+    factions: Option<&Factions>,
+) -> Option<benilla_ui::script::ZonePvp> {
+    let zone = zone?;
+    let mask = zone.faction_group_mask;
+    Some(benilla_ui::script::ZonePvp {
+        capital: zone.flags & 0x10 != 0,
+        faction_group_mask: mask,
+        faction_name: factions
+            .and_then(|f| f.catalog().faction_group_name(mask))
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 /// `[0x88272c]`, the realm's PvP flag the display gate reads: the selected realm's
@@ -287,13 +363,13 @@ pub(crate) struct RealmPvp(bool);
 /// Latch [`RealmPvp`] from the realm this session entered the world on.
 fn latch_realm_pvp(
     mut latch: ResMut<RealmPvp>,
-    roster: Option<Res<crate::char_select::Roster>>,
-    realms: Option<Res<crate::realm_select::Realms>>,
+    roster: Option<Res<crate::glue_session::roster::Roster>>,
+    tables: Option<Res<crate::glue_session::realm::RealmTables>>,
 ) {
     let realm_type = roster.and_then(|r| r.realm.as_ref().map(|realm| realm.realm_type));
     let row = realm_type
-        .zip(realms)
-        .and_then(|(t, realms)| realms.row_pvp(t));
+        .zip(tables)
+        .and_then(|(t, tables)| tables.row_pvp(t));
     latch.0 = latched_realm_pvp(latch.0, row);
 }
 
@@ -303,25 +379,43 @@ fn latched_realm_pvp(previous: bool, row_pvp: Option<bool>) -> bool {
     row_pvp.unwrap_or(previous)
 }
 
+/// Indoors the whole-WMO row's name replaces the zone text, and clears the subzone, only when it
+/// differs from the subzone text, ASCII case folded (`SStrCmpI` at `0x67e6e4`).
+fn whole_wmo_name_takes_the_zone(name: &str, subzone: &str) -> bool {
+    !name.eq_ignore_ascii_case(subzone)
+}
+
 /// The shared area catalog and the zone-event feed.
 pub(crate) struct AreaPlugin;
 
 impl Plugin for AreaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RealmPvp>()
+            .init_resource::<CommittedZone>()
+            .init_resource::<CommittedZoneText>()
+            // The session's end stands in for `ShutdownGame` (`0x491180`), the one zeroing.
+            .add_systems(
+                OnExit(crate::client_state::ClientState::InWorld),
+                clear_committed_zone,
+            )
             .add_systems(Startup, load_area_table.after(AssetSet::Open))
             .add_systems(
-                OnEnter(crate::char_select::ClientState::InWorld),
+                OnEnter(crate::client_state::ClientState::InWorld),
                 latch_realm_pvp,
             )
             .add_systems(
                 Update,
                 // After the leaf authority: leaf, indoor bit and names must come from one frame,
                 // as in the client's single-pass resolve (`0x67e510`), or a stale leaf fires a
-                // spurious splash.
+                // spurious splash. The commit's handlers read our template through the host, as the
+                // frame's packets left it.
                 feed_zone_events
-                    .after(crate::ui_script::UiInput)
-                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
+                    .after(crate::ui_script::UiTick)
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet)
+                    // And after the stream, the sound's listener and the hover, which read CVar
+                    // knobs (the clip and detail, the volumes, the rig) its handlers' calls write.
+                    .after(benilla_world::schedule::WorldStage::Stream)
+                    .after(crate::target::TargetUpdate),
             );
     }
 }
@@ -402,75 +496,22 @@ mod tests {
         }
     }
 
-    /// An Alliance player's template: friend Alliance (2), enemy Horde (4).
-    const ALLIANCE: Option<(u32, u32)> = Some((2, 4));
-
-    /// The display gate (`0x48d5c2`/`0x48d5cc`): a PvE realm outside a capital gets no type; a
-    /// capital's Flags `0x10` opens it there, and a PvP realm opens it everywhere.
+    /// The zone's row as the getter reads it: the capital bit, the mask and its faction name,
+    /// `""` for a mask no `FactionGroup` row names; no row, nothing to read.
     #[test]
-    fn the_pvp_type_shows_on_a_pvp_realm_or_in_a_capital() {
-        let elwynn = row(0x40, 2);
-        let stormwind = row(0x138, 2);
+    fn the_commit_pushes_the_zones_capital_bit_mask_and_faction_name() {
         let orgrimmar = row(0x138, 4);
         let stranglethorn = row(0x40, 0);
-        let pvp =
-            |realm_pvp, zone: &AreaTableRow| zone_pvp_info(realm_pvp, zone, Some(zone), ALLIANCE).0;
-
-        assert_eq!(pvp(false, &elwynn), None, "PvE realm, outside a capital");
         assert_eq!(
-            pvp(false, &stranglethorn),
-            None,
-            "PvE realm, ownerless zone"
+            zone_pvp(Some(&orgrimmar), None),
+            Some(benilla_ui::script::ZonePvp {
+                capital: true,
+                faction_group_mask: 4,
+                faction_name: String::new(),
+            })
         );
-        assert_eq!(
-            pvp(false, &stormwind),
-            Some("friendly"),
-            "PvE realm, own capital"
-        );
-        assert_eq!(
-            pvp(false, &orgrimmar),
-            Some("hostile"),
-            "PvE realm, enemy capital"
-        );
-
-        assert_eq!(pvp(true, &elwynn), Some("friendly"));
-        assert_eq!(pvp(true, &stranglethorn), Some("contested"));
-        assert_eq!(pvp(true, &orgrimmar), Some("hostile"));
-    }
-
-    /// An answered type always carries a faction string, `""` in an ownerless zone such as
-    /// Stranglethorn Vale (`0x48d633`); no type, no string (`0x48d6b5`).
-    #[test]
-    fn an_answered_type_carries_an_empty_faction_name_not_nil() {
-        assert_eq!(
-            pvp_faction_text(Some(("contested", ""))),
-            Some(String::new())
-        );
-        assert_eq!(
-            pvp_faction_text(Some(("friendly", "Alliance"))),
-            Some("Alliance".to_string())
-        );
-        assert_eq!(pvp_faction_text(None), None);
-    }
-
-    /// isArena is the leaf's `0x80`, read before any bail, so a closed gate keeps it.
-    #[test]
-    fn is_arena_survives_a_closed_gate() {
-        let battle_ring = row(0xd0, 0);
-        let stranglethorn = row(0x40, 0);
-        assert_eq!(
-            zone_pvp_info(false, &battle_ring, Some(&stranglethorn), ALLIANCE),
-            (None, true)
-        );
-        assert_eq!(
-            zone_pvp_info(true, &battle_ring, Some(&stranglethorn), ALLIANCE),
-            (Some("contested"), true)
-        );
-        assert_eq!(
-            zone_pvp_info(true, &battle_ring, Some(&stranglethorn), None),
-            (None, true),
-            "no faction template"
-        );
+        assert!(!zone_pvp(Some(&stranglethorn), None).unwrap().capital);
+        assert_eq!(zone_pvp(None, None), None);
     }
 
     /// A realm type with no row keeps what the last world entry stored.
@@ -482,15 +523,6 @@ mod tests {
         assert!(latched_realm_pvp(false, Some(true)));
     }
 
-    /// No zone row is a bail, not an ownerless zone.
-    #[test]
-    fn a_missing_zone_row_has_no_pvp_type() {
-        assert_eq!(
-            zone_pvp_info(true, &row(0, 0), None, ALLIANCE),
-            (None, false)
-        );
-    }
-
     /// On the install's AreaTable the gate opens in exactly the six capitals for a PvE realm.
     #[test]
     fn the_six_capitals_are_the_zones_a_pve_realm_colours() {
@@ -499,9 +531,8 @@ mod tests {
         let cat = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
         let open: Vec<u32> = (0..=u32::from(u16::MAX))
             .filter(|&id| {
-                cat.get(id).is_some_and(|r| {
-                    r.zone_id == 0 && zone_pvp_info(false, r, Some(r), ALLIANCE).0.is_some()
-                })
+                cat.get(id)
+                    .is_some_and(|r| r.zone_id == 0 && zone_pvp(Some(r), None).unwrap().capital)
             })
             .collect();
         assert_eq!(open, [1497, 1519, 1537, 1637, 1638, 1657]);
@@ -539,5 +570,230 @@ mod tests {
             cat.group_row(53, 2, 0).is_none_or(|g| g.name.is_empty()),
             "no named group rows — query B leaves the nulled subzone alone"
         );
+    }
+
+    /// `GetZonePVPInfo` (`0x48d540`) reads, at the call, the zone the last commit stored
+    /// (`0xb4e314`) and the active player's faction template (`0x48d5b4`-`0x48d5fe`): a capital
+    /// entered before our template arrives answers once it is there, with no zone change between,
+    /// and the type follows a template that changes.
+    #[test]
+    fn the_zone_pvp_type_reads_our_template_at_the_call() {
+        use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+        use crate::target::relations::fixture::{factions, HUMAN, ORC};
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        use benilla_ui::script::UiScript;
+        const ME: u64 = 0x7;
+        const ORGRIMMAR: u32 = 1637;
+        /// `UNIT_FIELD_FACTIONTEMPLATE`.
+        const TEMPLATE: u16 = 35;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let world = app.world_mut();
+        benilla_world::world_point::init_world_point_resources(world);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(NetCommands(tx));
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        world.insert_resource(factions());
+        world.insert_resource(AreaTableRes(AreaTableCatalog::from_rows(vec![(
+            ORGRIMMAR,
+            AreaTableRow {
+                name: "Orgrimmar".into(),
+                ..row(0x138, 4)
+            },
+        )])));
+        world.insert_resource(benilla_world::terrain_stream::CurrentArea(Some(ORGRIMMAR)));
+        world.insert_non_send_resource(UiScript::new().unwrap());
+        let store = |template: Option<u32>| {
+            let pairs: Vec<(u16, u32)> = template.map(|t| (TEMPLATE, t)).into_iter().collect();
+            ObjectStore(ObjectFields::from_pairs(&pairs).into_created(ObjectType::Player))
+        };
+        let me = world.spawn((SelfPlayer, Guid(ME), store(None))).id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        let pvp = |app: &mut App| {
+            let world = app.world_mut();
+            // The poll's tenth tick (`0x5db906`).
+            for _ in 0..10 {
+                world.run_system_cached(feed_zone_events).unwrap();
+            }
+            crate::script_calls::with_hosted_vm(world, |s| {
+                s.expect("a VM")
+                    .eval::<(Option<String>, Option<String>)>(
+                        "local t, f = GetZonePVPInfo() return t, f",
+                    )
+                    .unwrap()
+            })
+        };
+        assert_eq!(pvp(&mut app), (None, None), "no template: nil");
+        app.world_mut().entity_mut(me).insert(store(Some(ORC)));
+        assert_eq!(pvp(&mut app).0.as_deref(), Some("friendly"));
+        app.world_mut().entity_mut(me).insert(store(Some(HUMAN)));
+        assert_eq!(pvp(&mut app).0.as_deref(), Some("hostile"));
+    }
+
+    /// A worldport frees our player with every object (`0x467700`) and its create comes after the
+    /// load. The zone poll reports only the active mover's, else the active player's, position
+    /// (`0x5db937`, `0x5db956`), and runs on the tick's category 5 after the category 6 packet
+    /// drain (`0x401ec0`, `0x403620`), so the commit `0x494780` waits for our player and follows
+    /// its arrival. A capital entered on a PvE realm answers its type inside the new area's event.
+    #[test]
+    fn a_worldport_commits_the_zone_once_our_player_is_back() {
+        use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+        use crate::target::relations::fixture::{factions, ORC};
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        use benilla_ui::script::UiScript;
+        const ME: u64 = 0x7;
+        const ORGRIMMAR: u32 = 1637;
+        /// `UNIT_FIELD_FACTIONTEMPLATE`.
+        const TEMPLATE: u16 = 35;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let world = app.world_mut();
+        benilla_world::world_point::init_world_point_resources(world);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(NetCommands(tx));
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        world.insert_resource(factions());
+        world.insert_resource(AreaTableRes(AreaTableCatalog::from_rows(vec![(
+            ORGRIMMAR,
+            AreaTableRow {
+                name: "Orgrimmar".into(),
+                ..row(0x138, 4)
+            },
+        )])));
+        // The body is at the port's destination before our player's create arrives.
+        world.insert_resource(benilla_world::terrain_stream::CurrentArea(Some(ORGRIMMAR)));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                Seen = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+                f:SetScript("OnEvent", function()
+                    table.insert(Seen, tostring((GetZonePVPInfo())))
+                end)
+                "#,
+            )
+            .unwrap();
+        world.insert_non_send_resource(script);
+        let frame = |app: &mut App| {
+            let world = app.world_mut();
+            // The poll's tenth tick (`0x5db906`).
+            for _ in 0..10 {
+                world.run_system_cached(feed_zone_events).unwrap();
+            }
+            let s = world.non_send_resource::<UiScript>();
+            let seen = s.eval::<Vec<String>>("return Seen").unwrap();
+            s.run("Seen = {}").unwrap();
+            seen
+        };
+        assert_eq!(
+            frame(&mut app),
+            Vec::<String>::new(),
+            "no player, no commit"
+        );
+        let store = ObjectStore(
+            ObjectFields::from_pairs(&[(TEMPLATE, ORC)]).into_created(ObjectType::Player),
+        );
+        let me = app.world_mut().spawn((SelfPlayer, Guid(ME), store)).id();
+        app.world_mut().resource_mut::<GuidIndex>().0.insert(ME, me);
+        assert_eq!(frame(&mut app), ["friendly"]);
+    }
+
+    /// The poll `0x5db900` counts its calls (`0xc4d790`) and reports the area only on the tenth
+    /// (`0x5db906`, `jl 0x5db975`), subtracting ten (`0x5db917`): the first commit lands on the
+    /// tenth tick, and a subzone crossed and recrossed between two polls signals nothing.
+    #[test]
+    fn the_area_commits_on_every_tenth_tick() {
+        use crate::net::{Guid, GuidIndex, ObjectStore, SelfGuid, SelfPlayer};
+        use benilla_protocol::messages::ObjectType;
+        use benilla_ui::script::UiScript;
+        use benilla_world::terrain_stream::CurrentArea;
+        const ME: u64 = 0x7;
+        const ELWYNN: u32 = 12;
+        const GOLDSHIRE: u32 = 87;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let world = app.world_mut();
+        benilla_world::world_point::init_world_point_resources(world);
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        world.insert_resource(AreaTableRes(AreaTableCatalog::from_rows(vec![
+            (
+                ELWYNN,
+                AreaTableRow {
+                    name: "Elwynn Forest".into(),
+                    ..row(0, 0)
+                },
+            ),
+            (
+                GOLDSHIRE,
+                AreaTableRow {
+                    name: "Goldshire".into(),
+                    zone_id: ELWYNN,
+                    ..row(0, 0)
+                },
+            ),
+        ])));
+        world.insert_resource(CurrentArea(Some(ELWYNN)));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                Seen = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+                f:RegisterEvent("ZONE_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(Seen, event) end)
+                "#,
+            )
+            .unwrap();
+        world.insert_non_send_resource(script);
+        let store = ObjectStore(ObjectFields::from_pairs(&[]).into_created(ObjectType::Player));
+        let me = world.spawn((SelfPlayer, Guid(ME), store)).id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        let ticks = |app: &mut App, area: u32, n: usize| {
+            let world = app.world_mut();
+            world.insert_resource(CurrentArea(Some(area)));
+            for _ in 0..n {
+                world.run_system_cached(feed_zone_events).unwrap();
+            }
+            let s = world.non_send_resource::<UiScript>();
+            let seen = s.eval::<Vec<String>>("return Seen").unwrap();
+            s.run("Seen = {}").unwrap();
+            seen
+        };
+        use benilla_protocol::ObjectFields;
+        assert!(ticks(&mut app, ELWYNN, 9).is_empty(), "nine ticks return");
+        assert_eq!(ticks(&mut app, ELWYNN, 1), ["ZONE_CHANGED_NEW_AREA"]);
+        assert!(ticks(&mut app, GOLDSHIRE, 3).is_empty());
+        assert!(
+            ticks(&mut app, ELWYNN, 7).is_empty(),
+            "Goldshire left before the next poll"
+        );
+        assert!(ticks(&mut app, GOLDSHIRE, 9).is_empty());
+        assert_eq!(ticks(&mut app, GOLDSHIRE, 1), ["ZONE_CHANGED"]);
+        // `0xb4e314` holds the leaf's parent zone, and an id with no row keeps the last commit.
+        let committed = |app: &App| app.world().resource::<CommittedZone>().0;
+        assert_eq!(committed(&app), Some(ELWYNN));
+        ticks(&mut app, 4242, 10);
+        assert_eq!(committed(&app), Some(ELWYNN), "no row, no commit");
+    }
+
+    /// `0x67e6e4` compares the whole-WMO name with the subzone by `SStrCmpI` (`0x64a4c0`, limit
+    /// `0x7fffffff`): a name that differs only in case keeps both texts.
+    #[test]
+    fn the_whole_wmo_name_compares_without_case() {
+        assert!(!whole_wmo_name_takes_the_zone(
+            "The Great Forge",
+            "the great forge"
+        ));
+        assert!(!whole_wmo_name_takes_the_zone("Ironforge", "Ironforge"));
+        assert!(whole_wmo_name_takes_the_zone(
+            "Ironforge",
+            "The Great Forge"
+        ));
+        assert!(whole_wmo_name_takes_the_zone("Ironforge", ""));
     }
 }

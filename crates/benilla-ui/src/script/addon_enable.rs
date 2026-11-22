@@ -93,7 +93,7 @@ pub trait AddonStateFiles {
 /// rebuilt whole (`0x51f0b0` clears it, then callback `0x472300` fills a node per record through
 /// `AddOnList_LoadCharacter 0x51ebe0`), each holding that character's enable hash. A character
 /// with no file is an empty node, whose enable bit is answered from the others.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct EnableStore {
     /// The realm half of every node's file.
     realm: String,

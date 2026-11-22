@@ -78,6 +78,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         positions: vec![[0.0; 3]; normals.len()],
         normals,
         uvs: vec![[0.0; 2]; 0],
+        uvs2: Vec::new(),
         indices: vec![],
         texture: None,
         skin_slot: None,
@@ -100,6 +101,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         additive: false,
         no_depth_write: false,
         no_depth_test: false,
+        no_hit_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
         billboard: billboard.then(|| Billboard {
             bone: 0,
@@ -116,7 +118,10 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         rgb_seq: None,
         wmo_batch: None,
         env_map: false,
+        stage1: None,
+        combine: 1,
         section: None,
+        order: None,
     };
 
     assert!(

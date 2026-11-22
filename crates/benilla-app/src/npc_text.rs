@@ -14,18 +14,23 @@
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{Guid, GuidIndex, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
+use crate::ui_unit::UnitNames;
 
-/// The unit a `$`-macro expands against: the self player, or the speaker at the reference's four
-/// chat sites.
+/// The unit a `$`-macro expands against: the self player, or a chat line's subject at the
+/// reference's four chat sites.
 pub(crate) struct Subject {
     pub name: String,
-    /// `UNIT_FIELD_BYTES_0` bytes 0 and 1, into `ChrRaces` and `ChrClasses`, which the reference
-    /// reads at the client's locale column; we read [`crate::ui_unit`]'s rows, the enUS column's.
-    pub race: u8,
-    pub class: u8,
+    /// `UNIT_FIELD_BYTES_0` bytes 0 and 1 resolved through `ChrRaces` and `ChrClasses`, at the
+    /// client's locale column; empty for an id with no row, which the reference faults on.
+    pub race: String,
+    pub class: String,
     /// `UNIT_FIELD_BYTES_0` byte 2; `$G` takes the first arm on 0, the second on anything else.
     pub gender: u8,
+    /// A player: a unit with the player type bit, or a name-cache record. `$R` and `$C` print any
+    /// other unit's name instead (`0x50715d`-`0x50716b`, `0x5071ea`-`0x5071f7`).
+    pub player: bool,
 }
 
 /// Everything a `$`-token can read; `states` is the reference's global world-state table
@@ -96,12 +101,18 @@ pub(crate) fn substitute_checked(text: &str, ctx: &MacroContext) -> (String, boo
                 None => fail = true,
             },
             Some(tok @ ('R' | 'r' | 'C' | 'c')) => match subject {
+                // A unit that is not a player prints its name, straight to the tail: the
+                // lower-casing (`0x5071a3`) is on the table arm only.
+                Some(s) if !s.player => {
+                    out.push_str(&s.name);
+                    i = j + 1;
+                }
                 Some(s) => {
                     // An id outside the table faults the reference; we emit nothing.
                     let name = if matches!(tok, 'R' | 'r') {
-                        crate::ui_unit::race_names(s.race).map_or("", |(display, _)| display)
+                        s.race.as_str()
                     } else {
-                        crate::ui_unit::class_names(s.class).map_or("", |(display, _)| display)
+                        s.class.as_str()
                     };
                     if tok.is_ascii_lowercase() {
                         out.push_str(&name.to_ascii_lowercase());
@@ -144,6 +155,19 @@ pub(crate) fn substitute_checked(text: &str, ctx: &MacroContext) -> (String, boo
     (out, clean)
 }
 
+/// Whether `text`'s expansion fails with no subject: it holds a person token, or one outside the
+/// set. Only such a failure makes the chat path wait on the subject's name (`0x49dac2`). The
+/// world-state tokens never refuse, a missing key reading 0 (`0x507537`, `0x507544`, `0x4c5810`),
+/// so the empty table answers as the live one would.
+pub(crate) fn needs_subject(text: &str) -> bool {
+    let states = crate::world_state::WorldStates::default();
+    let ctx = MacroContext {
+        subject: None,
+        states: &states,
+    };
+    !substitute_checked(text, &ctx).1
+}
+
 /// Parses a `first:second;` branch body: the two arms and the index past the `;`.
 fn parse_branch(chars: &[char], start: usize) -> Option<(&[char], &[char], usize)> {
     let colon = (start..chars.len()).find(|&j| chars[j] == ':' || chars[j] == ';')?;
@@ -165,67 +189,114 @@ fn trim_spaces(arm: &[char]) -> &[char] {
     &arm[start..end]
 }
 
-/// The self player as a macro [`Subject`], once it is streamed and its name is known.
+/// The self player as a macro [`Subject`], once it is streamed and its name is known. The expander
+/// reads the name cache without a callback (`0x506fd4`), and our own name is seeded at login.
 pub(crate) fn player_identity(
     self_q: &Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     names: &NameCache,
-    commands: &NetCommands,
+    unit_names: UnitNames<'_>,
 ) -> Option<Subject> {
     let (store, guid) = self_q.iter().next()?;
+    player_subject(guid.0, store, names, unit_names)
+}
+
+/// The self player `guid` as a macro [`Subject`] off `store`, its descriptor as the caller reads
+/// it, once its name is known.
+pub(crate) fn player_subject(
+    guid: u64,
+    store: &ObjectStore,
+    names: &NameCache,
+    unit_names: UnitNames<'_>,
+) -> Option<Subject> {
     Some(Subject {
-        name: names.resolve(guid.0, commands)?.to_string(),
-        race: store.0.unit_race().unwrap_or(0),
-        class: store.0.unit_class().unwrap_or(0),
+        name: names.resolve_player(guid, Ask::Read)?.to_string(),
+        race: race_word(unit_names, store.0.unit_race().unwrap_or(0)),
+        class: class_word(unit_names, store.0.unit_class().unwrap_or(0)),
         gender: store.0.unit_gender().unwrap_or(0),
+        player: true,
     })
 }
 
-/// The chat feed's [`Subject`] for any guid: the object manager's descriptors, else the name
-/// cache (`0x506f70`). Guid 0 has no subject.
+/// A race byte's display name, empty with no row.
+fn race_word(names: UnitNames<'_>, race: u8) -> String {
+    names
+        .race(race)
+        .map_or_else(String::new, |(n, _)| n.to_string())
+}
+
+/// A class byte's display name, empty with no row.
+fn class_word(names: UnitNames<'_>, class: u8) -> String {
+    names
+        .class(class)
+        .map_or_else(String::new, |(n, _)| n.to_string())
+}
+
+/// The chat feed's [`Subject`] for any guid, resolved as the expander `0x506f70` resolves it: the
+/// unit the object manager holds (type mask 8, `0x506fad`), else the player-name cache's record
+/// (`0x506fcf`, `0x506fd4`), which the expansion only reads; the chat handler's own lookup with a
+/// callback asks for it (`0x49d9f5`, `0x49daea`), as `ask` says. A held unit is named by
+/// `GetUnitName` (`0x50710b` → `0x507124`, `0x609210`), which never fails: its miss is
+/// `unknown`, the `UNKNOWNOBJECT` text. A creature not streamed has no record in the name cache,
+/// and guid 0 no subject.
 pub(crate) fn subject_for_guid(
     guid: u64,
     index: &GuidIndex,
     stores: &Query<&ObjectStore>,
     names: &NameCache,
-    commands: &NetCommands,
+    ask: Ask<'_>,
+    unit_names: UnitNames<'_>,
+    unknown: impl FnOnce() -> String,
 ) -> Option<Subject> {
     if guid == 0 {
         return None;
     }
-    let store = index.0.get(&guid).and_then(|e| stores.get(*e).ok());
-    let name = names.resolve_unit(guid, store, commands)?.to_string();
+    let store = index
+        .0
+        .get(&guid)
+        .and_then(|e| stores.get(*e).ok())
+        .filter(|s| s.is_unit());
     if let Some(store) = store {
         return Some(Subject {
-            name,
-            race: store.0.unit_race().unwrap_or(0),
-            class: store.0.unit_class().unwrap_or(0),
+            name: names
+                .resolve_unit(guid, Some(store), ask)
+                .map_or_else(unknown, str::to_string),
+            race: race_word(unit_names, store.0.unit_race().unwrap_or(0)),
+            class: class_word(unit_names, store.0.unit_class().unwrap_or(0)),
             gender: store.0.unit_gender().unwrap_or(0),
+            // The player type bit, `[object+8]+8 & 0x10` (`0x507160`-`0x507166`).
+            player: store.0.object_type_mask().unwrap_or(0) & 0x10 != 0,
         });
     }
-    // A creature lands on zeros, so `$R` and `$C` emit nothing; the reference's non-player arm
-    // emits the unit's name (`0x50716b`, `0x5071f7`), which is not built.
+    let name = names.resolve_player(guid, ask)?.to_string();
     let (race, class, gender) = names.player_traits(guid).unwrap_or((0, 0, 0));
     Some(Subject {
         name,
-        race,
-        class,
+        race: race_word(unit_names, race),
+        class: class_word(unit_names, class),
         gender,
+        player: true,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{substitute, substitute_checked, MacroContext, Subject};
+    use crate::ui_unit::TestNames;
     use crate::world_state::WorldStates;
 
-    /// Race 4, class 5: both real rows.
-    fn subject(gender: u8) -> Subject {
+    /// Race 4, class 5: both real rows, named by the table at the install's locale.
+    fn subject_in(names: &TestNames, gender: u8) -> Subject {
         Subject {
             name: "Thrall".into(),
-            race: 4,
-            class: 5,
+            race: super::race_word(names.names(), 4),
+            class: super::class_word(names.names(), 5),
             gender,
+            player: true,
         }
+    }
+
+    fn subject(gender: u8) -> Subject {
+        subject_in(&TestNames::english(), gender)
     }
 
     fn expand(text: &str, subject: Option<&Subject>) -> String {
@@ -285,10 +356,32 @@ mod tests {
         assert_eq!(expand("A $C of $R", Some(&s)), "A Priest of Night Elf");
         assert_eq!(expand("a $c of $r", Some(&s)), "a priest of night elf");
         let unknown = Subject {
-            class: 6,
+            class: super::class_word(TestNames::english().names(), 6),
             ..subject(0)
         };
         assert_eq!(expand("[$C]", Some(&unknown)), "[]");
+    }
+
+    /// A subject that is not a player gives its own name for `$R` and `$C`, in either case
+    /// (`0x50716b`, `0x5071f7`).
+    #[test]
+    fn race_and_class_of_a_creature_are_its_name() {
+        let fang = Subject {
+            name: "Fang".into(),
+            player: false,
+            ..subject(0)
+        };
+        assert_eq!(
+            expand("$C, $c, $R, $r", Some(&fang)),
+            "Fang, Fang, Fang, Fang"
+        );
+    }
+
+    /// `$R` and `$C` are the table's words at the install's locale, not English.
+    #[test]
+    fn race_and_class_are_the_installs_words() {
+        let s = subject_in(&TestNames::korean(), 0);
+        assert_eq!(expand("$C / $R", Some(&s)), "사제 / 나이트 엘프");
     }
 
     #[test]

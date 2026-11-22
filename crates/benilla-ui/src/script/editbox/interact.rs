@@ -18,8 +18,8 @@ fn index_at_screen_pos(lua: &Lua, h: FrameHandle, x: f32, y: f32) -> usize {
             _ => None,
         };
         // An unanchored text region draws over its owner, so the frame's own corner stands in.
-        rh.and_then(|rh| model.region_resolved.get(&rh))
-            .or_else(|| model.resolved.get(&h))
+        rh.and_then(|rh| model.region_rect(rh))
+            .or_else(|| model.frame_rect(h))
             .map(|r| (r.left, r.top))
     };
     with_eb(lua, h, |eb| {
@@ -77,8 +77,8 @@ pub(in crate::script) fn move_word(lua: &Lua, h: FrameHandle, right: bool, shift
     with_eb(lua, h, |eb| eb.move_by_word(right, shift));
 }
 
-/// Ctrl+C (`0x77e1d0`): the focused box's selection. A password box never yields its text: the
-/// client copies the image's empty string (`0x882748`), benilla the mask run.
+/// Ctrl+C (`0x77e1d0`): the focused box's selection. A password box never yields its text: it
+/// copies the image's empty string (`0x882748`, `0x77e1f8`).
 pub(in crate::script) fn copy_selection(lua: &Lua) -> Option<String> {
     let h = focused(lua)?;
     with_eb(lua, h, |eb| eb.selected_text()).flatten()
