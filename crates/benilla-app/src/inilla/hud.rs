@@ -23,7 +23,7 @@ use super::platform::{KeyboardRequest, SafeArea, SyntheticKeys};
 use super::touch::{hud_visible, TouchState};
 use super::ui::Overlay;
 use super::{EguiWanted, Inilla};
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 
 pub(crate) const GOLD: egui::Color32 = egui::Color32::from_rgb(212, 175, 55);
 const INK: egui::Color32 = egui::Color32::from_rgb(12, 12, 16);

@@ -1,7 +1,7 @@
 //! **The launcher meets the login.** A server profile becomes benilla's realmlist (and realm name,
-//! and the world-address override); a saved account becomes a login attempt through the login
-//! screen's own submit path, so the connecting dialog, the queue and every refusal read exactly as
-//! for a typed login.
+//! and the world-address override); a saved account becomes a login through the stock login
+//! screen's own verb (`DefaultServerLogin`), so the glue manager's connecting dialog, the realm
+//! connect, the queue and every refusal read exactly as for a typed login.
 //!
 //! The **realm address override** is read by the network thread when it dials the world server
 //! (`net::io`, one call to [`world_address`]): the realm list's address is kept unless the active
@@ -12,14 +12,13 @@ use std::sync::RwLock;
 
 use bevy::prelude::*;
 
+use benilla_ui::mlua::Function;
 use inilla_core::profiles::{Account, ServerProfile};
 
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::cvars::Cvars;
-use crate::glue::dialog::GlueDialog;
-use crate::glue_strings::GlueStrings;
-use crate::login::Attempt;
+use crate::script_calls::HostedVm;
 
 /// The active profile's override, for the network thread.
 static WORLD_OVERRIDE: RwLock<Option<ServerProfile>> = RwLock::new(None);
@@ -116,25 +115,42 @@ fn apply_active_server(
     queue.applied = Some(fingerprint);
 }
 
-/// Hand a queued login to the login screen's submit path once the screen is up and idle.
+/// Hand a queued login to the stock login screen's own verb once its glue VM is up:
+/// `DefaultServerLogin`, as `AccountLogin_Login` calls it, so the glue manager (`CGlueMgr::Login`)
+/// runs the logon with its status dialog, then the realm connect, and shows every refusal. The
+/// verb does nothing until the EULA and the TOS are accepted, so the request waits for them: the
+/// launcher has closed, and the stock screen shows them.
 fn submit_queued_login(
     state: Res<State<ClientState>>,
     mut queue: ResMut<LoginQueue>,
-    mut attempt: Attempt,
-    mut dialog: ResMut<GlueDialog>,
-    strings: Option<Res<GlueStrings>>,
+    mut vm: HostedVm,
 ) {
-    if *state.get() != ClientState::Login || attempt.in_flight() {
+    if *state.get() != ClientState::Login || queue.pending.is_none() {
         return;
     }
-    let Some((user, pass)) = queue.pending.take() else {
-        return;
-    };
-    let text = strings
-        .as_deref()
-        .map(|s| s.text("LOGIN_STATE_CONNECTING", "Connecting").to_string())
-        .unwrap_or_else(|| "Connecting".into());
-    dialog.open_status(&text);
-    info!("inilla: logging in as {user}");
-    attempt.send(&user, &pass, true);
+    vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let globals = script.lua().globals();
+        let accepted = |verb: &str| {
+            globals
+                .get::<Function>(verb)
+                .and_then(|f| f.call::<bool>(()))
+                .unwrap_or(false)
+        };
+        if !(accepted("EULAAccepted") && accepted("TOSAccepted")) {
+            return;
+        }
+        let Ok(login) = globals.get::<Function>("DefaultServerLogin") else {
+            return;
+        };
+        let Some((user, pass)) = queue.pending.take() else {
+            return;
+        };
+        info!("inilla: logging in as {user}");
+        if let Err(e) = login.call::<()>((user, pass)) {
+            warn!("inilla: the login did not start: {e}");
+        }
+    });
 }

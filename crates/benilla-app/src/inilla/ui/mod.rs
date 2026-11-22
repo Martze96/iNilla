@@ -15,7 +15,7 @@ use super::data::DataState;
 use super::hud::GOLD;
 use super::session::LoginQueue;
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 
 pub(crate) use editor::EditorState;
 pub(crate) use launcher::{AccountForm, ServerForm};

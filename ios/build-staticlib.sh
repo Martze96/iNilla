@@ -36,8 +36,8 @@ messages="$OUT/build-messages.json"
 cargo build --target "$TARGET" --profile "$PROFILE" -p inilla-ios "${feature_args[@]}" \
     --message-format=json-render-diagnostics >"$messages"
 
-# A native library a build script links as `static:-bundle` (Lua 5.1, from third_party/lua-src)
-# is not inside the staticlib: ship each one beside it, in lib/, for the link to find.
+# A native library a build script links as `static:-bundle` is not inside the staticlib: ship
+# each one beside it, in lib/, for the link to find (none in today's graph; lib/ may stay empty).
 rm -rf "$OUT/lib"
 mkdir -p "$OUT/lib"
 jq -r 'select(.reason == "build-script-executed")

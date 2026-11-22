@@ -1,17 +1,20 @@
 //! **The command seam** — how the touch HUD, the controller and the remote console press game
 //! commands. Commands are addressed **by their `Bindings.xml` name** and go through
-//! [`BindingsState`] and [`UiScript::execute_binding`], so rebinding a key does not change what
-//! a HUD button does.
+//! [`benilla_ui::script::UiScript::execute_binding`] (held ones latched in [`BindingLatches`]), so
+//! rebinding a key does not change what a HUD button does. Every system here runs its Lua with the
+//! call host lent ([`crate::script_calls`]), as the key dispatch does: a body's calls (a cast, a
+//! target, a move) apply inside them, and a call made with no host lent would be refused.
 
 use std::collections::HashSet;
 
 use bevy::prelude::*;
 
 use benilla_ui::script::plain::PlainValue;
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{BindingInput, FiredInput};
 use inilla_core::pad::PadBinding;
 
-use crate::bindings::BindingsState;
+use crate::bindings::{BindingLatches, BindingsState};
+use crate::script_calls::{HostedVm, VmWith};
 use crate::ui_script::UiKeyboardCapture;
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
@@ -231,19 +234,26 @@ pub(crate) fn command_names() -> impl Iterator<Item = (&'static str, &'static st
     COMMANDS.iter().copied()
 }
 
+/// The commands a producer holds rather than presses: latched while held, released when let go.
+const HELD: &[&str] = &[
+    "MOVEFORWARD",
+    "MOVEBACKWARD",
+    "TURNLEFT",
+    "TURNRIGHT",
+    "STRAFELEFT",
+    "STRAFERIGHT",
+    "MOVEANDSTEER",
+    "PITCHUP",
+    "PITCHDOWN",
+];
+
 pub(crate) fn is_movement_or_held(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "MOVEFORWARD"
-            | "MOVEBACKWARD"
-            | "TURNLEFT"
-            | "TURNRIGHT"
-            | "STRAFELEFT"
-            | "STRAFERIGHT"
-            | "MOVEANDSTEER"
-            | "PITCHUP"
-            | "PITCHDOWN"
-    )
+    held_command(cmd).is_some()
+}
+
+/// The held command named `cmd`, as the static name its latch carries.
+fn held_command(cmd: &str) -> Option<&'static str> {
+    HELD.iter().copied().find(|&held| held == cmd)
 }
 
 /// A Lua evaluation somebody is waiting on (the remote console).
@@ -266,9 +276,9 @@ pub(crate) struct Synth {
     lua: Vec<LuaJob>,
     chat: Vec<String>,
     /// Holds latched last frame, to release what is no longer held.
-    latched: HashSet<String>,
+    latched: HashSet<&'static str>,
     /// Held-kind commands pressed-and-released within one frame: latched this frame, dropped next.
-    taps: Vec<String>,
+    taps: Vec<&'static str>,
 }
 
 impl Synth {
@@ -301,13 +311,14 @@ impl Synth {
     }
 }
 
-/// Apply the frame's synthetic input. Runs in the binding slot: after the key dispatch cleared
-/// this frame's edges and before the player controller reads them (`BindingSet` → `WorldStage::Input`).
+/// Apply the frame's synthetic input. Runs inside the binding pass, after its head and before its
+/// tail (`BindingHead` → `BindingTail`), where a key record's binding runs: a body's binding calls
+/// are this frame's edges, ahead of the player controller that reads them (`WorldStage::Input`).
 pub(crate) fn apply(
-    mut binds: ResMut<BindingsState>,
+    mut vm: VmWith<ResMut<'static, BindingsState>>,
+    mut latches: ResMut<BindingLatches>,
     mut synth: ResMut<Synth>,
     capture: Res<UiKeyboardCapture>,
-    mut script: Option<NonSendMut<UiScript>>,
 ) {
     let synth = &mut *synth;
     let pressed = std::mem::take(&mut synth.pressed);
@@ -317,121 +328,126 @@ pub(crate) fn apply(
     let fires = std::mem::take(&mut synth.fires);
 
     // What should be latched this frame.
-    let mut want: HashSet<String> = HashSet::new();
+    let mut want: HashSet<&'static str> = HashSet::new();
     if !capture.typing {
-        for name in movement {
-            want.insert(name.to_string());
-        }
+        want.extend(movement);
         for b in &held {
             if let PadBinding::Command(name) = b {
-                if is_movement_or_held(name) {
-                    want.insert(name.clone());
-                }
+                want.extend(held_command(name));
             }
         }
-        for c in synth.taps.drain(..) {
-            want.insert(c);
+        want.extend(synth.taps.drain(..));
+        // A held-kind press latches for this frame even if released within it.
+        for b in &pressed {
+            if let PadBinding::Command(name) = b {
+                if let Some(cmd) = held_command(name) {
+                    if want.insert(cmd) {
+                        synth.taps.push(cmd);
+                    }
+                }
+            }
         }
     } else {
         synth.taps.clear();
     }
 
-    let run = |script: &mut Option<NonSendMut<UiScript>>, body: &str| {
-        if let Some(s) = script.as_deref() {
-            crate::ui_script::run_or_warn(s, body);
-        }
-    };
-
-    for b in &pressed {
-        match b {
-            PadBinding::Command(name) => {
-                if is_movement_or_held(name) {
-                    if !capture.typing && !want.contains(name) {
-                        want.insert(name.clone());
-                        synth.taps.push(name.clone());
-                    }
-                } else if let Some(s) = script.as_mut() {
-                    if let Err(e) = s.execute_binding(name, true) {
-                        warn!("inilla: synth press({name}): {e}");
+    vm.run(|mut script| {
+        for b in &pressed {
+            match b {
+                // Held kinds are latched below.
+                PadBinding::Command(name) if is_movement_or_held(name) => {}
+                PadBinding::Command(name) => {
+                    if let Some(s) = script.as_deref() {
+                        if let Err(e) = s.execute_binding(name, true) {
+                            warn!("inilla: synth press({name}): {e}");
+                        }
                     }
                 }
+                PadBinding::Lua(chunk) => {
+                    if let Some(s) = script.as_deref() {
+                        crate::ui_script::run_or_warn(s, chunk);
+                    }
+                }
+                // Serviced by `run_vm_ops` ahead of the tick, through the chat box's own submit
+                // path, so slash commands parse client-side exactly as typed.
+                PadBinding::Chat(line) => synth.chat.push(line.clone()),
+                PadBinding::None | PadBinding::Special(_) => {}
             }
-            PadBinding::Lua(chunk) => run(&mut script, chunk),
-            // Serviced by `run_vm_ops` at the top of the next frame, through the chat box's
-            // own submit path, so slash commands parse client-side exactly as typed.
-            PadBinding::Chat(line) => synth.chat.push(line.clone()),
-            PadBinding::None | PadBinding::Special(_) => {}
         }
-    }
-    for b in &released {
-        if let PadBinding::Command(name) = b {
-            if !is_movement_or_held(name) {
-                if let Some(s) = script.as_mut() {
-                    if let Err(e) = s.execute_binding(name, false) {
-                        warn!("inilla: synth release({name}): {e}");
+        for b in &released {
+            if let PadBinding::Command(name) = b {
+                if !is_movement_or_held(name) {
+                    if let Some(s) = script.as_deref() {
+                        if let Err(e) = s.execute_binding(name, false) {
+                            warn!("inilla: synth release({name}): {e}");
+                        }
                     }
                 }
             }
         }
-    }
-    for (name, amount) in fires {
-        match name {
-            "CAMERAZOOMIN" => binds.synth_fire(crate::bindings::Input::CameraZoomIn, amount),
-            "CAMERAZOOMOUT" => binds.synth_fire(crate::bindings::Input::CameraZoomOut, amount),
-            _ => {
-                if let Some(s) = script.as_mut() {
+        for &(name, _) in &fires {
+            if !matches!(name, "CAMERAZOOMIN" | "CAMERAZOOMOUT") {
+                if let Some(s) = script.as_deref() {
                     let _ = s.execute_binding(name, true);
                 }
             }
         }
-    }
 
-    for c in synth.latched.difference(&want) {
-        binds.synth_release(&mut script, c);
-    }
-    for c in &want {
-        binds.synth_hold(&mut script, c);
-    }
+        for &c in synth.latched.difference(&want) {
+            latches.synth_release(script.as_deref_mut(), c);
+        }
+        for &c in &want {
+            latches.synth_hold(script.as_deref_mut(), c);
+        }
+    });
     synth.latched = want;
 
-    // Apply any binding calls made by Lua during execute_binding directly into BindingsState.
-    if let Some(s) = script.as_mut() {
-        let inputs = s.take_binding_input();
-        binds.apply_script_input(inputs);
+    // The pinch zoom: the wheel's one-shot with an analog amount (`1.0` is the reference's key
+    // step), straight into the input state as a host-less call is.
+    for (name, amount) in fires {
+        let fired = match name {
+            "CAMERAZOOMIN" => FiredInput::CameraZoomIn(amount),
+            "CAMERAZOOMOUT" => FiredInput::CameraZoomOut(amount),
+            _ => continue,
+        };
+        vm.own().apply_unhosted(BindingInput::Fire(fired));
     }
 }
 
-/// The VM-side ops — chat lines and Lua evaluation — before the VM ticks, so a `/cast` typed by
-/// a button is serviced this frame.
-pub(crate) fn run_vm_ops(script: Option<NonSendMut<UiScript>>, mut synth: ResMut<Synth>) {
-    let Some(mut script) = script else {
+/// The VM-side ops — chat lines and Lua evaluation — ahead of the tick, so a `/cast` typed by a
+/// button is serviced this frame; the evaluation runs with the call host lent.
+pub(crate) fn run_vm_ops(mut vm: HostedVm, mut synth: ResMut<Synth>) {
+    let synth = &mut *synth;
+    vm.run(|script| {
+        let Some(script) = script else {
+            for job in synth.lua.drain(..) {
+                if let Some(tx) = job.reply {
+                    let _ = tx.send(Err("no interface is loaded in this state".into()));
+                }
+            }
+            synth.chat.clear();
+            return;
+        };
+        for line in synth.chat.drain(..) {
+            script.push_chat_input(line);
+        }
         for job in synth.lua.drain(..) {
+            let result = script.eval_plain(&job.chunk);
             if let Some(tx) = job.reply {
-                let _ = tx.send(Err("no interface is loaded in this state".into()));
+                let _ = tx.send(result);
             }
         }
-        synth.chat.clear();
-        return;
-    };
-    for line in synth.chat.drain(..) {
-        script.push_chat_input(line);
-    }
-    for job in synth.lua.drain(..) {
-        let result = script.eval_plain(&job.chunk);
-        if let Some(tx) = job.reply {
-            let _ = tx.send(result);
-        }
-    }
+    });
 }
 
 /// Drop every synthetic latch at the world's edges, so nothing held on the way out is still held
 /// on the way back in.
 pub(crate) fn release_all(
-    mut binds: ResMut<BindingsState>,
+    mut vm: HostedVm,
+    mut latches: ResMut<BindingLatches>,
     mut synth: ResMut<Synth>,
-    mut script: Option<NonSendMut<UiScript>>,
 ) {
-    binds.synth_release_all(&mut script);
+    vm.run(|script| latches.synth_release_all(script));
     synth.latched.clear();
     synth.taps.clear();
     synth.held.clear();

@@ -13,7 +13,7 @@ use inilla_platform::device::Side;
 use inilla_platform::{audio, device};
 
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::cvars::Cvars;
 use crate::ui_script::UiKeyboardCapture;
 

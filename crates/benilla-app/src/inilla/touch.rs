@@ -26,7 +26,7 @@ use super::platform::SafeArea;
 use super::synth::Synth;
 use super::ui::Overlay;
 use super::{Inilla, InputProducers};
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::creature_anim::Casting;
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::spell::ActiveChannel;

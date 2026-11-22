@@ -28,7 +28,7 @@ use inilla_core::pad::PadBinding;
 
 use super::synth::{LuaJob, Synth};
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 
 enum ConsoleCmd {
     Lua {
