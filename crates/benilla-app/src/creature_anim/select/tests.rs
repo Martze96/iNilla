@@ -16,6 +16,7 @@ fn clip(anim_id: u16, move_speed: f32) -> AnimClip {
         anim_id,
         seq_index: 0,
         node: AnimationNodeIndex::new(0),
+        blend_node: None,
         looping: true,
         duration: 1.0,
         move_speed,
@@ -480,9 +481,8 @@ fn ranged_load_idle_selects_by_weapon_and_ranks_below_ready() {
 }
 
 /// `0x5fd460` claims the drawn ranged idle ([`ranged_idle_gate`]) on the ranged sheath
-/// (`cmp [+0xd40],2`) and the local auto-repeat bit `0x200` (`test ah,0x2`) alone. The any-caster
-/// hold `0x400` is tested only by `0x5fc3f0`'s Hold sustain: one Serpent Sting sets it and no
-/// volley end clears it, so admitting it would leave a shooter aiming.
+/// (`cmp [+0xd40],2`) and the local auto-repeat bit `0x200` (`test ah,0x2`) alone. The precast
+/// bit `0x400` is tested only by `0x5fc3f0`'s Hold sustain.
 #[test]
 fn the_ranged_idle_is_entered_by_the_auto_repeat_bit_and_the_ranged_sheath_alone() {
     assert!(ranged_idle_gate(true, Some(2)));
@@ -915,6 +915,7 @@ fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
     use std::time::{Duration, Instant};
     let spline = |grounded| crate::net::Spline {
         deck: None,
+        final_facing: benilla_protocol::MonsterMoveFacing::None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
         start: Instant::now(),
         duration: Duration::from_secs(10),
@@ -952,6 +953,7 @@ fn the_granted_modes_fold_into_the_flags_word_on_every_leg_but_our_own() {
     // Creature leg on a path: the granted bit rides alongside the spline's own FORWARD.
     let spline = crate::net::Spline {
         deck: None,
+        final_facing: benilla_protocol::MonsterMoveFacing::None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
         start: Instant::now(),
         duration: Duration::from_secs(10),
@@ -976,10 +978,11 @@ fn the_granted_modes_fold_into_the_flags_word_on_every_leg_but_our_own() {
         speed: 7.0,
         vertical_velocity: 0.0,
         jump_xy_vel: [0.0; 2],
-        fall_start_z: None,
+        fall_start: None,
         relay: Default::default(),
         last_apply_ms: 0.0,
         last_apply_pos: [0.0; 3],
+        fired_at_ms: None,
     };
     let v = unify(None, Some(&rm), None, false, Some(&walking));
     assert_eq!(v.flags, move_flags::FORWARD | move_flags::WALK_MODE);
@@ -1094,4 +1097,20 @@ fn the_prowl_idle_is_the_lowest_priority_stand() {
 fn the_prowl_creep_is_not_rate_scaled() {
     assert_eq!(playback_rate(&clip(STEALTH_WALK, 2.5), 7.0, 1.0), 1.0);
     assert_ne!(playback_rate(&clip(4, 2.5), 7.0, 1.0), 1.0);
+}
+
+#[test]
+fn the_demotion_drop_pairs_swings_and_ready_stances_with_stand_and_their_kin() {
+    // Swing or ready stance over Stand or a ready stance (`0x5feb05`-`0x5feb24`).
+    assert!(demotion_drops(16, 0) && demotion_drops(28, 0) && demotion_drops(16, 26));
+    assert!(
+        !demotion_drops(16, 51),
+        "a spell-ready request over a swing plays"
+    );
+    assert!(!demotion_drops(16, 17), "another swing plays");
+    // Cast or spell-ready stance over Stand or a spell-ready stance (`0x5feb26`-`0x5feb4b`).
+    assert!(demotion_drops(53, 0) && demotion_drops(51, 0) && demotion_drops(53, 52));
+    assert!(!demotion_drops(53, 28), "a ready stance over a cast plays");
+    // Neither: a run, an emote, Stand over Stand's neighbours.
+    assert!(!demotion_drops(5, 0) && !demotion_drops(68, 0) && !demotion_drops(0, 28));
 }

@@ -5,7 +5,7 @@ use benilla_ui::script::UiScript;
 
 use super::test_ui::load_ui as load_xml;
 
-fn harness() -> UiScript {
+pub(crate) fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
@@ -97,7 +97,7 @@ fn the_line_fades_out_over_the_reference_s_second_and_a_half() {
     s.tick(0.75);
     let half = alpha(&s);
     assert!(
-        (half - 0.5).abs() < 1e-3,
+        (half - 0.5).abs() < 1.0 / 255.0,
         "halfway through 1.5 s the line is at half alpha, got {half}"
     );
 

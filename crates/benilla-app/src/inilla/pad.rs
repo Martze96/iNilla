@@ -30,7 +30,7 @@ use super::synth::Synth;
 use super::touch::HudActions;
 use super::ui::Overlay;
 use super::{Inilla, InputProducers};
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::player::camera::LookConfig;
 use crate::target::Selection;
 

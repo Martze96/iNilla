@@ -195,7 +195,8 @@ fn light_schema() -> Schema {
     s
 }
 
-/// `LightParams.dbc`: 9 fields, 36-byte records, types per the client's reader `0x589030`.
+/// `LightParams.dbc`: 9 fields, 36-byte records, read as nine untyped dwords (`0x589030`), so
+/// int versus float is the consumers'.
 /// `cloudTypeID` (+0x0C) is 0 in every 5875 record; the glow is +0x10.
 fn light_params_schema() -> Schema {
     let mut s = Schema::new("LightParams");
@@ -330,7 +331,7 @@ impl LightCatalog {
             let mut m = HashMap::with_capacity(rs.records().len());
             for r in rs.records() {
                 if let (Some(id), Some(path)) = (u32_at(r, 0), str_at(&rs, r, 1)) {
-                    m.insert(id, crate::models::model_path(&path));
+                    m.insert(id, crate::models::model_name(&path));
                 }
             }
             m

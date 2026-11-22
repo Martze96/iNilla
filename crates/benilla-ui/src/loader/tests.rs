@@ -14,6 +14,72 @@ mod loader_tests {
         framexml::parse(text).expect("valid FrameXML")
     }
 
+    /// The Minimap's post-load (`0x4ee2b0`) runs `CSimpleFrame`'s first (`0x4ee2c0`), so its own
+    /// `OnLoad` finds the player arrow with no model yet.
+    #[test]
+    fn the_minimap_models_land_after_its_onload() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Minimap name="Minimap">
+                    <Scripts><OnLoad>seen = ({this:GetChildren()})[9]:GetModel() or "none"</OnLoad></Scripts>
+                </Minimap>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(s.eval::<String>("return seen").unwrap(), "none");
+        assert_eq!(
+            s.eval::<String>("return ({Minimap:GetChildren()})[9]:GetModel()")
+                .unwrap(),
+            "Interface\\Minimap\\MinimapArrow.mdx"
+        );
+    }
+
+    /// `CreateFrame("Minimap")` runs the same post-load hook (`0x70628b` → `0x6ee280` → slot 0x24 at
+    /// `0x6ee4ea`, `0x4ee2b0`): after the template's `OnLoad`, the stock models and their sequences.
+    #[test]
+    fn a_created_minimap_takes_the_stock_models_after_its_onload() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="MinimapTpl" virtual="true">
+                    <Scripts><OnLoad>seen = ({this:GetChildren()})[9]:GetModel() or "none"</OnLoad></Scripts>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.run(r#"m = CreateFrame("Minimap", "Made", nil, "MinimapTpl") bare = CreateFrame("Minimap")"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>("return seen").unwrap(), "none");
+        for frame in ["m", "bare"] {
+            assert_eq!(
+                s.eval::<String>(&format!("return ({{{frame}:GetChildren()}})[9]:GetModel()"))
+                    .unwrap(),
+                crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+                "{frame}"
+            );
+            for i in 1..=8 {
+                assert_eq!(
+                    s.eval::<String>(&format!(
+                        "return ({{{frame}:GetChildren()}})[{i}]:GetModel()"
+                    ))
+                    .unwrap(),
+                    crate::widget::MINIMAP_DEFAULT_ARROW_MODEL,
+                    "{frame} child {i}"
+                );
+            }
+        }
+        let made = s.minimap_child("Made", 1).unwrap();
+        assert_eq!(made.sequence, i32::from(crate::script::MINIMAP_GROUP_ARROW));
+        let made = s.minimap_child("Made", 6).unwrap();
+        assert_eq!(
+            made.sequence,
+            i32::from(crate::script::MINIMAP_LANDMARK_ARROW)
+        );
+    }
+
     /// `CMinimap::LoadXML 0x4ee2b0`: `minimapArrowModel` goes to engine children 1-8 (`0x4ee170`),
     /// `minimapPlayerModel` to child 9 alone (`[Minimap+0x338]`, `0x4ee260`); without the
     /// attributes the defaults are `0x84c768` and `0x8453c0`. `Minimap.xml:97` sets both.
@@ -42,6 +108,11 @@ mod loader_tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
 
         for i in 1..=8 {
+            assert_eq!(
+                s.minimap_child("Minimap", i).unwrap().sequence,
+                if i <= 5 { 165 } else { 166 },
+                "child {i} plays GroupArrow or Arrow (`0x4ee1de`, `0x4ee22b`)"
+            );
             assert_eq!(
                 s.eval::<String>(&format!(
                     "return ({{Minimap:GetChildren()}})[{i}]:GetModel()"
@@ -118,7 +189,7 @@ mod loader_tests {
             "the attribute supplied the parent"
         );
         // Host's TOPLEFT is screen (100, 550) in y-up; Attached hangs 5 in and 5 down from it.
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<(f64, f64)>("return Attached:GetLeft(), Attached:GetTop()")
                 .unwrap(),
             (105.0, 545.0),
@@ -154,6 +225,45 @@ mod loader_tests {
             "a non-frame global of the right name is named too: {:?}",
             report2.warnings
         );
+    }
+
+    /// `parent=` looks the name up with the Frame id (`0x6ee3c9` → `0x76c760`), so a global holding
+    /// another object, a Texture or a Font, is a miss: the frame is built parentless and the miss
+    /// logged (`0x8710f0`), never a `CreateFrame` raise.
+    #[test]
+    fn a_parent_attribute_naming_a_region_or_a_font_is_a_miss() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            ParentOwner = CreateFrame("Frame", "ParentOwner")
+            ParentTexture = ParentOwner:CreateTexture("ParentTexture")
+            CreateFont("ParentFont")
+        "#,
+        )
+        .unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="OnTexture" parent="ParentTexture"/>
+                <Frame name="OnFont" parent="ParentFont"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        for (frame, global) in [("OnTexture", "ParentTexture"), ("OnFont", "ParentFont")] {
+            assert!(
+                s.eval::<bool>(&format!(
+                    "return {frame} ~= nil and {frame}:GetParent() == nil"
+                ))
+                .unwrap(),
+                "{frame} is built parentless"
+            );
+            let want = format!("Couldn't find frame parent: {global}");
+            assert!(
+                report.warnings.contains(&want),
+                "{want}: {:?}",
+                report.warnings
+            );
+        }
     }
 
     /// A miss stores 0 over the default parent (`0x6ee3ef`), so the frame is built parentless; an
@@ -378,7 +488,7 @@ mod loader_tests {
             s.eval::<f32>("return SizedInstance:GetWidth()").unwrap(),
             125.0
         );
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<f32>("return SizedInstance:GetHeight()").unwrap(),
             21.0
         );
@@ -432,7 +542,7 @@ mod loader_tests {
         assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
         s.resolve();
         assert_eq!(s.eval::<f32>("return PinChild:GetLeft()").unwrap(), 40.0);
-        assert_eq!(s.eval::<f32>("return PinChild:GetTop()").unwrap(), 550.0);
+        crate::assert_near!(s.eval::<f32>("return PinChild:GetTop()").unwrap(), 550.0);
         assert_eq!(s.eval::<f32>("return PinChild:GetWidth()").unwrap(), 300.0);
         assert_eq!(s.eval::<f32>("return PinChild:GetHeight()").unwrap(), 200.0);
     }
@@ -503,6 +613,64 @@ mod loader_tests {
         assert!(
             s.eval::<bool>("return AfterTheBadInclude ~= nil").unwrap(),
             "the element after a failed Include must still be built"
+        );
+    }
+
+    /// A `<Script file>`'s body runs after the file (`0x6ee0d4`, then `0x6ee0ff`-`0x6ee10f`).
+    #[test]
+    fn a_script_file_body_runs_after_the_file() {
+        let s = UiScript::new().unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            (path == "A.lua").then(|| b"Order = 'file'".to_vec())
+        };
+        let doc = parse(r#"<Ui><Script file="A.lua">Order = Order .. ',body'</Script></Ui>"#);
+        let report = load(&s, &doc, &provider);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(s.eval::<String>("return Order").unwrap(), "file,body");
+    }
+
+    /// A `<Script file>` runs with the document's status (`0x704bc0`): a compile failure logs the
+    /// compiler's message (`0x704b31`) and a run failure what the error function answered
+    /// (`0x704b8d`), each alone at severity 2; an inline body's failure logs nothing.
+    #[test]
+    fn a_script_file_failure_is_a_load_status_line() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"seterrorhandler(function(m) Heard = (Heard or "") .. m .. "|" return "ret:" .. m end)"#)
+            .unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            match path {
+                "Bad.lua" => Some(b"this is not lua".to_vec()),
+                "Boom.lua" => Some(b"error(\"boom\")".to_vec()),
+                _ => None,
+            }
+        };
+        let doc = parse(
+            r#"<Ui><Script file="Bad.lua"/><Script file="Boom.lua"/><Script>error("inline")</Script></Ui>"#,
+        );
+        let report = load(&s, &doc, &provider);
+        let heard = s.eval::<String>("return Heard").unwrap();
+        let heard: Vec<&str> = heard.split('|').collect();
+        assert_eq!(heard.len(), 4, "{heard:?}");
+        assert_eq!(
+            report.status.lines(),
+            [heard[0].to_string(), format!("ret:{}", heard[1])]
+        );
+        assert!(heard[1].ends_with("boom"), "{heard:?}");
+    }
+
+    /// An inline `<Script>` body runs with no status (`0x704cd1` passes 0), so its compile or run
+    /// error reaches only the Lua error handler, never the load status FrameXML.log prints.
+    #[test]
+    fn an_inline_script_error_writes_no_load_status_line() {
+        let s = UiScript::new().unwrap();
+        let doc =
+            parse(r#"<Ui><Script>error("inline boom")</Script><Script>if then</Script></Ui>"#);
+        let report = load(&s, &doc, &no_files);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report.status.lines().is_empty(),
+            "{:?}",
+            report.status.lines()
         );
     }
 
@@ -600,6 +768,78 @@ mod loader_tests {
         );
     }
 
+    /// An empty `name=` leaves a region unnamed: the region loader skips it (`0x76fe07`) and
+    /// `SetName 0x76c650` refuses `""` (`0x76c664`), which the Lua constructors reach too.
+    #[test]
+    fn an_empty_region_name_leaves_it_unnamed() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="EmptyNames">
+                   <Layers><Layer level="ARTWORK">
+                     <FontString name="" inherits="GameFontNormal"/>
+                     <Texture name=""/>
+                   </Layer></Layers>
+                 </Frame>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let names: String = s
+            .eval(
+                r#"local out = {}
+                   for _, r in ipairs({ EmptyNames:GetRegions() }) do
+                     table.insert(out, tostring(r:GetName()))
+                   end
+                   table.insert(out, tostring(EmptyNames:CreateTexture(""):GetName()))
+                   table.insert(out, tostring(EmptyNames:CreateFontString(""):GetName()))
+                   table.insert(out, tostring(getglobal("")))
+                   return table.concat(out, ",")"#,
+            )
+            .unwrap();
+        assert_eq!(names, "nil,nil,nil,nil,nil");
+    }
+
+    /// `0x6f2630` rewrites a stop on every matching child (`0x6f2690`-`0x6f26d8`): the last
+    /// `MinColor` and the last `MaxColor` win.
+    #[test]
+    fn an_xml_gradient_takes_its_last_min_and_max_color() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="Fades">
+                   <Size><AbsDimension x="100" y="100"/></Size>
+                   <Anchors><Anchor point="CENTER"/></Anchors>
+                   <Layers><Layer level="ARTWORK">
+                     <Texture name="Twice" setAllPoints="true">
+                       <Color r="1" g="1" b="1"/>
+                       <Gradient>
+                         <MinColor r="1" g="0" b="0"/>
+                         <MaxColor r="0" g="1" b="0"/>
+                         <MinColor r="0" g="0" b="1"/>
+                         <MaxColor r="1" g="1" b="0"/>
+                       </Gradient>
+                     </Texture>
+                   </Layer></Layers>
+                 </Frame>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+        let gradient = s
+            .extract()
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Texture { gradient, .. } => *gradient,
+                _ => None,
+            })
+            .expect("the gradient extracts");
+        let (blue, yellow) = ([0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(gradient, [blue, yellow, yellow, blue]);
+    }
+
     /// `CSimpleFrame::LoadXML 0x769820`: a strata `0x6f17d0` does not know logs at severity 1
     /// (`0x7699a4`) and skips `SetFrameStrata 0x76a470`.
     #[test]
@@ -674,15 +914,31 @@ mod loader_tests {
             "{on:?}"
         );
 
+        // `lua_isnumber` refuses everything but a number or a numeric string, so the rest only
+        // read: the flag stays 1 (`true` coerces to no number and used to store 0).
+        for arg in ["nil", "true", "false", "\"x\"", "{}", "FrameXML_Debug"] {
+            assert_eq!(
+                s.eval::<i32>(&format!("return FrameXML_Debug({arg})"))
+                    .unwrap(),
+                1,
+                "{arg} is a pure GET — the flag is untouched"
+            );
+        }
+        assert_eq!(s.eval::<i32>("return FrameXML_Debug()").unwrap(), 1);
         assert_eq!(
-            s.eval::<i32>("return FrameXML_Debug(nil)").unwrap(),
-            1,
-            "nil is a pure GET — the flag is untouched"
+            s.eval::<i32>("return FrameXML_Debug(\"3.7\")").unwrap(),
+            3,
+            "a numeric string converts, truncated toward zero"
+        );
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug(-2.9)").unwrap(),
+            -2,
+            "…and a negative truncates toward zero too"
         );
         assert_eq!(
             s.eval::<i32>("return FrameXML_Debug(0)").unwrap(),
             0,
-            "…but 0 is TRUTHY in Lua, so it really does disable it"
+            "…and 0 is a number, so it really does disable it"
         );
         assert!(load(&s, &doc(), &no_files).traces.is_empty());
         // The stored value truncates toward zero (`0x40a2b0`).
@@ -820,8 +1076,8 @@ mod loader_tests {
         let (hl_right, text_left): (f64, f64) = s
             .eval("return RowHighlight:GetRight(), RowText:GetLeft()")
             .unwrap();
-        assert_eq!(hl_right, 22.0 + 3.0 + 16.0);
-        assert_eq!(
+        crate::assert_near!(hl_right, 22.0 + 3.0 + 16.0);
+        crate::assert_near!(
             text_left,
             hl_right + 2.0,
             "the label hangs off the highlight, not the button"
@@ -836,14 +1092,28 @@ mod loader_tests {
         );
     }
 
+    /// A handler that fails to compile reports nothing at load (`0x704c87`-`0x704c9f`) and fills
+    /// its slot with -1 (`0x702642`): it replaces the template's, `GetScript` answers nil
+    /// (`0x7748b9`), each fire calls nil, the enables still run (`0x70264c`, `0x769f6b`), and the
+    /// broken `OnLoad` errors when it fires in the template's place.
     #[test]
-    fn bad_handler_is_an_error_and_load_continues() {
+    fn a_handler_that_fails_to_compile_fills_its_slot_with_a_nil_call() {
         let s = UiScript::new().unwrap();
         let doc = parse(
             r#"<Ui>
-                <Frame name="Broken">
-                    <Scripts><OnLoad>this that syntax error(((</OnLoad></Scripts>
-                </Frame>
+                <Button name="ClickTemplate" virtual="true">
+                    <Scripts>
+                        <OnLoad>TemplateLoaded = true</OnLoad>
+                        <OnClick>TemplateClicks = (TemplateClicks or 0) + 1</OnClick>
+                    </Scripts>
+                </Button>
+                <Button name="Broken" inherits="ClickTemplate">
+                    <Scripts>
+                        <OnLoad>this that syntax error(((</OnLoad>
+                        <OnClick>if then</OnClick>
+                        <OnEnter>(((</OnEnter>
+                    </Scripts>
+                </Button>
                 <Frame name="Fine">
                     <Scripts><OnLoad>FineRan = true</OnLoad></Scripts>
                 </Frame>
@@ -851,16 +1121,34 @@ mod loader_tests {
         );
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 2, "both frames still created");
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(
-            report.errors.iter().any(|e| e.contains("compiling")),
-            "expected a compile error, got {:?}",
+            report.errors[0].ends_with("OnLoad: runtime error: attempt to call a nil value"),
+            "{:?}",
             report.errors
         );
-        assert!(s.eval::<bool>("return Broken ~= nil").unwrap());
-        assert!(s.eval::<bool>("return FineRan == true").unwrap());
+        assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+        assert!(s
+            .eval::<bool>(
+                r#"return TemplateLoaded == nil and FineRan == true
+                    and Broken:GetScript("OnClick") == nil and Broken:GetScript("OnLoad") == nil
+                    and Broken:IsMouseEnabled() == 1"#
+            )
+            .unwrap());
+        s.run(
+            r#"seterrorhandler(function(m) Seen = (Seen or "") .. m .. ";" end)
+               Broken:Click() Broken:Click()"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return Seen").unwrap(),
+            "attempt to call a nil value;attempt to call a nil value;"
+        );
+        assert!(s.eval::<bool>("return TemplateClicks == nil").unwrap());
     }
 
-    /// `OnAttributeChanged` is 2.0's; no 1.12 handler resolver has a slot for it.
+    /// `OnAttributeChanged` is 2.0's; no 1.12 handler resolver has a slot for it, so the frame
+    /// reports `Frame %s: Unknown script element %s` (`0x878778`, `0x769f44`).
     #[test]
     fn unsupported_script_name_is_a_warning() {
         let s = UiScript::new().unwrap();
@@ -870,10 +1158,30 @@ mod loader_tests {
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 1);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.contains("OnAttributeChanged")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Frame Keyed: Unknown script element OnAttributeChanged"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    /// The name is looked up before the body compiles (`0x7025d5`, `0x70263a`): an unknown tag
+    /// whose body is a syntax error reports the unknown element, not a compile error.
+    #[test]
+    fn an_unknown_script_tag_is_reported_before_its_body_compiles() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui><Frame name="Early"><Scripts><OnClick>this is ((( broken</OnClick></Scripts></Frame></Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            report.warnings,
+            ["Frame Early: Unknown script element OnClick"]
+        );
     }
 
     /// `Instantiate 0x6ee280` logs `"Unknown frame type: %s"` (`0x871124`) and builds nothing for
@@ -906,7 +1214,7 @@ mod loader_tests {
         assert!(s.eval::<bool>("return Real ~= nil").unwrap());
         // The Lua door raises on the same lookup.
         let err = s.run(r#"CreateFrame("Bogus")"#).unwrap_err().to_string();
-        assert!(err.contains("unknown frame type 'Bogus'"), "{err}");
+        assert!(err.contains("Unknown frame type 'Bogus'"), "{err}");
     }
 
     /// A `.toc` line hands a listed `Bindings.xml` to `0x6ede10` (from `0x6edd51`), so each
@@ -986,13 +1294,14 @@ mod loader_tests {
             return mn == 0 and mx == 100 and XmlBar:GetValue() == 50
                 and XmlBar:GetOrientation() == "HORIZONTAL"
                 and XmlBar:GetStatusBarTexture() ~= nil
-                and r < 0.2 and g > 0.8 and a == 1
+                and r < 0.2 and g > 0.8 and a > 0.99
         "#,
             )
             .unwrap();
         assert!(ok, "XML attributes + children landed in the widget state");
 
-        s.resolve();
+        // The fill's coordinates are the bar's update (`0x7833c0`), in the tick's walk.
+        s.tick(0.0);
         let bar = s
             .extract()
             .into_iter()
@@ -1002,7 +1311,7 @@ mod loader_tests {
             })
             .expect("bar fill quad");
         let r = bar.rect.expect("bar rect resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (0.0, 50.0, 0.0, 10.0),
             "defaultValue 50/100 fills half the 100px width"
@@ -1042,7 +1351,7 @@ mod loader_tests {
             })
             .expect("the plate draws");
         let r = plate.rect.expect("the plate resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (10.0, 182.0, 10.0, 106.0),
             "implicit SetAllPoints fills the 172×96 frame; the 256×32 size is unread"
@@ -1079,7 +1388,7 @@ mod loader_tests {
                 "return SeatLeft:GetLeft(), SeatLeft:GetRight(), SeatLeft:GetTop(), SeatLeft:GetBottom()",
             )
             .unwrap();
-        assert_eq!(
+        crate::assert_near!(
             (l, r, b, t),
             (0.0, 80.0, 40.0, 60.0),
             "justifyH=LEFT seats the implicit single anchor at the page's LEFT, size live"
@@ -1121,7 +1430,7 @@ mod loader_tests {
             .expect("the state texture draws");
         let r = scoped.rect.expect("resolved");
         // Button [100,100]..[136,136]; TOPLEFT+2,-2 with 24×24 → [102,110]..[126,134].
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (102.0, 126.0, 110.0, 134.0),
             "authored anchors + size hold; no implicit corner welds it to the button"
@@ -1311,7 +1620,7 @@ mod loader_tests {
             })
             .expect("hovered highlight quad");
         let r = hi.rect.expect("highlight rect resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (0.0, 20.0, 10.0, 30.0),
             "highlight is the anchored 20px square at the button's TOPLEFT, not the whole button"
@@ -1360,6 +1669,88 @@ mod loader_tests {
         s.tick(0.0);
         assert!(s.eval::<bool>("return typed == true").unwrap());
         assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// The line limit (`+0x320`) is the count of declared `TextLeft<n>`/`TextRight<n>` pairs, read
+    /// until either is missing (`0x529650`): a line past it is not added (`0x530291`).
+    #[test]
+    fn a_tooltip_holds_as_many_lines_as_it_declares_pairs() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <GameTooltip name="Cap">
+                    <Layers><Layer level="ARTWORK">
+                        <FontString name="$parentTextLeft1"/><FontString name="$parentTextRight1"/>
+                        <FontString name="$parentTextLeft2"/><FontString name="$parentTextRight2"/>
+                        <FontString name="$parentTextLeft3"/>
+                    </Layer></Layers>
+                </GameTooltip>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.run(
+            r#"
+            for i = 1, 5 do Cap:AddLine("line " .. i) end
+            assert(Cap:NumLines() == 2, "two pairs; a lone TextLeft3 is no line: " .. Cap:NumLines())
+            Cap:ClearLines()
+            Cap:AddDoubleLine("a", "b") Cap:AddLine("c") Cap:AddLine("d")
+            assert(Cap:NumLines() == 2)
+        "#,
+        )
+        .unwrap();
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
+    /// An EditBox's `<FontString bytes="N">` caps the box at N - 1 bytes (`0x77a225`-`0x77a260`):
+    /// `SStrToInt`, a value of 0 or less lifts the cap, and an empty or absent one leaves the
+    /// ctor's.
+    #[test]
+    fn an_editbox_fontstring_bytes_caps_the_box_at_n_minus_one() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <EditBox name="Chat" letters="255"><FontString bytes="256"/></EditBox>
+                <EditBox name="Short"><FontString bytes="4x"/></EditBox>
+                <EditBox name="Off"><FontString bytes="0"/></EditBox>
+                <EditBox name="Neg"><FontString bytes="-3"/></EditBox>
+                <EditBox name="Empty"><FontString bytes=""/></EditBox>
+                <EditBox name="Plain"><FontString/></EditBox>
+                <EditBox name="Bare" bytes="9"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        for (name, want) in [
+            ("Chat", 256),
+            ("Short", 4),
+            ("Off", 0),
+            ("Neg", 0),
+            ("Empty", 0),
+            ("Plain", 0),
+            ("Bare", 0),
+        ] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return {name}:GetMaxBytes()"))
+                    .unwrap(),
+                want,
+                "{name}"
+            );
+        }
+        // 300 two-byte letters stop at 255 bytes: 127 whole letters.
+        s.run(r#"Chat:SetFocus() Chat:Insert(string.rep("é", 300))"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<i64>("return string.len(Chat:GetText())").unwrap(),
+            254
+        );
+        s.run(r#"Chat:SetText(string.rep("a", 300))"#).unwrap();
+        assert_eq!(
+            s.eval::<i64>("return string.len(Chat:GetText())").unwrap(),
+            255
+        );
     }
 
     /// The EditBox ctor leaves autoFocus on (`flags = 1`), so the stock UI writes the attribute
@@ -1454,14 +1845,21 @@ mod loader_tests {
 
         let base = s.font_object("Base").expect("Base registered");
         assert_eq!(base.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(base.height, Some(12.0));
-        assert_eq!(base.color, Some([1.0, 0.82, 0.0, 1.0]));
+        assert_eq!(base.height, Some(crate::layout::Len::Script(12.0)));
+        assert_eq!(
+            base.color,
+            Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0]))
+        );
 
-        // Leaf: Base's face through Mid, Mid's white, its own height of 10.
+        // Leaf: Base's face and height through Mid, and Mid's white; its own `<FontHeight>` has
+        // no `font=` beside it, so it is never read (`0x783cf1`).
         let leaf = s.font_object("Leaf").expect("Leaf registered");
         assert_eq!(leaf.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(leaf.height, Some(10.0));
-        assert_eq!(leaf.color, Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(leaf.height, Some(crate::layout::Len::Script(12.0)));
+        assert_eq!(
+            leaf.color,
+            Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0]))
+        );
     }
 
     #[test]
@@ -1517,7 +1915,7 @@ mod loader_tests {
         assert!(matches!(
             &small.content,
             QuadContent::Text { font: Some(f), color: Some(c), .. }
-                if f == "Fonts\\FRIZQT__.TTF" && *c == [1.0, 0.82, 0.0, 1.0]
+                if f == "Fonts\\FRIZQT__.TTF" && *c == crate::color::quant::drawn([1.0, 0.82, 0.0, 1.0])
         ));
     }
 
@@ -1560,12 +1958,47 @@ mod loader_tests {
         assert!(matches!(
             &a.content,
             QuadContent::Text { color: Some(c), font_height: Some(h), .. }
-                if *c == [0.1, 0.2, 0.3, 1.0] && *h == 12.0
+                if *c == crate::color::quant::drawn([0.1, 0.2, 0.3, 1.0]) && *h == 12.0
         ));
-        assert!(s
+        // B's unknown font object leaves it with no font: it holds its text and draws none
+        // (`0x7724f8`).
+        assert_eq!(s.eval::<String>("return OVB:GetText()").unwrap(), "B");
+        assert!(!s
             .extract()
             .into_iter()
             .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "B")));
+    }
+
+    /// `<ButtonText>` is built by the ordinary FontString loader (`0x7789d0` → `0x6f2780`), so its
+    /// `font=` font object (`0x771104`) and its `inherits=` give the label its font; `zBar`'s tab
+    /// label is the first, `AdvancedTradeSkillWindow`'s buttons the second.
+    #[test]
+    fn button_text_reads_its_own_font_and_inherits() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Font name="TabFont" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="10"/></FontHeight>
+                </Font>
+                <Font name="DialogFont" font="Fonts\MORPHEUS.TTF" virtual="true">
+                    <FontHeight><AbsValue val="14"/></FontHeight>
+                </Font>
+                <Button name="ByFont"><ButtonText font="TabFont"/></Button>
+                <Button name="ByInherits"><ButtonText inherits="DialogFont"/></Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(
+            s.eval::<(String, f32)>("return ByFont:GetFontString():GetFont()")
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 10.0)
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>("return ByInherits:GetFontString():GetFont()")
+                .unwrap(),
+            ("Fonts\\MORPHEUS.TTF".to_string(), 14.0)
+        );
     }
 
     /// The chat edit box's shape. The engine assigns the text slot from the direct-child
@@ -1576,6 +2009,9 @@ mod loader_tests {
         s.set_screen_size(800.0, 600.0);
         let doc = parse(
             r#"<Ui>
+                <Font name="ChatFontNormal" font="Fonts\ARIALN.TTF" virtual="true">
+                    <FontHeight><AbsValue val="14"/></FontHeight>
+                </Font>
                 <EditBox name="EB" letters="255">
                     <Size><AbsDimension x="600" y="32"/></Size>
                     <Anchors>
@@ -1586,7 +2022,7 @@ mod loader_tests {
                     <TextInsets><AbsInset left="47" right="13" top="0" bottom="0"/></TextInsets>
                     <Layers>
                         <Layer level="ARTWORK">
-                            <FontString name="$parentHeader" text="Say:">
+                            <FontString name="$parentHeader" inherits="ChatFontNormal" text="Say:">
                                 <Anchors>
                                     <Anchor point="LEFT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor>
                                 </Anchors>
@@ -1625,13 +2061,13 @@ mod loader_tests {
             .expect("the typed text renders in the box's text region");
 
         // The header: its own LEFT+13 anchor and the 30×12 extent, centred on the 100..132 box.
-        assert_eq!(
+        crate::assert_near!(
             header.rect,
             Some(crate::layout::Rect::new(110.0, 113.0, 122.0, 143.0)),
             "header must keep its own anchor + auto-size"
         );
         // Typed text rect: the box minus the XML `<TextInsets>` (47 left, 13 right).
-        assert_eq!(
+        crate::assert_near!(
             typed.rect,
             Some(crate::layout::Rect::new(100.0, 147.0, 132.0, 687.0)),
             "the text region is anchored by the insets"
@@ -1662,20 +2098,20 @@ mod loader_tests {
             s.resolve();
             s.eval::<f64>(&format!("return {f}:GetLeft()")).unwrap()
         };
-        assert_eq!(left(&mut s, "Tut"), 100.0);
+        crate::assert_near!(left(&mut s, "Tut"), 100.0);
         s.mouse_button(150.0, 150.0, "LeftButton", true);
         s.mouse_move(250.0, 150.0);
-        assert_eq!(
+        crate::assert_near!(
             left(&mut s, "Tut"),
             200.0,
             "the element's title region drags the frame"
         );
         s.mouse_button(250.0, 150.0, "LeftButton", false);
 
-        assert_eq!(left(&mut s, "Plain"), 400.0);
+        crate::assert_near!(left(&mut s, "Plain"), 400.0);
         s.mouse_button(450.0, 150.0, "LeftButton", true);
         s.mouse_move(550.0, 150.0);
-        assert_eq!(left(&mut s, "Plain"), 400.0, "no element, no handle");
+        crate::assert_near!(left(&mut s, "Plain"), 400.0, "no element, no handle");
         s.mouse_button(550.0, 150.0, "LeftButton", false);
     }
 
@@ -1725,8 +2161,9 @@ mod loader_tests {
         let (l, r, t, b) = s
             .eval::<(f64, f64, f64, f64)>("return Micro:GetHitRectInsets()")
             .unwrap();
-        assert_eq!((l, r, t, b), (0.0, 0.0, 18.0, 0.0));
-        assert_eq!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
+        let law = crate::test_support::law43;
+        assert_eq!((l, r, t, b), (law(0.0), law(0.0), law(18.0), law(0.0)));
+        crate::assert_near!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
         // A button is mouse-enabled by construction, so the hit test is live.
         assert!(
             s.hit_test(14.0, 50.0).is_none(),
@@ -1823,7 +2260,7 @@ mod loader_tests {
             "the <NormalText> region must BE the button's label"
         );
         // 3 · The element's geometry landed on the label.
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<f64>("return KtmSelfHeaderNameText:GetWidth()")
                 .unwrap(),
             70.0
@@ -1845,7 +2282,7 @@ mod loader_tests {
             .expect("the <NormalText> label must paint");
         assert_eq!(
             label,
-            Some([0.9, 0.8, 0.1, 1.0]),
+            Some(crate::color::quant::drawn([0.9, 0.8, 0.1, 1.0])),
             "<NormalText inherits=> must reach the button's Normal-state font"
         );
     }
@@ -1941,12 +2378,12 @@ mod loader_tests {
                  return c:GetLeft(), c:GetRight(), l:GetLeft(), l:GetRight()",
             )
             .unwrap();
-        assert_eq!(
+        crate::assert_near!(
             (cl, cr),
             (40.0, 80.0),
             "the Gatherer row's label is centred on the button, not hugging its left edge"
         );
-        assert_eq!(
+        crate::assert_near!(
             (ll, lr),
             (28.0, 68.0),
             "the <ButtonText> row's label still hugs the button's left edge"
@@ -2066,6 +2503,89 @@ mod loader_tests {
         assert_eq!(s.eval::<i64>("return Gone:GetNumRegions()").unwrap(), 0);
     }
 
+    /// `0x78a130` sets the `file=` document (`0x78a2b2`) before it reads `hyperlinkFormat`
+    /// (`0x78a2d4`), so the document's links splice with the ctor's format and the XML's applies
+    /// from the next `SetText`.
+    #[test]
+    fn simplehtml_parses_its_file_before_taking_its_hyperlink_format() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="LinkDocFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+                <SimpleHTML name="LinkDoc" file="doc.html" hyperlinkFormat="|H%s|h[%s]|h">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="LinkDocFont"/>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "doc.html")
+                .then(|| b"<html><body><p><a href=\"x\">go</a></p></body></html>".to_vec())
+        };
+        let report = load_in(&s, &doc, "Interface/GlueXML/LinkDoc.xml", &files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let text = "local r = LinkDoc:GetRegions(); return r:GetText()";
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|hgo|h");
+        assert_eq!(
+            s.eval::<String>("return LinkDoc:GetHyperlinkFormat()")
+                .unwrap(),
+            "|H%s|h[%s]|h"
+        );
+        s.run(r#"LinkDoc:SetText('<html><body><p><a href="x">go</a></p></body></html>')"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|h[go]|h");
+    }
+
+    /// A `<SimpleHTML>` element font is loaded by `CSimpleFont::LoadXML` (`0x78a26e` → `0x783c30`),
+    /// whose file needs a height above 0 (`0x783d6d`-`0x783d78`): else it reports
+    /// `Font %s: Missing font height in %s element` (`0x87a4f0`) and returns (`0x783dae`) before
+    /// the element's `<Color>`, so that element keeps no font and its default colour.
+    #[test]
+    fn a_simplehtml_element_font_file_without_a_height_is_refused() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <SimpleHTML name="Page">
+                    <FontString font="Fonts\MORPHEUS.TTF"><Color r="1" g="0" b="0"/></FontString>
+                    <FontStringHeader1 font="Fonts\SKURRI.TTF">
+                        <FontHeight val="24"/><Color r="0" g="1" b="0"/>
+                    </FontStringHeader1>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(
+            report.warnings,
+            ["Font <unnamed>: Missing font height in FontString element"]
+        );
+        assert_eq!(
+            s.eval::<Option<String>>("return (Page:GetFont())").unwrap(),
+            None
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>("local p, h = Page:GetFont(\"H1\"); return p, h")
+                .unwrap(),
+            ("Fonts\\SKURRI.TTF".to_string(), 24.0)
+        );
+        let green = s
+            .eval::<(f32, f32, f32, f32)>("return Page:GetTextColor(\"H1\")")
+            .unwrap();
+        let one = crate::color::quant::read32(1.0);
+        assert_eq!(green, (0.0, one, 0.0, one));
+        let p = s
+            .eval::<(f32, f32, f32, f32)>("return Page:GetTextColor()")
+            .unwrap();
+        assert_ne!(
+            p,
+            (one, 0.0, 0.0, one),
+            "the refused element's Color is not read"
+        );
+    }
+
     /// A direct-child `<FontString>` declares `elementFont[0]` and `<FontStringHeader1>`
     /// `elementFont[1]`, neither a region, and `hyperlinkFormat=` lands at `+0x360`; stock
     /// `ItemTextFrame.xml:214` uses the first.
@@ -2145,7 +2665,7 @@ mod loader_tests {
                     .collect::<Vec<_>>(),
                 blocks
                     .iter()
-                    .map(|rh| model.region_data[rh].size)
+                    .map(|rh| model.region_data[rh].size.map(|(w, h)| (w.raw(), h.raw())))
                     .collect::<Vec<_>>(),
             )
         };
@@ -2205,8 +2725,9 @@ mod loader_tests {
     /// state-texture element builds a new region through the `<Layers>` adder (`0x6f26f0`) that the
     /// slot store installs, destroying the one it displaces (`0x778fd0` via `0x77900a`, the
     /// highlight's `0x779110`, the checked pair's `0x785330`/`0x785440`). So an instance's element
-    /// keeps nothing of the template's: the fresh region's TexCoords, alpha and BLEND (`0x76fc40`;
-    /// the highlight keeps its own, `0x7789a4`), and `SetAllPoints` with no anchors (`0x7701c0`).
+    /// keeps nothing of the template's: the fresh region's TexCoords and BLEND (`0x76fc40`; the
+    /// highlight keeps its own, `0x7789a4`), and `SetAllPoints` with no anchors (`0x7701c0`). No
+    /// texture level reads `alpha` (`0x76fe20`), so every alpha stays 1.
     #[test]
     fn an_instance_state_texture_replaces_the_templates() {
         const TAGS: [(&str, &str); 6] = [
@@ -2298,7 +2819,8 @@ mod loader_tests {
             "one region per slot, none of the template's left over"
         );
 
-        // An instance element's own size, anchors and alpha lay the fresh region out.
+        // An instance element's own size and anchors lay the fresh region out; its `alpha=` is not
+        // read.
         let laid: (i64, String, f32, f32, f32, Vec<f32>) = s
             .eval(
                 r#"local t = LaidOutInst:GetNormalTexture()
@@ -2313,7 +2835,7 @@ mod loader_tests {
                 "CENTER".to_string(),
                 20.0,
                 16.0,
-                0.25,
+                1.0,
                 vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
             )
         );
@@ -2411,7 +2933,8 @@ mod loader_tests {
                 "Interface\\After".to_string(),
                 vec![0.25, 0.25, 0.25, 0.75, 0.75, 0.25, 0.75, 0.75],
                 "MOD".to_string(),
-                0.5,
+                // `SetAlpha(0.5)` is the byte 127 (`0x79b638`).
+                127.0 / 255.0,
                 1,
                 "TOPLEFT".to_string(),
             )
@@ -2450,19 +2973,56 @@ mod layer_blend_tests {
         let mut s = s;
         s.set_screen_size(800.0, 600.0);
         s.resolve();
-        let additive = s
+        let blend = s
             .extract()
             .iter()
             .find_map(|q| match &q.content {
                 QuadContent::Texture {
                     path: Some(p),
-                    additive,
+                    blend,
                     ..
-                } if p == "Interface\\Glow" => Some(*additive),
+                } if p == "Interface\\Glow" => Some(*blend),
                 _ => None,
             })
             .expect("the layer texture extracted");
-        assert!(additive, "alphaMode=ADD must ride into the quad blend flag");
+        assert_eq!(
+            blend,
+            crate::script::BlendMode::Add,
+            "alphaMode=ADD must ride into the quad blend"
+        );
+    }
+
+    /// `alphaMode=` (`0x770176`) skips an empty value and ignores an unknown one with no log
+    /// (`0x770185`, `0x770195`), where `SetBlendMode` raises; a known one is any case.
+    #[test]
+    fn an_unknown_alpha_mode_is_ignored_without_a_fault() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="ModeHost">
+                    <Layers><Layer level="ARTWORK">
+                        <Texture name="ModeBogus" file="Interface\Bogus" alphaMode="ADDITIVE"/>
+                        <Texture name="ModeEmpty" file="Interface\Empty" alphaMode=""/>
+                        <Texture name="ModeMod" file="Interface\Mod" alphaMode="mod"/>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        )
+        .unwrap();
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert!(
+            report.warnings.is_empty(),
+            "warnings: {:?}",
+            report.warnings
+        );
+        let modes: (String, String, String) = s
+            .eval(
+                "return ModeBogus:GetBlendMode(), ModeEmpty:GetBlendMode(), \
+                 ModeMod:GetBlendMode()",
+            )
+            .unwrap();
+        assert_eq!(modes, ("BLEND".into(), "BLEND".into(), "MOD".into()));
     }
 }
 
@@ -3001,4 +3561,254 @@ fn join_ref_resolves_relative_framexml_paths() {
     assert_eq!(join_ref("", "../secret"), "../secret");
     // A leading `/` re-roots rather than meaning the filesystem root.
     assert_eq!(join_ref("a/b", "/c.xml"), "c.xml");
+}
+
+/// A texture's wrap is fixed when its file loads (`0x770200`'s second argument), never from the
+/// coordinates it draws with later: the XML loader passes 1 only when its `<TexCoords>` leave
+/// [0, 1] (`0x77012d`), the Lua `SetTexture` always 0 (`0x79bda5`).
+mod texture_wrap_tests {
+    use crate::framexml;
+    use crate::loader::*;
+    use crate::script::{QuadContent, UiScript};
+
+    fn no_files(_: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// A host holding one frame whose XML textures are `layers`, plus a Button with a
+    /// `<NormalTexture>` from `normal`.
+    fn host(layers: &str, normal: &str) -> UiScript {
+        host_with("", layers, normal)
+    }
+
+    /// [`host`] with `templates` (top-level `virtual` elements) ahead of the frame.
+    fn host_with(templates: &str, layers: &str, normal: &str) -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = framexml::parse(&format!(
+            r#"<Ui>
+                {templates}
+                <Frame name="WrapHost">
+                    <Size><AbsDimension x="100" y="100"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <Layers><Layer level="ARTWORK">{layers}</Layer></Layers>
+                </Frame>
+                <Button name="WrapBtn">
+                    <Size><AbsDimension x="40" y="20"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    {normal}
+                </Button>
+            </Ui>"#
+        ))
+        .expect("valid FrameXML");
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s
+    }
+
+    /// The load-time wrap of the drawn quad whose path holds `file`.
+    fn wrap_of(s: &mut UiScript, file: &str) -> bool {
+        s.resolve();
+        let wraps: Vec<bool> = s
+            .extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    wrap,
+                    ..
+                } if p.contains(file) => Some(wrap),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wraps.len(), 1, "one quad draws {file}: {wraps:?}");
+        wraps[0]
+    }
+
+    /// A Lua texture whose coordinates run far past [0, 1] clamps: the taxi map's route lines
+    /// (`TaxiFrame.lua:178`) stretch one texture over a long box and must not repeat.
+    #[test]
+    fn a_lua_texture_with_uvs_past_one_clamps() {
+        let mut s = host("", "");
+        s.run(
+            r#"local t = WrapHost:CreateTexture("LuaLine", "ARTWORK")
+            t:SetAllPoints(WrapHost)
+            t:SetTexture("Interface\\LuaLine")
+            t:SetTexCoord(-2.4, 3.4, 0, 1)"#,
+        )
+        .unwrap();
+        assert!(!wrap_of(&mut s, "LuaLine"));
+        s.run("LuaLine:SetTexCoord(0, 5, -1, 7)").unwrap();
+        assert!(!wrap_of(&mut s, "LuaLine"));
+    }
+
+    /// An XML `<Texture>` repeats exactly when one `<TexCoords>` edge is below 0 or above 1; an
+    /// edge left out keeps its default 0 or 1, and no `<TexCoords>` is no wrap.
+    #[test]
+    fn an_xml_texture_repeats_when_its_texcoords_leave_the_unit_square() {
+        let tex = |name: &str, tc: &str| {
+            format!(
+                r#"<Texture name="{name}" file="Interface\{name}"><Anchors><Anchor point="TOPLEFT"/></Anchors>{tc}</Texture>"#
+            )
+        };
+        let layers = [
+            tex(
+                "TcOut",
+                r#"<TexCoords left="0" right="2" top="0" bottom="1"/>"#,
+            ),
+            tex(
+                "TcNeg",
+                r#"<TexCoords left="0" right="1" top="-0.5" bottom="1"/>"#,
+            ),
+            tex(
+                "TcIn",
+                r#"<TexCoords left="0" right="0.453125" top="0" bottom="1"/>"#,
+            ),
+            tex(
+                "TcFlip",
+                r#"<TexCoords left="1" right="0" top="0" bottom="1"/>"#,
+            ),
+            tex("TcNone", ""),
+            tex("TcDefault", r#"<TexCoords right="1"/>"#),
+            tex("TcPartOut", r#"<TexCoords left="0.25" bottom="3"/>"#),
+        ]
+        .concat();
+        let mut s = host(&layers, "");
+        for (file, want) in [
+            ("TcOut", true),
+            ("TcNeg", true),
+            ("TcIn", false),
+            ("TcFlip", false),
+            ("TcNone", false),
+            ("TcDefault", false),
+            ("TcPartOut", true),
+        ] {
+            assert_eq!(wrap_of(&mut s, file), want, "{file}");
+        }
+    }
+
+    /// `SetTexCoord` leaves the flag where the load put it, in either direction.
+    #[test]
+    fn set_tex_coord_never_changes_the_wrap() {
+        let mut s = host(
+            r#"<Texture name="Tiled" file="Interface\Tiled"><Anchors><Anchor point="TOPLEFT"/></Anchors>
+                   <TexCoords left="0" right="4" top="0" bottom="1"/></Texture>
+               <Texture name="Strip" file="Interface\Strip"><Anchors><Anchor point="TOPLEFT"/></Anchors>
+                   <TexCoords left="0" right="1" top="0" bottom="1"/></Texture>"#,
+            "",
+        );
+        s.run("Tiled:SetTexCoord(0, 1, 0, 1) Strip:SetTexCoord(0, 4, 0, 1)")
+            .unwrap();
+        assert!(
+            wrap_of(&mut s, "Tiled"),
+            "a tiled texture shown whole stays repeating"
+        );
+        assert!(
+            !wrap_of(&mut s, "Strip"),
+            "a clamped one stretched past 1 stays clamped"
+        );
+    }
+
+    /// The binding loads with the flag off: a different file clamps, and the same file answers 1
+    /// before any load (`0x770225`), so the flag the XML load set survives, whatever the spelling.
+    #[test]
+    fn lua_set_texture_on_a_repeating_xml_texture() {
+        let mut s = host(
+            r#"<Texture name="Tiled" file="Interface\Tiled"><Anchors><Anchor point="TOPLEFT"/></Anchors>
+                   <TexCoords left="0" right="4" top="0" bottom="1"/></Texture>"#,
+            "",
+        );
+        assert!(wrap_of(&mut s, "Tiled"));
+        s.run(r#"Tiled:SetTexture("interface\\TILED.blp")"#)
+            .unwrap();
+        assert!(
+            wrap_of(&mut s, "Tiled"),
+            "the file it already shows is a no-op"
+        );
+        s.run(r#"Tiled:SetTexture("Interface\\Other")"#).unwrap();
+        assert!(
+            !wrap_of(&mut s, "Other"),
+            "another file loads with the flag off"
+        );
+        s.run(r#"Tiled:SetTexture("Interface\\Tiled")"#).unwrap();
+        assert!(
+            !wrap_of(&mut s, "Tiled"),
+            "…and so does coming back to the first"
+        );
+    }
+
+    /// Clearing or filling the texture drops the loaded image with its flag; the next file loads
+    /// with the binding's 0.
+    #[test]
+    fn clearing_or_filling_a_texture_drops_the_flag_with_the_image() {
+        let mut s = host(
+            r#"<Texture name="Tiled" file="Interface\Tiled"><Anchors><Anchor point="TOPLEFT"/></Anchors>
+                   <TexCoords left="0" right="4" top="0" bottom="1"/></Texture>"#,
+            "",
+        );
+        s.run("Tiled:SetTexture(nil)").unwrap();
+        s.run(r#"Tiled:SetTexture("Interface\\Tiled")"#).unwrap();
+        assert!(!wrap_of(&mut s, "Tiled"));
+        s.run(r#"Tiled:SetTexture(1, 0, 0, 1) Tiled:SetTexture("Interface\\Tiled")"#)
+            .unwrap();
+        assert!(!wrap_of(&mut s, "Tiled"));
+    }
+
+    /// A Button's state texture is an XML `<Texture>` too; `SetNormalTexture(path)` reloads it
+    /// through `0x770200` with the flag off (`0x778f3a`).
+    #[test]
+    fn a_button_state_texture_follows_the_same_rule() {
+        let mut s = host(
+            "",
+            r#"<NormalTexture file="Interface\BtnTiled">
+                   <TexCoords left="0" right="3" top="0" bottom="1"/></NormalTexture>"#,
+        );
+        assert!(wrap_of(&mut s, "BtnTiled"));
+        s.run(r#"WrapBtn:SetNormalTexture("Interface\\BtnTiled")"#)
+            .unwrap();
+        assert!(wrap_of(&mut s, "BtnTiled"), "the same file keeps its load");
+        s.run(r#"WrapBtn:SetNormalTexture("Interface\\BtnOther")"#)
+            .unwrap();
+        assert!(!wrap_of(&mut s, "BtnOther"));
+    }
+
+    /// A template loads through its own recursive load with its own flag, and the flag is zeroed
+    /// before the instance's children (`0x76fe5b`, `0x76fec6`): the instance's file takes the wrap
+    /// of the instance's own `<TexCoords>` alone, and a template's file keeps its own.
+    #[test]
+    fn a_template_level_loads_with_its_own_wrap_flag() {
+        let templates = r#"
+            <Texture name="TplBare" virtual="true">
+                <TexCoords left="0" right="3" top="0" bottom="1"/>
+            </Texture>
+            <Texture name="TplFile" virtual="true" file="Interface\TplFile">
+                <TexCoords left="0" right="3" top="0" bottom="1"/>
+            </Texture>
+            <Texture name="TplPlain" virtual="true" file="Interface\TplPlain"/>
+            <Texture name="TplShared" virtual="true" file="Interface\Shared">
+                <TexCoords left="0" right="3" top="0" bottom="1"/>
+            </Texture>"#;
+        let a = r#"<Anchors><Anchor point="TOPLEFT"/></Anchors>"#;
+        let layers = format!(
+            r#"<Texture name="OwnOnly" inherits="TplBare" file="Interface\OwnOnly">{a}</Texture>
+               <Texture name="OwnOut" inherits="TplPlain" file="Interface\OwnOut">{a}
+                   <TexCoords left="0" right="2" top="0" bottom="1"/></Texture>
+               <Texture name="FromTpl" inherits="TplFile">{a}</Texture>
+               <Texture name="Other" inherits="TplFile" file="Interface\Other">{a}</Texture>
+               <Texture name="Same" inherits="TplShared" file="interface\SHARED.blp">{a}</Texture>"#
+        );
+        let mut s = host_with(templates, &layers, "");
+        // The template has out-of-range edges, the instance only a file: the instance clamps.
+        assert!(!wrap_of(&mut s, "OwnOnly"));
+        // The instance's own out-of-range edges repeat its file, whatever the template says.
+        assert!(wrap_of(&mut s, "OwnOut"));
+        s.run("OwnOnly:SetTexCoord(0, 1, 0, 1)").unwrap();
+        // The template's file keeps the flag of the template's own edges.
+        assert!(wrap_of(&mut s, "TplFile"));
+        // An instance file of another name loads again, with the instance's flag.
+        assert!(!wrap_of(&mut s, "Other"));
+        // The same file under another spelling is the no-op of `0x770225`: the template's flag
+        // stays.
+        assert!(wrap_of(&mut s, "Shared"));
+    }
 }

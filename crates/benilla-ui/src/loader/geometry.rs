@@ -1,217 +1,210 @@
-use mlua::{ObjectLike, Table};
+use mlua::Table;
 
 use crate::framexml::{self, Element};
+use crate::layout::Len;
+use crate::script::binding_abi::s_str_to_int;
+use crate::script::object;
 
-use super::regions::FontAttrs;
-use super::{abs_dim, children_named, Loader};
+use super::{children_named, Loader};
 
 impl Loader<'_> {
-    /// A frame element's LoadXML attributes and simple children (`0x769820`), and a model pane's
-    /// own (`0x76cac0`).
-    pub(super) fn apply_attrs(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
-        if el.attr_bool("hidden") {
-            self.call(wrapper, "Hide", (), dbg);
-        }
-        // An unknown `frameStrata=` is logged (`0x7699a4`) and skipped, not raised as the Lua
-        // binding would (`0x774360`): `SetFrameStrata` runs only on a hit (`0x769971`), so the
-        // frame keeps the strata it had.
-        if let Some(strata) = el.attr("frameStrata") {
-            if crate::script::object::strata_from_str(strata).is_some() {
-                self.call(wrapper, "SetFrameStrata", strata.to_string(), dbg);
-            } else {
-                self.report
-                    .warnings
-                    .push(format!("{dbg}: Unknown frame strata: {strata}"));
-            }
-        }
-        if let Some(level) = el.attr("frameLevel") {
-            if let Ok(n) = level.parse::<i64>() {
-                self.call(wrapper, "SetFrameLevel", n, dbg);
-            }
-        }
-        if let Some(alpha) = el.attr("alpha") {
-            if let Ok(a) = alpha.parse::<f32>() {
-                self.call(wrapper, "SetAlpha", a, dbg);
-            }
-        }
-
-        // A model pane's `file=` is `SetModel` (`0x76cac0`).
-        let model_kind = super::model_kind_tag(&el.tag);
-        if model_kind {
-            if let Some(file) = el.attr("file") {
-                let text = self.resolve_text(file, dbg);
-                self.call(wrapper, "SetModel", text, dbg);
-            }
-        }
-        // A model pane's `scale=` is the model's scale, the field `SetModelScale` writes
-        // (`0x76cb61`); a value of 0 or less is refused, never clamped (`0x76cb92`). A plain
-        // frame's `scale=` is ignored; whether `0x769820` reads one is untraced.
-        if let Some(scale) = el.attr("scale") {
-            if model_kind {
-                match scale.trim().parse::<f32>() {
-                    Ok(s) if s > 0.0 => self.call(wrapper, "SetModelScale", s, dbg),
-                    _ => self.warn_once(
-                        &format!("model-scale:{dbg}"),
-                        format!("Frame {dbg}: Invalid model scale: {scale}"),
-                    ),
-                }
-            }
-        }
-        // A model pane's fog: `fogNear`/`fogFar` clamp at 0 here only (`0x76cbbb`, `0x76cbf3`),
-        // where the Lua setters store raw; `<FogColor>` is `SetFogColor`, fog bit included.
-        if model_kind {
-            for (attr, verb) in [("fogNear", "SetFogNear"), ("fogFar", "SetFogFar")] {
-                if let Some(v) = el.attr(attr).and_then(|v| v.trim().parse::<f32>().ok()) {
-                    self.call(wrapper, verb, v.max(0.0), dbg);
-                }
-            }
-            if let Some(fc) = children_named(el, "FogColor").next() {
-                let ch = |k: &str, d: f32| {
-                    fc.attr(k)
-                        .and_then(|v| v.trim().parse::<f32>().ok())
-                        .unwrap_or(d)
-                };
-                self.call(
-                    wrapper,
-                    "SetFogColor",
-                    (ch("r", 0.0), ch("g", 0.0), ch("b", 0.0), ch("a", 1.0)),
-                    dbg,
-                );
-            }
-        }
-        if let Some(id) = el.attr("id") {
-            if let Ok(n) = id.parse::<i64>() {
+    /// The pre-load hook's `id` (`0x769770`), read on the frame's own node alone: a non-empty one
+    /// through `SStrToInt`, a negative one skipped (`0x7697ae`-`0x7697b7`).
+    pub(super) fn apply_preload_id(&mut self, own: &Element, wrapper: &Table, dbg: &str) {
+        if let Some(id) = own.attr("id").filter(|v| !v.is_empty()) {
+            let n = s_str_to_int(id);
+            if n >= 0 {
                 self.call(wrapper, "SetID", n, dbg);
             }
         }
-        // `clampedToScreen`: the layout's screen clamp, geometry flag `0x10` (`0x768cc0`).
-        if el.attr_bool("clampedToScreen") {
-            self.call(wrapper, "SetClampedToScreen", true, dbg);
-        }
-        if el.attr_bool("enableMouse") {
-            self.call(wrapper, "EnableMouse", true, dbg);
-        }
-        // `<HitRectInsets>`: the mouse rect, inset from the frame's; a side it omits is 0.
-        if let Some(ins) = children_named(el, "HitRectInsets").next() {
-            let src = children_named(ins, "AbsInset").next().unwrap_or(ins);
-            let side = |k: &str| {
-                src.attr(k)
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-                    .unwrap_or(0.0)
-            };
-            self.call(
-                wrapper,
-                "SetHitRectInsets",
-                (side("left"), side("right"), side("top"), side("bottom")),
-                dbg,
-            );
-        }
-        // `<ResizeBounds>` (`0x769baa`): both pairs are always written, an absent one as 0, so a
-        // lone `<minResize>` resets the max to unbounded. A `<Size>` outside them is not clamped.
-        if let Some(rb) = children_named(el, "ResizeBounds").next() {
-            for (tag, verb) in [("minResize", "SetMinResize"), ("maxResize", "SetMaxResize")] {
-                let (x, y) = children_named(rb, tag).next().map_or((None, None), abs_dim);
-                self.call(wrapper, verb, (x.unwrap_or(0.0), y.unwrap_or(0.0)), dbg);
-            }
-        }
-        // `movable`/`resizable`: flag bits 0x100/0x200, via the setter Lua uses (`0x76a3c0`).
-        if el.attr_bool("movable") {
-            self.call(wrapper, "SetMovable", true, dbg);
-        }
-        if el.attr_bool("resizable") {
-            self.call(wrapper, "SetResizable", true, dbg);
-        }
-        // `toplevel`: bit 0x1 of the same flag word (`0x7698ec`).
-        if el.attr_bool("toplevel") {
-            self.call(wrapper, "SetToplevel", true, dbg);
-        }
-        // `enableKeyboard` enables both key kinds (`0x769ae8`, `0x769af3`).
-        if el.attr_bool("enableKeyboard") {
-            self.call(wrapper, "EnableKeyboard", true, dbg);
+    }
+
+    /// One `<HitRectInsets>` arm of the child loop: the mouse rect, inset from the frame's, when
+    /// the inset read succeeds (`0x769cb5`); a side it omits is 0. Each arm applies in turn, so the
+    /// last one read wins.
+    pub(super) fn apply_hit_rect_insets(&mut self, ins: &Element, wrapper: &Table, dbg: &str) {
+        if let Some(v) = self.inset(ins) {
+            let [l, r, t, b] = self.script_of(v);
+            self.call(wrapper, "SetHitRectInsets", (l, r, t, b), dbg);
+            crate::script::xml_layout::hit_rect_insets(self.lua, wrapper, v);
         }
     }
 
-    /// `<TitleRegion>`: the drag handle, built through the idempotent `CreateTitleRegion` so the
-    /// element and a later Lua call name one object (`0x769b2a` takes `0x773910`'s path).
+    /// One `<ResizeBounds>` arm (`0x769baa`): its first `<minResize>` and `<maxResize>`, both
+    /// pairs always written, an absent one as 0 (`0x769bc8`-`0x769c28`), so a lone `<minResize>`
+    /// resets the max to unbounded. A `<Size>` outside them is not clamped.
+    pub(super) fn apply_resize_bounds(&mut self, rb: &Element, wrapper: &Table, dbg: &str) {
+        for (tag, verb) in [("minResize", "SetMinResize"), ("maxResize", "SetMaxResize")] {
+            let v = children_named(rb, tag)
+                .next()
+                .map_or([Len::Script(0.0); 2], |d| self.dimension(d).v);
+            let [x, y] = self.script_of(v);
+            self.call(wrapper, verb, (x, y), dbg);
+            crate::script::xml_layout::resize_bound(self.lua, wrapper, tag == "maxResize", v);
+        }
+    }
+
+    /// One level's flag attributes, as `0x769820` reads them on each node after its geometry
+    /// (`0x769881`-`0x769b17`), the template first (`0x76985c`): each is skipped when empty (a
+    /// first-byte test), so an instance's `""` leaves its template's value.
+    pub(super) fn apply_level_flags(&mut self, level: &Element, wrapper: &Table, dbg: &str) {
+        // `hidden` hides or shows (`0x7698a2`-`0x7698c4`).
+        match level.attr_bool_opt("hidden") {
+            Some(true) => self.call(wrapper, "Hide", (), dbg),
+            Some(false) => self.call(wrapper, "Show", (), dbg),
+            None => {}
+        }
+        // `toplevel`, `movable` and `resizable` set or clear bits 0x1, 0x100 and 0x200 of the flag
+        // word through the setter Lua uses (`0x76a3c0`, at `0x7698ec`, `0x769916`, `0x769940`).
+        for (attr, verb) in [
+            ("toplevel", "SetToplevel"),
+            ("movable", "SetMovable"),
+            ("resizable", "SetResizable"),
+        ] {
+            if let Some(on) = level.attr_bool_opt(attr) {
+                self.call(wrapper, verb, on, dbg);
+            }
+        }
+        // An unknown `frameStrata=` is logged at severity 1, the name or `<unnamed>` (`0x878658`,
+        // `0x76999c`), and skipped, not raised as the Lua binding would (`0x774360`):
+        // `SetFrameStrata` runs only on a hit (`0x769971`), so the earlier level's stands.
+        if let Some(strata) = level.attr("frameStrata").filter(|v| !v.is_empty()) {
+            if crate::script::object::strata_from_str(strata).is_some() {
+                self.call(wrapper, "SetFrameStrata", strata.to_string(), dbg);
+            } else {
+                let name = self.object_name(wrapper);
+                self.status_warning(format!("Frame {name}: Unknown frame strata: {strata}"));
+            }
+        }
+        // `frameLevel=` with `SStrToInt` (`0x7699c5`): above 0 it is set (`0x76a4f0`, the setter
+        // `SetFrameLevel` calls), else logged (`0x878628`) and the level kept, so an instance's
+        // `"0"` leaves its template's level.
+        if let Some(value) = level.attr("frameLevel").filter(|v| !v.is_empty()) {
+            let n = s_str_to_int(value);
+            if n > 0 {
+                self.call(wrapper, "SetFrameLevel", n, dbg);
+            } else {
+                let name = self.object_name(wrapper);
+                self.status_warning(format!("Frame {name}: Unknown frame level: {value}"));
+            }
+        }
+        // `0x769a10`: a non-empty `alpha` through `SStrToFloat` (`0x64aaa0`), clamped with NaN
+        // at 1 and handed to the alpha walk as Lua's `SetAlpha` hands it (`0x769a76`-`0x769a8a`).
+        if let Some(alpha) = level.attr("alpha").filter(|v| !v.is_empty()) {
+            let a = crate::script::binding_abi::s_str_to_float(alpha);
+            self.call(wrapper, "SetAlpha", a, dbg);
+        }
+        // `enableMouse` and `enableKeyboard` only ever enable (`0x769aaf`, `0x769adb`), the
+        // keyboard both key kinds (`0x769ae8`, `0x769af3`), so `"false"` undoes no template.
+        if level.attr_bool("enableMouse") {
+            self.call(wrapper, "EnableMouse", true, dbg);
+        }
+        if level.attr_bool("enableKeyboard") {
+            self.call(wrapper, "EnableKeyboard", true, dbg);
+        }
+        // `clampedToScreen` sets or clears the layout's screen clamp, geometry flag `0x10`
+        // (`0x769b17` → `0x768cc0`).
+        if let Some(on) = level.attr_bool_opt("clampedToScreen") {
+            self.call(wrapper, "SetClampedToScreen", on, dbg);
+        }
+    }
+
+    /// One `<TitleRegion>` arm of the child loop (`0x769b2f`-`0x769ba5`): a new drag-handle region
+    /// for each element, the frame's from then on ([`crate::script::object::xml_title_region`]),
+    /// so an instance's element replaces its template's whole and none of the template's anchors
+    /// reach the region the frame keeps. Its layout load is `0x767800` itself (`0x81c528[2]`,
+    /// called at `0x769b8a`), which never re-enters `inherits`: the node alone.
     pub(super) fn apply_title_region(
         &mut self,
-        el: &Element,
+        tr: &Element,
         wrapper: &Table,
         self_name: &str,
         dbg: &str,
     ) {
-        let Some(tr) = children_named(el, "TitleRegion").next() else {
-            return;
-        };
-        let region: Table = match wrapper.call_method("CreateTitleRegion", ()) {
+        let region = match crate::script::object::xml_title_region(self.lua, wrapper) {
             Ok(r) => r,
             Err(e) => {
-                self.report.fault(format!("{dbg}: CreateTitleRegion: {e}"));
+                self.report.fault(format!("{dbg}: <TitleRegion>: {e}"));
                 return;
             }
         };
-        self.apply_region_layout(tr, &region, self_name, dbg, FontAttrs::Own);
+        self.apply_geometry(tr, &region, true, self_name, dbg);
     }
 
-    /// `<Size>` (`0x767800`). Every one applies in document order, and expansion puts an
-    /// instance's children after its template's, so the instance's own `<Size>` wins.
-    pub(super) fn apply_size(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
-        for size in children_named(el, "Size") {
-            let (x, y) = abs_dim(size);
-            if let Some(w) = x {
-                self.call(wrapper, "SetWidth", w, dbg);
-            }
-            if let Some(h) = y {
-                self.call(wrapper, "SetHeight", h, dbg);
-            }
-        }
-    }
-
-    /// `<Anchors>` (`0x767800`), after the `setAllPoints` shorthand: `relativePoint` defaults to
-    /// `point`, and `relativeTo` expands `$parent` to the nearest named ancestor's name, else
-    /// `Top` (`0x76c5b0`).
-    pub(super) fn apply_anchors(
+    /// One node's geometry, the CLayoutFrame part of every frame and region `LoadXML` (`0x767800`),
+    /// run once per level ([`Loader::levels`]): the node's first `<Size>`, then its first
+    /// `<Anchors>`, whose points are added, or, with none, `setAllPoints="true"` (compared whole,
+    /// `0x767879`) as `SetAllPoints`, which clears the points first (`0x767db0`). `setAllPoints`
+    /// beside the node's own `<Anchors>` is logged (`0x8784ac`) and ignored, so a template's
+    /// all-points and an instance's anchor both stand (`ActionButtonTemplate.xml`'s
+    /// `$parentCooldown` over `CooldownFrameTemplate`). `relativePoint` defaults to `point`, and
+    /// `relativeTo` expands `$parent` to `parent_name`, the nearest named ancestor's, else `Top`
+    /// (`0x76c5b0`).
+    pub(super) fn apply_geometry(
         &mut self,
-        el: &Element,
+        node: &Element,
         wrapper: &Table,
+        region: bool,
         parent_name: &str,
         dbg: &str,
     ) {
-        if el.attr_is_true("setAllPoints") {
-            self.call(wrapper, "SetAllPoints", (), dbg);
-        }
-        for anchors in children_named(el, "Anchors") {
-            for anchor in children_named(anchors, "Anchor") {
-                let Some(point) = anchor.attr("point") else {
-                    self.report
-                        .warnings
-                        .push(format!("{dbg}: <Anchor> without a point; skipped"));
-                    continue;
-                };
-                let rel_point = anchor.attr("relativePoint").unwrap_or(point).to_string();
-                let rel_to: Option<String> = anchor
-                    .attr("relativeTo")
-                    .map(|r| framexml::resolve_name(r, parent_name));
-                let (x, y) = children_named(anchor, "Offset")
-                    .next()
-                    .map(abs_dim)
-                    .unwrap_or((None, None));
-                let args = (
-                    point.to_string(),
-                    rel_to,
-                    rel_point,
-                    x.unwrap_or(0.0),
-                    y.unwrap_or(0.0),
-                );
-                let d = super::DeferredAnchor {
-                    wrapper: wrapper.clone(),
-                    region: false,
-                    args,
-                    dbg: dbg.to_string(),
-                };
-                // Deferred while the enclosing subtree has not built its target yet.
-                self.apply_anchor(d, true);
+        // A `<Size>` the dimension read accepts sets both axes, a missing one as 0
+        // (`0x767835`-`0x76784a`); one it refuses sets nothing.
+        if let Some(size) = children_named(node, "Size").next() {
+            let d = self.dimension(size);
+            if d.ok {
+                let [w, h] = d.script(self.model().layout_units());
+                self.call_on(wrapper, region, "SetWidth", w, dbg);
+                self.call_on(wrapper, region, "SetHeight", h, dbg);
+                crate::script::xml_layout::size(self.lua, wrapper, region, d.v);
             }
+        }
+        let set_all_points = node.attr_is_true("setAllPoints");
+        let Some(anchors) = children_named(node, "Anchors").next() else {
+            if set_all_points {
+                self.call_on(wrapper, region, "SetAllPoints", (), dbg);
+            }
+            return;
+        };
+        if set_all_points {
+            self.status_warning("SETALLPOINTS set to true in frame with anchors (ignored)".into());
+        }
+        // Every child of the first `<Anchors>`, whatever its tag (`[node+4]`, then `[child+0x1c]`,
+        // `0x7679e3`): its `point` through `0x6f1840`, a whole-string match ignoring case; a missing
+        // or unknown one is logged (`0x878470`, `0x7679cf`) and the child skipped, a missing one
+        // printing `(null)`: the status's `0x41a000` formats through `0x64a8b0` and `0x64a820`
+        // to the CRT, whose `__output` (`0x742ba5`) puts `(null)` (`0x871708`) for a null `%s`
+        // (`0x742ffc`).
+        for anchor in &anchors.children {
+            let point = anchor.attr("point");
+            let Some(point) = point.filter(|p| object::point_from_str(p).is_some()) else {
+                let shown = point.unwrap_or("(null)");
+                self.status_warning(format!("Invalid anchor point in frame: {shown}"));
+                continue;
+            };
+            // A non-empty `relativePoint` must parse too (`0x76792d`); an empty or absent one is
+            // `point` (`0x767940`).
+            let rel_point = match anchor.attr("relativePoint").filter(|r| !r.is_empty()) {
+                Some(r) if object::point_from_str(r).is_none() => {
+                    self.status_warning(format!("Invalid anchor point in frame: {r}"));
+                    continue;
+                }
+                Some(r) => r,
+                None => point,
+            };
+            // An empty `relativeTo` is the layout parent, as an absent one (`0x76795c`).
+            let rel_raw = anchor.attr("relativeTo").filter(|r| !r.is_empty());
+            let rel_to = rel_raw.map(|r| framexml::resolve_name(r, parent_name));
+            let args = (point.to_string(), rel_to, rel_point.to_string());
+            let d = super::XmlAnchor {
+                wrapper: wrapper.clone(),
+                region,
+                args,
+                offset: children_named(anchor, "Offset").next().cloned(),
+                rel_raw: rel_raw.unwrap_or_default().to_string(),
+                dbg: dbg.to_string(),
+            };
+            self.apply_anchor(d);
         }
     }
 }

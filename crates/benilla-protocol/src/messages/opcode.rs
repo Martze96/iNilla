@@ -1,6 +1,16 @@
 //! The 1.12.1 world opcode numbers (vmangos `Opcodes_1_12_1.h`). A client packet's header holds
 //! the opcode in 4 bytes, but every value fits `u16`; the senders widen it.
 
+/// `worldport`'s send (`0x404fc8`): `u32` clock, `u32` map, then x, y, z and the facing as floats.
+pub const CMSG_WORLD_TELEPORT: u16 = 0x0008;
+/// `port <name>`'s send (`0x404b31`): the argument text as a cstring.
+pub const CMSG_TELEPORT_TO_UNIT: u16 = 0x0009;
+/// `whois`'s send (`0x5adf1f`): the argument text as a cstring.
+pub const CMSG_WHOIS: u16 = 0x0064;
+/// `port <x y>`'s send (`0x404cdc`): x, y, z and the facing as floats.
+pub const MSG_MOVE_TELEPORT_CHEAT: u16 = 0x00C6;
+/// `setrawpos`'s send (`0x4051e4`): x, y, z and the facing as floats.
+pub const CMSG_MOVE_SET_RAW_POSITION: u16 = 0x00E1;
 pub const SMSG_CHAR_CREATE: u16 = 0x003A;
 pub const SMSG_CHAR_ENUM: u16 = 0x003B;
 // Character delete: CMSG a full u64 guid, SMSG one result byte (`CHAR_DELETE_SUCCESS` = 0x39).
@@ -33,6 +43,11 @@ pub const SMSG_NEW_WORLD: u16 = 0x003E;
 pub const SMSG_TRANSFER_PENDING: u16 = 0x003F;
 pub const SMSG_TRANSFER_ABORTED: u16 = 0x0040;
 pub const SMSG_LOGIN_SETTIMESPEED: u16 = 0x0042;
+// The game-clock messages (`gametime/messages` in benilla-re): a date to sync to, a date to set,
+// and a rate.
+pub const SMSG_GAMETIME_UPDATE: u16 = 0x0043;
+pub const SMSG_GAMETIME_SET: u16 = 0x0045;
+pub const SMSG_GAMESPEED_SET: u16 = 0x0047;
 pub const SMSG_BINDPOINTUPDATE: u16 = 0x0155;
 /// The proficiency mask for one item class (vmangos `Skill.h`).
 pub const SMSG_SET_PROFICIENCY: u16 = 0x0127;
@@ -63,15 +78,19 @@ pub const SMSG_SET_FACTION_STANDING: u16 = 0x0124;
 /// (`ReputationMgr::SendForceReactions`): a `u32` count, then `(faction id, reaction rank)` pairs
 /// of two `u32`s.
 pub const SMSG_SET_FORCED_REACTIONS: u16 = 0x02A5;
+/// A slot's at-war bit from the server: a `u32` slot and a `u8` whose bit `0x02` is the new bit
+/// (`0x4d56b0`). vmangos sends it when a creature of an unwarred faction enters combat with the
+/// player, and clears it as the player leaves combat (`Player::SendFactionAtWar`).
+pub const SMSG_SET_FACTION_ATWAR: u16 = 0x0313; // 787
 /// Set a faction's at-war flag from the reputation pane; none of the pane's three verbs is acked.
 pub const CMSG_SET_FACTION_ATWAR: u16 = 0x0125; // 293
 pub const CMSG_SET_FACTION_INACTIVE: u16 = 0x0317; // 791
 pub const CMSG_SET_WATCHED_FACTION: u16 = 0x0318; // 792
 pub const SMSG_AUTH_CHALLENGE: u16 = 0x01EC;
 pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
-/// The Warden anticheat challenge; vmangos kicks a client that leaves it unanswered for 30 s
-/// (`Warden::Update`). Deviation: benilla has no Warden, so the connect refuses such a server
-/// ([`crate::WardenRequired`]) because a session there would only be kicked.
+/// The Warden anticheat channel, which the reference hands to its Warden module (`0x6ca5c0`).
+/// benilla runs none and reads it past unanswered, a deviation recorded at
+/// [`crate::WorldSession::recv`] ([`crate::WorldSession::warden_asked`]).
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
 /// The answer to `CMSG_AUTH_SESSION`'s addon block: one record per `## Secure:` addon, in order,
 /// with no count or names.
@@ -90,11 +109,21 @@ pub const CMSG_TUTORIAL_FLAG: u16 = 0x00FE; // 254
 pub const CMSG_TUTORIAL_CLEAR: u16 = 0x00FF; // 255
 /// `ResetTutorials()`: empty body; every bit is cleared locally and on the server.
 pub const CMSG_TUTORIAL_RESET: u16 = 0x0100; // 256
+/// The server's digest of each of the eight account-data sections (`0x5af8e0`), sent at login.
+pub const SMSG_ACCOUNT_DATA_MD5: u16 = 0x0209;
+/// Ask for one section's file (`0x5afbe0`): one `u32`, the section.
+pub const CMSG_REQUEST_ACCOUNT_DATA: u16 = 0x020A;
+/// Store one section's file (`0x5afae0`): the section, its size and its zlib stream.
+pub const CMSG_UPDATE_ACCOUNT_DATA: u16 = 0x020B;
+/// One section's file (`0x5afc60`), the answer to [`CMSG_REQUEST_ACCOUNT_DATA`].
+pub const SMSG_UPDATE_ACCOUNT_DATA: u16 = 0x020C;
 pub const SMSG_PLAY_MUSIC: u16 = 0x0277;
 pub const SMSG_PLAY_OBJECT_SOUND: u16 = 0x0278;
 pub const SMSG_PLAY_SOUND: u16 = 0x02D2;
 /// The zone's weather, pushed by the server.
 pub const SMSG_WEATHER: u16 = 0x02F4;
+/// One `u32` emote, the placed bid's wave (`0x4cc5dd`).
+pub const CMSG_EMOTE: u16 = 0x0102;
 pub const SMSG_EMOTE: u16 = 0x0103;
 pub const CMSG_TEXT_EMOTE: u16 = 0x0104;
 pub const SMSG_TEXT_EMOTE: u16 = 0x0105;
@@ -297,6 +326,9 @@ pub const CMSG_PET_NAME_QUERY: u16 = 0x0052; // 82
 
 /// A pet bar press: the slot's packed word and a target guid, dispatched on its type byte.
 pub const CMSG_PET_ACTION: u16 = 0x0175; // 373
+/// A cast whose caster is the pet or a possessed unit (`SendCast`, `0x6e5816`): the caster's guid,
+/// the spell and the targets block.
+pub const CMSG_PET_CAST_SPELL: u16 = 0x01F0; // 496
 /// A pet bar drag: one or two `(position, packed)` pairs, told apart by body size alone.
 pub const CMSG_PET_SET_ACTION: u16 = 0x0174; // 372
 /// Set a pet spell's autocast bit to a given value (the right-click).
@@ -312,16 +344,31 @@ pub const CMSG_PET_ABANDON: u16 = 0x0176; // 374
 /// Rename the pet (`PetRename`, `0x4be4e0`). One-shot: the server clears `UNIT_FLAG_PET_RENAME`
 /// on success (`PetHandler.cpp:302-345`); a refusal is [`SMSG_PET_NAME_INVALID`].
 pub const CMSG_PET_RENAME: u16 = 0x0177; // 375
+/// Ask the server to resend our pet's or charm's bar, empty body (`0x4bc738`); answered by
+/// `SMSG_PET_SPELLS` (`MiscHandler.cpp:1168`).
+pub const CMSG_REQUEST_PET_INFO: u16 = 0x0279; // 633
 
 /// The ask-once GameObject template lookup, shaped like `CMSG_CREATURE_QUERY`.
 pub const CMSG_GAMEOBJECT_QUERY: u16 = 0x005E; // 94
 /// Ask for a quest's template; answered by [`SMSG_QUEST_QUERY_RESPONSE`].
 pub const CMSG_QUEST_QUERY: u16 = 0x005C; // 92
 pub const CMSG_ITEM_QUERY_SINGLE: u16 = 0x0056; // 86
+/// Ask for an item's name alone, the item-name store's query (`0x559fe0`); answered by
+/// [`SMSG_ITEM_NAME_QUERY_RESPONSE`].
+pub const CMSG_ITEM_NAME_QUERY: u16 = 0x02C4; // 708
+/// Answers `CMSG_ITEM_NAME_QUERY`; vmangos sends nothing for an unknown item.
+pub const SMSG_ITEM_NAME_QUERY_RESPONSE: u16 = 0x02C5; // 709
 pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
 /// Open an openable item (a clam, a lockbox, a gift) by bag position; the loot that answers names
 /// the item's own guid (`HandleOpenItemOpcode`).
 pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
+/// Read a book from a bag position (`HandleReadItemOpcode`, `ItemHandler.cpp:410-436`): `bag`,
+/// `slot`, as in [`CMSG_OPEN_ITEM`]; sent by the reader's open (`0x4e3586` → `0x5ec580`).
+pub const CMSG_READ_ITEM: u16 = 0x00AD; // 173
+/// The book may be read: the item's guid (`0x5ec600`).
+pub const SMSG_READ_ITEM_OK: u16 = 0x00AE; // 174
+/// The book may not: the item's guid, then a reason byte vmangos does not write.
+pub const SMSG_READ_ITEM_FAILED: u16 = 0x00AF; // 175
 /// Gift-wrap an item: `giftBag`, `giftSlot`, `itemBag`, `itemSlot`, paper first. Sent when the
 /// wrap cursor, armed locally by right-clicking the paper (`0x5edea0`), clicks the item.
 pub const CMSG_WRAP_ITEM: u16 = 0x01D3; // 467
@@ -334,6 +381,12 @@ pub const SMSG_GAMEOBJECT_CUSTOM_ANIM: u16 = 0x00B3; // 179
 /// The client arms substate 12 (AnimationData 157) and the object outlives its
 /// `SMSG_DESTROY_OBJECT` for that play.
 pub const SMSG_GAMEOBJECT_DESPAWN_ANIM: u16 = 0x0215; // 533
+/// A GameObject's state reset: a bare `u64` guid (vmangos `GameObject.cpp:453`, `:2460-2465`). The
+/// client re-applies the descriptor's `GAMEOBJECT_STATE` (`0x6e9790` → `0x5f8c00` → `0x5f8bd0`).
+pub const SMSG_GAMEOBJECT_RESET_STATE: u16 = 0x02A7; // 679
+/// A used GameObject's page: a bare `u64` guid (vmangos `GameObject.cpp:1549-1554`). The client
+/// opens the item-text reader on the object (`0x5f88c0` → `0x4e32e0`).
+pub const SMSG_GAMEOBJECT_PAGETEXT: u16 = 0x01DF; // 479
 /// We walked into an area trigger: its `AreaTrigger.dbc` id (reference `0x5e2110`).
 pub const CMSG_AREATRIGGER: u16 = 0x00B4; // 180
 /// An area trigger's refusal (level, ghost, faction), shown like `SMSG_NOTIFICATION` (`0x4945b0`).
@@ -433,6 +486,9 @@ pub const CMSG_MOVE_NOT_ACTIVE_MOVER: u16 = 0x02D1; // 721
 /// body (`MiscHandler.cpp:1138-1155`). Sending 0 moves visibility home while the camera stays on
 /// the object, so it must be deliberate; the server expects no reply.
 pub const CMSG_FAR_SIGHT: u16 = 0x027A; // 634
+/// End far sight now: empty body, the view back on the player (`0x5e43f8`). vmangos never sends
+/// it; it clears `PLAYER_FARSIGHT` instead.
+pub const SMSG_CLEAR_FAR_SIGHT_IMMEDIATE: u16 = 0x020D; // 525
 /// Stop auto-repeat: empty body, sent from the local cancel (`0x6ea080`), so on every cancel.
 pub const CMSG_CANCEL_AUTO_REPEAT_SPELL: u16 = 0x026D; // 621
 
@@ -619,6 +675,15 @@ pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
 pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
 pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
 
+/// The GM survey's submission, built and sent by `0x496630` for `GMSurveySubmit` (`0x48cf80`).
+pub const CMSG_GMSURVEY_SUBMIT: u16 = 0x032A; // 810
+/// The lottery window's two sends: the last numbers' query (`0x4c4220`) and the ticket purchase
+/// (`0x4c4290`, `0x4c4400`). No 1.12 server handles either.
+/// `BuySkillTier`'s send (`0x4d3fbc`), the skill-point purchase of a step.
+pub const CMSG_SKILL_BUY_STEP: u16 = 0x021F; // 543
+pub const CMSG_LOTTERY_QUERY_OBSOLETE: u16 = 0x0334; // 820
+pub const CMSG_BUY_LOTTERY_TICKET_OBSOLETE: u16 = 0x0336; // 822
+
 /// A ticket-state push: `u32` 1 updated, 2 closed, 3 survey offered; vmangos never sends it. The
 /// reference re-asks for the ticket on 1 (`0x5e7932`); 2 and 3 are recorded, not acted on, and
 /// the survey window 3 offers is not built.
@@ -776,6 +841,9 @@ pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
 /// `UseSoulstone()`: empty body; the server casts our `PLAYER_SELF_RES_SPELL` and zeroes it
 /// (`SpellHandler.cpp:461`). No answer packet, only descriptor deltas.
 pub const CMSG_SELF_RES: u16 = 0x02B3; // 691
+/// An enemy took our insignia in a battleground: one byte, `freeRepop`, which vmangos sends as 0
+/// (`Player.cpp:7653-7654`).
+pub const SMSG_PLAYER_SKINNED: u16 = 0x02BC; // 700
 /// A non-PvP death's 10% durability loss: empty body, a red error line (`Unit.cpp:1170-1182`).
 pub const SMSG_DURABILITY_DAMAGE_DEATH: u16 = 0x02BD; // 701
 
@@ -825,6 +893,8 @@ pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
 /// Our LFG slots and comment, sent only from `0x4e8948`; nothing answers it. The name is the
 /// emulators'.
 pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
+/// The LFG inquiry `LFGQuery` sends (`0x4e97f9`); the server's result list comes back under it.
+pub const MSG_LOOKING_FOR_GROUP: u16 = 0x01FF; // 511
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108
@@ -882,6 +952,7 @@ pub const MSG_PETITION_RENAME: u16 = 0x02C1; // 705
 
 pub const CMSG_GROUP_INVITE: u16 = 0x006E; // 110
 pub const SMSG_GROUP_INVITE: u16 = 0x006F; // 111
+pub const SMSG_GROUP_CANCEL: u16 = 0x0071; // 113
 pub const CMSG_GROUP_ACCEPT: u16 = 0x0072; // 114
 pub const CMSG_GROUP_DECLINE: u16 = 0x0073; // 115
 pub const SMSG_GROUP_DECLINE: u16 = 0x0074; // 116

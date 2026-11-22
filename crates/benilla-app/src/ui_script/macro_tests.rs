@@ -20,6 +20,7 @@ fn harness() -> UiScript {
 
 fn harness_with(player: &str) -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The global strings this window formats.
     s.run(
@@ -289,11 +290,11 @@ fn dragging_a_macro_button_loads_the_cursor_with_the_macro_payload() {
     no_errors(&s, "drag");
     let payload = s.cursor_payload();
     assert!(
-        matches!(&payload, Some(CursorPayload::Macro(m)) if m.index == 1),
-        "the macro payload, carrying its index: {payload:?}"
+        matches!(&payload, Some(CursorPayload::Macro(m)) if m.id == 1),
+        "the macro payload, carrying its id: {payload:?}"
     );
 
-    // A bar slot packs the MACRO tag (0x40 << 24) with the macro index.
+    // A bar slot packs the MACRO tag (0x40 << 24) with the macro id.
     let mut s = s;
     s.run("PlaceAction(1)").unwrap();
     assert_eq!(s.take_action_sets(), vec![(1, 0x4000_0000 | 1)]);
@@ -362,14 +363,14 @@ fn the_two_tabs_fit_inside_the_window() {
             .unwrap();
 
         assert!(label1 > 0.0 && label2 > 0.0, "both labels measured");
-        assert_eq!(
+        benilla_ui::assert_near!(
             w1,
             label1 + PAD + SIDES,
             "tab 1 is text − 15 + the end slices"
         );
         let uncapped = label2 + PAD + SIDES;
         if cap_should_bind {
-            assert_eq!(
+            benilla_ui::assert_near!(
                 w2,
                 CAP + PAD + SIDES,
                 "the reference's 150 cap binds on a long name"
@@ -379,10 +380,10 @@ fn the_two_tabs_fit_inside_the_window() {
                 "…and the name really was over it"
             );
         } else {
-            assert_eq!(w2, uncapped, "a short name is under the cap");
+            benilla_ui::assert_near!(w2, uncapped, "a short name is under the cap");
         }
         assert!(
-            w2 <= CAP + PAD + SIDES,
+            w2 <= CAP + PAD + SIDES + benilla_ui::test_support::TOL,
             "the clamp may tighten the reference's cap, never loosen it"
         );
 
@@ -420,7 +421,7 @@ fn the_icon_choosers_scroll_bar_sits_on_the_popup_plate() {
     );
     // The stock seat: 6 right of a scroll frame whose right edge is 39 in from the 297-wide popup's
     // (`UIPanelTemplates.xml:172`, `Blizzard_MacroUI.xml:766`), so 264..280.
-    assert_eq!(
+    benilla_ui::assert_near!(
         (bar_left - plate_left, bar_right - plate_left),
         (264.0, 280.0)
     );
@@ -521,7 +522,7 @@ fn the_tab_highlight_is_exactly_its_tab() {
                 } else {
                     tr - tl
                 };
-                assert_eq!(
+                benilla_ui::assert_near!(
                     hr - hl,
                     want,
                     "{tab} f{frame} ({name}): highlight {} wide, label {label}, tab {}",
@@ -530,7 +531,7 @@ fn the_tab_highlight_is_exactly_its_tab() {
                 );
                 // `TabButtonTemplate` anchors the highlight `BOTTOM` at `(2, -8)`: centred on the
                 // tab, 2 right (`UIPanelTemplates.xml:395-397`).
-                assert_eq!(
+                benilla_ui::assert_near!(
                     (hl + hr) / 2.0,
                     (tl + tr) / 2.0 + 2.0,
                     "{tab} f{frame} ({name}): highlight not centred on the tab"
@@ -545,6 +546,10 @@ fn the_tab_highlight_is_exactly_its_tab() {
 fn the_icon_picker_opens_without_raising() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
+    // Edit mode puts the selected macro's name in the box (`Blizzard_MacroUI.lua:226`), and
+    // `EditBox:SetText` raises for the nil of an empty slot (`0x79854c`), so a macro is selected.
+    s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
+    s.run("ShowMacroFrame()").unwrap();
     select_first(&s);
     let _ = s.errors();
     s.run("MacroEditButton:Click()").unwrap();

@@ -1,11 +1,12 @@
 //! What the game tells the world, and what it does with what the world publishes back:
-//! [`publish_view_focus`] says where to stream from, ahead of the stream stage, and
-//! [`release_post_snap_hold`] ends the mover's settle hold on the residency the world publishes.
-//! The hold ends on residency, never on ground contact, the same way for every mover mode.
+//! [`publish_view_focus`] says where to stream from, ahead of the stream stage,
+//! [`release_post_snap_hold`] ends the mover's settle hold on the residency the world publishes,
+//! and [`publish_caster_outdoors`] asks the world whether each caster stands outdoors. The hold
+//! ends on residency, never on ground contact, the same way for every mover mode.
 
 use bevy::prelude::*;
 
-use super::{Player, SETTLE_TIMEOUT};
+use super::{MoverLock, Player, SETTLE_TIMEOUT};
 use benilla_world::terrain_stream::{ViewFocus, WorldLoadProgress};
 use benilla_world::view::Viewer;
 
@@ -54,13 +55,13 @@ pub(super) fn publish_viewer(
 pub(super) fn publish_view_focus(
     mut focus: ResMut<ViewFocus>,
     mut player: Option<ResMut<Player>>,
-    roster: Option<Res<crate::char_select::Roster>>,
+    roster: Option<Res<crate::glue_session::roster::Roster>>,
     cinematic: Option<Res<crate::cinematic::Cinematic>>,
     mut was_flying: Local<bool>,
 ) {
     let entry = roster
         .as_deref()
-        .and_then(crate::char_select::Roster::pending_entry);
+        .and_then(crate::glue_session::roster::Roster::pending_entry);
     // A cinematic flies the eye away from the body (a Tauren intro opens 1741 yd out), so the
     // stream follows the camera, as in free-fly.
     let flying = cinematic.as_deref().is_some_and(|c| c.is_playing());
@@ -76,13 +77,21 @@ pub(super) fn publish_view_focus(
         }
     }
     *was_flying = flying;
+    // Far reloads, a teleport's snap or a cinematic's far cut, are one mark to the stream: a change
+    // re-arms its load, which a pacing edge does only for a focus that was settled.
+    let reloads = player
+        .as_deref()
+        .map_or(0, |p| p.reloads)
+        .wrapping_add(cinematic.as_deref().map_or(0, |c| c.reloads()));
     // Spawn caps pace only a live avatar in a settled world; through entry, a teleport or a world
     // swap a cap would only lengthen the load.
     *focus = match player.as_deref() {
         Some(p) if p.active => {
             let wow = benilla_assets::coords::bevy_to_wow(p.pos);
             let paced = !p.settling && !p.world_stale;
-            if p.detached || flying {
+            if flying {
+                ViewFocus::cinematic(wow, paced)
+            } else if p.detached {
                 ViewFocus::detached(wow, paced)
             } else {
                 ViewFocus::body(wow, paced)
@@ -94,7 +103,33 @@ pub(super) fn publish_view_focus(
             Some((map, pos)) => ViewFocus::entry(map, pos),
             None => ViewFocus::camera(),
         },
-    };
+    }
+    .with_reload(reloads);
+}
+
+/// The reference's reload gate: a forced move of more than 30 yards (`d² > 900`, `0x80c730` is
+/// 30.0 and the compare is strict, `0x617ee5`; the cinematic shot arm's gate `0x48eec1` compares
+/// the 30.0 of `0x804554`, and EndCinematic's `0x48f0fc`, camera against the followed object, that
+/// of `0x804558`) reloads the destination before the frame goes on. `from` and `to` are in one frame.
+pub(crate) fn is_far_reload(from: Vec3, to: Vec3) -> bool {
+    from.distance_squared(to) > 30.0 * 30.0
+}
+
+/// Is the load's focus the tile under `at` (a Bevy position)? Residency counts only for the tile
+/// the held thing stands on: on a mismatch (the snap frame, a free-fly eye) a release is refused.
+pub(crate) fn focus_is_under(p: &WorldLoadProgress, at: Vec3) -> bool {
+    p.focus_tile.is_some_and(|t| {
+        let wow = benilla_assets::coords::bevy_to_wow(at);
+        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+        t == (tx as i32, ty as i32)
+    })
+}
+
+/// The tile under `at` is in: this map's own tile (a WMO-only map's one building) is spawned or
+/// its read failed, which a swap reaches only after draining every tile of the map we left. A
+/// destination is presentable ([`WorldLoadProgress::presentable`]) only once this holds too.
+pub(crate) fn residency_reached(p: &WorldLoadProgress, at: Vec3) -> bool {
+    p.focus_resident && p.total > 0 && focus_is_under(p, at)
 }
 
 /// Ends the post-snap hold when the destination's world has arrived. Runs after the stream stage,
@@ -109,14 +144,8 @@ pub(super) fn release_post_snap_hold(
     let Some(p) = progress else { return };
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
     // a free-fly eye) the release and the stale-clear are refused and only the backstop runs.
-    let focus_matches = p.focus_tile.is_some_and(|t| {
-        let wow = benilla_assets::coords::bevy_to_wow(player.pos);
-        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
-        t == (tx as i32, ty as i32)
-    });
-    // Residency means this map's own tile (a WMO-only map's one building) is spawned, which a
-    // swap reaches only after draining every tile of the map we left.
-    if p.focus_resident && p.total > 0 && focus_matches {
+    let focus_matches = focus_is_under(&p, player.pos);
+    if residency_reached(&p, player.pos) {
         player.world_stale = false;
     }
     // Any counter moving is the destination still arriving; tracked every frame, so the first
@@ -137,7 +166,10 @@ pub(super) fn release_post_snap_hold(
     // the deadline is pushed while the resident world is still the map we left and while the
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
-    if p.presentable() && !player.world_stale && focus_matches {
+    if player.world_reload && now >= player.reload_ceiling {
+        // The reload's ceiling, which nothing below extends.
+        player.end_settle(false, now);
+    } else if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if player.world_stale || progressed {
         player.settle_deadline = now + SETTLE_TIMEOUT;
@@ -153,6 +185,118 @@ pub(super) fn release_post_snap_hold(
             info!("worldport: ack sent at settle release");
         }
     }
+}
+
+/// The active player's answer to `CWorld::IsEntityOutdoors 0x6706f0`, which the spell validator
+/// asks through `0x612cc0` for its place rungs; true with no body, as for a null entity
+/// (`0x6706fa`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PlayerOutdoors(pub(crate) bool);
+
+impl Default for PlayerOutdoors {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// The pet bar's unit's answer to `CWorld::IsEntityOutdoors 0x6706f0`, with its guid: the one
+/// caster but the active player, the bar's presses passing it to the attempt (`0x4bd385`), whose
+/// place rungs ask that unit's own node through `0x612cc0`. `None` while the bar's unit has no
+/// body.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct BarUnitOutdoors(pub(crate) Option<(u64, bool)>);
+
+/// Asks the entity outdoors test of the world for each caster after this frame's re-place:
+/// [`PlayerOutdoors`] where our own body stands (free-fly freezes it in place, so it still
+/// answers), and [`BarUnitOutdoors`] where the pet bar's unit stands, at its world position, as a
+/// mounted unit's `Transform` is seat-relative.
+pub(crate) fn publish_caster_outdoors(
+    test: benilla_world::wmo_portal::EntityOutdoors,
+    player: Option<Res<Player>>,
+    lock: Option<Res<MoverLock>>,
+    mut outdoors: ResMut<PlayerOutdoors>,
+    bar: Option<Res<crate::ui_pet::PetBar>>,
+    index: Option<Res<crate::net::GuidIndex>>,
+    bodies: Query<&GlobalTransform>,
+    mut unit_outdoors: ResMut<BarUnitOutdoors>,
+) {
+    let now = match player.as_deref() {
+        // `pos` is another unit's while we drive it, and still the last mover's until the new
+        // one's pose is adopted (`reseat`): our own body's answer holds.
+        Some(p)
+            if p.active
+                && lock
+                    .as_deref()
+                    .is_some_and(|l| l.foreign_mover.is_some() || l.reseat) =>
+        {
+            None
+        }
+        Some(p) if p.active => Some(test.at(p.pos)),
+        // No body: a null entity reads outdoors (`0x6706fa`).
+        _ => Some(true),
+    };
+    if let Some(now) = now.filter(|&now| outdoors.0 != now) {
+        outdoors.0 = now;
+    }
+    let unit = bar
+        .map(|b| b.spells.pet_guid)
+        .filter(|&guid| guid != 0)
+        .and_then(|guid| {
+            let body = bodies.get(*index.as_deref()?.0.get(&guid)?).ok()?;
+            Some((guid, test.at(body.translation())))
+        });
+    if unit_outdoors.0 != unit {
+        unit_outdoors.0 = unit;
+    }
+}
+
+/// One placed building for the entity outdoors test, with the terrain it is asked against: a
+/// group of `flags` whose 10-yd floor spans WoW x and y -5 to 5 at z 30, placed at the world's
+/// origin.
+#[cfg(test)]
+pub(crate) fn insert_test_room(world: &mut World, flags: u32) {
+    use benilla_assets::{AdtTile, WmoGroupNav, WmoModel};
+    use benilla_world::terrain_stream::TerrainStreamer;
+    use benilla_world::wmo_portal::WmoPortalInstance;
+
+    let floor = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        [[a[0], a[1], 30.0], [b[0], b[1], 30.0], [c[0], c[1], 30.0]]
+    };
+    let tris = vec![vec![
+        floor([-5.0, -5.0], [5.0, -5.0], [5.0, 5.0]),
+        floor([-5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]),
+    ]];
+    let (bounds, all) = benilla_assets::collision_tri_bounds(&tris);
+    let room = WmoModel {
+        group_nav: vec![WmoGroupNav {
+            flags,
+            bbox_min: [-5.0, -5.0, 30.0],
+            bbox_max: [5.0, 5.0, 34.0],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        }],
+        group_collision_grids: benilla_assets::collision_tri_grids(&tris),
+        group_collision_tris: tris,
+        group_collision_bounds: bounds,
+        collision_bounds: all,
+        ..WmoModel::default()
+    };
+    let mut wmos = Assets::<WmoModel>::default();
+    let handle = wmos.add(room);
+    world.insert_resource(wmos);
+    world.init_resource::<Assets<AdtTile>>();
+    world.init_resource::<TerrainStreamer>();
+    world.spawn(WmoPortalInstance {
+        handle,
+        world_from_local: bevy::math::Affine3A::IDENTITY,
+        name_set: 0,
+        visible: vec![true],
+        interior_fog: vec![false],
+        flooded: vec![None],
+    });
 }
 
 #[cfg(test)]
@@ -252,6 +396,36 @@ mod tests {
             !p.world_stale,
             "and re-staled a world the streamer had cleared"
         );
+    }
+
+    /// A teleport's far snap and a cinematic's far cut reach the stream as the same mark, so its
+    /// load re-arms for either, with the focus unpaced or not.
+    #[test]
+    fn far_reloads_of_the_body_and_of_a_shot_both_reach_the_stream() {
+        let mut app = App::new();
+        app.insert_resource(ViewFocus::default())
+            .insert_resource(Player {
+                active: true,
+                ..Player::default()
+            })
+            .insert_resource(crate::cinematic::Cinematic::playing_for_test())
+            .add_systems(Update, publish_view_focus);
+        app.update();
+        let mark = |app: &App| app.world().resource::<ViewFocus>().reload();
+        let steady = mark(&app);
+        app.update();
+        assert_eq!(mark(&app), steady, "a frame with no reload keeps the mark");
+
+        app.world_mut().resource_mut::<Player>().reloads += 1;
+        app.update();
+        let after_snap = mark(&app);
+        assert_ne!(after_snap, steady, "a far snap");
+
+        app.world_mut()
+            .resource_mut::<crate::cinematic::Cinematic>()
+            .mark_reload();
+        app.update();
+        assert_ne!(mark(&app), after_snap, "a far shot");
     }
 
     #[test]
@@ -469,6 +643,94 @@ mod tests {
         assert!(
             matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
             "the timeout release must still ack the transfer, got {sent:?}"
+        );
+    }
+
+    /// The outdoors answer is `0x6706f0` asked where our own body stands: indoors in a room's
+    /// interior group, outdoors in an `EXTERIOR` (0x8) group or off the building, and outdoors
+    /// with no body, as for a null entity (`0x6706fa`). The body answers in free-fly, which
+    /// freezes it and publishes no viewer, and wherever the viewer is. While we drive another
+    /// unit, or have not yet adopted our own body's pose after one, `pos` is not our body's, so
+    /// the last answer holds.
+    #[test]
+    fn the_outdoors_answer_is_asked_where_the_body_stands() {
+        use benilla_assets::coords::wow_to_bevy;
+
+        // One frame of the system over the test room, from the answer `last`.
+        let ask_locked =
+            |flags: u32, player: Player, lock: MoverLock, viewer: Viewer, last: bool| {
+                let mut app = App::new();
+                insert_test_room(app.world_mut(), flags);
+                app.insert_resource(player)
+                    .insert_resource(lock)
+                    .insert_resource(viewer)
+                    .insert_resource(PlayerOutdoors(last))
+                    .init_resource::<BarUnitOutdoors>()
+                    .add_systems(Update, publish_caster_outdoors);
+                app.update();
+                app.world().resource::<PlayerOutdoors>().0
+            };
+        let ask = |flags: u32, player: Player, viewer: Viewer, last: bool| {
+            ask_locked(flags, player, MoverLock::default(), viewer, last)
+        };
+        let (inside, outside) = (
+            wow_to_bevy([1.0, 2.0, 30.0]),
+            wow_to_bevy([40.0, 2.0, 30.0]),
+        );
+        let body = |pos: Vec3| Player {
+            active: true,
+            pos,
+            ..Player::default()
+        };
+        // `publish_viewer`'s body: our position, unless free-flying.
+        let seen = |pos: Vec3| Viewer {
+            at: Some(pos),
+            ..Viewer::default()
+        };
+
+        assert!(
+            !ask(0, body(inside), seen(inside), true),
+            "an interior group"
+        );
+        assert!(
+            ask(0x8, body(inside), seen(inside), false),
+            "an exterior group"
+        );
+        assert!(
+            ask(0, body(outside), seen(outside), false),
+            "off the building"
+        );
+        assert!(
+            ask(0, Player::default(), Viewer::default(), false),
+            "no body"
+        );
+        let flying = Player {
+            detached: true,
+            ..body(inside)
+        };
+        assert!(
+            !ask(0, flying, Viewer::default(), true),
+            "free-fly: the frozen body, with no viewer"
+        );
+        assert!(
+            !ask(0, body(inside), seen(outside), true),
+            "the body, not the viewer"
+        );
+        let driving = MoverLock {
+            foreign_mover: Some(0xF130_0000_0000_0043),
+            ..MoverLock::default()
+        };
+        assert!(
+            !ask_locked(0, body(outside), driving, seen(outside), false),
+            "driving another unit holds the answer"
+        );
+        let reseating = MoverLock {
+            reseat: true,
+            ..MoverLock::default()
+        };
+        assert!(
+            !ask_locked(0, body(outside), reseating, seen(outside), false),
+            "so does the frame before our own body's pose is adopted"
         );
     }
 }

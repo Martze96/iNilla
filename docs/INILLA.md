@@ -132,16 +132,16 @@ controller is in use and comes back with the next touch.
 
 ## Languages and addons
 
-The game speaks the language of its data. iNilla reads it off the install (`ChrRaces.dbc`'s race
-names, as vmangos does) and, for anything but English, moves each DBC's text into the column the
-readers use (`benilla-dbc`'s `localize`). The logon then reports that language, so vmangos sends
-its quests, items and NPC names in it too, and `GetLocale()` answers it, so addons pick their own
-translation. An iNilla server can host several languages; the Game data screen then offers a
-choice (one language on the phone at a time: switching downloads that language's archives).
+The game speaks the language of its data. benilla reads it as the 1.12.1 client does, from the
+install's `Wow.ini` (in `interface.MPQ`, `[WoW Config]` `Language` and `Country`): every DBC string
+comes from that language's column, the logon reports it, so vmangos sends its quests, items and NPC
+names in it too, and `GetLocale()` answers it, so addons pick their own translation. An iNilla
+server can host several languages; the Game data screen then offers a choice (one language on the
+phone at a time: switching downloads that language's archives).
 
-German is wired end to end and has been played on an iPhone: it needs a German 1.12.1 client's
-`Data` on the server (see the iNilla server's docs). The German interface calls
-`SetEuropeanNumbers`, so the tooltips write their decimals with a comma ("Tempo 2,60").
+German is wired end to end: it needs a German 1.12.1 client's `Data` on the server (see the iNilla
+server's docs). The German interface calls `SetEuropeanNumbers`, so the interface's numbers swap
+their separators as in the German client ("Tempo 2,60").
 
 **Addons** come from the server too: its data host lists them per language (an iNilla server
 ships pfQuest in English and German) and **Install / update addons** on the Game data screen, or a

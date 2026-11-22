@@ -29,9 +29,9 @@ pub(super) fn set_shown(lua: &Lua, h: FrameHandle, shown: bool) {
 }
 
 /// The show slot (`+0x88`): the kind's override, else the base [`base_show`]. GameTooltip's is
-/// `0x530a80`. CharacterModelBase's (`0x505d00`, which rebuilds the doll from its unit or file)
-/// is the app's: the script model holds no doll instance, and the app re-takes a body pane's
-/// snapshot on its hidden-to-drawn edge, however the show came.
+/// `0x530a80`. CharacterModelBase's (`0x505d00`, which asks for a fresh copy of its subject) runs
+/// in the arena's show mark ([`crate::widget::WidgetArena::show_mark`]), on every
+/// hidden-to-visible edge however the show came; the app builds the copy.
 pub(super) fn show(lua: &Lua, h: FrameHandle) {
     match kind(lua, h) {
         Some(FrameKind::GameTooltip) => super::tooltip::show_override(lua, h),
@@ -40,8 +40,8 @@ pub(super) fn show(lua: &Lua, h: FrameHandle) {
 }
 
 /// The hide slot (`+0x84`): the kind's override, else the base [`base_hide`]. GameTooltip's is
-/// `0x530a60`. CharacterModelBase's (`0x505ce0`, which releases the doll's model) is the app's
-/// too: a hidden pane is not drawn, and its snapshot re-takes on the next show.
+/// `0x530a60`. CharacterModelBase's (`0x505ce0`, which releases the copy) runs in the arena's hide
+/// step ([`crate::widget::WidgetArena::hide_step`]); the next show asks for a new one.
 pub(super) fn hide(lua: &Lua, h: FrameHandle) {
     match kind(lua, h) {
         Some(FrameKind::GameTooltip) => super::tooltip::hide_override(lua, h),
@@ -218,8 +218,8 @@ fn leave_mouse_index(model: &mut Model, h: FrameHandle) -> Option<Option<u32>> {
 /// The removal tail's capture clear (`0x764ca5`–`0x764cad`): a frame leaving the mouse index
 /// that holds the capture slot (`root+0x80`) empties it. `0x766420` delivers a release to the
 /// capture alone, so the press this frame took reaches no one: no `OnMouseUp`, no click, and no
-/// world click, since the world hook `0x492b50` runs only in freelook. The button stays held
-/// until its release, which then finds nothing.
+/// world click, since the world hook `0x492b50` sends a release to the world only in freelook.
+/// The button stays held until its release, which then finds nothing.
 fn drop_capture(model: &mut Model, h: FrameHandle) {
     if model.mouse_capture == Some(h) {
         model.mouse_capture = None;
@@ -275,6 +275,7 @@ fn notify(lua: &Lua, h: FrameHandle, visible: bool) {
         record(lua, fired);
     }
     super::editbox::visibility_focus(lua, h, visible);
+    super::messageframe::on_visibility(lua, h, visible);
 }
 
 /// Open or close a frame's load window: the pre-load hook's `+0x114 = 1` (`0x7697c2`) and the

@@ -46,26 +46,16 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
         .collect()
 }
 
-/// Runs `UIParent_ManageFramePositions` after the interface has loaded, then the buff pass below.
+/// Runs `UIParent_ManageFramePositions` after the interface has loaded. The buff rows keep
+/// `BuffFrame.xml`'s anchors past it: `BuffFrame_OnLoad` never pitches them, and the stock
+/// `UIOptionsFrame.lua` does it on `VARIABLES_LOADED` (l.206), after every addon (`0x4900a3`, then
+/// `0x4900b2`).
 fn bootstrap_positions(script: &UiScript) -> Vec<String> {
     if let Err(e) = script.run("UIParent_ManageFramePositions()") {
         error!("ui_script: managed-positions bootstrap: {e}");
         return vec![format!("managed-positions bootstrap: {e}")];
     }
-    if let Err(e) = apply_buff_durations(script) {
-        error!("ui_script: buff-duration layout: {e}");
-        return vec![format!("buff-duration layout: {e}")];
-    }
     Vec::new()
-}
-
-/// Runs `BuffButtons_UpdatePositions` at load, which `BuffFrame_OnLoad` never calls: until the
-/// stock `UIOptionsFrame.lua`'s `VARIABLES_LOADED` arm runs it (l.206), the second buff row and
-/// the debuff row keep `BuffFrame.xml`'s anchors whatever `SHOW_BUFF_DURATIONS` says.
-pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
-    script
-        .run("if BuffButtons_UpdatePositions then BuffButtons_UpdatePositions() end")
-        .map_err(|e| e.to_string())
 }
 
 /// What a screen-size or UI-scale change re-runs, from `extract::tick_script`: anchors follow the
@@ -271,9 +261,16 @@ pub(crate) fn load_stock_bindings(script: &mut UiScript) {
 
 /// Every [`LAYER_MANIFEST`] entry, in order, after the whole core: the layer loads as more of the
 /// stock load, with no `ADDON_LOADED` and no registry row, as FrameXML does (`0x48ffed`).
+///
+/// The layer's `/errors` log hooks the error handler as it loads (`ScriptLogFrame.xml`), after the
+/// core: what the core's load recorded before is handed to the log's recorder directly, not run
+/// through the handler chain again, so the stock dialog shows nothing twice.
 fn load_layer(script: &UiScript) -> Vec<String> {
+    let before = script.diagnostics_seq();
     let layer = Addon::layer();
-    layer.load_files(script, &layer.toc.files)
+    let failures = layer.load_files(script, &layer.toc.files);
+    script.replay_diagnostics(before, "BenillaScriptLog_Record");
+    failures
 }
 
 /// The in-game UI, the core, then the layer unless [`layer_enabled`] says no, then every

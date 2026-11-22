@@ -17,7 +17,6 @@ const SHARER: u64 = 0x0000_0000_0000_0007;
 const FLIGHT_MASTER: u64 = 0xF130_0000_0000_0002;
 const TRAINER: u64 = 0xF130_0000_0000_0003;
 const VENDOR: u64 = 0xF130_0000_0000_0004;
-const PARTNER: u64 = 0x0000_0000_0000_0008;
 const TABARD_VENDOR: u64 = 0xF130_0000_0000_0005;
 const REGISTRAR: u64 = 0xF130_0000_0000_0006;
 const MAILBOX: u64 = 0xF110_0000_0000_0B0C;
@@ -70,21 +69,26 @@ fn legs_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
         crate::ui_stable::UiStablePlugin,
         crate::ui_bank::UiBankPlugin,
         crate::cinematic::CinematicPlugin,
+        crate::ui_session::UiSessionPlugin,
     ))
     .insert_resource(NetCommands(tx))
     .init_resource::<crate::net::GuidIndex>()
     .init_resource::<crate::screen_fade::ScreenFade>()
     .init_resource::<crate::items::Items>()
+    .init_resource::<crate::ui_party::GroupState>()
+    .init_resource::<crate::ui_action::UiErrorKeys>()
     .add_message::<crate::sound::LootPickupSound>()
-    .add_message::<crate::target::DeselectGuid>();
+    .init_resource::<crate::target::OwedSelects>();
+    crate::ui_loot::seat_loot_steps(app.world_mut());
     (app, rx)
 }
 
 /// Open every window a leg closes.
 fn open_everything(world: &mut World) {
-    world
-        .resource_mut::<crate::ui_loot::LootState>()
-        .open(CORPSE, 1, 0, Vec::new());
+    // Its `LOOT_OPENED` long fired, so the leg finds no open still queued on the loot lane.
+    let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+    loot.open(CORPSE, 1, 0, Vec::new());
+    loot.signals_fired();
     world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
     world
         .resource_mut::<crate::ui_item_text::ItemTextOpen>()
@@ -100,11 +104,6 @@ fn open_everything(world: &mut World) {
     world
         .resource_mut::<crate::ui_merchant::MerchantOpen>()
         .open(VENDOR, Vec::new());
-    {
-        let mut trade = world.resource_mut::<crate::ui_trade::TradeSession>();
-        trade.begin(PARTNER);
-        trade.open_window();
-    }
     world.resource_mut::<crate::ui_duel::DuelState>().arbiter = 0xF130_0000_0000_00D1;
     world
         .resource_mut::<crate::ui_tabard::TabardOpen>()
@@ -121,6 +120,11 @@ fn open_everything(world: &mut World) {
     world
         .resource_mut::<crate::ui_stable::StableOpen>()
         .open(STABLE_MASTER, 0, Vec::new());
+    // The bank last, so it holds the latch: every leg above releases its own, and the interaction
+    // close finds the banker.
+    // The open's latch and cell, its `BANKFRAME_OPENED` long fired (`0x4f8507`, `0x4f850e`), so
+    // the sweep's close finds no open still queued on the bank lane ahead of it.
+    crate::ui_session::register(world, BANKER);
     world
         .resource_mut::<crate::ui_bank::BankOpen>()
         .open(BANKER);
@@ -128,8 +132,9 @@ fn open_everything(world: &mut World) {
 }
 
 /// One sweep closes every window in the reference's order: the legs from `0x490ab2` to
-/// `0x490b2a`, `PLAYER_LEAVING_WORLD` (`0x490b4d`), then the interaction close (`0x490b5f`), whose
-/// trade arm is tested before its bank arm, then the cinematic (`0x490b77`). The mail leg and the
+/// `0x490b2a`, `PLAYER_LEAVING_WORLD` (`0x490b4d`), then the interaction close (`0x490b5f`) on the
+/// window still latched, here the bank, which no leg closes, then the cinematic (`0x490b77`). A
+/// latched trade closes there too, which `ui_trade`'s own sweep tests pin. The mail leg and the
 /// duel leg are silent, and the charter window is no leg's.
 #[test]
 fn the_sweep_closes_every_window_in_the_references_order() {
@@ -152,7 +157,6 @@ fn the_sweep_closes_every_window_in_the_references_order() {
             "AUCTION_HOUSE_CLOSED",
             "PET_STABLE_CLOSED",
             "PLAYER_LEAVING_WORLD",
-            "TRADE_CLOSED",
             "BANKFRAME_CLOSED",
             "CINEMATIC_STOP",
         ]
@@ -165,11 +169,10 @@ fn the_sweep_closes_every_window_in_the_references_order() {
                 ClientCommand::LootRelease { guid: CORPSE },
                 ClientCommand::QuestPushResult { sharer: SHARER, .. },
                 ClientCommand::CancelTrade,
-                ClientCommand::CancelTrade,
             ]
         ),
-        "the release (`0x48f2da`), the sharer's decline (`0x501173`), the trade leg's cancel \
-         (`0x5d4310`) and the interaction close's (`0x4bf527`): {sent:?}"
+        "the release (`0x48f2da`), the sharer's decline (`0x501173`) and the trade leg's cancel \
+         (`0x5d4310`), sent with no trade open: {sent:?}"
     );
 
     let world = app.world();
@@ -177,6 +180,34 @@ fn the_sweep_closes_every_window_in_the_references_order() {
     assert_eq!(world.resource::<crate::ui_duel::DuelState>().arbiter, 0);
     assert_eq!(world.resource::<crate::ui_mail::MailOpen>().mailbox, None);
     assert!(!world.resource::<crate::ui_bank::BankOpen>().is_open());
+}
+
+/// The gossip leg `0x4e1f60` ends with `ResetGossipOptions` (`0x4e1f89`): after a world change
+/// the getters' rows are gone, the greeting text stays, and it runs with no menu open too.
+#[test]
+fn the_gossip_leg_resets_the_option_and_quest_slots() {
+    use benilla_protocol::messages::GossipOption;
+    let (mut app, _rx) = legs_app();
+    app.insert_non_send_resource(spied_vm(&EVENTS));
+    {
+        let mut gossip = app
+            .world_mut()
+            .resource_mut::<crate::ui_gossip::GossipState>();
+        gossip.npc = Some(GOSSIPER);
+        gossip.text = "Hello".into();
+        gossip.options = vec![GossipOption {
+            index: 0,
+            icon: 1,
+            coded: false,
+            message: "Browse".into(),
+        }];
+        gossip.quests = vec![(7, 4, 1, "A quest".into())];
+    }
+    sweep_in_place(&mut app);
+    let gossip = app.world().resource::<crate::ui_gossip::GossipState>();
+    assert_eq!(gossip.npc, None);
+    assert!(gossip.options.is_empty() && gossip.quests.is_empty());
+    assert_eq!(gossip.text, "Hello", "the text buffer is not a slot");
 }
 
 /// The latch spent, a second departure in the same world sweeps nothing (`0x490a87`).

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::SelectionRequest;
 
-use super::by_name::{self, ByNameScan, SelectCommit};
+use super::by_name::{self, ByNameScan, SelectCommit, SelectDebt};
 use super::scan;
 
 /// Everything the selection calls read and write.
@@ -21,92 +21,182 @@ pub(crate) struct ScriptSelect<'w, 's> {
     /// included.
     commit: SelectCommit<'w, 's>,
     by_name: ByNameScan<'w, 's>,
+    /// Where a name that finds nobody shows its line.
+    errors: Res<'w, crate::ui_action::UiErrorKeys>,
     /// The TAB cycler's inputs, for the `TargetNearest*` calls.
     scan: scan::TargetScan<'w, 's>,
     history: ResMut<'w, scan::TabHistory>,
     time: Res<'w, Time>,
+    /// The deselects a call's own steps owe, its loot close's (`0x48f369`), run inside it; absent
+    /// in a harness without targets.
+    owed: Option<ResMut<'w, scan::OwedSelects>>,
 }
 
 impl ScriptSelect<'_, '_> {
+    /// The guid selected now.
+    pub(crate) fn selected(&self) -> Option<u64> {
+        self.commit.selection.guid
+    }
+
+    /// The selection as the VM seats it after a call moved it: the guid, whether its object is
+    /// held, its `UNIT_FIELD_TARGET` (`0x515a0f`-`0x515a25`, the hop `"targettarget"` makes) and
+    /// whether that unit is held.
+    pub(crate) fn seated(&self) -> Option<benilla_ui::script::SeatedSelection> {
+        let selection = &self.commit.selection;
+        let guid = selection.guid?;
+        let target = selection
+            .target
+            .and_then(|e| self.tokens.stores.get(e).ok())
+            .and_then(|s| s.0.unit_target())
+            .unwrap_or(0);
+        Some(benilla_ui::script::SeatedSelection {
+            guid,
+            held: selection.target.is_some(),
+            target,
+            target_held: target != 0 && self.tokens.held(target).is_some(),
+        })
+    }
+
     /// `TargetUnit` (`0x4899d0`), `AssistUnit` (`0x489b80`) and `TargetLastEnemy` share the
-    /// reference's helper `0x489a40`: a resolved unit or a roster member is committed, anything
-    /// else is a no-op, never a deselect. Here a token must name a streamed unit, so an
-    /// out-of-range roster member is a no-op (the guid-only selection is not built).
-    pub(crate) fn select(&mut self, request: SelectionRequest) {
-        match request {
+    /// reference's helper `0x489a40` ([`SelectCommit::select`]): a held unit or a party or raid
+    /// member or pet is committed, a member out of range by guid, and anything else is a no-op,
+    /// never a deselect.
+    pub(crate) fn select(&mut self, request: SelectionRequest) -> SelectDebt {
+        let (tokens, last_enemy, errors, by_name) =
+            (&self.tokens, &self.last_enemy, &self.errors, &self.by_name);
+        self.commit.owing(|commit| match request {
+            // `0x489a08 call 0x515970(token)`, then `0x489a16 call 0x489a40`.
             SelectionRequest::Unit(token) => {
-                if let Some((entity, guid)) = self.tokens.resolve(&token, &self.commit.selection) {
-                    self.commit.commit(entity, guid);
+                if let Some(guid) = tokens.guid(&token, &commit.selection) {
+                    commit.select(guid);
                 }
             }
-            // `0x489ba9 call 0x515940(token)`, then the shared tail. An unresolvable token is
-            // silent here; the reference shows message `0xb8` `ERR_GENERIC_NO_TARGET` (`0x489c0e`).
-            SelectionRequest::Assist(token) => {
-                match self.tokens.resolve(&token, &self.commit.selection) {
-                    Some((basis, _)) => self.commit.assist(basis, "AssistUnit"),
-                    None => info!("assist (AssistUnit): \"{token}\" names nothing; silent no-op"),
-                }
-            }
-            // `0x489c40`, `/assist <name>`: a player name, prefix-matched by the app's name scan.
+            // `0x489ba9 call 0x515940(token)`, then the shared tail; a token that names no unit
+            // the object manager holds shows message `0xb8` (`0x489c0e`).
+            SelectionRequest::Assist(token) => match tokens.resolve(&token, &commit.selection) {
+                Some((basis, _)) => commit.assist(basis, "AssistUnit"),
+                None => errors.push(crate::ui_action::UiError::key("ERR_GENERIC_NO_TARGET")),
+            },
+            // `0x489c40`, the stock `/assist <name>`: a player name, else the selection.
             SelectionRequest::AssistByName(name) => {
-                by_name::assist_named(&self.by_name, &mut self.commit, Some(&name), "AssistByName");
+                by_name::assist_named(by_name, commit, errors, &name, "AssistByName");
             }
             // `0x489b45` → `0x489a40`. Empty memory is a no-op (the shim `0x489b40` tests nothing),
-            // unlike `TargetLastTarget 0x489b00`, which reaches `0x493540(0,0)` and deselects.
-            SelectionRequest::LastEnemy => {
-                let Some(guid) = self.last_enemy.0 else {
-                    info!("TargetLastEnemy: nothing hostile has been targeted yet; no-op");
-                    return;
-                };
-                match self.tokens.held(guid) {
-                    Some((entity, guid)) => self.commit.commit(entity, guid),
-                    // Stale: a no-op, and the memory stays, as the reference never clears it.
-                    None => info!(
-                        "TargetLastEnemy: {guid:#x} is no longer streamed; target left untouched"
-                    ),
+            // unlike `TargetLastTarget 0x489b00`, which reaches `0x493540(0,0)` and deselects; a
+            // memory `0x489a40` passes over stays, as nothing clears it.
+            SelectionRequest::LastEnemy => match last_enemy.0 {
+                Some(guid) => {
+                    if !commit.select(guid) {
+                        info!("TargetLastEnemy: {guid:#x} is no longer streamed; target untouched");
+                    }
                 }
-            }
-        }
+                None => info!("TargetLastEnemy: nothing hostile has been targeted yet; no-op"),
+            },
+        })
     }
 
     /// `TargetByName(name, exactMatch)` (`0x489d60`), the stock `/target`.
-    pub(crate) fn target_by_name(&mut self, name: &str, exact: bool) {
-        by_name::target_named(&self.by_name, &mut self.commit, name, exact);
+    pub(crate) fn target_by_name(&mut self, name: &str, exact: bool) -> SelectDebt {
+        let (by_name, errors) = (&self.by_name, &self.errors);
+        self.commit
+            .owing(|commit| by_name::target_named(by_name, commit, errors, name, exact))
     }
 
     /// `TargetNearest*([reverse])` (`0x489a80`/`0x489aa0`/`0x489ac0`/`0x489ae0` →
     /// `0x493f60(reverse, mode)`), one cycle of the cycler the TAB key runs.
-    pub(crate) fn target_nearest(&mut self, mode: benilla_ui::script::NearestMode, reverse: bool) {
-        let engaged = self.commit.engaged();
-        scan::cycle(
-            scan::ScanSide::of(mode),
-            reverse,
-            self.time.elapsed_secs_f64(),
-            &self.scan,
-            &mut self.history,
-            &mut self.commit.selection,
-            &mut self.commit.seam,
-            engaged,
-        );
+    pub(crate) fn target_nearest(
+        &mut self,
+        mode: benilla_ui::script::NearestMode,
+        reverse: bool,
+    ) -> SelectDebt {
+        let now = self.time.elapsed_secs_f64();
+        let (scan, history) = (&self.scan, &mut self.history);
+        self.commit.owing(|commit| {
+            let owed = scan::cycle(
+                scan::ScanSide::of(mode),
+                reverse,
+                now,
+                scan,
+                history,
+                &mut commit.selection,
+                &mut commit.seam,
+                &mut commit.front,
+            );
+            commit.owe_all(owed);
+        })
     }
 
     /// `TargetLastTarget()` (`0x489b00`): a held last-target pair goes to `0x489a40` as a stack
-    /// copy, so a streamed unit is committed (which stamps the outgoing target, swapping the two)
-    /// and an unstreamed one is a no-op (the roster fallback is not built, as for
-    /// `TargetLastEnemy`); an empty pair deselects through `0x493540(0,0)` (`0x489b2d`).
-    pub(crate) fn target_last_target(&mut self) {
-        match self.commit.selection.last {
-            Some(guid) => match self.tokens.held(guid) {
-                Some((entity, guid)) => self.commit.commit(entity, guid),
-                None => info!("TargetLastTarget: {guid:#x} is no longer streamed; no-op"),
-            },
-            None => self.commit.clear(),
-        }
+    /// copy, so a streamed unit, or a party member out of range, is committed (which stamps the
+    /// outgoing target, swapping the two), and any other unstreamed guid is a no-op; an empty pair
+    /// deselects through `0x493540(0,0)` (`0x489b2d`).
+    pub(crate) fn target_last_target(&mut self) -> SelectDebt {
+        self.commit.owing(|commit| match commit.selection.last {
+            Some(guid) => {
+                if !commit.select(guid) {
+                    info!("TargetLastTarget: {guid:#x} is no longer streamed; no-op");
+                }
+            }
+            None => commit.clear(),
+        })
+    }
+
+    /// The rest of a call's teardown its signals held back, now that their listeners have run, up
+    /// to the send its ladder's listeners hold back ([`SelectCommit::store_send`]).
+    pub(crate) fn store_send(&mut self, send: super::scan::OwedSend) -> super::scan::OwedWire {
+        self.commit.store_send(send)
+    }
+
+    /// A select's send, now that its ladder's listeners have run ([`SelectCommit::send_wire`]).
+    pub(crate) fn send_wire(&self, wire: super::scan::OwedWire) {
+        self.commit.send_wire(wire);
+    }
+
+    /// The teardown's pet leg, if it waits behind its stop, now that the stop's listeners have
+    /// run: whether it called a unit off ([`SelectCommit::run_pet_leg`]).
+    pub(crate) fn run_pet_leg(&mut self, send: &mut super::scan::OwedSend) -> bool {
+        self.commit.run_pet_leg(send)
+    }
+
+    /// The teardown's StopAttack past its head, now that its tutorials' listeners have run:
+    /// whether its next-swing cancel ran ([`SelectCommit::stop_send`]).
+    pub(crate) fn stop_send(&mut self, stop: crate::creature_anim::StopTail) -> bool {
+        self.commit.stop_send(stop)
+    }
+
+    /// The teardown's StopAttack's save leg, now that the cancel's listeners have run
+    /// ([`SelectCommit::stop_save`]).
+    pub(crate) fn stop_save(&mut self) {
+        self.commit.stop_save();
+    }
+
+    /// Pay what a selecting call still owes, now that its signals' listeners have run, up to a
+    /// payment that selected again ([`SelectCommit::pay`]): what that one owes.
+    pub(crate) fn pay(&mut self, debt: SelectDebt) -> SelectDebt {
+        self.commit.pay(debt)
+    }
+
+    /// Pay all of `debt` now ([`SelectCommit::pay_now`]).
+    #[cfg(test)]
+    pub(crate) fn pay_now(&mut self, debt: SelectDebt) {
+        self.commit.pay_now(debt);
+    }
+
+    /// Where the selects a call owes begin, for [`Self::owed_deselect`].
+    pub(crate) fn owed_mark(&self) -> usize {
+        self.owed.as_deref().map_or(0, scan::OwedSelects::mark)
+    }
+
+    /// The next deselect the call owed since `from` (`0x493910(guid, 1)`), torn down now and
+    /// owing what its signals owe, for the call to signal before it returns.
+    pub(crate) fn owed_deselect(&mut self, from: usize) -> Option<SelectDebt> {
+        let guid = self.owed.as_deref_mut()?.take_deselect(from)?;
+        Some(self.commit.owing(|commit| commit.tear_down(guid)))
     }
 
     /// `ClearTarget()` (`0x489ff0`): deselect whatever the calls before it left selected.
-    pub(crate) fn clear_target(&mut self) {
-        self.commit.clear();
+    pub(crate) fn clear_target(&mut self) -> SelectDebt {
+        self.commit.owing(|commit| commit.clear())
     }
 }
 
@@ -123,7 +213,13 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::PendingCast>();
+        world.init_resource::<crate::ui_cast::CastReports>();
+        world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::AttackStopInFlight>();
+        world.init_resource::<crate::creature_anim::UnitEdits>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::ui_loot::LootState>();
         world.init_resource::<crate::ui_loot::LootLatch>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
@@ -132,17 +228,23 @@ mod tests {
         world.init_resource::<crate::net::Reputations>();
         world.init_resource::<super::super::AssistAttack>();
         world.init_resource::<super::super::Selection>();
+        world.init_resource::<crate::spell::SpellTargeting>();
+        world.init_resource::<crate::spell::CursorPicks>();
+        world.init_resource::<crate::spell::targeting::EnchantConfirmItem>();
         world.init_resource::<scan::LastEnemy>();
         world.init_resource::<crate::names::NameCache>();
         world.init_resource::<scan::TabHistory>();
         world.init_resource::<Time>();
-        world.insert_non_send_resource(UiScript::new().expect("a bare VM"));
+        // No engine behind it: the VM keeps its calls for the test to apply.
+        let mut script = UiScript::new().expect("a bare VM");
+        script.keep_calls();
+        world.insert_non_send_resource(script);
         world
     }
 
     /// The selection calls from Lua, through the binding bodies of ASSISTTARGET (`AssistUnit`) and
-    /// TARGETLASTHOSTILE (`TargetLastEnemy`): an empty basis, a garbage token and a stale memory
-    /// are each a no-op (`0x489a40`'s bare `ret`), never a deselect or a panic.
+    /// TARGETLASTHOSTILE (`TargetLastEnemy`): an empty basis and a stale memory are each a no-op
+    /// (`0x489a40`'s bare `ret`), and an unknown token raises, never a deselect or a panic.
     #[test]
     fn the_selection_calls_run_assist_and_last_enemy_without_ever_deselecting() {
         use crate::net::{Guid, ObjectStore, SelfPlayer};
@@ -153,9 +255,13 @@ mod tests {
         const BASIS: u64 = 0xB0A2;
         const VICTIM: u64 = 0xC0DE;
         const GONE: u64 = 0x6017;
-        // `UNIT_FIELD_TARGET` is a 2-field guid at index 16; HEALTH/MAXHEALTH keep the units live.
-        let store =
-            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+        // `UNIT_FIELD_TARGET` is a 2-field guid at index 16; HEALTH/MAXHEALTH keep the units live,
+        // and `OBJECT_FIELD_TYPE` 0x9 makes each a unit, the typemask `0x489a40` selects by.
+        let store = |pairs: &[(u16, u32)]| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(
+                &[&[(2, 0x9)], pairs].concat(),
+            ))
+        };
 
         let mut world = script_world();
 
@@ -183,7 +289,8 @@ mod tests {
                 .run_system_once(
                     |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
                         for request in script.take_selection_requests() {
-                            select.select(request);
+                            let debt = select.select(request);
+                            select.pay_now(debt);
                         }
                     },
                 )
@@ -203,8 +310,20 @@ mod tests {
         // The victim targets nobody: assisting it is a no-op, not a deselect.
         assert_eq!(run(&mut world, r#"AssistUnit("target")"#), Some(VICTIM));
 
-        assert_eq!(run(&mut world, r#"AssistUnit("nosuchunit")"#), Some(VICTIM));
-        assert_eq!(run(&mut world, r#"TargetUnit("nosuchunit")"#), Some(VICTIM));
+        // An unknown token raises in the resolver (`0x515940` → `0x515970`) before any select.
+        assert!(world
+            .non_send_resource_mut::<UiScript>()
+            .eval::<()>(r#"AssistUnit("nosuchunit")"#)
+            .is_err());
+        assert_eq!(
+            world.resource::<super::super::Selection>().guid,
+            Some(VICTIM)
+        );
+        // `TargetUnit`'s resolver raises alike (`0x489a08` → `0x515970`).
+        assert!(world
+            .non_send_resource_mut::<UiScript>()
+            .eval::<()>(r#"TargetUnit("nosuchunit")"#)
+            .is_err());
 
         // TargetLastEnemy with nothing remembered: also a no-op.
         assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
@@ -221,8 +340,8 @@ mod tests {
     }
 
     /// `TargetUnit("partypet1")`, the TARGETPARTYPET1 binding and the pet half of
-    /// TARGETPARTYMEMBER1, commits the pet the member's descriptor names (`0x515970` to `0x4e81d0`);
-    /// a slot with no member, or one whose pet is not held, is a no-op, never a deselect.
+    /// TARGETPARTYMEMBER1, commits the pet the member's descriptor names (`0x515970` to `0x4e81d0`),
+    /// held or not (`0x489a64`); a slot with no member is a no-op, never a deselect.
     #[test]
     fn target_unit_selects_a_party_pet() {
         use crate::net::{Guid, ObjectStore, SelfPlayer};
@@ -234,23 +353,31 @@ mod tests {
         const MEMBER: u64 = 0x1234;
         const PET: u64 = 0xF140_0000_0000_0077;
         // HEALTH/MAXHEALTH keep the units live; `UNIT_FIELD_SUMMON` is the 2-field guid at 8.
-        let store =
-            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+        // `OBJECT_FIELD_TYPE` 0x9 makes a unit, the typemask `0x489a40` selects by, and 0x19 a
+        // player, the typemask the party lookups find a member by (`0x4e8144`, `0x4e81fb`).
+        let store = |kind: u32, pairs: &[(u16, u32)]| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(
+                &[&[(2, kind)], pairs].concat(),
+            ))
+        };
 
         let mut world = script_world();
-        world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));
+        world.spawn((SelfPlayer, Guid(ME), store(0x19, &[(22, 100), (28, 100)])));
         let pet = world
-            .spawn((Guid(PET), store(&[(22, 100), (28, 100)])))
+            .spawn((Guid(PET), store(0x9, &[(22, 100), (28, 100)])))
             .id();
         let member = world
             .spawn((
                 Guid(MEMBER),
-                store(&[
-                    (22, 100),
-                    (28, 100),
-                    (8, PET as u32),
-                    (9, (PET >> 32) as u32),
-                ]),
+                store(
+                    0x19,
+                    &[
+                        (22, 100),
+                        (28, 100),
+                        (8, PET as u32),
+                        (9, (PET >> 32) as u32),
+                    ],
+                ),
             ))
             .id();
         let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
@@ -281,7 +408,8 @@ mod tests {
                 .run_system_once(
                     |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
                         for request in script.take_selection_requests() {
-                            select.select(request);
+                            let debt = select.select(request);
+                            select.pay_now(debt);
                         }
                     },
                 )
@@ -300,10 +428,12 @@ mod tests {
                 "{token}"
             );
         }
-        // Out of view, the pet is named but not held: nothing to select, no deselect.
+        // Out of view, the pet is named but not held: the held member's descriptor still names it
+        // (`0x4e814d`), so `IsRaidMemberOrPet` selects it by the guid alone (`0x489a64`).
         world.resource_mut::<crate::net::GuidIndex>().0.remove(&PET);
         assert_eq!(run(&mut world, r#"TargetUnit("party1")"#), Some(MEMBER));
-        assert_eq!(run(&mut world, r#"TargetUnit("partypet1")"#), Some(MEMBER));
+        assert_eq!(run(&mut world, r#"TargetUnit("partypet1")"#), Some(PET));
+        assert_eq!(world.resource::<super::super::Selection>().target, None);
     }
 
     /// `TargetUnit` and `AssistUnit` take the tokens the reference's resolver takes (`0x515970`,
@@ -339,12 +469,15 @@ mod tests {
         let mut world = script_world();
         // We target the victim, party1 targets the victim, the victim targets `THIRD`, our pet
         // targets `THIRD`; `THIRD` targets nobody.
-        world.spawn((SelfPlayer, Guid(ME), unit(PLAYER, PET, VICTIM)));
+        let me = world
+            .spawn((SelfPlayer, Guid(ME), unit(PLAYER, PET, VICTIM)))
+            .id();
         let member = world.spawn((Guid(MEMBER), unit(PLAYER, 0, VICTIM))).id();
         let victim = world.spawn((Guid(VICTIM), unit(CREATURE, 0, THIRD))).id();
         let third = world.spawn((Guid(THIRD), unit(CREATURE, 0, 0))).id();
         let pet = world.spawn((Guid(PET), unit(CREATURE, 0, THIRD))).id();
         let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
+        index.insert(ME, me);
         index.insert(MEMBER, member);
         index.insert(VICTIM, victim);
         index.insert(THIRD, third);
@@ -364,9 +497,6 @@ mod tests {
                 None,
                 Some(ME),
             );
-        let mut bar = crate::ui_pet::PetBar::default();
-        bar.spells.pet_guid = PET;
-        world.insert_resource(bar);
 
         let run = |world: &mut World, lua: &str| {
             world
@@ -377,7 +507,8 @@ mod tests {
                 .run_system_once(
                     |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
                         for request in script.take_selection_requests() {
-                            select.select(request);
+                            let debt = select.select(request);
+                            select.pay_now(debt);
                         }
                     },
                 )
@@ -405,7 +536,6 @@ mod tests {
             "party1targetfoo",
             "party1foo",
             "party2target",
-            "npctarget",
         ] {
             assert_eq!(
                 run(&mut world, &format!(r#"TargetUnit("{token}")"#)),
@@ -413,6 +543,11 @@ mod tests {
                 "{token}"
             );
         }
+        // `npc` is compared whole, so `npctarget` is no token and raises (`0x515c14`).
+        assert!(world
+            .non_send_resource_mut::<UiScript>()
+            .eval::<()>(r#"TargetUnit("npctarget")"#)
+            .is_err());
 
         reset(&mut world);
         assert_eq!(
@@ -451,7 +586,7 @@ mod tests {
     #[test]
     fn target_and_assist_unit_name_the_interaction_npc() {
         use crate::net::{Guid, ObjectStore, SelfPlayer};
-        use crate::ui_session::InteractNpc;
+        use crate::ui_session::InteractLatch;
         use benilla_ui::script::UiScript;
         use bevy::ecs::system::RunSystemOnce;
 
@@ -474,7 +609,9 @@ mod tests {
         let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
         index.insert(VENDOR, vendor);
         index.insert(GUARD, guard);
-        world.insert_resource(InteractNpc(Some(vendor), Some(VENDOR)));
+        let mut latch = InteractLatch::default();
+        latch.latch_for_test(VENDOR);
+        world.insert_resource(latch);
 
         let run = |world: &mut World, lua: &str| {
             world
@@ -485,7 +622,8 @@ mod tests {
                 .run_system_once(
                     |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
                         for request in script.take_selection_requests() {
-                            select.select(request);
+                            let debt = select.select(request);
+                            select.pay_now(debt);
                         }
                     },
                 )
@@ -516,7 +654,7 @@ mod tests {
             .resource_mut::<crate::net::GuidIndex>()
             .0
             .insert(VENDOR, vendor);
-        world.insert_resource(InteractNpc::default());
+        world.insert_resource(InteractLatch::default());
         assert_eq!(run(&mut world, r#"TargetUnit("npc")"#), Some(GUARD));
     }
 
@@ -527,7 +665,7 @@ mod tests {
     fn typing_target_unit_npc_in_the_stock_chat_box_selects_the_vendor() {
         benilla_formats::wow_data_or_skip!();
         use crate::net::{Guid, ObjectStore, SelfPlayer};
-        use crate::ui_session::InteractNpc;
+        use crate::ui_session::InteractLatch;
         use benilla_ui::script::UiScript;
         use bevy::ecs::system::RunSystemOnce;
 
@@ -536,14 +674,18 @@ mod tests {
         let unit = || ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, 0x09)]));
 
         let mut world = script_world();
-        world.insert_non_send_resource(crate::ui_script::chat_tests::chat_frame());
+        let mut chat = crate::ui_script::chat_tests::chat_frame();
+        chat.keep_calls();
+        world.insert_non_send_resource(chat);
         world.spawn((SelfPlayer, Guid(ME), unit()));
         let vendor = world.spawn((Guid(VENDOR), unit())).id();
         world
             .resource_mut::<crate::net::GuidIndex>()
             .0
             .insert(VENDOR, vendor);
-        world.insert_resource(InteractNpc(Some(vendor), Some(VENDOR)));
+        let mut latch = InteractLatch::default();
+        latch.latch_for_test(VENDOR);
+        world.insert_resource(latch);
 
         let mut script = world.non_send_resource_mut::<UiScript>();
         assert!(script.focus_editbox("ChatFrameEditBox"));
@@ -553,7 +695,8 @@ mod tests {
             .run_system_once(
                 |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
                     for request in script.take_selection_requests() {
-                        select.select(request);
+                        let debt = select.select(request);
+                        select.pay_now(debt);
                     }
                 },
             )

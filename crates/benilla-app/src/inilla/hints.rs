@@ -24,7 +24,7 @@ use super::pad::PadHud;
 use super::touch::TouchState;
 use super::ui::Overlay;
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::ui_script::UiKeyboardCapture;
 
 /// The chat line being typed, as the stock edit box holds it.

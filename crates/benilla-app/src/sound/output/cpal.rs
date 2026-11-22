@@ -1,13 +1,18 @@
 //! The non-macOS half of [`super`]: the same surface as `coreaudio.rs` ([`Device`], [`Stream`],
 //! [`Cycle`], [`Notices`], [`Listeners`], [`set_realtime`], [`now_ns`]) over cpal, which speaks
-//! ALSA, PipeWire, WASAPI and the rest. Where cpal differs from CoreAudio:
+//! ALSA (and through its PCMs PipeWire and PulseAudio), WASAPI and the rest. Where cpal differs
+//! from CoreAudio:
 //!
+//! - The device: when the host default will not open, another output stands in
+//!   ([`default_output`]).
 //! - Cycle timestamps: cpal gives `callback` and `playback` instants, so
 //!   [`Cycle::output_time_ns`] is `now + (playback - callback)` on our own clock.
 //! - Device notices: cpal has no notification API, so [`Listeners`] polls the default device's
-//!   identity and rate, backed by cpal's stream error callback. Nothing is an analogue of
+//!   identity and the open device's rate, backed by cpal's stream error callback. Nothing is an analogue of
 //!   `kAudioDeviceProcessorOverload`, so the overload meter reads zero.
 //! - Realtime: no workgroups; [`set_realtime`] is `SCHED_FIFO` on unix and MMCSS on Windows.
+//! - COM, on Windows: cpal keeps one device enumerator for the process, made in the apartment of
+//!   whichever thread asks first; [`host`] makes it in an apartment that outlives every thread.
 //!
 //! An unsupported target compiles to cpal's Null host, reports no device and runs silent.
 
@@ -36,6 +41,65 @@ pub(super) fn now_ns() -> u64 {
     EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
+/// cpal's default host. Every device read here comes through it, so on Windows cpal's device
+/// enumerator is made in the MTA (`com`) before any thread reads a device.
+fn host() -> cpal::Host {
+    #[cfg(windows)]
+    com::anchor();
+    cpal::default_host()
+}
+
+/// cpal's WASAPI host caches one `IMMDeviceEnumerator` for the process, made by the first thread to
+/// ask, inside a single-threaded apartment of that thread's own. When that thread exits, cpal's
+/// `CoUninitialize` closes the apartment and unloads the DLLs it loaded, the enumerator's among
+/// them, and every later read calls through a dead vtable: `STATUS_ACCESS_VIOLATION`
+/// (RustAudio/cpal#1302). So it is made once, on a thread of our own inside the multithreaded
+/// apartment, which `CoIncrementMTAUsage` keeps for the life of the process.
+#[cfg(windows)]
+mod com {
+    use cpal::traits::HostTrait as _;
+    use windows_sys::Win32::System::Com::{
+        CoIncrementMTAUsage, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED,
+    };
+
+    /// Make cpal's enumerator in the MTA, once; later calls return at once.
+    pub(super) fn anchor() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let made = std::thread::Builder::new()
+                .name("audio-com".into())
+                .spawn(make_in_mta)
+                .map_err(|e| e.to_string())
+                .and_then(|t| t.join().unwrap_or_else(|_| Err("panicked".into())));
+            if let Err(e) = made {
+                bevy::log::warn!("audio: cpal's device enumerator is not in the MTA ({e})");
+            }
+        });
+    }
+
+    fn make_in_mta() -> Result<(), String> {
+        let mut cookie = std::ptr::null_mut();
+        // SAFETY: an out-parameter; the cookie is never decremented, so the MTA stands for the
+        // life of the process.
+        let hr = unsafe { CoIncrementMTAUsage(&mut cookie) };
+        if hr < 0 {
+            return Err(format!("CoIncrementMTAUsage: {hr:#010x}"));
+        }
+        // SAFETY: joins this thread to the MTA explicitly, balanced by the `CoUninitialize` below,
+        // so cpal's own STA join here answers `RPC_E_CHANGED_MODE`, which it keeps without
+        // uninitializing.
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
+        if hr < 0 {
+            return Err(format!("CoInitializeEx(MTA): {hr:#010x}"));
+        }
+        // Any call that reaches the enumerator makes it; whether a device exists does not matter.
+        let _ = cpal::default_host().default_output_device();
+        // SAFETY: balances this thread's `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Device
 
@@ -53,9 +117,13 @@ pub(super) struct Device {
     /// The cpal handle and the config we open with.
     device: cpal::Device,
     config: cpal::SupportedStreamConfig,
-    /// The host's stable id, when it has one: what [`Listeners`] compares, since a display name
-    /// is neither unique nor fixed.
+    /// The host's stable id, when it has one.
     id: Option<cpal::DeviceId>,
+    /// The host default when this device was chosen, which [`Listeners`] watches; `None` when the
+    /// host had none.
+    default: Option<Identity>,
+    /// Whether this is that default rather than a stand-in for it.
+    is_default: bool,
 }
 
 impl std::fmt::Debug for Device {
@@ -70,16 +138,139 @@ impl std::fmt::Debug for Device {
     }
 }
 
-/// The host's default output device; with none (headless, no sound server, an unsupported
-/// target) the caller runs silent.
+/// Who a device is: the host's id where it has one, since a display name is neither unique nor
+/// fixed, else the name.
+#[derive(Clone)]
+struct Identity {
+    id: Option<cpal::DeviceId>,
+    name: String,
+}
+
+impl Identity {
+    /// `None` when the device cannot be read, which is a transient, not a change.
+    fn of(device: &cpal::Device) -> Option<Self> {
+        let id = device.id().ok();
+        let name = device.description().ok().map(|d| d.name().to_string());
+        match (id, name) {
+            (None, None) => None,
+            (id, name) => Some(Self {
+                id,
+                name: name.unwrap_or_default(),
+            }),
+        }
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        match (&self.id, &other.id) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.name == other.name,
+        }
+    }
+}
+
+/// The stand-in search's memory across calls: devices whose stream would not open (skipped by
+/// the next search, forgotten once any stream opens) and the stand-in last announced.
+struct Choice {
+    refused: Vec<cpal::DeviceId>,
+    announced: Option<cpal::DeviceId>,
+}
+
+static CHOICE: std::sync::Mutex<Choice> = std::sync::Mutex::new(Choice {
+    refused: Vec::new(),
+    announced: None,
+});
+
+fn choice() -> std::sync::MutexGuard<'static, Choice> {
+    CHOICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The host's default output device, or, when it will not open, the first other output that
+/// does (`fallback.rs` orders them on ALSA; other hosts in their own order). With none
+/// (headless, an unsupported target) the caller runs silent.
+///
+/// Deviation: 1.12.1 sets FMOD up on driver 0 and, when that fails, runs silent for the session
+/// (`Sound::Initialize` `0x7a4330`, the driver −1 → 0 at `0x7a445f`); here another output stands
+/// in, because on Linux the default is often a stock `dmix` whose card a sound server holds.
 pub(super) fn default_output() -> Result<Device> {
     // Prime the clock's epoch on the main thread, not first in the audio callback.
     now_ns();
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .context("no default output device")?;
-    describe(device)
+    let host = host();
+    let default = host.default_output_device();
+    let watched = default.as_ref().and_then(Identity::of);
+    let refused = choice().refused.clone();
+    let is_refused = |d: &cpal::Device| d.id().is_ok_and(|id| refused.contains(&id));
+
+    let why = match &default {
+        None => anyhow::anyhow!("no default output device"),
+        Some(d) if is_refused(d) => anyhow::anyhow!("its last stream would not open"),
+        Some(d) => match describe(d.clone()) {
+            Ok(mut device) => {
+                device.default = watched;
+                device.is_default = true;
+                choice().announced = None;
+                return Ok(device);
+            }
+            Err(e) => e,
+        },
+    };
+
+    // By the variant, not its name: cpal names it "Alsa".
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    let alsa = host.id() == cpal::HostId::Alsa;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )))]
+    let alsa = false;
+    let others = host.devices().into_iter().flatten().filter(|d| {
+        d.description()
+            .is_ok_and(|desc| desc.direction() != cpal::DeviceDirection::Input)
+            && watched
+                .as_ref()
+                .is_none_or(|w| Identity::of(d).is_none_or(|i| !i.same_as(w)))
+            && !is_refused(d)
+    });
+    let ranked = super::fallback::by_rank(others, |d| {
+        if !alsa {
+            return Some(0);
+        }
+        let id = d.id().ok()?;
+        let desc = d.description().ok()?;
+        super::fallback::alsa_rank(&id.1, &desc.extended().join("\n"))
+    });
+    for candidate in ranked {
+        match describe(candidate) {
+            Ok(mut device) => {
+                device.default = watched;
+                let mut choice = choice();
+                if choice.announced != device.id {
+                    let id = device
+                        .id
+                        .as_ref()
+                        .map_or(String::new(), |id| format!(" ({id})"));
+                    bevy::log::warn!(
+                        "audio: the default output will not open ({why:#}); playing on {}{id}",
+                        device.name
+                    );
+                    choice.announced.clone_from(&device.id);
+                }
+                return Ok(device);
+            }
+            Err(e) => bevy::log::debug!("audio: no stand-in there either: {e:#}"),
+        }
+    }
+    // Nothing else opens: forget the refusals, so the next search starts again at the default.
+    choice().refused.clear();
+    Err(why.context("the default output will not open, and no other output does"))
 }
 
 fn describe(device: cpal::Device) -> Result<Device> {
@@ -112,6 +303,8 @@ fn describe(device: cpal::Device) -> Result<Device> {
         id: device.id().ok(),
         device,
         config,
+        default: None,
+        is_default: false,
     })
 }
 
@@ -191,7 +384,7 @@ impl Stream {
             scratch: vec![0.0; MAX_CYCLE_FRAMES * CHANNELS as usize],
         };
         // Every output format cpal can hand a typed callback for.
-        let stream = match device.config.sample_format() {
+        let built = match device.config.sample_format() {
             cpal::SampleFormat::F32 => build::<f32, _>(device, &config, ctx, on_error),
             cpal::SampleFormat::F64 => build::<f64, _>(device, &config, ctx, on_error),
             cpal::SampleFormat::I8 => build::<i8, _>(device, &config, ctx, on_error),
@@ -203,11 +396,26 @@ impl Stream {
             cpal::SampleFormat::U16 => build::<u16, _>(device, &config, ctx, on_error),
             cpal::SampleFormat::U32 => build::<u32, _>(device, &config, ctx, on_error),
             cpal::SampleFormat::U64 => build::<u64, _>(device, &config, ctx, on_error),
-            other => bail!("device {} wants sample format {other}", device.name),
-        }?;
-        stream.play().context("starting the output stream")?;
+            other => Err(anyhow::anyhow!(
+                "device {} wants sample format {other}",
+                device.name
+            )),
+        };
+        let started = built.and_then(|stream| {
+            stream.play().context("starting the output stream")?;
+            Ok(stream)
+        });
+        // A refusal steers the next [`default_output`] search past this device; an open clears
+        // them, so a later search starts again at the default.
+        let mut choice = choice();
+        match (&started, &device.id) {
+            (Ok(_), _) => choice.refused.clear(),
+            (Err(_), Some(id)) => choice.refused.push(id.clone()),
+            (Err(_), None) => {}
+        }
+        drop(choice);
         Ok(Self {
-            _stream: stream,
+            _stream: started?,
             observed_frames,
         })
     }
@@ -329,9 +537,16 @@ pub(super) struct Notices {
     pub last_overload_ns: AtomicU64,
 }
 
-/// The device watch: a thread that re-reads the host's default output every [`WATCH_EVERY`] and
-/// raises a notice when it changes. One-shot: the backend answers a notice by rebuilding the
-/// stream, which arms a fresh watch.
+/// The device watch: a thread that re-reads the host's default output and the open device's rate
+/// every [`WATCH_EVERY`] and raises a notice when either changes. One-shot: the backend answers a
+/// notice by rebuilding the stream, which arms a fresh watch.
+///
+/// Deviation: a change of the default output device is followed (here and in `coreaudio.rs`), where
+/// 1.12.1 initialises its sound device once and never again (`Sound::Initialize` `0x7a4330`
+/// refuses a second call; the driver-enumeration functions `0x7a6320`-`0x7a6380` have no caller),
+/// because a headset plugged in mid-session should play at once. On ALSA the watch sees only the
+/// "default" PCM, whose id never changes, so on Linux it is the sound server (PipeWire or Pulse)
+/// that moves the stream.
 pub(super) struct Listeners {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -341,8 +556,12 @@ impl Listeners {
     pub(super) fn arm(device: &Device, notices: Arc<Notices>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let watching = Arc::clone(&stop);
-        let (was_id, was_name, was_rate) =
-            (device.id.clone(), device.name.clone(), device.sample_rate);
+        let (watched, is_default, ours, was_rate) = (
+            device.default.clone(),
+            device.is_default,
+            device.device.clone(),
+            device.sample_rate,
+        );
         let thread = std::thread::Builder::new()
             .name("audio-devwatch".into())
             .spawn(move || {
@@ -351,21 +570,27 @@ impl Listeners {
                     if watching.load(Ordering::Acquire) {
                         return;
                     }
-                    let Some(now) = cpal::default_host().default_output_device() else {
-                        notices.device_died.store(true, Ordering::Release);
-                        return;
-                    };
-                    // By the host's id where there is one, else by name; an unreadable device
-                    // is a transient (`None`), not a change.
-                    let changed = match (&was_id, now.id()) {
-                        (Some(was), Ok(is_now)) => Some(*was != is_now),
-                        _ => now.description().ok().map(|d| d.name() != was_name),
-                    };
-                    if changed == Some(true) {
-                        notices.default_changed.store(true, Ordering::Release);
-                        return;
+                    // Compared with the default this device was chosen against, so a stand-in is
+                    // not rebuilt every poll for a default that still will not open.
+                    match host().default_output_device() {
+                        None if is_default => {
+                            notices.device_died.store(true, Ordering::Release);
+                            return;
+                        }
+                        None => {}
+                        Some(now) => {
+                            let changed = match (&watched, Identity::of(&now)) {
+                                (Some(was), Some(is_now)) => !is_now.same_as(was),
+                                (None, Some(_)) => true,
+                                (_, None) => false,
+                            };
+                            if changed {
+                                notices.default_changed.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
                     }
-                    if now
+                    if ours
                         .default_output_config()
                         .is_ok_and(|c| c.sample_rate() != was_rate)
                     {

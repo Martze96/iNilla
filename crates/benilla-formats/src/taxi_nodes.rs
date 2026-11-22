@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{f32_at, parse, str_at, u32_at};
+use crate::dbc::{f32_at, loc_str, parse, u32_at};
 use crate::Chain;
 
 const TAXI_NODES: &str = "DBFilesClient\\TaxiNodes.dbc";
@@ -22,7 +22,7 @@ pub struct TaxiNode {
     pub map_id: u32,
     /// World position `(x, y, z)` on `map_id`.
     pub pos: [f32; 3],
-    /// The enUS name (locale slot 0), the taxi map's node label.
+    /// The name in the locale's column, the taxi map's node label.
     pub name: String,
     /// The `creature_template` entry of a Horde rider's taxi mount here, `0` for no Horde service.
     pub mount_horde: u32,
@@ -36,6 +36,13 @@ pub struct TaxiNodes {
 }
 
 impl TaxiNodes {
+    /// A catalog of these rows, keyed by id, a later row replacing an earlier one.
+    pub fn from_rows(rows: impl IntoIterator<Item = TaxiNode>) -> Self {
+        Self {
+            rows: rows.into_iter().map(|n| (n.id, n)).collect(),
+        }
+    }
+
     pub fn get(&self, id: u32) -> Option<&TaxiNode> {
         self.rows.get(&id)
     }
@@ -61,7 +68,7 @@ fn schema() -> Schema {
     for name in ["X", "Y", "Z"] {
         s.add_field(SchemaField::new(name, FieldType::Float32));
     }
-    s.add_field(SchemaField::new("Name", FieldType::String)); // enUS (locale 0)
+    s.add_field(SchemaField::new("Name", FieldType::String)); // locale 0
     s.add_field(SchemaField::new_array(
         "NameOtherLocales",
         FieldType::String,
@@ -79,23 +86,20 @@ pub fn load_taxi_nodes(chain: &mut Chain) -> Result<TaxiNodes> {
         .read_file(TAXI_NODES)
         .context("reading TaxiNodes.dbc")?;
     let rs = parse(&bytes, schema(), "TaxiNodes")?;
-    let mut rows = HashMap::with_capacity(rs.records().len());
-    for r in rs.records() {
-        let Some(id) = u32_at(r, 0) else { continue };
-        let (Some(x), Some(y), Some(z)) = (f32_at(r, 2), f32_at(r, 3), f32_at(r, 4)) else {
-            continue;
-        };
-        let node = TaxiNode {
+    let locale = chain.locale();
+    let rows = rs.records().iter().filter_map(|r| {
+        let id = u32_at(r, 0)?;
+        let (x, y, z) = (f32_at(r, 2)?, f32_at(r, 3)?, f32_at(r, 4)?);
+        Some(TaxiNode {
             id,
             map_id: u32_at(r, 1).unwrap_or(0),
             pos: [x, y, z],
-            name: str_at(&rs, r, 5).unwrap_or_default(),
+            name: loc_str(&rs, r, 5, locale).unwrap_or_default(),
             mount_horde: u32_at(r, 14).unwrap_or(0),
             mount_alliance: u32_at(r, 15).unwrap_or(0),
-        };
-        rows.insert(id, node);
-    }
-    Ok(TaxiNodes { rows })
+        })
+    });
+    Ok(TaxiNodes::from_rows(rows))
 }
 
 #[cfg(test)]

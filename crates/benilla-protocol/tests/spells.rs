@@ -92,6 +92,13 @@ fn spell_and_action_wire() {
         "item cast: u32 id + u16 mask 0x10 + packed item guid"
     );
 
+    // The partner's non-traded slot, 6, as `0x6e6900` binds it: mask 0x1000, packed guid {6, 0}.
+    assert_eq!(
+        messages::cast_spell_trade_item(7418, 6),
+        hx("fa1c000000100106"),
+        "trade-slot cast: u32 id + u16 mask 0x1000 + packed guid 6 (mask 0x01)"
+    );
+
     // CMSG_ATTACKSWING: one full 8-byte guid, not packed.
     assert_eq!(messages::attack_swing(victim), hx("2a000045000030f1"));
 
@@ -343,7 +350,7 @@ fn attack_swing_refusal_wire() {
 /// `Server/Packets/Spell.cpp:54-58`.
 #[test]
 fn spell_visual_wire_golden() {
-    use benilla_protocol::messages::{SpellCastTargets, SpellGo, SpellStart};
+    use benilla_protocol::messages::{SpellCastTargets, SpellGo, SpellGoMiss, SpellStart};
 
     let creature = 0xF130_0000_4500_002Au64; // packs with mask 0xC9
 
@@ -372,6 +379,7 @@ fn spell_visual_wire_golden() {
                         mask: 0x2,
                         unit_target: Some(0x55),
                         go_target: None,
+                        source: None,
                         dest: None,
                     },
                     ammo_display_id: None,
@@ -423,6 +431,14 @@ fn spell_visual_wire_golden() {
     }
 
     // SMSG_SPELL_GO: only a SPELL_MISS_REFLECT miss carries the extra reflectResult byte.
+    let go_misses = || {
+        let miss = |target, info, reflect_result| SpellGoMiss {
+            target,
+            info,
+            reflect_result,
+        };
+        vec![miss(0xCC, 2, 0), miss(0xDD, 11, 2)]
+    };
     let body = hx(concat!(
         "0101",             // item_or_caster pguid: guid 1
         "c92a4530f1",       // caster pguid: the creature
@@ -453,11 +469,12 @@ fn spell_visual_wire_golden() {
                     spell_id: 75,
                     cast_flags: 0x120,
                     hits: vec![0xAA, 0xBB],
-                    misses: vec![(0xCC, 2), (0xDD, 11)],
+                    misses: go_misses(),
                     targets: SpellCastTargets {
                         mask: 0x2,
                         unit_target: Some(0xEE),
                         go_target: None,
+                        source: None,
                         dest: None,
                     },
                     ammo_display_id: Some(5996),
@@ -475,15 +492,20 @@ fn spell_visual_wire_golden() {
             misses,
             target,
             go_target,
+            target_mask,
+            source,
             dest,
             ammo_display_id,
             item_caster,
+            unit_caster,
         } => {
             assert_eq!(caster, creature);
+            assert_eq!((target_mask, source), (0x2, None));
+            assert_eq!(unit_caster, creature, "the second guid as written");
             assert_eq!(spell_id, 75);
             assert_eq!(cast_flags, 0x120);
             assert_eq!(hits, vec![0xAA, 0xBB]);
-            assert_eq!(misses, vec![(0xCC, 2), (0xDD, 11)]);
+            assert_eq!(misses, go_misses());
             assert_eq!(target, Some(0xEE));
             assert_eq!(go_target, None); // a unit-targeted cast leaves the GO target empty
             assert_eq!(dest, None); // …and the ground point empty (mask 0x2, no 0x40)
@@ -535,6 +557,34 @@ fn spell_visual_wire_golden() {
         other => panic!("ground spell go event, got {other:?}"),
     }
 
+    // A source-point cast: mask 0x0020, its point read where the dest would be (`0x7e4f22`) and
+    // carried with the mask, which the missile launcher aims at (`0x60a5ce`).
+    let body = hx(concat!(
+        "011a",     // item_or_caster pguid: guid 0x1a
+        "011a",     // caster pguid
+        "0a000000", // spellId 10
+        "0001",     // castFlags 0x100
+        "00",       // hit count 0
+        "00",       // miss count 0
+        "2000",     // SpellCastTargets mask: TARGET_FLAG_SOURCE_LOCATION
+        "0000803f", // source x 1.0
+        "00000040", // source y 2.0
+        "00004040", // source z 3.0
+    ));
+    let packet = messages::parse_server(messages::opcode::SMSG_SPELL_GO, &body).unwrap();
+    match decode(packet).pop().unwrap() {
+        SessionEvent::SpellGo {
+            target_mask,
+            source,
+            dest,
+            ..
+        } => assert_eq!(
+            (target_mask, source, dest),
+            (0x20, Some([1.0, 2.0, 3.0]), None)
+        ),
+        other => panic!("source spell go event, got {other:?}"),
+    }
+
     // A GameObject caster (Lightwell 181102, spell 7001): vmangos writes the null `m_casterUnit`
     // as a lone zero mask byte (`Spell.cpp:4525`), so the object rides only slot 1.
     const LIGHTWELL: u64 = 0xF110_02C3_6E00_0123; // GO high guid, entry 181102 << 24, counter 0x123
@@ -563,8 +613,10 @@ fn spell_visual_wire_golden() {
             hits,
             target,
             item_caster,
+            unit_caster,
             ..
         } => {
+            assert_eq!(unit_caster, 0, "the empty caster slot, kept as written");
             assert_eq!(
                 caster, LIGHTWELL,
                 "an empty caster slot falls back to slot 1 — the GameObject IS the caster"
@@ -920,6 +972,7 @@ fn combat_log_wire_golden() {
                 &SpellLogMiss {
                     spell_id: 133,
                     caster: 0x42,
+                    extended: false,
                     misses: vec![(0xAA, 3), (0xBB, 11)],
                 }
             );
@@ -935,7 +988,7 @@ fn combat_log_wire_golden() {
     body.extend_from_slice(&250u32.to_le_bytes()); // total
     body.push(0); // xpType: kill
     body.extend_from_slice(&200u32.to_le_bytes()); // base xp (kept: rested bonus = total − base)
-    body.extend_from_slice(&1.25f32.to_le_bytes()); // group bonus (dropped)
+    body.extend_from_slice(&1.25f32.to_le_bytes()); // group float
     let packet = messages::parse_server(messages::opcode::SMSG_LOG_XPGAIN, &body).unwrap();
     match &packet {
         ServerPacket::XpGain(x) => {
@@ -946,6 +999,7 @@ fn combat_log_wire_golden() {
                     total: 250,
                     base: 200,
                     kill: true,
+                    group: 1.25,
                 }
             );
         }
@@ -969,6 +1023,7 @@ fn combat_log_wire_golden() {
                     total: 50,
                     base: 50, // non-kill carries no base on the wire; base = total
                     kill: false,
+                    group: 1.0, // nor a float: the handler's own 1.0
                 }
             );
         }
@@ -1235,22 +1290,22 @@ fn kill_outcome_dispel_enchantment_and_execute_logs_parse() {
         other => panic!("dispel failed, got {}", other.name()),
     }
 
-    // SMSG_ENCHANTMENTLOG, per vmangos `Server/Packets/Item.cpp:235-242`.
+    // SMSG_ENCHANTMENTLOG: the owner, then the caster (`0x628f23`-`0x628f29`).
     let body = hx(concat!(
-        "0000000000000000", // caster 0: the enchant faded
         "0b00000000000000", // owner 11
+        "0000000000000000", // caster 0: the enchant faded (`0x628fac`)
         "d2040000",         // itemEntry 1234
-        "39050000",         // spellId 1337
+        "39050000",         // enchantment 1337
         "00",               // showAffiliation false
     ));
     match messages::parse_server(messages::opcode::SMSG_ENCHANTMENTLOG, &body).unwrap() {
         ServerPacket::EnchantmentLog(p) => assert_eq!(
             p,
             EnchantmentLog {
-                caster: 0,
                 owner: 11,
+                caster: 0,
                 item_entry: 1234,
-                spell_id: 1337,
+                enchant_id: 1337,
                 show_affiliation: false,
             }
         ),

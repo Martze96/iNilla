@@ -1,12 +1,14 @@
 //! The soulbind confirmations other than loot's: `EQUIP_BIND`, `AUTOEQUIP_BIND` and `USE_BIND`.
 //! They are client-local: the client reads the cached template's bonding and defers its own send,
 //! and an accept re-issues that action with a suppress flag, as 1.12 has no confirm packet. The
-//! app owns the pending records; this module holds only the intents.
+//! app owns the pending records; each answer is a call the host applies inside its verb
+//! ([`super::ItemCall::EquipAnswer`], [`super::ItemCall::BindOnUse`]).
 
-use mlua::Lua;
+use mlua::{Lua, Value};
 
-use super::Model;
-use crate::script::binding_abi::Idx32;
+use super::binding_abi;
+use super::item_calls::submit;
+use super::ItemCall;
 
 /// One answer to a pending-equip question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,22 +22,11 @@ pub struct PendingEquipAnswer {
 }
 
 impl super::UiScript {
-    /// The equip answers in call order. The app ignores an index it holds no record for, as the
-    /// reference's `0x5e1be0` bounds-checks it and returns.
-    pub fn take_pending_equip_answers(&mut self) -> Vec<PendingEquipAnswer> {
-        std::mem::take(&mut self.model_mut().pending_equip_answers)
-    }
-
-    /// `ConfirmBindOnUse()` calls since the last drain.
-    pub fn take_bind_on_use_confirms(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().bind_on_use_confirms)
-    }
-
     /// The client's item-usable predicate (`0x5ea930`), which the app's equip deferral asks: an
     /// item the player cannot equip is never asked about. Entry `0` and an unanswered template
     /// read usable.
     pub fn item_usable(&self, item_id: u32) -> bool {
-        super::item_stats::item_usable_by_id(&self.model_ref(), item_id)
+        super::item_stats::item_usable_by_id(&self.lua, &self.model_ref(), item_id)
     }
 }
 
@@ -45,13 +36,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `0x4898f0`, the `OnAccept` of `EQUIP_BIND` and `AUTOEQUIP_BIND` (`StaticPopup.lua:612-647`).
     g.set(
         "EquipPendingItem",
-        lua.create_function(|lua, index: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.pending_equip_answers.push(PendingEquipAnswer {
-                index,
-                accept: true,
-            });
-            Ok(())
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: EquipPendingItem(index)` (`0x842600`, `0x489901`).
+            let index = binding_abi::index_arg32(lua, index, "Usage: EquipPendingItem(index)")?;
+            submit(
+                lua,
+                ItemCall::EquipAnswer(PendingEquipAnswer {
+                    index,
+                    accept: true,
+                }),
+            )
         })?,
     )?;
 
@@ -59,13 +53,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // standing dialog (`exclusive = 1`), and that cancel releases the superseded item's locks.
     g.set(
         "CancelPendingEquip",
-        lua.create_function(|lua, Idx32(index): Idx32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.pending_equip_answers.push(PendingEquipAnswer {
-                index,
-                accept: false,
-            });
-            Ok(())
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: CancelPendingEquip(index)` (`0x842620`, `0x489971`).
+            let index = binding_abi::index_arg32(lua, index, "Usage: CancelPendingEquip(index)")?;
+            submit(
+                lua,
+                ItemCall::EquipAnswer(PendingEquipAnswer {
+                    index,
+                    accept: false,
+                }),
+            )
         })?,
     )?;
 
@@ -74,9 +71,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ConfirmBindOnUse",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.bind_on_use_confirms += 1;
-            Ok(())
+            // The re-issued use is `CGItem::Use` (`0x5d92c1`), whose cast is `TryCastSpell`'s,
+            // behind the gate's tag 2; the call spends the pending state whatever the gate said
+            // (`0x5d92c6`-`0x5d92cc`).
+            let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
+            submit(lua, ItemCall::BindOnUse { may_cast })
         })?,
     )?;
 
@@ -89,8 +88,9 @@ mod tests {
 
     /// Order matters: a supersede is a cancel of one record arriving between two others.
     #[test]
-    fn the_equip_answers_queue_in_call_order_with_their_verdicts() {
+    fn the_equip_answers_are_calls_in_call_order_with_their_verdicts() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("EquipPendingItem(0) CancelPendingEquip(1) EquipPendingItem(2)")
             .unwrap();
         let answers = s.take_pending_equip_answers();
@@ -101,15 +101,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, true), (1, false), (2, true)]
         );
-        assert!(s.take_pending_equip_answers().is_empty(), "drained");
+        assert!(s.take_pending_equip_answers().is_empty(), "taken");
     }
 
     #[test]
     fn confirm_bind_on_use_counts() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(s.take_bind_on_use_confirms(), 0);
         s.run("ConfirmBindOnUse() ConfirmBindOnUse()").unwrap();
         assert_eq!(s.take_bind_on_use_confirms(), 2);
-        assert_eq!(s.take_bind_on_use_confirms(), 0, "drained");
+        assert_eq!(s.take_bind_on_use_confirms(), 0, "taken");
     }
 }

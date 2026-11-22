@@ -55,6 +55,24 @@ fn drawn_textures(s: &mut UiScript) -> Vec<String> {
         .collect()
 }
 
+/// The stock template declares 30 `TextLeft`/`TextRight` pairs, the tooltip's line limit
+/// (`0x529650`, `0x530291`): the 31st `AddLine` adds nothing.
+#[test]
+fn a_stock_template_tooltip_holds_30_lines() {
+    benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    s.run(
+        r#"
+        local tip = CreateFrame("GameTooltip", "CapTip", UIParent, "GameTooltipTemplate")
+        for i = 1, 40 do tip:AddLine("line " .. i) end
+        assert(tip:NumLines() == 30, tip:NumLines())
+        assert(CapTipTextLeft30:GetText() == "line 30")
+        assert(CapTipTextLeft31 == nil)
+    "#,
+    )
+    .unwrap();
+}
+
 /// An addon tooltip's lines are named after the caller (`MyTipTextLeft1`), never the template, so
 /// the corpus idiom `getglobal(tip:GetName().."TextLeft1")` resolves.
 #[test]
@@ -75,7 +93,7 @@ fn an_addon_tooltip_from_the_template_names_its_lines_after_the_caller() {
         !report
             .warnings
             .iter()
-            .any(|w| w.contains("unknown template")),
+            .any(|w| w.contains("Couldn't find inherited node")),
         "the template resolves: {:?}",
         report.warnings
     );
@@ -190,8 +208,8 @@ fn an_addon_may_call_gametooltip_onload_the_reference_way_with_no_argument() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // The tint, quantized: `SetBackdropColor` (`0x777d30`) stores a byte per channel, truncating
-    // `x * 255 + 0.5`, so 0.09 reads back as 23/255.
-    let q = |x: f32| f32::from((x * 255.0 + 0.5) as u8) / 255.0;
+    // `x * 255 + 0.5`, and the getter reads the byte through the float scale (`0x777c98`).
+    let q = benilla_ui::color::quant::read32;
     let (r, g, b) = s
         .eval::<(f32, f32, f32)>("return MyTip:GetBackdropColor()")
         .unwrap();
@@ -341,9 +359,10 @@ fn the_status_bar_is_the_templates_because_tipbuddy_anchors_to_it() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// An instance's `frameStrata` (`Necrosis.xml:1332`) and `hidden="false"` (`PowerAuras.xml:20`)
-/// win over the template's; PowerAuras never calls `Show()`, and `GameTooltip_OnLoad` does not
-/// hide the frame (`GameTooltip.lua:79-82`).
+/// An instance's `frameStrata` (`Necrosis.xml:1332`) wins over the template's. `hidden="false"`
+/// (`PowerAuras.xml:20`) is read on its own level after the template's `"true"` (`0x76985c`): it
+/// sets the shown bit and runs the tooltip's show (`0x7698b8`-`0x7698c4`), which with no owner
+/// clears the bit and hides again (`0x530aba`-`0x530ac8`), so the tooltip loads hidden.
 #[test]
 fn an_instance_attribute_beats_the_templates() {
     benilla_formats::wow_data_or_skip!();
@@ -362,8 +381,9 @@ fn an_instance_attribute_beats_the_templates() {
         "the instance's strata overrides the template's TOOLTIP"
     );
     assert!(
-        s.eval::<bool>("return Powa_Tooltip:IsShown()").unwrap(),
-        "hidden=\"false\" beats the template's hidden=\"true\" — PowerAuras never calls Show()"
+        !s.eval::<bool>("return Powa_Tooltip:IsShown() == 1")
+            .unwrap(),
+        "an ownerless tooltip's show hides it again"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -22,24 +22,24 @@
 //!
 //! ## The window hello and goodbye (`0x60c3b0`, right-click)
 //!
-//! Opening any interaction window (`0x4930d0`, 14 call sites, none a mouseover) plays the NPC's
-//! hello once with a free-picked take (`0x60c464`), the same `+0x4` slot. Closing to nothing plays
-//! the goodbye (`+0x8`). A swap to another NPC's window plays the new hello and suppresses the old
-//! goodbye (`0x4930fd`: `dl = (new_guid != 0)`). The active NPC is the union of the window sessions
-//! ([`MerchantOpen`], [`GossipState`], [`QuestGiver`], [`TrainerOpen`]). Every such call also zeroes
-//! the select greeting's tracked NPC (`0x60c3d1`), so the next left-click starts its sequence over.
+//! The interaction latch speaks them ([`LatchVocal`]), not the windows: registering on it
+//! (`0x4930d0`, 14 call sites, none a mouseover) for a different unit plays the NPC's hello once
+//! with a free-picked take (`0x60c464`), the same `+0x4` slot, and releasing it to nothing
+//! through `0x4931c0` plays the goodbye (`+0x8`), so every window on the latch greets alike. A
+//! swap to another NPC's window plays the new hello and no goodbye for the old (`0x4930fd`:
+//! `dl = (new_guid != 0)`), and a walk-away close (`0x493305`) plays none. The gate is a
+//! non-player unit (`0x493159`, `0x493182`, `0x4931f8`-`0x493203`): a game object (a mailbox)
+//! or a player speaks nothing. Every such call also zeroes the select greeting's tracked NPC
+//! (`0x60c3d1`), so the next left-click starts its sequence over.
 
 use bevy::prelude::*;
 
 use benilla_formats::NpcGreetingCatalog;
 use benilla_protocol::EntityKind;
 
-use crate::net::{ActiveMover, GuidIndex, NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::target::{both_reactions_at_least_neutral, Factions};
-use crate::ui_gossip::GossipState;
-use crate::ui_merchant::MerchantOpen;
-use crate::ui_quest::QuestGiver;
-use crate::ui_trainer::TrainerOpen;
+use crate::net::{ActiveMover, Guid, GuidIndex, NetEntity, ObjectStore, SelfPlayer};
+use crate::target::{RelUnit, RelationWorld, Relations};
+use crate::ui_session::LatchVocal;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
@@ -93,40 +93,6 @@ fn greet_line(seq: usize, pissed_variations: usize) -> (GreetLine, usize) {
     }
 }
 
-/// The vocal an active-NPC change produces (`SetActiveNPC`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WindowVocal {
-    Hello(u64),
-    Goodbye(u64),
-    None,
-}
-
-/// The active interaction NPC, the union of the window sessions. Every NPC-bound window must be
-/// in it: one left out makes a swap to it look like a close and plays a stray goodbye.
-fn active_interaction_npc(
-    merchant: &MerchantOpen,
-    gossip: &GossipState,
-    quest: &QuestGiver,
-    trainer: &TrainerOpen,
-) -> Option<u64> {
-    merchant
-        .vendor
-        .or(gossip.npc)
-        .or(quest.npc)
-        .or(trainer.trainer)
-}
-
-/// Open or swap plays the new NPC's hello with no goodbye for the old (`dl = new_guid != 0`);
-/// closing to nothing plays the goodbye.
-fn window_vocal(prev: Option<u64>, active: Option<u64>) -> WindowVocal {
-    match (prev, active) {
-        (p, a) if p == a => WindowVocal::None,
-        (_, Some(new)) => WindowVocal::Hello(new),
-        (Some(old), None) => WindowVocal::Goodbye(old),
-        (None, None) => WindowVocal::None,
-    }
-}
-
 fn load_npc_greetings(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     let Some(assets) = assets else { return };
     let loaded = {
@@ -142,6 +108,12 @@ fn load_npc_greetings(mut commands: Commands, assets: Option<Res<WorldAssets>>) 
     }
 }
 
+/// Whether an object greets: a non-player unit (`0x493159`, `0x493182`, `0x4931f8`-`0x493203`).
+/// A player, a game object such as a mailbox and a book have no NPC to speak.
+fn speaks(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Unit)
+}
+
 /// A live non-player unit (type-mask bit 3 set, bit 4 clear) whose display has an NPCSoundID row.
 fn resolve(
     npc: Entity,
@@ -149,7 +121,7 @@ fn resolve(
     greetings: &NpcGreetings,
 ) -> Option<(benilla_formats::NpcGreeting, Vec3)> {
     let (net, transform, store) = units.get(npc).ok()?;
-    if !matches!(net.kind, EntityKind::Unit) {
+    if !speaks(net.kind) {
         return None;
     }
     if store.is_some_and(|s| s.0.unit_is_dead()) {
@@ -167,16 +139,15 @@ fn player_may_hear(me: Option<&ObjectStore>) -> bool {
 
 /// The select greeting's two gates (`0x60c270`): both reaction directions between the unit and the
 /// active mover at least neutral (`0x60c2d9`, `0x60c2ef`), none streamed bailing (`0x60c2d0`), then
-/// [`player_may_hear`] on the local player (`0x60c31d`).
+/// [`player_may_hear`] on the local player (`0x60c31d`). A unit whose descriptor has not streamed
+/// reads neutral both ways.
 fn select_greeting_allowed(
-    factions: Option<&Factions>,
-    reputations: &Reputations,
-    npc: Option<&ObjectStore>,
-    mover: Option<&ObjectStore>,
+    rel: &Relations,
+    npc: Option<&RelUnit>,
+    mover: Option<&RelUnit>,
     me: Option<&ObjectStore>,
 ) -> bool {
-    mover.is_some()
-        && both_reactions_at_least_neutral(factions, reputations, npc, mover)
+    mover.is_some_and(|mover| npc.is_none_or(|npc| rel.both_at_least_neutral(mover, npc)))
         && player_may_hear(me)
 }
 
@@ -245,10 +216,10 @@ fn play_select_greetings(
     mut reqs: MessageReader<NpcGreetingRequest>,
     mut seq: ResMut<GreetSeq>,
     units: Query<(&NetEntity, &Transform, Option<&ObjectStore>)>,
+    guids: Query<&Guid>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mover: Query<&ObjectStore, With<ActiveMover>>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    mover: Query<(&Guid, &ObjectStore), With<ActiveMover>>,
+    relations: RelationWorld,
     greetings: Option<Res<NpcGreetings>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -269,14 +240,17 @@ fn play_select_greetings(
         let Ok((net, transform, npc_store)) = units.get(req.npc) else {
             continue;
         };
-        if !matches!(net.kind, EntityKind::Unit) {
+        if !speaks(net.kind) {
             continue;
         }
+        let npc = npc_store
+            .zip(guids.get(req.npc).ok())
+            .map(|(s, g)| relations.unit_of(g.0, s));
+        let mover = mover.single().ok().map(|(g, s)| relations.unit_of(g.0, s));
         let allowed = select_greeting_allowed(
-            factions.as_deref(),
-            &reputations,
-            npc_store,
-            mover.single().ok(),
+            &relations.get(),
+            npc.as_ref(),
+            mover.as_ref(),
             self_store.single().ok(),
         );
         let dead = npc_store.is_some_and(|s| s.0.unit_is_dead());
@@ -312,14 +286,10 @@ fn play_select_greetings(
     }
 }
 
-/// The window hello and goodbye, from the active NPC's change.
+/// The window hello and goodbye, from the latch's lines.
 fn play_window_greetings(
-    merchant: Res<MerchantOpen>,
-    gossip: Res<GossipState>,
-    quest: Res<QuestGiver>,
-    trainer: Res<TrainerOpen>,
+    mut lines: MessageReader<LatchVocal>,
     index: Res<GuidIndex>,
-    mut prev_active: Local<Option<u64>>,
     mut select_seq: ResMut<GreetSeq>,
     units: Query<(&NetEntity, &Transform, Option<&ObjectStore>)>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
@@ -330,46 +300,41 @@ fn play_window_greetings(
     config: Res<SoundConfig>,
     cam: Query<&Transform, (With<WorldCamera>, Without<NetEntity>)>,
 ) {
-    let active = active_interaction_npc(&merchant, &gossip, &quest, &trainer);
-    let vocal = window_vocal(*prev_active, active);
-    if matches!(vocal, WindowVocal::None) {
+    if lines.is_empty() {
         return;
     }
-    *prev_active = active;
-
     let (Some(greetings), Some(mut kits), Some(assets)) = (greetings, kits, assets) else {
+        lines.clear();
         return;
     };
     let listener = cam.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
 
-    // A despawned NPC resolves nothing: the reference's teardown clear is silent (`0x605950`).
-    let (guid, hello) = match vocal {
-        WindowVocal::Hello(g) => (g, true),
-        WindowVocal::Goodbye(g) => (g, false),
-        WindowVocal::None => return,
-    };
-    let Some(&npc) = index.0.get(&guid) else {
-        return;
-    };
-    // The call zeroes the select greeting's tracked NPC for any unit, before the gates below.
-    if units
-        .get(npc)
-        .is_ok_and(|(net, ..)| matches!(net.kind, EntityKind::Unit))
-    {
-        forget_tracked(&mut select_seq);
+    for &line in lines.read() {
+        let (guid, hello) = match line {
+            LatchVocal::Hello(g) => (g, true),
+            LatchVocal::Goodbye(g) => (g, false),
+        };
+        // A despawned NPC resolves nothing: the reference's teardown clear is silent (`0x605950`).
+        let Some(&npc) = index.0.get(&guid) else {
+            continue;
+        };
+        // The call zeroes the select greeting's tracked NPC for any unit, before the gates below.
+        if units.get(npc).is_ok_and(|(net, ..)| speaks(net.kind)) {
+            forget_tracked(&mut select_seq);
+        }
+        // No reaction gate here (`0x60c3b0`), only the player's: dead or a ghost hears nothing.
+        if !player_may_hear(self_store.single().ok()) {
+            continue;
+        }
+        let Some((row, pos)) = resolve(npc, &units, &greetings) else {
+            continue;
+        };
+        let kit_id = if hello { row.hello } else { row.goodbye };
+        // Both window lines free-pick their take (`variation = -1`).
+        play_line(
+            npc, kit_id, None, pos, listener, &mut kits, &assets, &mut out, &config,
+        );
     }
-    // No reaction gate here (`0x60c3b0`), only the player's: dead or a ghost hears nothing.
-    if !player_may_hear(self_store.single().ok()) {
-        return;
-    }
-    let Some((row, pos)) = resolve(npc, &units, &greetings) else {
-        return;
-    };
-    let kit_id = if hello { row.hello } else { row.goodbye };
-    // Both window lines free-pick their take (`variation = -1`).
-    play_line(
-        npc, kit_id, None, pos, listener, &mut kits, &assets, &mut out, &config,
-    );
 }
 
 /// A despawning unit stops its greeting (`0x5fbb6c`).
@@ -413,62 +378,23 @@ mod tests {
         assert_eq!(greet_line(5, 0), (GreetLine::Hello, 0));
     }
 
-    #[test]
-    fn window_vocal_opens_closes_and_suppresses_swap_goodbye() {
-        assert_eq!(window_vocal(None, Some(0x1)), WindowVocal::Hello(0x1)); // open
-        assert_eq!(window_vocal(Some(0x1), None), WindowVocal::Goodbye(0x1)); // close to nothing
-        assert_eq!(window_vocal(Some(0x1), Some(0x2)), WindowVocal::Hello(0x2)); // swap: no goodbye
-        assert_eq!(window_vocal(Some(0x1), Some(0x1)), WindowVocal::None); // no change
-        assert_eq!(window_vocal(None, None), WindowVocal::None);
-    }
-
-    /// A gossip→trainer handoff on one NPC is a silent swap, not a close with a goodbye.
-    // The sessions have private fields, so they are built from `default()` and a field set.
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn gossip_to_trainer_on_one_npc_is_a_silent_swap() {
-        let npc = 0x1234_u64;
-        let (empty_merchant, empty_gossip, empty_quest, empty_trainer) = (
-            MerchantOpen::default(),
-            GossipState::default(),
-            QuestGiver::default(),
-            TrainerOpen::default(),
-        );
-
-        assert_eq!(
-            active_interaction_npc(&empty_merchant, &empty_gossip, &empty_quest, &empty_trainer),
-            None,
-        );
-
-        // Frame 1: gossip open on `npc`.
-        let mut gossip = GossipState::default();
-        gossip.npc = Some(npc);
-        let before = active_interaction_npc(&empty_merchant, &gossip, &empty_quest, &empty_trainer);
-
-        // Frame 2: gossip closed, the trainer open on the same NPC.
-        let mut trainer = TrainerOpen::default();
-        trainer.trainer = Some(npc);
-        let after = active_interaction_npc(&empty_merchant, &empty_gossip, &empty_quest, &trainer);
-
-        assert_eq!(before, Some(npc), "gossip drove the active NPC");
-        assert_eq!(after, Some(npc), "the trainer keeps the same NPC active");
-        assert_eq!(
-            window_vocal(before, after),
-            WindowVocal::None,
-            "gossip→trainer on one NPC is a silent swap — no goodbye",
-        );
-    }
-
     use benilla_protocol::field::{
         FIELD_PLAYER_FLAGS, FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH,
         FIELD_UNIT_MAXHEALTH,
     };
     use benilla_protocol::ObjectFields;
 
+    use crate::net::Reputations;
+    use crate::target::Factions;
+
+    /// The active player's guid.
+    const ME: u64 = 1;
+
     /// A player-controlled player on faction template 1 (Human), with the given health and
     /// `PLAYER_FLAGS`.
     fn player(health: u32, player_flags: u32) -> ObjectStore {
         ObjectStore(ObjectFields::from_pairs(&[
+            (2, 0x19),
             (FIELD_UNIT_FACTIONTEMPLATE, 1),
             (FIELD_UNIT_FLAGS, 1 << 3),
             (FIELD_UNIT_HEALTH, health),
@@ -504,31 +430,43 @@ mod tests {
                 template,
             )]))
         };
-        let allowed = |npc: &ObjectStore, mover: Option<&ObjectStore>, me: &ObjectStore| {
-            select_greeting_allowed(Some(&factions), &reps, Some(npc), mover, Some(me))
+        let rel = Relations {
+            factions: Some(&factions),
+            reputations: &reps,
+            me: Some(ME),
+            roster: None,
+            units: &crate::target::relations::NoUnits,
+        };
+        let allowed = |npc: &ObjectStore, mover: Option<&RelUnit>, me: &ObjectStore| {
+            select_greeting_allowed(&rel, Some(&RelUnit::of(2, npc)), mover, Some(me))
         };
         let me = player(100, 0);
+        let mover = RelUnit::of(ME, &me);
         assert!(
-            !allowed(&unit(14), Some(&me), &me),
+            !allowed(&unit(14), Some(&mover), &me),
             "a hostile monster is silent"
         );
         assert!(
-            allowed(&unit(31), Some(&me), &me),
+            allowed(&unit(31), Some(&mover), &me),
             "a neutral critter greets"
         );
         assert!(
-            !allowed(&unit(31), Some(&me), &player(0, 0)),
+            !allowed(&unit(31), Some(&mover), &player(0, 0)),
             "a dead player hears no greeting"
         );
         assert!(
-            !allowed(&unit(31), Some(&me), &player(1, 0x10)),
+            !allowed(&unit(31), Some(&mover), &player(1, 0x10)),
             "nor does a ghost"
         );
 
         // The reaction pair is with the active mover, not the player: a monster hostile to the
-        // player greets the creature we possess, which is its own kind, and a friend of the player
-        // is refused when the mover is hostile to it. No mover streamed, no greeting.
-        let possessed = unit(14);
+        // player greets the creature we possess, which is its own kind. No mover streamed, no
+        // greeting.
+        let possessed = RelUnit {
+            charmed_by: ME,
+            flags: 1 << 3,
+            ..RelUnit::of(3, &unit(14))
+        };
         assert!(allowed(&unit(14), Some(&possessed), &me));
         assert!(!allowed(&unit(14), None, &me));
     }
@@ -538,29 +476,44 @@ mod tests {
     #[test]
     fn the_reaction_gate_is_the_pair_not_one_direction() {
         let reps = Reputations::default();
-        let ffa = ObjectStore(ObjectFields::from_pairs(&[
-            (FIELD_UNIT_FLAGS, 1 << 3),
-            (FIELD_PLAYER_FLAGS, 0x80),
-        ]));
-        let other = ObjectStore(ObjectFields::from_pairs(&[
-            (FIELD_UNIT_FLAGS, 1 << 3),
-            (FIELD_PLAYER_FLAGS, 0x80),
-        ]));
+        let rel = Relations {
+            factions: None,
+            reputations: &reps,
+            me: Some(ME),
+            roster: None,
+            units: &crate::target::relations::NoUnits,
+        };
+        let ffa = player(100, 0x80);
+        let (me, other) = (RelUnit::of(ME, &ffa), RelUnit::of(2, &ffa));
         assert!(!select_greeting_allowed(
-            None,
-            &reps,
+            &rel,
             Some(&other),
-            Some(&ffa),
+            Some(&me),
             Some(&ffa)
         ));
         let calm = player(100, 0);
+        let (me, other) = (RelUnit::of(ME, &calm), RelUnit::of(2, &calm));
         assert!(select_greeting_allowed(
-            None,
-            &reps,
-            Some(&calm),
-            Some(&calm),
+            &rel,
+            Some(&other),
+            Some(&me),
             Some(&calm)
         ));
+    }
+
+    /// Only a non-player unit has a hello and a goodbye: a mailbox, a player and the rest do not.
+    #[test]
+    fn only_a_non_player_unit_speaks() {
+        assert!(speaks(EntityKind::Unit));
+        for kind in [
+            EntityKind::Player,
+            EntityKind::GameObject,
+            EntityKind::DynamicObject,
+            EntityKind::Corpse,
+            EntityKind::Other,
+        ] {
+            assert!(!speaks(kind), "{kind:?}");
+        }
     }
 
     fn two_npcs() -> (Entity, Entity) {

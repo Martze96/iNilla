@@ -8,12 +8,14 @@
 //! Lua handles are never accumulated breadth-wise (MAXCSTACK): a frame's wrapper and `OnLoad`
 //! live only across its own subtree build, and everything durable lives Lua-side.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use mlua::{Function, ObjectLike, Table, Value};
 
 use crate::framexml::{self, Element, ParsedDocument, ScriptRef, TopLevel};
-use crate::script::{FontObject, JustifyH, JustifyV, Outline, UiScript};
+use crate::justify;
+use crate::layout::Len;
+use crate::script::{Outline, UiScript};
 use crate::status;
 
 mod backdrop;
@@ -23,29 +25,10 @@ mod scripts;
 mod widgets;
 
 impl LoadReport {
-    /// A load fault that is no script raise: the handler hears the row's own text.
+    /// A failure the reference reports: its row in [`Self::errors`]. A script's raise reached the
+    /// Lua error handler as it ran, through the runner's error function.
     pub(super) fn fault(&mut self, text: String) {
-        self.handler_errors.push(text.clone());
         self.errors.push(text);
-    }
-
-    /// A script raise: the row is `text`, the handler hears the bare Lua message of `e`.
-    pub(super) fn raise(&mut self, text: String, e: &mlua::Error) {
-        self.handler_errors.push(crate::script::lua_message(e));
-        self.errors.push(text);
-    }
-
-    /// Each of [`Self::errors`] with what the Lua error handler is called with for it.
-    pub fn raised(&self) -> impl Iterator<Item = (&str, &str)> {
-        debug_assert_eq!(
-            self.errors.len(),
-            self.handler_errors.len(),
-            "every error row is written through `fault` or `raise`"
-        );
-        self.errors
-            .iter()
-            .map(String::as_str)
-            .zip(self.handler_errors.iter().map(String::as_str))
     }
 }
 
@@ -55,14 +38,10 @@ pub struct LoadReport {
     /// Issues that dropped nothing, and the document layer's parse warnings. An unknown frame type
     /// drops its node yet lands here: the reference logs it and goes on (`0x6ee356`).
     pub warnings: Vec<String>,
-    /// Failures the reference raises on: a handler that fails to compile, a method call that
-    /// errors, a malformed included document.
+    /// Failures the reference raises on: a handler that errors as it fires (`OnLoad`), a method
+    /// call that errors, a malformed included document. A handler that fails to compile is none:
+    /// the reference reports nothing until it fires (`0x704c87`-`0x704c9f`).
     pub errors: Vec<String>,
-    /// What the Lua error handler is called with for each of [`Self::errors`], row for row
-    /// ([`Self::raised`]): the bare Lua message of a raise, as `lua_pcall` leaves it for the
-    /// reference's error function (`0x703b40`), and the row's own text for a fault that is no
-    /// script raise.
-    handler_errors: Vec<String>,
     /// `<Include file=>` and `<Script file=>` paths the provider lacks. The reference logs
     /// `"Couldn't open %s"` (`0x6edaa0`, `0x846ff4`) or `"Error loading %s"` (`0x872e50`) and goes
     /// on (`0x6ee00d`); kept apart from `warnings` so a load that resolved nothing is not clean.
@@ -126,7 +105,6 @@ pub fn load_into_under(
         status_root,
         report: LoadReport::default(),
         warned: HashSet::new(),
-        deferred_anchors: Vec::new(),
     };
     loader.report.warnings.extend(doc.warnings.iter().cloned());
     loader.load_doc(doc);
@@ -154,7 +132,6 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         status_root: "",
         report: LoadReport::default(),
         warned: HashSet::new(),
-        deferred_anchors: Vec::new(),
     };
 
     let (own_name, parent_name) = loader.frame_names(wrapper);
@@ -164,7 +141,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         own_name.as_deref().unwrap_or("<unnamed>")
     );
 
-    // Diagnostic only: `expand` does not say what kind a template was declared as.
+    // Diagnostic only: the load does not say what kind a template was declared as.
     let mut notes = Vec::new();
     let mut any_resolved = false;
     {
@@ -198,14 +175,16 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
     }
     loader.report.warnings.extend(notes);
 
-    // The XML `inherits=` expansion; its warnings get the `CreateFrame` call as a prefix.
+    // The synthetic node `CreateFrame` hands the XML builder (`0x70628b` → `0x6ee280`); its
+    // warnings get the `CreateFrame` call as a prefix.
+    let node = framexml::inherits_node(kind, template);
     let first = loader.report.warnings.len();
-    let expanded = loader.expand(&framexml::inherits_node(kind, template));
+    let levels = loader.levels(&node);
     for w in &mut loader.report.warnings[first..] {
         *w = format!("{dbg}: {w}");
     }
 
-    loader.decorate(&expanded, wrapper, &self_name, &parent_name, &dbg);
+    loader.decorate(&levels, kind, wrapper, &self_name, &parent_name, &dbg);
 
     loader.report
 }
@@ -247,6 +226,11 @@ impl Loader<'_> {
         status::install_path(&format!("{}{path}", self.status_root))
     }
 
+    /// Mark the loader's `CreateFrame` call, the builder's creation half (`Model::xml_creating`).
+    fn set_xml_creating(&self, on: bool) {
+        self.model().xml_creating = on;
+    }
+
     /// `FrameXML_Debug` above 0, read where the reference reads it, at each close.
     fn debug(&self) -> bool {
         self.model().framexml_debug.get() > 0
@@ -273,23 +257,62 @@ struct Loader<'a> {
     pub(super) status_root: &'a str,
     // The template and font registries live on the `Model` and persist across loads: the
     // reference's template table is global (`0x6ee500`), so `MerchantFrame.xml` inherits a template
-    // `CharacterFrameTemplates.xml` registered. Fonts are their own namespace, stored flattened.
+    // `CharacterFrameTemplates.xml` registered. Fonts are their own namespace.
     pub(super) report: LoadReport,
     /// Warn-once keys.
     pub(super) warned: HashSet<String>,
-    /// Anchors whose named `relativeTo` did not exist yet, applied once the enclosing frame's
-    /// subtree is built: the reference resolves anchors at layout, this loader at `SetPoint`, so a
-    /// target built later waits here (`ClassTrainerFrameTemplates.xml:67` hangs the label off the
-    /// highlight). Each `decorate` drains its own.
-    pub(super) deferred_anchors: Vec<DeferredAnchor>,
 }
 
-/// One `SetPoint` held until its target exists.
-pub(super) struct DeferredAnchor {
+/// The nodes an element's `LoadXML` reads, in the order it reads them: the reference merges no
+/// template into an instance, but re-enters `LoadXML` on each `inherits` node first (`0x76985c`
+/// for a frame, `0x76fe5b` for a texture, `0x770f9e` for a FontString), then reads the node's own
+/// attributes and its own first child of each kind (`0x6f2c50`). So an attribute whose rule is
+/// local to a node (`setAllPoints` beside the node's own `<Anchors>`, a `font=` with its own
+/// `<FontHeight>`) is read level by level, the template first and the element last. The templates
+/// are shared with the registry, not copied.
+pub(super) struct Levels<'a> {
+    inherited: Vec<std::rc::Rc<Element>>,
+    own: &'a Element,
+}
+
+type LevelIter<'l> = std::iter::Chain<
+    std::iter::Map<
+        std::slice::Iter<'l, std::rc::Rc<Element>>,
+        fn(&std::rc::Rc<Element>) -> &Element,
+    >,
+    std::iter::Once<&'l Element>,
+>;
+
+impl Levels<'_> {
+    pub(super) fn iter(&self) -> LevelIter<'_> {
+        let shared: fn(&std::rc::Rc<Element>) -> &Element = |e| e;
+        self.inherited
+            .iter()
+            .map(shared)
+            .chain(std::iter::once(self.own))
+    }
+}
+
+impl<'l> IntoIterator for &'l Levels<'_> {
+    type Item = &'l Element;
+    type IntoIter = LevelIter<'l>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// One `<Anchor>` as read, before its target is looked up ([`Loader::apply_anchor`]).
+pub(super) struct XmlAnchor {
     pub(super) wrapper: Table,
     /// A region wrapper (`call_region`) rather than a frame's (`call`).
     pub(super) region: bool,
-    pub(super) args: (String, Option<String>, String, f32, f32),
+    /// `(point, relativeTo, relativePoint)`, `relativeTo` with `$parent` expanded.
+    pub(super) args: (String, Option<String>, String),
+    /// The anchor's first `<Offset>`, read only once the target passes (`0x767992`).
+    pub(super) offset: Option<Element>,
+    /// `relativeTo` as spelled, before `$parent` expands: what the anchor lines print (`0x76796f`,
+    /// `0x767984`).
+    pub(super) rel_raw: String,
     pub(super) dbg: String,
 }
 
@@ -304,20 +327,27 @@ impl Loader<'_> {
     }
 
     /// Run a file chunk (bytes, as on disk) in the one global state, named after its path. The
-    /// name matters: unnamed, mlua's `#[track_caller]` `load` names it after this Rust line.
-    fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
+    /// name matters: unnamed, mlua's `#[track_caller]` `load` names it after this Rust line. A file
+    /// runs with the document's status (`0x704bc0`), so a compile or run failure is also a
+    /// severity-2 line of it, the message alone (`0x704b31`, `0x704b8d`); an inline body has none.
+    fn run(&mut self, chunk: &[u8], path: &str) -> mlua::Result<()> {
         // The reference's file chunk name, `"@%s"` (`0x8716e0`, `0x704bc0`; a file name to
-        // `luaO_chunkid 0x6f5c40`), with `\` separators as in `crate::script::addon_chunk_name`.
-        self.run_named(chunk, &format!("@{}", path.replace('/', "\\")))
+        // `luaO_chunkid 0x6f5c40`), with `\` separators as in `crate::script::addon_chunk_name`,
+        // over the install path: an addon's files sit under `Interface\AddOns\`.
+        let name = format!("@{}", self.status_path(path));
+        crate::script::execute_buffer_reported(self.lua, chunk, name, |_| {}).map_err(
+            |(e, line)| {
+                let line = String::from_utf8_lossy(&line).into_owned();
+                self.report.status.report(status::FAILURE, line);
+                e
+            },
+        )
     }
 
-    /// Run a chunk under a complete chunk name, for a producer whose name is not a path.
+    /// Run a chunk under a complete chunk name, for a producer whose name is not a path, as
+    /// `0x704ae0` runs it: under the error function.
     fn run_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
-        self.lua
-            .load(chunk)
-            .set_name(name)
-            .set_mode(mlua::ChunkMode::Text)
-            .exec()
+        crate::script::execute_buffer(self.lua, chunk, name, |_| {})
     }
 
     fn model(&self) -> mlua::AppDataRefMut<'_, crate::script::Model> {
@@ -332,7 +362,20 @@ impl Loader<'_> {
         wrapper: &mlua::Table,
         func: &mlua::Function,
     ) -> mlua::Result<()> {
-        crate::script::event::invoke_with_globals(self.lua, wrapper.clone(), func, None, Vec::new())
+        crate::script::event::invoke_with_globals(self.lua, wrapper.clone(), func, Vec::new())
+    }
+
+    /// An object's name as the reference's load lines print it: its own name (vtable `+4`), else
+    /// `<unnamed>` (`0x84c7f0`).
+    pub(super) fn object_name(&self, wrapper: &Table) -> String {
+        crate::script::binding_abi::name_of(self.lua, wrapper)
+    }
+
+    /// A severity-1 line into the document's record, the status object's `+0xc` slot every
+    /// `LoadXML` logs through, retained as a warning too.
+    pub(super) fn status_warning(&mut self, line: String) {
+        self.report.status.report(status::WARNING, line.clone());
+        self.report.warnings.push(line);
     }
 
     pub(super) fn warn_once(&mut self, key: &str, msg: impl Into<String>) {
@@ -342,12 +385,13 @@ impl Loader<'_> {
     }
 
     /// Resolve `text=` as a global-string key (`FrameScript_GetText 0x703bf0`), so
-    /// `GlobalStrings.lua` must run before any XML. A miss comes back empty (`0x882748`) and all
-    /// three `text=` readers then show the raw value (`0x778c07`, `0x771006`, `0x7292a6`). The
-    /// warning on a key-shaped miss is benilla's own.
+    /// `GlobalStrings.lua` must run before any XML. A miss comes back empty (`0x882748`), and all
+    /// three `text=` readers show the raw value for an empty answer (`0x771032`, `0x778c31`,
+    /// `0x7292a6`), so a global holding `""` shows its key. The warning on a key-shaped miss is
+    /// benilla's own.
     pub(super) fn resolve_text(&mut self, raw: &str, dbg: &str) -> String {
         if let Ok(s) = self.lua().globals().get::<String>(raw) {
-            return s;
+            return if s.is_empty() { raw.to_string() } else { s };
         }
         if is_global_string_key(raw) {
             self.warn_once(
@@ -376,8 +420,7 @@ impl Loader<'_> {
                     match (self.files)(&joined) {
                         Some(bytes) => {
                             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
-                                self.report
-                                    .raise(format!("<Script file=\"{path}\">: {e}"), &e);
+                                self.report.fault(format!("<Script file=\"{path}\">: {e}"));
                             }
                         }
                         None => {
@@ -392,30 +435,30 @@ impl Loader<'_> {
                     }
                 }
                 TopLevel::Script(ScriptRef::Inline { body, line }) => {
-                    // Deviation: padded to the block's line, so a raise reports a line a reader can
-                    // find in the file; the reference counts from the body's first line.
+                    // Deviation: padded to the block's line, because that way a raise reports a
+                    // line a reader can find in the file; the reference counts from the body's
+                    // first line.
                     let mut chunk = "\n".repeat(line.saturating_sub(1) as usize).into_bytes();
                     chunk.extend_from_slice(body.as_bytes());
                     // The reference names an inline body `"%s:<Scripts>"` (`0x871074`, formatted at
                     // `0x6ee0ff`) over the document's path with no `@`, so a raise reads
                     // `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a file path.
-                    let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
+                    let name = format!("{}:<Scripts>", self.status_path(&self.path));
                     if let Err(e) = self.run_named(&chunk, &name) {
-                        self.report.raise(format!("inline <Script>: {e}"), &e);
+                        self.report.fault(format!("inline <Script>: {e}"));
                     }
                 }
                 TopLevel::Font(el) => self.do_font(el),
                 TopLevel::Template(el) => self.register_template(el),
                 TopLevel::Instance(el) => {
-                    let expanded = self.expand(el);
-                    self.materialize(&expanded, None, framexml::DEFAULT_PARENT_NAME);
+                    self.materialize(el, None, framexml::DEFAULT_PARENT_NAME);
                 }
             }
         }
     }
 
     /// A top-level `virtual` element, registered raw (`0x6ee500`, called at `0x6ee1bd` under the
-    /// live context word): `expand` resolves its own `inherits` at instantiation.
+    /// live context word): its own `inherits` is resolved at instantiation ([`Self::levels`]).
     fn register_template(&mut self, el: &Element) {
         // No name, or an empty one (`0x6ee1a9` tests its first byte): `0x871020` at severity 1
         // into the document's record (`0x6ee1c4`-`0x6ee1cf`), and nothing registers.
@@ -469,8 +512,7 @@ impl Loader<'_> {
         // XML. A `.toc` line goes through the same routine.
         if status::runs_as_lua(&joined) {
             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
-                self.report
-                    .raise(format!("<Include file=\"{path}\">: {e}"), &e);
+                self.report.fault(format!("<Include file=\"{path}\">: {e}"));
             }
             return;
         }
@@ -497,86 +539,217 @@ impl Loader<'_> {
         }
     }
 
-    /// Resolve `inherits=` against the persistent template registry (`framexml::expand`).
-    pub(super) fn expand(&mut self, el: &Element) -> Element {
-        let model = self.model();
-        let templates = model.framexml_templates.borrow();
-        // A font object in an inherit chain is skipped, not warned as an unknown template.
-        let fonts = model.framexml_fonts.borrow();
-        let font_names: std::collections::HashSet<&str> =
-            fonts.keys().map(|k| k.as_str()).collect();
-        let mut warns = Vec::new();
-        let out = framexml::expand_known(el, &*templates, &font_names, &mut warns);
-        drop(font_names);
-        drop(fonts);
-        drop(templates);
-        drop(model);
-        self.report.warnings.extend(warns);
-        out
-    }
-
-    /// [`Loader::expand`] for a region, only when `inherits=` names a registered element template:
-    /// a FontString's `inherits=` usually names a font object, which passes through unwarned.
-    pub(super) fn expand_region(&mut self, el: &Element) -> Element {
-        // One verbatim name, matched case-insensitively, as `framexml::expand` looks it up.
-        let hit = el.attr("inherits").is_some_and(|name| {
-            !name.is_empty() && self.model().framexml_templates.borrow().contains(name)
-        });
-        if hit {
-            self.expand(el)
-        } else {
-            el.clone()
+    /// The nodes `raw`'s `LoadXML` reads ([`Levels`]), a frame's or a texture's. The walk stops at
+    /// an `inherits` the registry lacks, which the level naming it logs before anything else at
+    /// severity 1, `Couldn't find inherited node: %s` (`0x8786a8`; a frame `0x769861`, a texture
+    /// `0x76fe60`).
+    ///
+    /// Deviation: a cycle (`A` inherits `B`, `B` inherits `A`) stops at the repeated name with a
+    /// warning because the reference has no guard: its `parent=` walk (`0x6ee390`-`0x6ee3c2`) spins
+    /// forever round a cycle with no `parent=` on it, and where one stops that walk, the level
+    /// recursion (`0x76985c`, and `0x76a092` for the `<Frames>`) overflows the stack.
+    pub(super) fn levels<'a>(&mut self, raw: &'a Element) -> Levels<'a> {
+        let (inherited, stop) = {
+            let model = self.model();
+            let templates = model.framexml_templates.borrow();
+            let inherited = templates.inherited_levels(raw);
+            let first = inherited.first().map_or(raw, |t| &**t);
+            let stop = first
+                .attr("inherits")
+                .filter(|n| !n.is_empty())
+                .map(|n| (n.to_string(), templates.contains(n)));
+            (inherited, stop)
+        };
+        match stop {
+            Some((name, false)) => {
+                self.status_warning(format!("Couldn't find inherited node: {name}"))
+            }
+            Some((name, true)) => self.report.warnings.push(format!(
+                "inheritance cycle detected at template '{name}'; skipping this reference"
+            )),
+            None => {}
+        }
+        Levels {
+            inherited,
+            own: raw,
         }
     }
 
-    /// A top-level `<Font name=…>`: flatten its `inherits=` chain (fonts inherit only fonts),
-    /// register the [`FontObject`] and store the flattened element for later fonts to inherit.
+    /// The nodes a FontString's `LoadXML` reads: [`Self::levels`], up to the first `inherits` that
+    /// names a font, which the string links instead of loading a template (`0x770f69`).
+    pub(super) fn fontstring_levels<'a>(&self, raw: &'a Element) -> Levels<'a> {
+        let model = self.model();
+        let inherited = model
+            .framexml_templates
+            .borrow()
+            .inherited_levels_until(raw, |name| model.fonts.id(name).is_some());
+        Levels {
+            inherited,
+            own: raw,
+        }
+    }
+
+    /// A top-level `<Font name=…>`: the named object, made if new and kept with its followers if
+    /// re-declared (`0x783870`, `0x7839ab`), loads the node ([`Self::load_font_node`]) and is
+    /// published whether or not its own font was refused.
     pub(super) fn do_font(&mut self, el: &Element) {
-        let Some(name) = el.name().map(str::to_string) else {
+        // No name, or an empty one (`0x6ee143` tests its first byte): `0x87104c` at severity 1
+        // (`0x6ee162`), and no font is made.
+        let Some(name) = el.name().filter(|n| !n.is_empty()).map(str::to_string) else {
+            let line = "Unnamed font node at top level";
+            self.report.status.report(status::WARNING, line);
+            self.report.warnings.push(line.to_string());
             return;
         };
-        let merged = {
-            let model = self.model();
-            let fonts = model.framexml_fonts.borrow();
-            let view: HashMap<&str, &Element> =
-                fonts.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            let mut warns = Vec::new();
-            let merged = framexml::expand(el, &view, &mut warns);
-            drop(view);
-            drop(fonts);
-            drop(model);
-            self.report.warnings.extend(warns);
-            merged
-        };
-
-        let font = font_object_from_element(&merged);
-        {
-            let mut model = self.model();
-            model
-                .font_objects_by_lower
-                .insert(name.to_ascii_lowercase(), font);
-            model
-                .framexml_fonts
-                .borrow_mut()
-                .insert(name.clone(), merged);
-        }
+        let id = self.model().fonts.named(&name);
+        self.load_font_node(el, id, &name);
         // In 1.12 a named `<Font>` is also a Lua global, the object `SetFontObject` takes.
-        if let Err(e) = crate::script::font::publish(self.lua(), &name) {
+        if let Err(e) = crate::script::font::publish(self.lua(), id, &name) {
             self.report
                 .warnings
                 .push(format!("<Font name=\"{name}\">: {e}"));
         }
     }
 
-    /// Build one template-expanded frame element, its nested `<Frames>`, then its `OnLoad`
-    /// (bottom-up, `0x76a060`). `parent` is the lexically enclosing frame, which `parent=`
+    /// `CSimpleFont::LoadXML 0x783c30` on font `id`, `name` naming it in the warnings: `inherits=`
+    /// links it to that font (`0x783ce6`; a miss is logged, `0x87a51c`), a `font=` naming a font
+    /// links it there instead (`0x783d22`), and any other `font=` is a file that needs the node's
+    /// own first `<FontHeight>` above 0 and sets the flags word whole from `outline=` and
+    /// `monochrome=` (`0x783db1`-`0x783ea3`) when it loads; without the height the load stops
+    /// (`0x783dae`). Then `spacing=` with `SStrToFloat` (`0x783ef6`), `justifyV`, `justifyH` and each
+    /// `<Color>` and `<Shadow>` child, the last of each winning. Each attribute is a setter's write,
+    /// clearing its inherit bit (`0x783ea9`-`0x784100`) and pushing to what already follows the
+    /// font.
+    pub(super) fn load_font_node(
+        &mut self,
+        el: &Element,
+        id: crate::script::font::FontId,
+        name: &str,
+    ) {
+        use crate::script::{font, FontMask};
+        if let Some(parent) = el.attr("inherits").filter(|n| !n.is_empty()) {
+            let to = self.model().fonts.id(parent);
+            match to {
+                Some(to) => self.link_font_node(id, to, name),
+                None => self.status_warning(format!("Couldn't find inherited font: {parent}")),
+            }
+        }
+        match el.attr("font").filter(|f| !f.is_empty()) {
+            Some(f) if self.model().fonts.id(f).is_some() => {
+                let to = self.model().fonts.id(f).expect("tested");
+                self.link_font_node(id, to, name);
+            }
+            Some(path) => {
+                // The first `<FontHeight>`, read whatever it answers (`0x783d65`), above 0.
+                let height = children_named(el, "FontHeight")
+                    .next()
+                    .map(|h| self.value(h))
+                    .filter(|h| h.raw() > 0.0);
+                let Some(height) = height else {
+                    self.report_missing_font_height("Font", name, &el.tag);
+                    return;
+                };
+                let outline = el.attr("outline").map(Outline::parse).unwrap_or_default();
+                // Any non-empty `monochrome=` sets the flag (`0x783e01`-`0x783e14`), even "false".
+                let monochrome = el.attr("monochrome").is_some_and(|v| !v.is_empty());
+                // The font the node already holds (the path ignoring case, the height within 2⁻²²,
+                // the same flags) is kept as spelled and still clears the bit (`0x783e17`-`0x783e5d`
+                // → `0x783ea9`); any other loads first (`0x783e7c`), which also refuses a height of
+                // a screen or more. A load that fails is logged (`0x87a4c8`) and the node goes on
+                // to `spacing`, keeping what it follows.
+                let mut model = self.model();
+                let u = model.layout_units();
+                let fo = &model.fonts.get(id).block;
+                let held = fo
+                    .font
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(path))
+                    && fo.height.is_some_and(|h| {
+                        (h.script(u) - height.script(u)).abs() < crate::script::SAME_FONT_HEIGHT
+                    })
+                    && (fo.outline, fo.monochrome) == (outline, monochrome);
+                let loads = crate::script::font_size_loads(u, height.layout(u))
+                    && crate::script::face_loads(&model, path);
+                if held || loads {
+                    font::set(&mut model, id, FontMask::FONT, |fo| {
+                        if !held {
+                            fo.font = Some(path.to_string());
+                            fo.height = Some(height);
+                            fo.outline = outline;
+                            fo.monochrome = monochrome;
+                        }
+                    });
+                } else {
+                    drop(model);
+                    self.status_warning(format!("Font {name}: Unable to load font file {path}"));
+                }
+            }
+            None => {}
+        }
+        let mut model = self.model();
+        if let Some(sp) = el.attr("spacing").filter(|v| !v.is_empty()) {
+            let sp = xml_float(sp);
+            font::set(&mut model, id, FontMask::SPACING, |fo| {
+                fo.spacing = Some(sp)
+            });
+        }
+        // Each axis matches its token as `0x6f1990` does and writes its own bits of the one justify
+        // word, none for the other axis's token (`0x783f75`-`0x783f7c`, `0x783fbd`-`0x783fc4`); a
+        // token that matches nothing is skipped and clears no bit (`0x783f6d`, `0x783fb5`).
+        for (attr, mask) in [("justifyV", justify::V_MASK), ("justifyH", justify::H_MASK)] {
+            let Some(bits) = el.attr(attr).and_then(justify::parse_bits) else {
+                continue;
+            };
+            font::set(&mut model, id, FontMask::JUSTIFY, |fo| {
+                let word = fo.justify.get_or_insert_with(Default::default);
+                word.0 = justify::set_axis(word.0, mask, bits);
+            });
+        }
+        drop(model);
+        for child in &el.children {
+            if child.tag.eq_ignore_ascii_case("Color") {
+                let c = color_of(child);
+                font::set(&mut self.model(), id, FontMask::COLOR, |fo| {
+                    fo.color = Some(c)
+                });
+            } else if child.tag.eq_ignore_ascii_case("Shadow") {
+                let sh = self.shadow_of(child);
+                font::set(&mut self.model(), id, FontMask::SHADOW, |fo| {
+                    fo.shadow = Some(sh)
+                });
+            }
+        }
+    }
+
+    /// Link font `id` to `to` for an XML attribute. Deviation: a link that would close a loop is
+    /// refused and reported because the reference's XML legs (`0x783ce6`, `0x783d22`) check
+    /// nothing, and the next push down such a loop would never end.
+    fn link_font_node(
+        &mut self,
+        id: crate::script::font::FontId,
+        to: crate::script::font::FontId,
+        name: &str,
+    ) {
+        use crate::script::font;
+        let mut model = self.model();
+        if font::would_loop(&model, id, to) {
+            drop(model);
+            self.status_warning(format!("Font {name}: can't create a font object loop"));
+            return;
+        }
+        font::link_font(&mut model, id, Some(to));
+    }
+
+    /// Build one frame element (`Instantiate 0x6ee280`): its levels, its nested `<Frames>`, then its
+    /// `OnLoad` (bottom-up, `0x76a060`). `parent` is the lexically enclosing frame, which `parent=`
     /// overrides; `None` when the frame type is unknown, which skips the subtree.
     pub(super) fn materialize(
         &mut self,
-        el: &Element,
+        raw: &Element,
         parent: Option<&Table>,
         parent_name: &str,
     ) -> Option<Table> {
+        let el = raw;
         // Only creation lives here: everything after `CreateFrame` is `decorate`, which
         // `apply_template` enters for a frame that already exists.
 
@@ -584,36 +757,46 @@ impl Loader<'_> {
         //     miss logs `"Unknown frame type: %s"` (`0x871124`, at `0x6ee356`), builds nothing for
         //     the node and goes on to the next sibling. Only the Lua door raises.
         if crate::script::object::registered_frame_kind(self.lua(), &el.tag).is_none() {
-            self.report
-                .warnings
-                .push(format!("Unknown frame type: {}", el.tag));
+            self.status_warning(format!("Unknown frame type: {}", el.tag));
             return None;
         }
 
-        // 1a · `parent=` wins over the lexical parent, unexpanded: `0x6ee280` hands the raw value
-        //      to the by-name lookup `0x76c760` (at `0x6ee3e8`). A miss is logged and stores 0 over
-        //      the default parent (`0x6ee3ef`), so the frame is built parentless (`0x6ee408`); an
-        //      empty `parent=""` keeps the default parent silently (`0x6ee3c7`).
+        // 1a · `parent=` wins over the lexical parent: the node's own, else the first up its
+        //      `inherits` chain (`0x6ee390`-`0x6ee3c4`), a present one ending the walk. `0x6ee280`
+        //      hands the raw value to the by-name lookup `0x76c760` (at `0x6ee3e8`), no `$parent`.
+        //      A miss is logged and stores 0 over the default parent (`0x6ee3ef`), so the frame is
+        //      built parentless (`0x6ee408`); an empty `parent=""` keeps the default parent
+        //      silently (`0x6ee3c7`).
         //      `None`: no attribute, or an empty one. `Some(None)`: a miss, parentless and logged.
-        let attr_parent: Option<Option<Table>> =
-            el.attr("parent")
-                .filter(|name| !name.is_empty())
-                .map(|name| {
-                    // Only a frame counts: `0x76c760` reads the frame registry, so a non-frame
-                    // global of that name is a miss. A frame wrapper is the one table carrying
-                    // lightuserdata at `[0]` (`0x6f3ea0`).
-                    let hit =
-                        self.lua().globals().get::<Table>(name).ok().filter(|t| {
-                            matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(_)))
-                        });
-                    if hit.is_none() {
-                        // The reference's wording (`0x8710f0`).
-                        self.report
-                            .warnings
-                            .push(format!("Couldn't find frame parent: {name}"));
-                    }
-                    hit
+        //      The walk is silent: a missing template is the load's to log, after `CreateFrame`
+        //      (`0x769861`, inside slot 8).
+        let parent_attr: Option<String> = raw.attr("parent").map(str::to_string).or_else(|| {
+            let model = self.model();
+            let templates = model.framexml_templates.borrow();
+            let chain = templates.inherited_levels(raw);
+            chain
+                .iter()
+                .rev()
+                .find_map(|n| n.attr("parent"))
+                .map(str::to_string)
+        });
+        let attr_parent: Option<Option<Table>> = parent_attr
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                // Only a frame counts: `0x76c760` asks the object at `[0]` for the Frame id
+                // (`0x6ee3c9`), so a global holding another object, a region or a Font, or
+                // none is a miss.
+                let hit = self.lua().globals().get::<Table>(name).ok().filter(|t| {
+                    crate::script::object::decode_id(t)
+                        .is_ok_and(|id| self.model().id_to_frame.contains_key(&id))
                 });
+                if hit.is_none() {
+                    // `0x8710f0` at severity 1 (`0x6ee3fa`).
+                    self.status_warning(format!("Couldn't find frame parent: {name}"));
+                }
+                hit
+            });
         let parent = match &attr_parent {
             Some(resolved) => resolved.as_ref(),
             None => parent,
@@ -646,21 +829,23 @@ impl Loader<'_> {
                 return None;
             }
         };
-        let wrapper: Table =
-            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
-                Ok(w) => w,
-                Err(e) => {
-                    self.report.fault(format!(
-                        "CreateFrame(<{}>{}): {e}",
-                        el.tag,
-                        resolved_name
-                            .as_deref()
-                            .map(|n| format!(" name=\"{n}\""))
-                            .unwrap_or_default()
-                    ));
-                    return None;
-                }
-            };
+        self.set_xml_creating(true);
+        let made = create.call::<Table>((el.tag.clone(), resolved_name.clone(), parent.cloned()));
+        self.set_xml_creating(false);
+        let wrapper: Table = match made {
+            Ok(w) => w,
+            Err(e) => {
+                self.report.fault(format!(
+                    "CreateFrame(<{}>{}): {e}",
+                    el.tag,
+                    resolved_name
+                        .as_deref()
+                        .map(|n| format!(" name=\"{n}\""))
+                        .unwrap_or_default()
+                ));
+                return None;
+            }
+        };
         self.report.frames += 1;
 
         let dbg_name = resolved_name
@@ -678,100 +863,145 @@ impl Loader<'_> {
         // `$parent` for its contents; a nameless frame passes its nearest named ancestor on.
         let self_name = resolved_name.as_deref().unwrap_or(parent_name).to_string();
 
-        self.decorate(el, &wrapper, &self_name, parent_name, &dbg_name);
+        // The levels the load reads, its first line a missing template's (`0x769861`).
+        let levels = self.levels(raw);
+        self.decorate(
+            &levels,
+            &el.tag,
+            &wrapper,
+            &self_name,
+            parent_name,
+            &dbg_name,
+        );
         Some(wrapper)
     }
 
     /// Everything a frame element does to an existing frame, from `LoadXML` attributes to its
     /// `OnLoad` (bottom-up, `0x76a060`) and the post-load OnShow; shared by [`Self::materialize`] and
-    /// [`apply_template`]. `$parent` is `self_name` in this frame's contents and `parent_name` in
-    /// its own anchors (`0x76c5b0`).
+    /// [`apply_template`]. `levels` are the nodes its load reads ([`Loader::levels`]) and `kind` the
+    /// instance's type. `$parent` is `self_name` in this frame's contents and `parent_name` in its
+    /// own anchors (`0x76c5b0`).
     pub(super) fn decorate(
         &mut self,
-        el: &Element,
+        levels: &Levels,
+        kind: &str,
         wrapper: &Table,
         self_name: &str,
         parent_name: &str,
         dbg_name: &str,
     ) {
-        // This frame's deferred anchors drain before its OnLoad; a nested frame drains its own.
-        let deferred_mark = self.deferred_anchors.len();
-        // 1c · the pre-load hook opens the frame's load window (`0x7697c2`): until the post-load
-        //      hook, its own OnShow and OnHide fire nothing.
+        // 1 · the pre-load hook (`0x769770`): the own node's `id`, then the frame's load window
+        //      opens (`0x7697c2`): until the post-load hook, its own OnShow and OnHide fire nothing.
+        self.apply_preload_id(levels.own, wrapper, dbg_name);
         crate::script::visibility::set_load_window(self.lua(), wrapper, true);
-        // 2 · LoadXML attributes (`0x769820`).
-        self.apply_attrs(el, wrapper, dbg_name);
-        // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, `0x767800`).
-        self.apply_size(el, wrapper, dbg_name);
-        self.apply_anchors(el, wrapper, parent_name, dbg_name);
-        // 5 · <Layers> regions (`0x769d70`) and the <Backdrop> plate (`0x77e6c0`), whose nine
-        //     pieces are regions too, in document order: both are arms of the one child loop
-        //     (`0x769b1c`), so the order they link into `GetRegions` is the file's. A template's
-        //     children come first, as its LoadXML runs first. `$parent` in a region name is this
-        //     frame.
-        for child in &el.children {
-            if child.tag.eq_ignore_ascii_case("Layers") {
-                self.apply_layers(child, wrapper, self_name, dbg_name);
-            } else if child.tag.eq_ignore_ascii_case("Backdrop") {
-                self.apply_backdrop(child, wrapper, dbg_name);
-            }
+        // 2 · each level's load, the template first (`0x76985c`): its base load (`0x769820`),
+        //     then its type's part, so a Slider's or StatusBar's first SetValue fires
+        //     (`0x789a1e`-`0x789a44`, `0x783371`) with the handler that level's `<Scripts>` set.
+        //     OnLoad is captured to fire bottom-up below.
+        let mut onload = None;
+        for level in levels {
+            self.load_level(
+                level,
+                kind,
+                wrapper,
+                self_name,
+                parent_name,
+                dbg_name,
+                &mut onload,
+            );
         }
-        // 5·b · a direct-child `<FontString>`: the widget's own text font (EditBox, message frame).
-        self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
-        // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
-        self.apply_title_region(el, wrapper, self_name, dbg_name);
-        // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
-        //      so a Frame wearing a <Button> template skips the Button steps.
-        self.apply_statusbar(el, wrapper, self_name, dbg_name);
-        self.apply_slider(el, wrapper, self_name, dbg_name);
-        self.apply_colorselect(el, wrapper, self_name, dbg_name);
-        self.apply_button(el, wrapper, self_name, dbg_name);
-        self.apply_editbox(el, wrapper, dbg_name);
-        self.apply_messageframe(el, wrapper, dbg_name);
-        self.apply_simplehtml(el, wrapper, dbg_name);
-        self.apply_minimap(el, wrapper, dbg_name);
-        // 6 · <Scripts> handlers (`0x769ef0`); OnLoad is captured to fire bottom-up below.
-        let onload = self.apply_scripts(el, wrapper, dbg_name);
-        // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
-        //      inside the load window, so ahead of every <Frames> child and of our own OnLoad.
-        self.apply_scrollframe(el, wrapper, self_name, dbg_name);
 
-        // 7 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
-        //     <Frames>, whose OnLoads fire before ours (`0x76a060`).
+        // 3 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
+        //     <Frames> (`0x76a060`): per level, the template first, the level's first `<Frames>`
+        //     alone (`0x6f2c50`), each child whole before its next sibling, so their OnLoads fire
+        //     before ours.
         crate::script::visibility::set_load_window(self.lua(), wrapper, false);
-        for frames_el in children_named(el, "Frames") {
-            for child in &frames_el.children {
-                let expanded = self.expand(child);
-                self.materialize(&expanded, Some(wrapper), self_name);
+        for level in levels {
+            if let Some(frames) = children_named(level, "Frames").next() {
+                for child in &frames.children {
+                    self.materialize(child, Some(wrapper), self_name);
+                }
             }
         }
 
-        // 7c · deferred anchors: every child exists now, as at the reference's layout pass.
-        self.drain_deferred_anchors(deferred_mark);
-        // 8 · this frame's OnLoad, now that its subtree is complete (bottom-up).
+        // 4 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
             self.fire_onload(wrapper, &func, dbg_name);
         }
-        // 9 · and its OnShow, if it is visible now (`0x76a3b3`).
+        // 5 · and its OnShow, if it is visible now (`0x76a3b3`).
         crate::script::visibility::post_load_show(self.lua(), wrapper);
+        // 6 · the two game-side post-load overrides, each after chaining to this one: a
+        //     GameTooltip's line lookup (`0x529668` calls `0x76a2f0` first), so the lines its own
+        //     `<Frames>`, OnLoad or OnShow made count, and a Minimap's models (`0x4ee2c0`).
+        crate::script::tooltip_post_load(self.lua(), wrapper);
+        if kind.eq_ignore_ascii_case("Minimap") {
+            self.apply_minimap(levels.own, wrapper, dbg_name);
+        }
     }
 
-    /// Apply one anchor, deferring it (when `may_defer`) while its named `relativeTo` is unbuilt.
-    pub(super) fn apply_anchor(&mut self, d: DeferredAnchor, may_defer: bool) {
+    /// One level of a frame's `LoadXML` (`CSimpleFrame::LoadXML 0x769820` on `level`, after the
+    /// recursion into its `inherits` level): the node's geometry (`0x76987c` → `0x767800`), its
+    /// anchors resolved now; then its flag attributes (`0x769881`-`0x769b17`); then one child loop
+    /// in document order (`0x769b1c`-`0x769d22`) whose arms are `<TitleRegion>`,
+    /// `<ResizeBounds>`, `<Backdrop>`, `<HitRectInsets>`, `<Layers>` and `<Scripts>`, any other
+    /// tag skipped silently; then the part of `kind`, the instance's type
+    /// ([`Self::typed_level`]). `$parent` is `parent_name` in the frame's own anchors and
+    /// `self_name` in its contents.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn load_level(
+        &mut self,
+        level: &Element,
+        kind: &str,
+        wrapper: &Table,
+        self_name: &str,
+        parent_name: &str,
+        dbg: &str,
+        onload: &mut Option<Function>,
+    ) {
+        self.apply_geometry(level, wrapper, false, parent_name, dbg);
+        self.apply_level_flags(level, wrapper, dbg);
+        for child in &level.children {
+            let is = |t: &str| child.tag.eq_ignore_ascii_case(t);
+            if is("TitleRegion") {
+                self.apply_title_region(child, wrapper, self_name, dbg);
+            } else if is("ResizeBounds") {
+                self.apply_resize_bounds(child, wrapper, dbg);
+            } else if is("Backdrop") {
+                self.apply_backdrop(child, wrapper, dbg);
+            } else if is("HitRectInsets") {
+                self.apply_hit_rect_insets(child, wrapper, dbg);
+            } else if is("Layers") {
+                // `0x769d70`: each region created, named and loaded as it is reached, so it links
+                // into `GetRegions` in the file's order, a template's first.
+                self.apply_layers(child, wrapper, self_name, dbg);
+            } else if is("Scripts") {
+                self.apply_scripts(child, wrapper, dbg, onload);
+            }
+        }
+        self.typed_level(level, kind, wrapper, self_name, dbg);
+    }
+
+    /// Apply one anchor as it is read: a named `relativeTo` is looked up now (`0x767964` →
+    /// `0x76c700`), so a target not yet built is a miss, logged as spelled (`0x878440`, at
+    /// `0x76796d`), and the anchor dropped (`0x76797b`); the object itself (`0x878420`,
+    /// `0x76797d`) is logged and skipped too. Nothing retries it.
+    pub(super) fn apply_anchor(&mut self, d: XmlAnchor) {
         let rel: Value = match d.args.1.as_deref() {
             Some(name) => {
                 match crate::script::object::anchor_args::resolve_xml_relative_to(self.lua(), name)
                 {
-                    Some(t) => Value::Table(t),
-                    // Not built yet: retry once the subtree is complete; a miss then is real.
-                    None if may_defer => {
-                        self.deferred_anchors.push(d);
-                        return;
+                    Some(t) => {
+                        let id = crate::script::object::decode_id;
+                        if id(&t).ok().is_some_and(|i| id(&d.wrapper).ok() == Some(i)) {
+                            let raw = &d.rel_raw;
+                            self.status_warning(format!("Frame anchored to itself: {raw}"));
+                            return;
+                        }
+                        Value::Table(t)
                     }
                     None => {
-                        self.report
-                            .warnings
-                            .push(format!("{}: Couldn't find relative frame: {name}", d.dbg));
+                        let raw = &d.rel_raw;
+                        self.status_warning(format!("Couldn't find relative frame: {raw}"));
                         return;
                     }
                 }
@@ -788,26 +1018,25 @@ impl Loader<'_> {
                 None => Value::Nil,
             },
         };
-        let DeferredAnchor {
+        let XmlAnchor {
             wrapper,
             region,
-            args: (point, _, rel_point, x, y),
+            args: (point, _, rel_point),
+            offset,
             dbg,
+            ..
         } = d;
-        let args = (point, rel, rel_point, x, y);
+        // The first `<Offset>`, read whatever it answers, after the target's miss and self tests
+        // (`0x767946`-`0x7679ad`), so a skipped anchor reads none.
+        let v = offset.map_or([Len::Script(0.0); 2], |o| self.dimension(&o).v);
+        let [x, y] = v.map(|l| l.script(self.model().layout_units()));
+        let args = (point.clone(), rel, rel_point, x, y);
         if region {
             self.call_region(&wrapper, "SetPoint", args, &dbg);
         } else {
             self.call(&wrapper, "SetPoint", args, &dbg);
         }
-    }
-
-    /// Apply the anchors deferred since `mark`, in order; a target still missing now warns.
-    pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
-        let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
-        for d in pending {
-            self.apply_anchor(d, false);
-        }
+        crate::script::xml_layout::offset(self.lua, &wrapper, region, &point, v);
     }
 
     fn frame_names(&self, wrapper: &Table) -> (Option<String>, String) {
@@ -831,6 +1060,132 @@ impl Loader<'_> {
     }
 }
 
+/// What one of the reference's XML length readers answers (`XmlReadDimension 0x6f1eb0`,
+/// `XmlReadValue 0x6f1d60`, `XmlReadInset 0x6f20a0`): the values, zeroed and then written where
+/// read, and whether the read succeeded. A failure keeps what was written before it, which a
+/// caller that ignores the answer reads (`0x7679ad`, `0x77142d`, `0x771146`).
+pub(super) struct XmlLength<const N: usize> {
+    pub(super) v: [Len; N],
+    pub(super) ok: bool,
+}
+
+impl<const N: usize> XmlLength<N> {
+    /// The values as script numbers, for a cell benilla keeps as one: a layout length through `G`.
+    pub(super) fn script(&self, units: crate::layout::LayoutUnits) -> [f32; N] {
+        self.v.map(|l| l.script(units))
+    }
+}
+
+impl Loader<'_> {
+    /// The readers' one node rule: the node's own non-empty `keys` through `SStrToFloat`, then its
+    /// first child only. With none, the read succeeds when `gate` is present, else it logs
+    /// `missing` with the node's tag and fails (`0x6f1f44`-`0x6f1f55`). The node's own and an
+    /// `abs` child's non-empty `keys` are script numbers the reader stores by `S` (`0x6f1ee3`-
+    /// `0x6f1f02`, `0x6f1f9f`-`0x6f1fc1`), the child's overwriting; a `rel` child's are layout
+    /// units, stored as parsed (`0x6f2037`-`0x6f2060`); any other child logs `0x871464` and fails
+    /// (`0x6f2070`).
+    fn xml_length<const N: usize>(
+        &mut self,
+        el: &Element,
+        keys: [&str; N],
+        gate: &str,
+        child: (&str, &str),
+        missing: &str,
+    ) -> XmlLength<N> {
+        let mut v = [Len::Script(0.0); N];
+        let read = |src: &Element, v: &mut [Len; N], unit: fn(f32) -> Len| {
+            for (slot, key) in v.iter_mut().zip(keys) {
+                if let Some(x) = xml_float_attr(src, key) {
+                    *slot = unit(x);
+                }
+            }
+        };
+        read(el, &mut v, Len::Script);
+        let ok = match el.children.first() {
+            None if el.attr(gate).is_some() => true,
+            None => {
+                self.status_warning(format!("{missing}{}", el.tag));
+                false
+            }
+            Some(c) if c.tag.eq_ignore_ascii_case(child.0) => {
+                read(c, &mut v, Len::Script);
+                true
+            }
+            Some(c) if c.tag.eq_ignore_ascii_case(child.1) => {
+                read(c, &mut v, Len::Layout);
+                true
+            }
+            Some(c) => {
+                let line = format!("Unknown child node in {} element: {}", el.tag, c.tag);
+                self.status_warning(line);
+                false
+            }
+        };
+        XmlLength { v, ok }
+    }
+
+    /// `XmlReadDimension` (`0x6f1eb0`): `x` and `y` of a `<Size>`, an `<Offset>`, a
+    /// `<PushedTextOffset>` or a resize bound, gated on `y` (`0x8714e8`).
+    pub(super) fn dimension(&mut self, el: &Element) -> XmlLength<2> {
+        let missing = r#"No "x" or "y" attributes in element: "#;
+        self.xml_length(
+            el,
+            ["x", "y"],
+            "y",
+            ("AbsDimension", "RelDimension"),
+            missing,
+        )
+    }
+
+    /// `XmlReadValue` (`0x6f1d60`): the `val` of a `<FontHeight>`, `<EdgeSize>` or `<TileSize>`
+    /// (`0x8714a4`).
+    /// Whatever the read answers, its unit kept, for a caller that ignores the answer.
+    pub(super) fn value(&mut self, el: &Element) -> Len {
+        let missing = r#"No "val" attribute in element: "#;
+        self.xml_length(el, ["val"], "val", ("AbsValue", "RelValue"), missing)
+            .v[0]
+    }
+
+    /// [`Self::value`] with its answer and its unit, for a caller that checks it (`0x77e779`,
+    /// `0x77e7ae`).
+    pub(super) fn value_read(&mut self, el: &Element) -> Option<Len> {
+        let missing = r#"No "val" attribute in element: "#;
+        let r = self.xml_length(el, ["val"], "val", ("AbsValue", "RelValue"), missing);
+        r.ok.then_some(r.v[0])
+    }
+
+    /// `XmlReadInset` (`0x6f20a0`): `left`, `right`, `top` and `bottom` of an insets element,
+    /// gated on `bottom` alone (`0x6f21bc`, `0x871530`).
+    pub(super) fn inset(&mut self, el: &Element) -> Option<[Len; 4]> {
+        let missing = r#"No "right", "left", "top", or "bottom" attributes in element: "#;
+        let keys = ["left", "right", "top", "bottom"];
+        let r = self.xml_length(el, keys, "bottom", ("AbsInset", "RelInset"), missing);
+        r.ok.then_some(r.v)
+    }
+
+    /// Script numbers for a verb, a layout length through `G`.
+    pub(super) fn script_of<const N: usize>(&self, v: [Len; N]) -> [f32; N] {
+        let units = self.model().layout_units();
+        v.map(|l| l.script(units))
+    }
+
+    /// A `<Shadow>` element (`0x7713ca`, `0x784058`): its first `<Color>` over opaque black
+    /// (`0xff000000`), and its first `<Offset>` read whatever it answers (`0x77142d`, `0x7840a8`),
+    /// script numbers the reader stores by `S` (`0x6f1ee3`-`0x6f1efd`), else (0.001, -0.001)
+    /// layout units, stored raw (`0x3a83126f`, `0xba83126f`), which new cells read as the reload
+    /// they stand for would ([`crate::layout::Len::Layout`]).
+    pub(super) fn shadow_of(&mut self, sh: &Element) -> crate::script::FontShadow {
+        let offset = match children_named(sh, "Offset").next() {
+            Some(o) => self.dimension(o).v,
+            None => crate::script::FontShadow::DEFAULT_OFFSET,
+        };
+        let color = children_named(sh, "Color")
+            .next()
+            .map_or(crate::color::Rgba8::BLACK, color_of);
+        crate::script::FontShadow { offset, color }
+    }
+}
+
 /// Iterate an element's direct children whose tag matches `tag` (case-insensitively).
 pub(super) fn children_named<'a>(
     el: &'a Element,
@@ -839,18 +1194,6 @@ pub(super) fn children_named<'a>(
     el.children
         .iter()
         .filter(move |c| c.tag.eq_ignore_ascii_case(tag))
-}
-
-/// Iterate an element's direct children whose tag matches any of `tags` (case-insensitively), in
-/// document order. One walk, not one per tag: a Button's label and state fonts each answer to two
-/// tags (`CSimpleButton::LoadXML 0x7788c0`) and each slot is last-wins.
-pub(super) fn children_named_any<'a>(
-    el: &'a Element,
-    tags: &'a [&'a str],
-) -> impl Iterator<Item = &'a Element> {
-    el.children
-        .iter()
-        .filter(move |c| tags.iter().any(|t| c.tag.eq_ignore_ascii_case(t)))
 }
 
 /// Whether a `text=` value is shaped like a GlobalStrings key: `SCREAMING_SNAKE` with a letter, two
@@ -862,85 +1205,45 @@ fn is_global_string_key(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// An `x`/`y` pair from a `<Size>`/`<Offset>`: its `<AbsDimension>` child, else its own attributes.
-pub(super) fn abs_dim(el: &Element) -> (Option<f32>, Option<f32>) {
-    let src = children_named(el, "AbsDimension").next().unwrap_or(el);
-    let x = src.attr("x").and_then(|v| v.trim().parse::<f32>().ok());
-    let y = src.attr("y").and_then(|v| v.trim().parse::<f32>().ok());
-    (x, y)
+/// An XML number as every loader reads one, `SStrToFloat` (`0x64aaa0`): a prefix parse with no
+/// whitespace skip and no leading `+`, narrowed to the `f32` the reference stores.
+pub(super) fn xml_float(s: &str) -> f32 {
+    crate::script::binding_abi::s_str_to_float(s) as f32
 }
 
-/// Read an RGBA colour from a `<Color r= g= b= a=/>` element (`a` defaults to 1.0).
-pub(super) fn color_of(el: &Element) -> [f32; 4] {
-    let c = |k: &str, d: f32| {
+/// [`xml_float`] of a present, non-empty attribute, as the readers take one (`0x6f1ed9`-`0x6f1ee0`).
+fn xml_float_attr(el: &Element, key: &str) -> Option<f32> {
+    el.attr(key).filter(|v| !v.is_empty()).map(xml_float)
+}
+
+/// A `<Color r= g= b= a=/>` element as `0x6f23d0` packs it: each attribute that is present and
+/// non-empty through `SStrToFloat` (`0x64aaa0`, so text with no number is 0), else 0 for r, g and b
+/// and 1 for a (`0x6f23e2`-`0x6f23f7`), then clamped and rounded as every colour setter does.
+pub(super) fn color_of(el: &Element) -> crate::color::Rgba8 {
+    let c = |k: &str, d: f64| {
         el.attr(k)
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(d)
-    };
-    [c("r", 0.0), c("g", 0.0), c("b", 0.0), c("a", 1.0)]
-}
-
-/// A `<TexCoords>` child's UV rect `(l, r, t, b)`; one missing an edge is ignored (full UVs).
-pub(super) fn tex_coords_of(el: &Element) -> Option<(f32, f32, f32, f32)> {
-    let tc = children_named(el, "TexCoords").next()?;
-    let edge = |k: &str| tc.attr(k).and_then(|v| v.trim().parse::<f32>().ok());
-    Some((edge("left")?, edge("right")?, edge("top")?, edge("bottom")?))
-}
-
-/// A `<FontHeight>`-style scalar: its `<AbsValue val=>` child, else its own `val=`.
-pub(super) fn abs_value(el: &Element) -> Option<f32> {
-    let src = children_named(el, "AbsValue").next().unwrap_or(el);
-    src.attr("val").and_then(|v| v.trim().parse::<f32>().ok())
-}
-
-/// A [`FontObject`] from a flattened `<Font>`. The merge appends inherited nodes first, so the last
-/// `<FontHeight>`, `<Color>` and `<Shadow>` win.
-pub(super) fn font_object_from_element(el: &Element) -> FontObject {
-    let justify_h = el
-        .attr("justifyH")
-        .map(|j| match j.to_ascii_uppercase().as_str() {
-            "LEFT" => JustifyH::Left,
-            "RIGHT" => JustifyH::Right,
-            _ => JustifyH::Center,
-        });
-    let justify_v = el
-        .attr("justifyV")
-        .map(|j| match j.to_ascii_uppercase().as_str() {
-            "TOP" => JustifyV::Top,
-            "BOTTOM" => JustifyV::Bottom,
-            _ => JustifyV::Middle,
-        });
-    // `<Shadow>` inherits like any child: `MasterFont`'s (1,-1) black reaches every `GameFont*`
-    // (`Fonts.xml:55`).
-    let shadow = children_named(el, "Shadow").last().map(|sh| {
-        let offset = children_named(sh, "Offset")
-            .next()
-            .map(abs_dim)
-            .map(|(x, y)| [x.unwrap_or(0.0), y.unwrap_or(0.0)])
-            .unwrap_or([0.0, 0.0]);
-        let color = children_named(sh, "Color")
-            .next()
-            .map(color_of)
-            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-        crate::script::FontShadow { offset, color }
-    });
-    FontObject {
-        font: el.attr("font").map(str::to_string),
-        height: children_named(el, "FontHeight").last().and_then(abs_value),
-        color: children_named(el, "Color").last().map(color_of),
-        outline: el.attr("outline").map(Outline::parse).unwrap_or_default(),
-        justify_h,
-        justify_v,
-        shadow,
-        // `spacing=` (`0x783ee0`, read with `atof` when not empty), inherited down the flattened
-        // chain like the other attributes.
-        spacing: el
-            .attr("spacing")
             .filter(|v| !v.is_empty())
-            .map(crate::framexml::atof),
-    }
+            .map_or(d, crate::script::binding_abi::s_str_to_float)
+    };
+    crate::color::Rgba8::pack(c("r", 0.0), c("g", 0.0), c("b", 0.0), c("a", 1.0))
 }
 
+/// A `<TexCoords>` element's edges `(l, r, t, b)`: each starts at 0, 1, 0, 1 and is read with
+/// `SStrToFloat` only when present and non-empty (`0x76fef5`-`0x76ff70`).
+pub(super) fn tex_coords(tc: &Element) -> (f32, f32, f32, f32) {
+    let edge = |k: &str, default: f32| xml_float_attr(tc, k).unwrap_or(default);
+    (
+        edge("left", 0.0),
+        edge("right", 1.0),
+        edge("top", 0.0),
+        edge("bottom", 1.0),
+    )
+}
+
+#[cfg(test)]
+mod level_tests;
+#[cfg(test)]
+mod order_tests;
 #[cfg(test)]
 mod template_name_tests;
 #[cfg(test)]

@@ -1,35 +1,29 @@
-//! The `GameTooltip` method surface and engine behaviour: the line stack, owner and anchor,
-//! auto-size and the fade.
+//! The `GameTooltip` method surface and engine behaviour: the line stack, owner and anchor, the
+//! sizer and the fade.
 //!
 //! Lines are named FontString regions published as Lua globals (`<name>TextLeft1` …), since
 //! FrameXML addresses them by name (`GameTooltipTextLeft1:SetTextColor`, `UnitFrame.lua:76`). The
-//! template declares 30 pairs, which are adopted; the reference grows past them through
-//! `AddFontStrings`, and this also creates pairs on demand.
+//! post-load pass ([`post_load`]) fixes the pairs a tooltip holds, the template's 30 in the stock
+//! one, and only `AddFontStrings` adds to them; a tooltip with none holds no line. Neither touches
+//! a pair's points, justification or shown bit: those are the template's.
 //!
-//! Layout is a pre-pass of every `resolve` ([`layout_tooltips`]): the width is the widest line (a
-//! double line adds the column gap) plus padding, floored by `SetMinimumWidth`; the height is the
-//! summed line heights and gaps; each right column sits flush with the text inset.
+//! The plate is sized by the show, `AppendText` and the cache answers ([`size::size_tooltip`]).
 
 use mlua::{Lua, Table, Value};
 
 use super::event;
-use super::object::{frame_handle_of, publish_global};
-use super::region::region_wrapper;
+use super::object::frame_handle_of;
 use super::visibility;
-use super::{FontObject, Model, RegionData};
-use crate::layout::{Anchor, Anchors, Point};
-use crate::order::DrawLayer;
-use crate::widget::{
-    FrameHandle, KindState, RegionKind, TooltipAnchor, TooltipState, TOOLTIP_DOUBLE_GAP,
-    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
-};
+use super::Model;
+use crate::layout::{Anchor, Anchors, Handle, Point};
+use crate::widget::{FrameHandle, KindState, TooltipAnchor, TooltipState, TOOLTIP_FADE_SECS};
 
 /// Registry key of the GameTooltip method table, a named registry root (the MAXCSTACK discipline).
 pub(super) const REG_TOOLTIP_METHODS: &str = "__benilla_tooltip_methods";
 
 impl super::UiScript {
-    /// The name of the frame that owns the GameTooltip named `tooltip`; `None` for no such
-    /// tooltip, no owner or an unnamed one. 1.12 answers only `IsOwned(frame)`, so the host's
+    /// The name of the frame or region that owns the GameTooltip named `tooltip`; `None` for no
+    /// such tooltip, no owner or an unnamed one. 1.12 answers only `IsOwned(frame)`, so the host's
     /// recorders read the owner here.
     pub fn tooltip_owner_name(&self, tooltip: &str) -> Option<String> {
         let model = self.model_ref();
@@ -38,7 +32,14 @@ impl super::UiScript {
             KindState::Tooltip(t) => t.owner?,
             _ => return None,
         };
-        model.arena.frame(owner)?.name.clone()
+        match model.id_to_frame.get(&owner) {
+            Some(&f) => model.arena.frame(f)?.name.clone(),
+            None => model
+                .arena
+                .region(*model.id_to_region.get(&owner)?)?
+                .name
+                .clone(),
+        }
     }
 }
 
@@ -52,260 +53,173 @@ fn with_tip<T>(lua: &Lua, this: &Table, f: impl FnOnce(&mut TooltipState) -> T) 
 pub(super) fn tip_mut(model: &mut Model, h: FrameHandle) -> mlua::Result<&mut TooltipState> {
     match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         Some(KindState::Tooltip(t)) => Ok(t),
-        _ => Err(mlua::Error::runtime("not a GameTooltip")),
+        _ => Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     }
 }
 
-/// `SetFontObject` onto a line cell, except that a missing font object keeps the default face
-/// rather than raising (a VM loaded without Fonts.xml).
-fn apply_font(d: &mut RegionData, name: &str, fo: Option<&FontObject>) {
-    d.font_object = Some(name.to_string());
-    // The inherit mask (`+0x2c`) stays: a re-point does not restore inheritance in the reference.
-    // From here the line follows the font object live, through `font::propagate`.
-    if let Some(f) = fo {
-        d.font_path = f.font.clone();
-        d.font_height = f.height;
-        d.outline = f.outline;
-        d.font_shadow = f.shadow;
-        if let Some(c) = f.color {
-            d.set_vertex_color(Some(c));
+/// The FontString a global of that name holds, as `FindFrameOfType` (`0x76c760`) finds it: a Lua
+/// global lookup and a type test, no owner check.
+fn global_font_string(lua: &Lua, name: &str) -> Option<crate::widget::RegionHandle> {
+    let Value::Table(t) = lua.globals().get::<Value>(name).ok()? else {
+        return None;
+    };
+    let rh = super::region::region_handle_of(lua, &t).ok()?;
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    (model.arena.region(rh)?.kind == crate::widget::RegionKind::FontString).then_some(rh)
+}
+
+/// A GameTooltip's post-load pass (`CGTooltip::PostLoadXML`, `0x529650`), run when the frame is
+/// made, after its template: it finds `<name>TextLeft<n>` and `<name>TextRight<n>` from 1 until
+/// either is missing (`0x52972d`-`0x52983d`; `<unnamed>` for an unnamed tooltip, `0x84c7f0`) and
+/// keeps the pairs as the line arrays. Their count is the line limit: the stock template declares
+/// 30, and a tooltip made without a template holds none.
+pub(crate) fn post_load(lua: &Lua, wrapper: &Table) {
+    let Ok(h) = frame_handle_of(lua, wrapper) else {
+        return;
+    };
+    let name = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        if !matches!(
+            model.arena.frame(h).map(|f| &f.kind_state),
+            Some(KindState::Tooltip(_))
+        ) {
+            return;
         }
+        crate::script::binding_abi::frame_name(&model, h)
+    };
+    let mut pairs = Vec::new();
+    loop {
+        let n = pairs.len() + 1;
+        let (Some(left), Some(right)) = (
+            global_font_string(lua, &format!("{name}TextLeft{n}")),
+            global_font_string(lua, &format!("{name}TextRight{n}")),
+        ) else {
+            break;
+        };
+        pairs.push((left, right));
+    }
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if let Ok(t) = tip_mut(&mut model, h) {
+        t.left_lines = pairs.iter().map(|p| p.0).collect();
+        t.right_lines = pairs.iter().map(|p| p.1).collect();
+        // The second pass stores 0 in each wrap flag (`0x529830`).
+        t.wrapped = vec![false; pairs.len()];
     }
 }
 
-/// Grows the line-pair pool to `n` pairs: XML-declared pairs (`<name>TextLeft<i>`) are adopted
-/// with their fonts, and created pairs clone the previous pair's fonts past a declared ladder, or
-/// else wear the template's `GameTooltipHeaderText` (line 1) and `GameTooltipText`.
-fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
-    let h = frame_handle_of(lua, this)?;
-    // (id, global name) pairs to publish once the model borrow is dropped.
-    let mut publish: Vec<(u32, String)> = Vec::new();
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let frame_name = model
-            .arena
-            .frame(h)
-            .and_then(|f| f.name.clone())
-            .unwrap_or_default();
-        let frame_id = model.frame_id(h);
-        loop {
-            let (have, prev_left, prev_right, clone_prev) =
-                match model.arena.frame(h).map(|f| &f.kind_state) {
-                    Some(KindState::Tooltip(t)) => (
-                        t.left_lines.len(),
-                        t.left_lines.last().copied(),
-                        t.right_lines.last().copied(),
-                        t.xml_declared_lines,
-                    ),
-                    _ => return Err(mlua::Error::runtime("not a GameTooltip")),
-                };
-            if have >= n {
-                break;
-            }
-            let i = have + 1;
-
-            // The template's declared pair for this index (ShoppingTooltipTemplate's ladder).
-            let declared = |model: &Model, cell: &str| -> Option<crate::widget::RegionHandle> {
-                if frame_name.is_empty() {
-                    return None;
-                }
-                let id = model
-                    .region_by_name
-                    .get(&format!("{frame_name}Text{cell}{i}"))
-                    .copied()?;
-                let rh = model.id_to_region.get(&id).copied()?;
-                (model.arena.region(rh)?.owner == h).then_some(rh)
-            };
-            // A created cell's fonts: the previous line's under an XML ladder, else the defaults.
-            let seed_font =
-                |model: &mut Model,
-                 d: &mut RegionData,
-                 prev: Option<crate::widget::RegionHandle>| {
-                    let cloned = clone_prev
-                        .then(|| prev.and_then(|p| model.region_data.get(&p)).cloned())
-                        .flatten();
-                    match cloned {
-                        Some(src) => {
-                            d.font_object = src.font_object.clone();
-                            d.font_path = src.font_path.clone();
-                            d.font_height = src.font_height;
-                            d.outline = src.outline;
-                            d.font_shadow = src.font_shadow;
-                            d.set_vertex_color(src.vertex_color);
-                        }
-                        None => {
-                            let font = if i == 1 {
-                                "GameTooltipHeaderText"
-                            } else {
-                                "GameTooltipText"
-                            };
-                            let fo = model.font_object(font).cloned();
-                            apply_font(d, font, fo.as_ref());
-                        }
-                    }
-                };
-
-            let adopted_left = declared(&model, "Left");
-            let left = match adopted_left {
-                Some(rh) => rh,
-                None => model
-                    .arena
-                    .create_region(h, RegionKind::FontString, DrawLayer::Artwork, 0)
-                    .ok_or_else(|| mlua::Error::runtime("dead tooltip frame"))?,
-            };
-            let left_drew = model.region_draws(left);
-            {
-                let mut d = if adopted_left.is_some() {
-                    // Keep the declared faces; the engine owns justify/visibility/anchors.
-                    model.region_data.remove(&left).unwrap_or_default()
-                } else {
-                    let mut d = RegionData {
-                        hidden: true,
-                        ..RegionData::default()
-                    };
-                    seed_font(&mut model, &mut d, prev_left);
-                    d
-                };
-                d.hidden = true;
-                // Left-justified as in the template; it shows once a wrap line pins its width.
-                d.justify.set_h(super::JustifyH::Left);
-                d.anchors = Anchors::from([match prev_left {
-                    None => Anchor::new(
-                        Point::TopLeft,
-                        frame_id,
-                        Point::TopLeft,
-                        TOOLTIP_PAD,
-                        -TOOLTIP_PAD,
-                    ),
-                    Some(prev) => {
-                        let prev_id = model.region_id(prev);
-                        Anchor::new(
-                            Point::TopLeft,
-                            prev_id,
-                            Point::BottomLeft,
-                            0.0,
-                            -TOOLTIP_LINE_GAP,
-                        )
-                    }
-                }]);
-                model.region_data.insert(left, d);
-                model.note_region_draw(left, left_drew);
-                model.touch_measure(left); // an adopted cell can arrive text-in-hand
-                                           // A line row's points are set with the invalidate flag (`0x530197`).
-                model.invalidate_region(left, true);
-            }
-            let left_id = model.region_id(left);
-
-            let adopted_right = declared(&model, "Right");
-            let right = match adopted_right {
-                Some(rh) => rh,
-                None => model
-                    .arena
-                    .create_region(h, RegionKind::FontString, DrawLayer::Artwork, 0)
-                    .ok_or_else(|| mlua::Error::runtime("dead tooltip frame"))?,
-            };
-            let right_drew = model.region_draws(right);
-            {
-                let mut d = if adopted_right.is_some() {
-                    model.region_data.remove(&right).unwrap_or_default()
-                } else {
-                    let mut d = RegionData {
-                        hidden: true,
-                        ..RegionData::default()
-                    };
-                    seed_font(&mut model, &mut d, prev_right);
-                    d
-                };
-                d.hidden = true;
-                d.justify.set_h(super::JustifyH::Right);
-                // RIGHT on the left cell's LEFT, the point the layout re-sets with the plate
-                // width as x (`0x53094f`), as the template's `$parentTextRight1` declares it.
-                d.anchors =
-                    Anchors::from([Anchor::new(Point::Right, left_id, Point::Left, 0.0, 0.0)]);
-                model.region_data.insert(right, d);
-                model.note_region_draw(right, right_drew);
-                model.touch_measure(right); // an adopted cell can arrive text-in-hand
-                model.invalidate_region(right, true);
-            }
-            let right_id = model.region_id(right);
-
-            if !frame_name.is_empty() {
-                // Adopted pairs are already named and published by the loader.
-                if adopted_left.is_none() {
-                    let ln = format!("{frame_name}TextLeft{i}");
-                    crate::script::region::set_region_name(&mut model, left, left_id, &ln);
-                    publish.push((left_id, ln));
-                }
-                if adopted_right.is_none() {
-                    let rn = format!("{frame_name}TextRight{i}");
-                    crate::script::region::set_region_name(&mut model, right, right_id, &rn);
-                    publish.push((right_id, rn));
-                }
-            }
-
-            let t = tip_mut(&mut model, h)?;
-            t.left_lines.push(left);
-            t.right_lines.push(right);
-            if i == 1 && adopted_left.is_some() {
-                t.xml_declared_lines = true;
-            }
-        }
-    }
-    for (id, name) in publish {
-        let wrapper = region_wrapper(lua, id)?;
-        publish_global(lua, &name, &wrapper)?;
-    }
-    Ok(())
+/// `AddFontStrings` (`0x530c40` into `0x529940`): the caller's pair becomes the last of the line
+/// arrays with a clear wrap flag (`0x529a26`), raising the line limit by one. The pair keeps its own
+/// points, justification and shown bit.
+pub(super) fn add_font_strings(
+    lua: &Lua,
+    this: &Table,
+    left: crate::widget::RegionHandle,
+    right: crate::widget::RegionHandle,
+) -> mlua::Result<()> {
+    with_tip(lua, this, |t| {
+        t.left_lines.push(left);
+        t.right_lines.push(right);
+        t.wrapped.push(false);
+    })
 }
 
-/// Writes a line cell's text and colour and shows it.
+/// Writes a line cell's text and colour and shows it. The text goes through `SetText` with its
+/// expand flag (`0x5302e7`, `0x53033d` for the two sides of a line, `0x53060e` for `AppendText`'s
+/// helper `0x5305b0`), so the number separators swap while `SetEuropeanNumbers` holds.
 pub(super) fn write_cell(
     model: &mut Model,
     rh: crate::widget::RegionHandle,
     text: &str,
-    color: [f32; 4],
+    color: crate::color::Rgba8,
 ) {
+    // The region colour (`0x77f750`, `0x5302d0`), which clears no inherit bit: a later change to
+    // the line's font object's colour repaints it until the next write.
+    model
+        .region_data
+        .entry(rh)
+        .or_default()
+        .set_vertex_color(Some(color));
+    model.set_region_hidden(rh, false);
+    set_cell_text(model, rh, text);
+}
+
+/// A line cell's `SetText(text, 1)` alone (`0x771d80`), touching neither its colour nor its shown
+/// bit, as `AppendText`'s helper writes line 1 (`0x53060e`).
+pub(super) fn set_cell_text(model: &mut Model, rh: crate::widget::RegionHandle, text: &str) {
+    let text = model.localized_text(text.to_string());
     let d = model.region_data.entry(rh).or_default();
     let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
-    d.text = Some(text.to_string());
-    d.set_vertex_color(Some(color));
-    // The line's own colour, as if set by `SetTextColor`: a later
-    // `GameTooltipText:SetTextColor` must not repaint it.
-    d.font_explicit.color = true;
-    model.set_region_hidden(rh, false);
+    d.text = Some(text);
     model.touch_measure(rh);
     model.touch_layout_text(rh, was_shown);
 }
 
-/// Blanks every line cell and resets the counters and the subject: the model half of the clear
-/// ([`clear_silent`]).
+/// The model half of the clear ([`clear_silent`]), `0x530050`'s loop over the used lines: each left
+/// text's width is set to 0, its height kept (`0x5301f0`), its text to "" and both cells are hidden
+/// (`0x530203`-`0x530225`), and the wrap flag is zeroed (`0x530236`); a right text is left as it
+/// was, so it reads back until the line is written again.
 fn clear_content(model: &mut Model, h: FrameHandle) {
     let (lefts, rights) = match model.arena.frame(h).map(|f| &f.kind_state) {
-        Some(KindState::Tooltip(t)) => (t.left_lines.clone(), t.right_lines.clone()),
+        Some(KindState::Tooltip(t)) => (
+            t.left_lines
+                .iter()
+                .take(t.num_lines)
+                .copied()
+                .collect::<Vec<_>>(),
+            t.right_lines
+                .iter()
+                .take(t.num_lines)
+                .copied()
+                .collect::<Vec<_>>(),
+        ),
         _ => return,
     };
-    for rh in lefts.into_iter().chain(rights) {
+    // A line with no authored size already reads width 0.
+    for &rh in &lefts {
+        if model.region_data.get(&rh).is_some_and(|d| d.size.is_some()) {
+            size::set_line_width(model, rh, crate::layout::Len::Layout(0.0));
+        }
+    }
+    for (rh, left) in lefts
+        .into_iter()
+        .map(|rh| (rh, true))
+        .chain(rights.into_iter().map(|rh| (rh, false)))
+    {
         let drew = model.region_draws(rh);
         if let Some(d) = model.region_data.get_mut(&rh) {
             let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
-            d.text = None;
+            if left {
+                d.text = Some(String::new());
+            }
             d.hidden = true;
             model.note_region_draw(rh, drew);
-            // `measured` and the wrap pin (`size`) stay: the measure cache is keyed by content
-            // ([`RegionData::measure_key`]) and `append_line` rewrites the pin, so the hover
-            // loop's per-frame clear and rebuild (`ContainerFrameItemButton_OnUpdate`) re-measures
-            // nothing, and its lines' layout re-hashes to the converged node and solves nothing.
-            model.touch_layout_text(rh, was_shown);
+            // `measured` stays: the measure cache is keyed by content
+            // ([`RegionData::measure_key`]), and the sizer's memo holds the other widths a wrapped
+            // line is measured at, so the hover loop's per-frame clear and rebuild
+            // (`ContainerFrameItemButton_OnUpdate`) re-measures nothing.
+            if left {
+                model.touch_layout_text(rh, was_shown);
+            }
         }
     }
     if let Ok(t) = tip_mut(model, h) {
+        let used = t.num_lines.min(t.wrapped.len());
+        t.wrapped[..used].fill(false);
         t.num_lines = 0;
         t.min_width = 0.0;
-        // Clear drops the subject and unregisters its health watcher (`0x5300ad`, `0x53007c`).
+        // Clear drops the subject and unregisters its health watcher (`0x5300ad`, `0x53007c`),
+        // and drops the game object and the corpse it kept (`0x5300b9`, `0x5300d1`).
         t.unit_guid = None;
+        t.object_guid = None;
+        t.corpse_guid = None;
     }
+    model.unit_watches.unlink_tooltip(h);
     // New content replaces a spell render still waiting on its view.
     model.spell_tooltip_waits.remove(&h);
+    // The clear zeroes the kept item entry (`0x5300dd`) and spell (`0x5300e3`), so a cache answer
+    // rebuilds nothing.
+    model.item_builds.remove(&h);
+    model.spell_builds.remove(&h);
 }
 
 /// The tooltip's `<name>StatusBar` health bar (`[+0x348]`), if it has one.
@@ -356,9 +270,9 @@ pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
 /// remembered item id (`0x5300dd`) that the cache callback `0x52e530` needs (`0x52e55e`), so the
 /// plate stays down until the next hover.
 ///
-/// A spell render still waiting on its view ([`Model::spell_tooltip_waits`], filled by the host
-/// ahead of a hover) is the one exception: the reference reads spells synchronously and has no
-/// such state. That plate takes the base hide, keeping its owner and its wait, so the view's
+/// A spell render still waiting on its view ([`Model::spell_tooltip_waits`], with no host to build
+/// it at the call) is the one exception: the reference reads spells synchronously and has no such
+/// state. That plate takes the base hide, keeping its owner and its wait, so the view's
 /// arrival renders it in place.
 pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
     let waiting = {
@@ -375,16 +289,17 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
 }
 
 /// The tooltip's show (`0x530a80`, slot `+0x88`), however the show comes: with an owner and a line
-/// (`0x530a83`–`0x530a95`) it restores full alpha, disarms the fade (`0x530aa3`) and runs the base
-/// show; else it clears its shown bit and hides through its own hide (`0x530abe`, `0x530ac8`).
-/// So a parent's show brings back only a tooltip that still has an owner.
+/// (`0x530a83`–`0x530a95`) it restores full alpha, disarms the fade (`0x530aa3`), sizes itself
+/// (`0x530aad`), so a shown tooltip's `Show` sizes it again, and runs the base show, whose `OnShow`
+/// reads the new size; else it clears its shown bit and hides through its own hide (`0x530abe`,
+/// `0x530ac8`). So a parent's show brings back only a tooltip that still has an owner.
 pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
     let live = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let live = tip_mut(&mut model, h).is_ok_and(|t| t.owner.is_some() && t.num_lines > 0);
         if live {
             full_alpha(&mut model, h);
-            owe_relayout(&mut model, h);
+            size::size_tooltip(&mut model, h);
         }
         live
     };
@@ -419,7 +334,7 @@ pub(in crate::script) fn hide_override(lua: &Lua, h: FrameHandle) {
 pub(in crate::script) fn set_owner_core(
     lua: &Lua,
     h: FrameHandle,
-    owner: Option<FrameHandle>,
+    owner: Option<Handle>,
     anchor: TooltipAnchor,
     x: f32,
     y: f32,
@@ -432,24 +347,27 @@ pub(in crate::script) fn set_owner_core(
     };
     t.owner = owner;
     t.anchor = TooltipAnchor::None;
+    t.owner_offset = (x, y);
     if let Some(owner) = owner {
         t.anchor = anchor;
-        apply_anchor(&mut model, h, owner, anchor, x, y);
+        apply_anchor(&mut model, h, owner, anchor, x, y, true);
     }
 }
 
-/// The anchor apply (`0x52fe90`, with the core's 1): `ANCHOR_PRESERVE` returns first
-/// (`0x52fead`); every other mode clears all points (`0x767ed0` at `0x52fec2`); modes 0..5 then
-/// set one point on the owner (`0x52ffbc`), and 6 and 7 stop there. The clear lets
+/// The anchor apply (`0x52fe90`): `ANCHOR_PRESERVE` returns first (`0x52fead`); every other mode
+/// clears all points (`0x767ed0` at `0x52fec2`) but `ANCHOR_NONE` without `clear`: the sizer
+/// passes 0 (`0x530a45`), the SetOwner core 1 (`0x53002d`); modes 0..5 then set one point
+/// on the owner (`0x52ffbc`), and 6 and 7 stop there. The core's clear lets
 /// `GameTooltip_SetDefaultAnchor` (GameTooltip.lua:76-77) set one point with no stale owner
 /// anchor; mode 6 is then placed per frame by `cursor_anchor`.
 fn apply_anchor(
     model: &mut Model,
     h: FrameHandle,
-    owner: FrameHandle,
+    owner: Handle,
     anchor: TooltipAnchor,
     x: f32,
     y: f32,
+    clear: bool,
 ) {
     let pts = match anchor {
         TooltipAnchor::Right => Some((Point::BottomLeft, Point::TopRight)),
@@ -460,7 +378,7 @@ fn apply_anchor(
         TooltipAnchor::BottomLeft => Some((Point::TopRight, Point::BottomLeft)),
         TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => None,
     };
-    if matches!(anchor, TooltipAnchor::Cursor | TooltipAnchor::None) {
+    if anchor == TooltipAnchor::Cursor || (anchor == TooltipAnchor::None && clear) {
         let dropped = model
             .layout_inputs
             .get_mut(&h)
@@ -470,8 +388,7 @@ fn apply_anchor(
         }
     }
     if let Some((own, rel)) = pts {
-        let owner_id = model.frame_id(owner);
-        let new = Anchors::from([Anchor::new(own, owner_id, rel, x, y)]);
+        let new = Anchors::from([Anchor::new(own, owner, rel, x, y)]);
         let input = model.layout_inputs.entry(h).or_default();
         // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout;
         // a real one is `SetPoint` with the invalidate flag (`0x52ff12`..`0x52ffb2`).
@@ -510,7 +427,7 @@ fn full_alpha(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         t.fade_left = None;
     }
-    model.arena.set_alpha(h, 1.0);
+    model.arena.set_alpha(h, 255);
 }
 
 /// Shows or hides as the Lua verbs do, handlers included.
@@ -526,12 +443,12 @@ pub(in crate::script) const DEFAULT_TEXT_GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0
 /// The client's duration formatter (`0x52fa50`): days, hours, minutes or seconds by threshold,
 /// each dividing by its own unit. `round_up` ceils every arm but seconds, which truncates, so 61 s
 /// reads "2 minutes" and 3 599 999 ms "60 minutes". The text is the player's own
-/// `GlobalStrings.lua` through `get`; a missing key renders no line.
+/// `GlobalStrings.lua` through `strings`; a missing key renders no line.
 pub(in crate::script) fn duration_text(
     ms: u32,
     key_prefix: &str,
     round_up: bool,
-    get: &dyn Fn(&str) -> Option<String>,
+    strings: crate::strings::Strings<'_>,
 ) -> Option<String> {
     const DAY_MS: u32 = 86_400_000;
     const HOUR_MS: u32 = 3_600_000;
@@ -552,7 +469,7 @@ pub(in crate::script) fn duration_text(
     } else {
         ms / divisor
     };
-    let template = plural_template(&format!("{key_prefix}_{suffix}"), n, get)?;
+    let template = plural_template(&format!("{key_prefix}_{suffix}"), n, strings)?;
     Some(template.replacen("%d", &n.to_string(), 1))
 }
 
@@ -562,9 +479,9 @@ pub(in crate::script) fn duration_text(
 pub(in crate::script) fn plural_template(
     token: &str,
     n: u32,
-    get: &dyn Fn(&str) -> Option<String>,
+    strings: crate::strings::Strings<'_>,
 ) -> Option<String> {
-    crate::strings::plural(token, Some(n), get)
+    crate::strings::plural(token, Some(n), strings)
 }
 
 /// A colour component by `lua_tonumber`'s coercion: a number or a string `luaO_str2d` reads as
@@ -610,26 +527,19 @@ fn parse_line_tail(lua: &Lua, args: &[Value]) -> ([f32; 4], bool) {
     )
 }
 
-/// A text argument as a line's string: numbers stringify as Lua does, and nil is empty.
-fn text_of(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
-        Some(Value::Number(n)) => {
-            let n = *n;
-            if n == n.trunc() && n.abs() < 1e15 {
-                format!("{}", n as i64)
-            } else {
-                format!("{n}")
-            }
-        }
-        Some(Value::Integer(i)) => format!("{i}"),
-        _ => String::new(),
-    }
+/// A line's text argument as `SetText`, `AddLine` and `AddDoubleLine` read it: `lua_isstring` then
+/// `lua_tostring` (`0x531c25`, `0x5316dc`, `0x5318ef`, `0x53190f`), so a number is its `%.14g`
+/// text and the bytes of a string are kept, lossily; anything else is no text.
+fn text_of(lua: &mlua::Lua, v: Option<&Value>) -> String {
+    v.and_then(|v| crate::script::binding_abi::optional_string(lua, v))
+        .unwrap_or_default()
 }
 
 /// Appends one line, without showing the tooltip or touching a fade (`0x5303b0`): `AddLine`
-/// callers call `Show`. The reference's line core drops a line whose sides are both empty
-/// (`0x530270`); this appends it.
+/// callers call `Show`. The line core (`0x530270`) clears the wrap flag when the right text is
+/// non-empty (`0x53027d`–`0x530284`), adds no line when both texts are empty
+/// (`0x5302a9`–`0x5302b4`) or the array is full (`0x530291`), and writes only a non-empty side
+/// (`0x5302ba`, `0x53030a`).
 pub(super) fn append_line(
     lua: &Lua,
     this: &Table,
@@ -637,72 +547,48 @@ pub(super) fn append_line(
     right: Option<(String, [f32; 4])>,
     wrap: bool,
 ) -> mlua::Result<()> {
+    let right_empty = right.as_ref().is_none_or(|(text, _)| text.is_empty());
+    if left.0.is_empty() && right_empty {
+        return Ok(());
+    }
+    let wrap = wrap && right_empty;
     let h = frame_handle_of(lua, this)?;
-    let n = with_tip(lua, this, |t| t.num_lines + 1)?;
-    ensure_lines(lua, this, n)?;
+    let (cap, have) = with_tip(lua, this, |t| (t.left_lines.len(), t.num_lines))?;
+    // A full line array adds nothing (`0x530291`).
+    if have >= cap {
+        return Ok(());
+    }
+    let n = have + 1;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let (lh, rh) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Tooltip(t)) => (t.left_lines[n - 1], t.right_lines[n - 1]),
-        _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+        _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     };
-    write_cell(&mut model, lh, &left.0, left.1);
-    // The wrap width is pinned at append, so the first measure already comes back wrapped. It is
-    // written from this line's own flag every time, and layout is touched only on a change.
-    let pin = wrap.then_some((crate::widget::TOOLTIP_WRAP_WIDTH, 0.0));
-    if let Some(d) = model.region_data.get_mut(&lh) {
-        if d.size != pin {
-            d.size = pin;
-            // `SetWidth`, which invalidates (`0x7683d0`), named: a conservative touch would
-            // re-derive the whole layout graph on every hover that turns a line wrapped or plain.
-            model.invalidate_region(lh, true);
-            // The wrap pin is the measure key's wrap-width input.
-            model.touch_measure(lh);
-        }
+    if !left.0.is_empty() {
+        write_cell(
+            &mut model,
+            lh,
+            &left.0,
+            crate::color::Rgba8::from_f32(left.1),
+        );
     }
-    if let Some((text, color)) = right {
-        write_cell(&mut model, rh, &text, color);
+    if let Some((text, color)) = right.filter(|(text, _)| !text.is_empty()) {
+        write_cell(&mut model, rh, &text, crate::color::Rgba8::from_f32(color));
     }
     if let Ok(t) = tip_mut(&mut model, h) {
+        // The wrap flag (`0x53036f`), read by the sizer alone; the line is not sized here.
+        if let Some(flag) = t.wrapped.get_mut(n - 1) {
+            *flag = wrap;
+        }
         t.num_lines = n;
     }
-    owe_relayout(&mut model, h);
     Ok(())
 }
 
-/// A line writer or the show ran the relayout (`0x530640`, from `0x52ad59`, `0x52b029`,
-/// `0x52e5ae`, `0x52f869`, `0x530615`, `0x530aad`), which does nothing without an owner
-/// (`0x530651`) and else ends in an unconditional invalidate (`0x530a52`).
-pub(super) fn owe_relayout(model: &mut Model, h: FrameHandle) {
-    if let Ok(t) = tip_mut(model, h) {
-        if t.owner.is_some() {
-            t.relayout_owed = true;
-        }
-    }
-}
-
+mod size;
 mod verbs;
+pub(in crate::script) use size::{size_owed, size_tooltip};
 pub(super) use verbs::install;
-
-/// A line cell's measured extent; `None` for a hidden or unmeasured cell, which adds no size and
-/// no gap, so a fresh tooltip keeps its declared size until its lines are measured.
-type Cell = Option<(f32, f32)>;
-
-fn cell(model: &Model, rh: crate::widget::RegionHandle) -> Cell {
-    let d = model.region_data.get(&rh)?;
-    let text = d.text.as_deref()?;
-    if d.hidden {
-        return None;
-    }
-    if text.is_empty() {
-        // One unit each way, the floor of the line's own rect: the reference's `GetHeight`
-        // (`0x772a60`) clamps to one unit, so no FontString reads back 0.
-        return Some((
-            super::layout::FONTSTRING_MIN_SPAN,
-            super::layout::FONTSTRING_MIN_SPAN,
-        ));
-    }
-    d.measured.map(|m| (m.w, m.h))
-}
 
 /// `ANCHOR_CURSOR` (mode 6), re-anchored every frame by the update override `0x530b20`: one
 /// `SetPoint` (`0x767c70`) pins the plate's BOTTOM to the screen root's BOTTOMLEFT (`0xcf0bd8`)
@@ -730,7 +616,9 @@ fn cursor_anchor(model: &mut Model, h: FrameHandle) {
     }
 }
 
-pub(super) fn layout_tooltips(model: &mut Model) {
+/// The resolve's tooltip pre-pass: each shown `ANCHOR_CURSOR` plate is placed on the cursor
+/// ([`cursor_anchor`]), lines or not.
+pub(super) fn anchor_cursor_tooltips(model: &mut Model) {
     // Only tooltips in the resolve's roster: one outside it would mint an id here and take the
     // layout ledger's conservative branch.
     let tips: Vec<FrameHandle> = model
@@ -741,102 +629,12 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         .filter(|h| model.frame_to_id.contains_key(h))
         .collect();
     for h in tips {
-        // Mode 6 runs before the line gate: the reference re-anchors any shown plate, lines or not.
         let cursor_mode = match model.arena.frame(h).map(|f| (&f.kind_state, f.shown)) {
             Some((KindState::Tooltip(t), shown)) => shown && t.anchor == TooltipAnchor::Cursor,
             _ => false,
         };
         if cursor_mode {
             cursor_anchor(model, h);
-        }
-        // The relayout's closing invalidate (`0x530a52`), whatever it computed. Its own writes
-        // below push when they move the plate; past those, a re-resolve gives back the rect the
-        // plate holds unless that rect is stale, so only then is the invalidate paid here.
-        let owed = tip_mut(model, h).is_ok_and(|t| std::mem::take(&mut t.relayout_owed));
-        if owed && model.frame_holds_stale(h) {
-            model.note_layout_frame_write(h);
-            if let Some(&id) = model.frame_to_id.get(&h) {
-                model.queue_invalidate(id);
-            }
-        }
-        let (num, lefts, rights, min_w, pad_w) = match model.arena.frame(h).map(|f| &f.kind_state) {
-            Some(KindState::Tooltip(t)) => (
-                t.num_lines,
-                t.left_lines.clone(),
-                t.right_lines.clone(),
-                t.min_width,
-                t.padding,
-            ),
-            _ => continue,
-        };
-        if num == 0 {
-            continue;
-        }
-        let n = num.min(lefts.len()).min(rights.len());
-        let rows: Vec<(Cell, Cell)> = (0..n)
-            .map(|i| (cell(model, lefts[i]), cell(model, rights[i])))
-            .collect();
-        let mut maxw: f32 = 0.0;
-        let mut totalh: f32 = 0.0;
-        let mut counted = 0usize;
-        for (l, r) in &rows {
-            if l.is_none() && r.is_none() {
-                continue;
-            }
-            let (lw, lh) = l.unwrap_or((0.0, 0.0));
-            let (rw, rh_h) = r.map_or((0.0, 0.0), |(w, hgt)| (TOOLTIP_DOUBLE_GAP + w, hgt));
-            if counted > 0 {
-                totalh += TOOLTIP_LINE_GAP;
-            }
-            totalh += lh.max(rh_h);
-            counted += 1;
-            maxw = maxw.max(lw + rw);
-        }
-        if counted == 0 {
-            continue; // nothing measured yet: the declared size holds
-        }
-        maxw = maxw.max(min_w);
-        if maxw <= 0.0 || totalh <= 0.0 {
-            continue;
-        }
-        let input = model.layout_inputs.entry(h).or_default();
-        // `pad_w` is `SetPadding`'s extra width (ItemRefTooltip's room for its close button).
-        let (w, ht) = (maxw + 2.0 * TOOLTIP_PAD + pad_w, totalh + 2.0 * TOOLTIP_PAD);
-        let moved = input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-        input.width = w;
-        input.height = ht;
-        // Inside the resolve, so a note and not a touch; the incremental pass still has to hear
-        // that these inputs changed. The size goes through `SetWidth`/`SetHeight` (`0x530a2e`,
-        // `0x530a39`), which invalidate the tooltip.
-        model.note_layout_frame_write(h);
-        // A size the measures moved since the relayout ran: benilla's measures land a tick after
-        // the line write, where the reference's relayout measured in the call.
-        if moved {
-            if let Some(&id) = model.frame_to_id.get(&h) {
-                model.queue_invalidate(id);
-            }
-        }
-        // Right-flush each shown right cell: one `SetPoint(RIGHT, leftCell, LEFT, width, 0)`
-        // (`0x530910`..`0x53094f`), which leaves any other point the cell holds alone.
-        let units = model.layout_units();
-        for (i, (_, r)) in rows.iter().enumerate() {
-            if r.is_none() {
-                continue;
-            }
-            let Some(&left_id) = model.region_to_id.get(&lefts[i]) else {
-                continue;
-            };
-            let new = Anchor::new(Point::Right, left_id, Point::Left, maxw, 0.0);
-            let stored = model
-                .region_data
-                .get_mut(&rights[i])
-                .is_some_and(|d| d.anchors.set(new, units));
-            if stored {
-                model.note_layout_region_write(rights[i]);
-                if let Some(&id) = model.region_to_id.get(&rights[i]) {
-                    model.queue_invalidate(id);
-                }
-            }
         }
     }
 }
@@ -850,7 +648,7 @@ pub(super) fn layout_tooltips(model: &mut Model) {
 pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
     let done = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        // Roster-gated as in `layout_tooltips`, since the hide writes layout.
+        // Roster-gated as in `anchor_cursor_tooltips`, since the hide writes layout.
         if !model.frame_to_id.contains_key(&h) {
             return;
         }
@@ -875,14 +673,14 @@ pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
             .arena
-            .set_alpha(h, 1.0);
+            .set_alpha(h, 255);
         set_shown(lua, h, false);
     }
 }
 
-/// The fade's alpha with `left` seconds to go, in whole 255ths as the reference's `SetAlpha`
-/// takes them. The product is formed in f64, where `left × 255` is exact as in the x87 original.
-fn fade_alpha(left: f32) -> f32 {
+/// The fade's alpha byte with `left` seconds to go, as the reference hands the alpha walk whole
+/// 255ths. The product is formed in f64, where `left × 255` is exact as in the x87 original.
+fn fade_alpha(left: f32) -> u8 {
     let half = f64::from(TOOLTIP_FADE_SECS) * 0.5;
     let left = f64::from(left);
     let units = if left < half {
@@ -890,5 +688,5 @@ fn fade_alpha(left: f32) -> f32 {
     } else {
         255.0
     };
-    (units / 255.0) as f32
+    units as u8
 }

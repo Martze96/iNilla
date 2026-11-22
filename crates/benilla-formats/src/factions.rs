@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, u32_at};
+use crate::dbc::{loc_str, parse, u32_at};
 use crate::Chain;
 
 const FACTION_TEMPLATE: &str = "DBFilesClient\\FactionTemplate.dbc";
@@ -22,10 +22,14 @@ const FACTION_GROUP: &str = "DBFilesClient\\FactionGroup.dbc";
 const CHR_RACES: &str = "DBFilesClient\\ChrRaces.dbc";
 
 /// One `FactionTemplate.dbc` row: the fields the reaction comparator reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FactionTemplate {
     /// The row's `Faction.dbc` id, what another template's `enemies`/`friends` lists name.
     pub faction: u32,
+    /// Column 2, `Flags` (`row+0x8`): bit `0x1000` makes the template's units hostile to a
+    /// contested player (`0x6065be`), vmangos `FACTION_TEMPLATE_FLAG_ATTACK_PVP_ACTIVE_PLAYERS`
+    /// (`DBCEnums.h:81`).
+    pub flags: u32,
     /// The faction-group bits this template belongs to (Player/Alliance/Horde/Monster).
     pub group_mask: u32,
     pub friend_group_mask: u32,
@@ -87,6 +91,12 @@ impl FactionTemplate {
     }
 }
 
+/// The mask bit for a 1-based race or class byte, `dec ecx; shl reg,cl` (`0x4d5512`, `0x52a7dd`):
+/// x86 masks the count to five bits, so 0 tests bit 31 and 33 tests bit 0.
+fn unit_byte_bit(byte: u8) -> u32 {
+    1u32.wrapping_shl(u32::from(byte).wrapping_sub(1))
+}
+
 /// One `Faction.dbc` row's reputation identity: its list slot and the race/class-gated base values
 /// the reference adds to the wire standing.
 #[derive(Debug, Clone, Copy)]
@@ -111,8 +121,7 @@ impl FactionInfo {
     /// only in this loop's accept block (`0x4d5555`). Unlike vmangos's `GetIndexFitTo`, a slot
     /// with both masks zero is rejected (`0x4d550b`), and the last matching slot wins.
     pub fn slot_for(&self, race: u8, class: u8) -> Option<usize> {
-        let race_mask = 1u32 << (race.max(1) - 1);
-        let class_mask = 1u32 << (class.max(1) - 1);
+        let (race_mask, class_mask) = (unit_byte_bit(race), unit_byte_bit(class));
         (0..4).rfind(|&i| {
             let (races, classes) = (self.race_masks[i], self.class_masks[i]);
             (races != 0 || classes != 0)
@@ -138,8 +147,7 @@ impl FactionInfo {
     /// builder `0x529fe0` takes the first matching slot, not the last, and shows the line unless
     /// its flags carry `0x4`. A zero race mask matches on the class mask instead.
     pub fn tooltip_shows_for(&self, race: u8, class: u8) -> bool {
-        let race_bit = 1u32 << (race.max(1) - 1);
-        let class_bit = 1u32 << (class.max(1) - 1);
+        let (race_bit, class_bit) = (unit_byte_bit(race), unit_byte_bit(class));
         for i in 0..4 {
             let race_match = if self.race_masks[i] == 0 {
                 self.class_masks[i]
@@ -178,7 +186,8 @@ pub mod faction_flags {
     /// Listed in the reputation pane, the only flag that gates membership; the server sets it on
     /// first contact and sends `SMSG_SET_FACTION_VISIBLE`.
     pub const VISIBLE: u8 = 0x01;
-    /// The player has declared war on this faction.
+    /// At war: the player's reaction toward the faction's units is hostile (`0x60640c`). The
+    /// pane's toggle, `SMSG_SET_FACTION_ATWAR` and a standing of Hostile or below write it.
     pub const AT_WAR: u8 = 0x02;
     /// Suppresses the standing-change auto-reveal and rank-change chat line; the row stays listed.
     pub const HIDDEN: u8 = 0x04;
@@ -253,6 +262,45 @@ impl FactionCatalog {
             names: HashMap::new(),
             descriptions: HashMap::new(),
         }
+    }
+
+    /// This catalog with one `Faction.dbc` row's reputation identity: list slot `rep_index`, and
+    /// `base` for the races in `race_mask`, whatever the class. Fixture constructor for tests.
+    pub fn with_reputation(
+        mut self,
+        faction_id: u32,
+        rep_index: i32,
+        race_mask: u32,
+        base: i32,
+    ) -> Self {
+        let info = FactionInfo {
+            rep_index,
+            team: 0,
+            race_masks: [race_mask, 0, 0, 0],
+            class_masks: [0; 4],
+            base: [base, 0, 0, 0],
+            flags: [0; 4],
+        };
+        self.factions.insert(faction_id, info);
+        self
+    }
+
+    /// This catalog with `faction_id`'s `team` (its parent, the pane's grouping key), name and
+    /// description. Fixture constructor for tests; the row must exist ([`Self::with_reputation`]).
+    pub fn with_faction_text(
+        mut self,
+        faction_id: u32,
+        team: u32,
+        name: &str,
+        description: &str,
+    ) -> Self {
+        if let Some(info) = self.factions.get_mut(&faction_id) {
+            info.team = team;
+        }
+        self.names.insert(faction_id, name.to_string());
+        self.descriptions
+            .insert(faction_id, description.to_string());
+        self
     }
 
     /// The template row for a `UNIT_FIELD_FACTIONTEMPLATE` id.
@@ -423,6 +471,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
                 id,
                 FactionTemplate {
                     faction: at(1),
+                    flags: at(2),
                     group_mask: at(3),
                     friend_group_mask: at(4),
                     enemy_group_mask: at(5),
@@ -437,6 +486,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
         .read_file(FACTION)
         .with_context(|| format!("reading {FACTION}"))?;
     let rs = parse(&bytes, faction_schema(), "Faction")?;
+    let locale = chain.locale();
     let mut factions = HashMap::with_capacity(rs.records().len());
     let mut names = HashMap::with_capacity(rs.records().len());
     let mut descriptions = HashMap::new();
@@ -455,12 +505,12 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
                     flags: [at(14), at(15), at(16), at(17)],
                 },
             );
-            // Name0 (enUS), column 19: after the ID, the index, 16 slot columns and `Team`.
-            if let Some(name) = crate::dbc::str_at(&rs, r, 19) {
+            // The name block, column 19: after the ID, the index, 16 slot columns and `Team`.
+            if let Some(name) = loc_str(&rs, r, 19, locale) {
                 names.insert(id, name);
             }
-            // Desc0 (enUS), column 28, past the name block; empty on most rows.
-            if let Some(desc) = crate::dbc::str_at(&rs, r, 28) {
+            // The description block, column 28, past the name block; empty on most rows.
+            if let Some(desc) = loc_str(&rs, r, 28, locale) {
                 descriptions.insert(id, desc);
             }
         }
@@ -479,15 +529,15 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
             Some(FactionGroupRow {
                 mask_id: u32_at(r, 1)?,
                 internal: crate::dbc::str_at(&rs, r, 2).unwrap_or_default(),
-                name: crate::dbc::str_at(&rs, r, 3).unwrap_or_default(),
+                name: loc_str(&rs, r, 3, locale).unwrap_or_default(),
             })
         })
         .collect();
     for r in rs.records() {
-        let (Some(mask_id), Some(name)) = (u32_at(r, 1), crate::dbc::str_at(&rs, r, 3)) else {
+        let (Some(mask_id), Some(name)) = (u32_at(r, 1), loc_str(&rs, r, 3, locale)) else {
             continue;
         };
-        // Field 2 is `InternalName`, field 3 `Name0`; `UnitFactionGroup` returns both.
+        // Field 2 is `InternalName`, field 3 the name block; `UnitFactionGroup` returns both.
         if let Some(internal) = crate::dbc::str_at(&rs, r, 2) {
             group_internal_names.insert(1u32 << mask_id, internal);
         }
@@ -524,11 +574,7 @@ mod tests {
     fn tpl(faction: u32) -> FactionTemplate {
         FactionTemplate {
             faction,
-            group_mask: 0,
-            friend_group_mask: 0,
-            enemy_group_mask: 0,
-            enemies: [0; 4],
-            friends: [0; 4],
+            ..Default::default()
         }
     }
 
@@ -796,5 +842,31 @@ mod tests {
             "Argent Dawn's description: {:?}",
             cat.faction_description(529)
         );
+    }
+
+    /// The slot pick builds its bits with `dec ecx; shl reg,cl` on the zero-extended unit bytes
+    /// (`0x4d5512`..`0x4d552d`, and the tooltip's `0x52a7dd`..`0x52a802`): x86 masks the count to
+    /// five bits, so byte 33 tests bit 0 and byte 0 tests bit 31, and no byte panics.
+    #[test]
+    fn slot_bits_mask_the_shift_count_like_shl() {
+        let info = FactionInfo {
+            rep_index: 0,
+            team: 0,
+            race_masks: [1, 1 << 31, 0, 0],
+            class_masks: [1, 1 << 31, 0, 0],
+            base: [100, 200, 0, 0],
+            flags: [0, 0x4, 0, 0],
+        };
+        assert_eq!(info.slot_for(1, 1), Some(0));
+        assert_eq!(info.slot_for(33, 33), Some(0), "count 32 masks to bit 0");
+        assert_eq!(info.slot_for(32, 32), Some(1));
+        assert_eq!(info.slot_for(0, 0), Some(1), "count -1 masks to bit 31");
+        assert_eq!(info.slot_for(34, 1), None, "bit 1 is in no race mask");
+        assert_eq!(info.slot_for(255, 255), None, "count 254 masks to bit 30");
+        assert_eq!(info.base_for(33, 33), 100);
+        assert!(info.tooltip_shows_for(33, 33));
+        assert!(!info.tooltip_shows_for(32, 32), "slot 1 hides the line");
+        assert!(!info.tooltip_shows_for(0, 0), "and so does byte 0's bit 31");
+        assert!(!info.tooltip_shows_for(255, 255));
     }
 }

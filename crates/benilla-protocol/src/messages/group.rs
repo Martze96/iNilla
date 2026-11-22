@@ -69,7 +69,7 @@ impl GroupMemberEntry {
 
 /// The loot tail `SMSG_GROUP_LIST` carries only when it lists members (`Group.cpp:170-179`);
 /// `threshold` is an item quality, 2 to 4 in practice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GroupLootInfo {
     /// 0 free-for-all, 1 round-robin, 2 master, 3 group, 4 need before greed (`LootMethod`).
     pub method: u8,
@@ -102,7 +102,9 @@ pub(super) fn read_group_list(
         let method = read_u8(r)?;
         let master = read_u64_le(r)?;
         let threshold = read_u8(r)?;
-        let _dungeon_difficulty = read_u8(r)?; // always 0 at 5875 (Group.h:281)
+        // 1.12.1 reads a fourth byte it never uses, and a short body leaves it unread without
+        // failing (`0x5e6e3d`, `0x418cb0`): MaNGOS Zero sends none, vmangos a 0 (Group.h:281).
+        let _dungeon_difficulty = read_u8(r).ok();
         Some(GroupLootInfo {
             method,
             master,
@@ -249,18 +251,21 @@ impl PartyMemberStatsInfo {
     /// raw; [`Self::shown_power`] divides at the read. AFK and DND are cleared, as in the client.
     /// `pet` is the object of the member's pet guid ([`ObjectFields::unit_pet_guid`]) when held:
     /// its block is copied, and without one the pet block is emptied (`0x5f0a1f`-`0x5f0b72`).
-    /// `pet_name` is that pet's cached name (`0x609210`, copied into `+0x88` at `0x5f0a70`); a
-    /// pet whose name the cache does not hold yet keeps the name the record had.
-    ///
-    /// Deviation: zone and position are kept, not set to the viewer's zone and the object's
-    /// position, because nothing in benilla reads them.
+    /// `pet_name` is what `0x609210` answers for that pet (`0x5f0a63`), copied into `+0x88`
+    /// (`0x5f0a70`): its cached name, or on a miss the `UNKNOWNOBJECT` text (`0x609324`), so the
+    /// record never keeps the name of a pet it named before. `zone` is the viewer's own zone
+    /// (`0xb4e314`, stored at `0x5f095e`) and `position` the object's x and y as `_ftol`'s low
+    /// words (`0x5f0970`-`0x5f0986`), which the minimap's arrow and the roster's zone read until
+    /// the stats reply.
     ///
     /// [`ObjectFields::unit_pet_guid`]: crate::messages::update_object::ObjectFields::unit_pet_guid
     pub fn snapshot_descriptor(
         &mut self,
         fields: &crate::messages::update_object::ObjectFields,
         pet: Option<&crate::messages::update_object::ObjectFields>,
-        pet_name: Option<&str>,
+        pet_name: &str,
+        zone: u16,
+        position: (i16, i16),
     ) {
         let mut status = member_status::ONLINE;
         if fields.player_is_ghost() {
@@ -287,6 +292,8 @@ impl PartyMemberStatsInfo {
         self.cur_power = Some(fields.unit_power(power_type).unwrap_or(0) as u16);
         self.max_power = Some(fields.unit_max_power(power_type).unwrap_or(0) as u16);
         self.level = Some(fields.unit_level().unwrap_or(0) as u16);
+        self.zone = Some(zone);
+        self.position = Some(position);
         let (buffs, debuffs) = snapshot_aura_block(fields);
         self.auras = Some(buffs);
         self.auras_negative = Some(debuffs);
@@ -296,9 +303,7 @@ impl PartyMemberStatsInfo {
             Some((guid, pet)) => {
                 let power_type = pet.unit_power_type();
                 self.pet_guid = Some(guid);
-                if let Some(name) = pet_name {
-                    self.pet_name = Some(name.to_string());
-                }
+                self.pet_name = Some(pet_name.to_string());
                 self.pet_model_id = Some(pet.unit_displayid().unwrap_or(0) as u16);
                 self.pet_cur_hp = Some(pet.unit_health().unwrap_or(0) as u16);
                 self.pet_max_hp = Some(pet.unit_max_health().unwrap_or(0) as u16);
@@ -343,7 +348,7 @@ impl PartyMemberStatsInfo {
             / power_display_scale(u32::from(self.shown_power_type()))
     }
 
-    /// `UnitPowerType` from the pet block (`+0xd8`, `0x5179d2`'s pet leg), 0 when it has none.
+    /// `UnitPowerType` from the pet block (`+0xd8`, the pet leg `0x5179ff`), 0 when it has none.
     pub fn shown_pet_power_type(&self) -> u8 {
         self.pet_power_type.unwrap_or(0)
     }
@@ -552,7 +557,8 @@ pub fn group_uninvite(member_name: &str) -> Vec<u8> {
     body
 }
 
-/// `CMSG_GROUP_UNINVITE_GUID` body, the raid frame's kick: a full guid (`Group.cpp:14-17`).
+/// `CMSG_GROUP_UNINVITE_GUID` body, the kick `0x5e9510` sends for a player whose object the client
+/// does not hold (`0x5e953e`): a full guid (`Group.cpp:14-17`).
 pub fn group_uninvite_guid(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
@@ -643,9 +649,11 @@ pub fn ready_check_start() -> Vec<u8> {
     Vec::new()
 }
 
-/// `MSG_RAID_READY_CHECK` body answering one: 1 ready or 0 not, no guid (`Group.cpp:84-92`).
-pub fn ready_check_answer(ready: bool) -> Vec<u8> {
-    vec![u8::from(ready)]
+/// `MSG_RAID_READY_CHECK` body answering one: the status byte, no guid (`Group.cpp:84-92`). The
+/// client writes whatever byte `ConfirmReadyCheck` was given (`PutInt8` at `0x4bc0e4`); the stock
+/// buttons pass 1 ready and 0 not.
+pub fn ready_check_answer(status: u8) -> Vec<u8> {
+    vec![status]
 }
 
 /// One `SMSG_RAID_INSTANCE_INFO` row, a permanent raid lockout (vmangos `Player::SendRaidInfo`).

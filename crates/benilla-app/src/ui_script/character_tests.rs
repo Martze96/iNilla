@@ -13,6 +13,7 @@ use super::test_ui::load_ui as load_xml;
 fn player_unit() -> UnitState {
     UnitState {
         exists: true,
+        has_object: true,
         name: Some("Benilla".into()),
         health: 100,
         max_health: 100,
@@ -52,13 +53,18 @@ fn combat_stats() -> UnitCombatStats {
 fn inventory_with_head_item() -> InventorySlots {
     let mut slots: InventorySlots = Default::default();
     slots[1] = Some(InvSlotView {
+        roll: Default::default(),
+        uncached_link: None,
         duration_ms: None,
+        field_duration: 0,
         already_bound: false,
+        occupied_seats: None,
         bonding: 0,
         use_spell: 0,
         use_fork: Default::default(),
         bar_placeable: true,
         consumable: false,
+        spell_charges: [0; 5],
         durability: None,
         flags: 0,
         item_id: 1234,
@@ -66,12 +72,17 @@ fn inventory_with_head_item() -> InventorySlots {
         count: 1,
         contents_count: None,
         quality: 2,
+        inventory_type: Some(1),
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
         guid: 0x70e,
         equip_slots: vec![1],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     slots
 }
@@ -82,11 +93,14 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     slots.insert(
         1,
         benilla_ui::script::ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
             bonding: 0,
             use_spell: 0,
             bar_placeable: true,
@@ -103,12 +117,17 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     benilla_ui::script::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }
@@ -118,7 +137,8 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
 #[test]
 fn shipped_character_frame_loads_clean() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let s = UiScript::new().unwrap();
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     let mut counts = std::collections::HashMap::new();
     for f in super::test_ui::CHARACTER_UI {
         counts.insert(*f, super::test_ui::load_ui_strict(&s, f));
@@ -142,6 +162,7 @@ fn shipped_character_frame_loads_clean() {
 fn shipped_character_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The stock tooltip sizes from its measured lines; a fixed-width font stands in for the atlas.
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
@@ -247,7 +268,8 @@ fn shipped_character_frame_drives_end_to_end() {
         "N/A"
     );
 
-    // The app follows a snapshot push with this event; the slots repaint on the event.
+    // The equipment's producers fire this after the push ([`crate::field_watch`],
+    // [`crate::item_watch`]); the slots repaint on the event.
     s.fire_event(
         "UNIT_INVENTORY_CHANGED",
         vec![ScriptValue::Str("player".into())],
@@ -340,6 +362,7 @@ fn shipped_character_frame_drives_end_to_end() {
 fn close_button_draws_above_the_paper_doll_page() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -375,12 +398,13 @@ fn close_button_draws_above_the_paper_doll_page() {
 
 /// `PaperDollFrame_SetLevel` writes `PLAYER_LEVEL` to `CharacterLevelText` and `HonorLevelText`
 /// (`PaperDollFrame.lua:100-103`); `UNIT_LEVEL` repaints it while the page shows (`:42-49`). A nil
-/// race raises in its `format`, and `ui_unit::feed_units` always pushes the player snapshot before
+/// race raises in its `format`, and the getters read the player through the host before
 /// `PLAYER_ENTERING_WORLD`, so the test seats one first.
 #[test]
 fn level_line_reads_the_snapshot_and_repaints_on_unit_level() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -430,6 +454,7 @@ fn level_line_reads_the_snapshot_and_repaints_on_unit_level() {
 fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -437,6 +462,8 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
     s.set_inventory_slots(inventory_with_head_item());
+    // The worn item's watcher runs the alert recompute, whose event repaints the slots.
+    s.recompute_inventory_alerts();
     // Shown, so extract() emits the slot quads.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
@@ -464,7 +491,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     s.resolve();
     let head_icon_dim = s.extract().iter().any(|q| {
         matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), desaturated, .. }
-            if p.contains("INV_Helmet_01") && *desaturated && c[0] == 0.5 && c[1] == 0.5 && c[2] == 0.5)
+            if p.contains("INV_Helmet_01") && *desaturated && c[..3] == benilla_ui::color::quant::drawn([0.5, 0.5, 0.5, 1.0])[..3])
     });
     assert!(head_icon_dim, "the picked slot's icon dims");
 
@@ -487,6 +514,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
 fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -514,6 +542,7 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     );
 
     s.set_container(0, Some(backpack_with_fitting_helm()));
+    s.seat_item_records();
     s.run("PickupContainerItem(0, 1)").unwrap();
     s.tick(0.0); // delivers the queued CURSOR_UPDATE
     assert!(s.errors().is_empty(), "{:?}", s.errors());
@@ -549,6 +578,7 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
 fn model_pane_click_auto_equips_a_held_bag_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -560,6 +590,7 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
     s.resolve();
 
     s.set_container(0, Some(backpack_with_fitting_helm()));
+    s.seat_item_records();
     s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
 
@@ -585,6 +616,7 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
 fn broken_equipped_item_tints_its_doll_slot_red() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -617,7 +649,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
             _ => None,
         })
     }
-    let red = [0.9, 0.0, 0.0, 1.0];
+    let red = benilla_ui::color::quant::drawn([0.9, 0.0, 0.0, 1.0]);
     let white = [1.0, 1.0, 1.0, 1.0];
     assert_eq!(
         slot_color(&mut s, "CharacterHeadSlot", "Quickslot2"),
@@ -656,9 +688,10 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
 #[test]
 fn tab_round_trip_with_a_selected_skill_by_point() {
     let _data = benilla_formats::wow_data_or_skip!();
-    use benilla_ui::script::{SkillEntry, SkillsState};
+    use benilla_ui::script::{SkillCall, SkillEntry, SkillsState};
 
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -680,6 +713,9 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
                 category_order: 1,
                 description: "Defensive expertise.".into(),
                 abandonable: false,
+                step: 0,
+                flags: 0,
+                tier_id: 0,
                 mono: false,
             },
             SkillEntry {
@@ -697,6 +733,9 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
                 description: "Working with metals.".into(),
                 // A primary profession: SkillRaceClassInfo flag 0x20, `SKILL_FLAG_UNLEARNABLE`.
                 abandonable: true,
+                step: 0,
+                flags: 0,
+                tier_id: 0,
                 mono: false,
             },
         ],
@@ -761,7 +800,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
         "the detail description renders via SKILL_DESCRIPTION"
     );
 
-    // Accepting the unlearn confirm queues CMSG_UNLEARN_SKILL by skill id; the server removes it.
+    // Accepting the unlearn confirm hands CMSG_UNLEARN_SKILL by skill id; the server removes it.
     assert!(
         shown(&mut s, "SkillDetailStatusBarUnlearnButton"),
         "the unlearn button shows for a profession"
@@ -778,9 +817,9 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     );
     s.run("StaticPopup1Button1:Click()").unwrap();
     assert_eq!(
-        s.take_skill_abandons(),
-        vec![164],
-        "accept queues the skill id"
+        s.take_skill_calls(),
+        [SkillCall::Abandon(164)],
+        "accept hands the skill id"
     );
     assert!(!shown(&mut s, "StaticPopup1"), "accept closes the confirm");
     assert_eq!(
@@ -832,6 +871,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
 fn rotate_arrows_tap_twice_and_spin_while_held() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -909,6 +949,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
 fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
@@ -1022,6 +1063,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     /// `2 * CharacterFrameTab1Left:GetWidth()`: the two 20-unit end slices.
     const SIDES: f64 = 40.0;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The app always installs a measurer (`AtlasMeasurer`); a bare VM has none.
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
@@ -1056,7 +1098,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     for i in [0, 2, 3, 4] {
         let (label, width) = first[i];
         assert!(label > 0.0, "tab {} measured its label", i + 1);
-        assert_eq!(
+        benilla_ui::assert_near!(
             width,
             fitted(label),
             "tab {} is its text plus the two end slices, from OnShow alone",
@@ -1069,8 +1111,9 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
             i + 1
         );
     }
-    assert_eq!(
-        first[1].1, 115.0,
+    benilla_ui::assert_near!(
+        first[1].1,
+        115.0,
         "…and the hidden pet tab is not yet fitted"
     );
 
@@ -1078,7 +1121,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     s.run("CharacterFrameTab2:Show()").unwrap();
     s.resolve();
     let (pet_label, pet_width) = widths(&mut s)[1];
-    assert_eq!(
+    benilla_ui::assert_near!(
         pet_width,
         fitted(pet_label),
         "the pet tab fits when it is first shown"
@@ -1089,11 +1132,12 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     }
     s.resolve();
     let settled = widths(&mut s);
-    assert_eq!(
-        settled[0], first[0],
+    benilla_ui::assert_near!(
+        settled[0],
+        first[0],
         "the fit is once, in OnShow — nothing re-fits per frame"
     );
-    assert_eq!(&settled[2..], &first[2..], "…for the whole row");
+    benilla_ui::assert_near!(&settled[2..], &first[2..], "…for the whole row");
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
 
@@ -1104,6 +1148,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
 fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");

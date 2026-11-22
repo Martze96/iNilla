@@ -1,4 +1,5 @@
-//! The realmlist: the `host[:port]` benilla dials for the logon handshake.
+//! The realmlist: the `host[:port]`, or several separated by `;`, benilla dials for the logon
+//! handshake.
 //!
 //! The reference registers the CVar `realmList` (help "Address of realm list server", at
 //! `0x5ab6a6`) and loads it from `realmlist.wtf` beside the executable, with no UI. benilla keeps
@@ -15,7 +16,10 @@ use bevy::prelude::*;
 pub(crate) struct RealmlistPlugin;
 
 /// `realmList`'s change callback: a value that is not an address is ignored with a warning.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<Realmlist>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut realmlist: bevy::prelude::Mut<'_, Realmlist>,
+) {
     if !ev.is(CVAR_REALMLIST) {
         return;
     }
@@ -30,7 +34,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<R
 
 impl Plugin for RealmlistPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<Realmlist>();
     }
 }
@@ -101,6 +104,12 @@ impl Realmlist {
         self.refused.take()
     }
 
+    /// Put back a refused value [`Self::take_refused`] took, for a later reader; a newer refusal
+    /// stands.
+    pub(crate) fn keep_refused(&mut self, typed: String) {
+        self.refused.get_or_insert(typed);
+    }
+
     /// Points at an already normalized `address`; ignored while pinned by the env.
     pub(crate) fn set(&mut self, address: &str) {
         if self.pinned_by_env || self.address == address {
@@ -137,11 +146,20 @@ pub(crate) fn normalize(input: &str) -> Option<String> {
     if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
-    // Mirrors `host_port`'s split: a single colon must carry a valid port; two or more colons
-    // are an IPv6 literal, left intact.
-    if let Some((host, port)) = s.rsplit_once(':') {
-        if !host.contains(':') && (host.is_empty() || port.parse::<u16>().is_err()) {
-            return None;
+    // The logon resolves each `;`-separated host up to the first empty one (`0x43b890`), so the
+    // first must be there. Each mirrors `host_port`'s split: a single colon must carry a valid
+    // port; two or more colons are an IPv6 literal, left intact. Deviation: a host name may carry
+    // a port, where the reference resolves a name whole (`0x43ba0e`) and takes a port only on a
+    // dotted address (`0x43f3d0`), because a self-hosted server on another logon port is usually
+    // written that way (`localhost:3725`), and an address 1.12.1 can dial means the same here.
+    if s.starts_with(';') {
+        return None;
+    }
+    for piece in s.split(';').take_while(|piece| !piece.is_empty()) {
+        if let Some((host, port)) = piece.rsplit_once(':') {
+            if !host.contains(':') && (host.is_empty() || port.parse::<u16>().is_err()) {
+                return None;
+            }
         }
     }
     Some(s.to_string())
@@ -218,6 +236,19 @@ mod tests {
             normalize("logon.example.org:3724").as_deref(),
             Some("logon.example.org:3724"),
         );
+    }
+
+    /// The logon resolves each `;`-separated host in turn (`0x43b890`), so each one's port is
+    /// checked on its own.
+    #[test]
+    fn each_host_of_a_semicolon_list_is_checked_on_its_own() {
+        assert_eq!(
+            normalize("10.0.0.1:3725;logon.example.org").as_deref(),
+            Some("10.0.0.1:3725;logon.example.org"),
+        );
+        assert_eq!(normalize("a.example.org;b.example.org:notaport"), None);
+        assert_eq!(normalize("a.example.org:notaport;b.example.org"), None);
+        assert_eq!(normalize(";a.example.org"), None, "no first host");
     }
 
     #[test]

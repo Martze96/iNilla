@@ -8,6 +8,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use super::{overlay_text, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::ObjectStore;
+use crate::query_cache::Ask;
 use crate::ui_script::{InspectMode, PointerOverUi};
 use benilla_world::interact::{WorldObject, WorldPick};
 use benilla_world::model_render::ModelKind;
@@ -69,7 +70,7 @@ type MotionReadout = (
     Option<&'static crate::net::RemoteMotion>,
     Option<&'static crate::net::UnitMoveModes>,
     // The ground clamp's memo, for the card's `ground` line.
-    Option<&'static crate::net::GroundClamped>,
+    Option<&'static crate::net::motion::spline::GroundClamped>,
     // Where the unit stands now, which the `ground` line reads the terrain against.
     &'static Transform,
 );
@@ -109,10 +110,10 @@ pub(super) struct InspectStores<'w, 's> {
     motion: Query<'w, 's, MotionReadout>,
     /// The MCNK height under the hovered unit, the `ground` line's `terrain`.
     points: benilla_world::world_point::WorldPoint<'w, 's>,
-    factions: Option<Res<'w, crate::target::ring::Factions>>,
     self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
-    /// The live standings: `ring_reaction` takes the reputation branch before the template one.
-    reputations: Res<'w, crate::net::Reputations>,
+    /// The relation model's inputs, the live standings among them: the unit's reaction toward us
+    /// takes the reputation branch before the template one.
+    relations: crate::target::RelationWorld<'w, 's>,
     /// This frame's rendered plate verdict, not a re-derivation, so the card matches the screen.
     plates: Res<'w, crate::vplates::VPlates>,
     /// The two master bits, so a `plate ✗` can say whether the category gate refused it.
@@ -204,9 +205,13 @@ pub(super) fn inspect_ui(
         .entity
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
-    let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
-    let (reputations, plates, plate_mode) =
-        (&*stores.reputations, &stores.plates.0, &*stores.plate_mode);
+    let relations = &stores.relations;
+    let (factions, self_store) = (relations.factions(), stores.self_store.single().ok());
+    let (reputations, plates, plate_mode) = (
+        stores.relations.reputations(),
+        &stores.plates.0,
+        &*stores.plate_mode,
+    );
     let go_templates = &*stores.go_templates;
     let queued_area = stores.stone.as_deref().map_or(0, |s| s.area);
     let hovered_go = &*stores.hovered_go;
@@ -291,7 +296,7 @@ pub(super) fn inspect_ui(
     // The unit's name through the ask-once cache; it fills on a later frame.
     let name_line = net_entity
         .and_then(|p| guids.get(p).ok())
-        .and_then(|g| names.resolve_unit(g.0, store, &net_commands))
+        .and_then(|g| names.resolve_unit(g.0, store, Ask::New(&net_commands)))
         .map(str::to_string);
     // Gate by kind, not field presence: a create-seeded store answers every field (absent is 0).
     let kind = net_entity.and_then(|p| kinds.get(p).ok()).map(|n| n.kind);
@@ -348,7 +353,7 @@ pub(super) fn inspect_ui(
                     self_store, go_guid,
                 ),
                 meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    go_guid.and_then(|g| Some(go_templates.get(g)?.meeting_stone?.area)),
+                    go_templates.of(&s.0).and_then(|t| Some(t.meeting_stone?.area)),
                     queued_area,
                 ),
             };
@@ -364,7 +369,7 @@ pub(super) fn inspect_ui(
             //  · `hover ✓`, `shown ✗`: the publish lost to occlusion, a nearer unit or UI.
             //  · `shown ✓` and no tooltip: the fault is in [`crate::ui_tooltip`].
             // `tmpl —` is the ask-once template query not answered yet.
-            let tmpl = go_guid.and_then(|g| go_templates.get(g));
+            let tmpl = go_templates.of(&s.0);
             let hover_gate = crate::target::cursor_mode::mouseover_eligible(
                 s.0.gameobject_type_id(),
                 flags,
@@ -384,14 +389,15 @@ pub(super) fn inspect_ui(
                     Some(t) => format!("{:?}", t.name),
                 }
             );
-            // TEXT (type 9) only, the template's page: `page —` means none, so no window opens;
-            // `page ?` means the query has not answered yet.
-            let page_text = if s.0.gameobject_type_id() == crate::target::cursor_mode::GO_TYPE_TEXT
-            {
-                let go_guid = net_entity.and_then(|p| guids.get(p).ok()).map(|g| g.0);
-                match go_guid
-                    .and_then(|g| go_templates.get(g))
-                    .map(|t| t.text_page.map_or(0, |p| p.page_id))
+            // A type with a pageID column (TEXT, GOOBER), the template's page: `page —` means
+            // none, so no window opens; `page ?` means the query has not answered yet.
+            let page_text = if crate::go_templates::has_column(
+                &s.0,
+                crate::go_templates::GoColumn::PageId,
+            ) {
+                match go_templates
+                    .of(&s.0)
+                    .map(|t| t.page_id(&s.0))
                 {
                     None => " · page ?".to_string(),
                     Some(0) => " · page —".to_string(),
@@ -435,7 +441,12 @@ pub(super) fn inspect_ui(
     // Why this unit does or does not carry a plate: every input of `vplates::drive_vplates`'s
     // gate and the verdict read from [`crate::vplates::VPlates`].
     let plate_line = store.filter(|_| is_unit).map(|s| {
-        let rank = crate::target::ring::ring_reaction(factions, reputations, Some(s), self_store);
+        let guid = net_entity
+            .and_then(|p| guids.get(p).ok())
+            .map_or(0, |g| g.0);
+        let rel = relations.get();
+        let unit = relations.unit_of(guid, s);
+        let rank = relations.me().map_or(3, |me| rel.reaction(&unit, &me));
         let word = match rank {
             0 => "hated",
             1 => "hostile",
@@ -453,7 +464,7 @@ pub(super) fn inspect_ui(
             s.0.unit_faction_template()
                 .and_then(|t| factions?.catalog().template(t))
                 .map(|t| {
-                    if crate::target::ring::forced_rank(reputations, t.faction).is_some() {
+                    if crate::target::relations::forced_rank(reputations, t.faction).is_some() {
                         "forced"
                     } else if factions
                         .is_some_and(|f| f.catalog().reputation_faction(t.faction).is_some())
@@ -464,10 +475,10 @@ pub(super) fn inspect_ui(
                     }
                 })
                 .unwrap_or("?");
-        let ctype = net_entity
-            .and_then(|p| guids.get(p).ok())
-            .and_then(|g| benilla_protocol::guid::entry(g.0))
-            .and_then(|e| names.creature_type(e));
+        let ctype =
+            s.0.object_entry()
+                .filter(|&e| e != 0)
+                .and_then(|e| names.creature_type(e));
         let ctype = ctype.map_or_else(|| "type ?".to_string(), |t| format!("type {t}"));
         let verdict = match net_entity {
             Some(p) if plates.contains(&p) => "plate ✓".to_string(),
@@ -534,7 +545,7 @@ pub(super) fn inspect_ui(
                 None => moving,
             }
         });
-    // The ground clamp's memo ([`crate::net::GroundClamped`]): `z` is drawn, `seat` the server's
+    // The ground clamp's memo ([`crate::net::motion::spline::GroundClamped`]): `z` is drawn, `seat` the server's
     // last pose, `drop` = `seat - z` the clamp's correction, `terrain` the MCNK height. `walk` is
     // the swept step on a server path and `idle` the settle from the seat; an idle miss stays at
     // the seat, a walk miss descends.

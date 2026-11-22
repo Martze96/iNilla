@@ -123,6 +123,20 @@ impl ItemInfo {
         self.spell_charges_0 != 0 && self.spell_charges_0 != -1
     }
 
+    /// The reference's `template+0x11c != 0`: block 0 names a spell, of any trigger. The worn-item
+    /// cooldown getter runs no query without one (`0x4c8b47`).
+    pub fn has_spell_0(&self) -> bool {
+        self.spells.iter().any(|s| s.index == 0)
+    }
+
+    /// The depleted-charge gate: block 0 carries charges (`template+0x144 != 0`, -1 unlimited
+    /// included) and the instance's `ITEM_FIELD_SPELL_CHARGES[0]` is 0. The tooltip setters and the
+    /// cooldown getters then skip the cooldown query (`0x5347e3`, `0x53318a`, `0x4f9a48`,
+    /// `0x4c8b55`).
+    pub fn charges_depleted(&self, charges_left: i32) -> bool {
+        self.spell_charges_0 != 0 && charges_left == 0
+    }
+
     /// The first ON_USE spell's block ordinal, the third byte of `CMSG_USE_ITEM`; usually 0, but
     /// an item with an ON_EQUIP block 0 has its on-use in a later block.
     pub fn use_spell_index(&self) -> Option<u8> {
@@ -178,6 +192,9 @@ impl ItemInfo {
 
 /// Template bit: right-click opens a loot window, as on a clam or lockbox (`ItemPrototype.h:66`).
 pub const ITEM_FLAG_LOOTABLE: u32 = 0x0000_0004;
+/// Template bit `ITEM_FLAG_PLAYERCAST` (`ItemPrototype.h:70`): the bit a use of the item must carry
+/// to hold the in-flight slot (`0x6e501d`).
+pub const ITEM_FLAG_PLAYERCAST: u32 = 0x0000_0040;
 /// Template bit for gift wrapping (`ItemPrototype.h:73`).
 pub const ITEM_FLAG_WRAPPER: u32 = 0x0000_0200;
 /// Instance (`ITEM_FIELD_FLAGS`) bit a lockbox gains once picked or keyed open.
@@ -417,7 +434,29 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     ))
 }
 
-/// Body of `CMSG_ITEM_QUERY_SINGLE`: entry, then a full item guid (0 with no instance in hand).
+/// Body of `CMSG_ITEM_NAME_QUERY`: the item entry, then the asker's guid, which the 1.12 client
+/// puts because the store's owner flag is set (`0x559fe0`; its query send matches `0x558648`) and
+/// vmangos skips (`ItemNameQuery::ReadFromWorldPacket`).
+pub fn item_name_query(entry: u32, guid: u64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&entry.to_le_bytes());
+    body.extend_from_slice(&guid.to_le_bytes());
+    body
+}
+
+/// Read `SMSG_ITEM_NAME_QUERY_RESPONSE`: the entry, then the name, the one string the store's
+/// reader takes (`0x7c8dc0`); vmangos writes the same pair (`ItemNameQueryResponse::AppendBodyTo`).
+/// A top-bit entry is the store's refusal (`0x556e67`), with nothing after it.
+pub(super) fn read_item_name_query_response(r: &mut &[u8]) -> io::Result<(u32, Option<String>)> {
+    let entry = read_u32_le(r)?;
+    if entry & 0x8000_0000 != 0 {
+        return Ok((entry & 0x7FFF_FFFF, None));
+    }
+    Ok((entry, Some(read_cstring(r)?)))
+}
+
+/// Body of `CMSG_ITEM_QUERY_SINGLE`: entry, then the lookup's owner id (`PutGuid`, `0x558648`
+/// to `0x558698`): an instance's or a unit's guid, a spell's `0xb0000000` id, or 0 for none.
 pub fn item_query(entry: u32, guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&entry.to_le_bytes());
@@ -435,6 +474,7 @@ pub const SLOT_BAG_FIRST: u8 = 19;
 
 /// `SpellCastTargets` mask bits, vmangos `SpellDefines.h`.
 const TARGET_FLAG_GAMEOBJECT: u16 = 0x0800;
+const TARGET_FLAG_TRADE_ITEM: u16 = 0x1000;
 
 const TARGET_FLAG_UNIT: u16 = 0x0002;
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
@@ -458,12 +498,73 @@ pub enum UseItemTarget {
     Dest([f32; 3]),
     /// `TARGET_FLAG_ITEM` and a packed guid: a poison, oil or stone applied to a clicked item.
     Item(u64),
+    /// `TARGET_FLAG_TRADE_ITEM` (`0x1000`) and a trade slot as the packed guid: the non-traded
+    /// slot of the partner's window, which the trade bind `0x6e6900` writes as guid `{6, 0}`
+    /// (`0x6e6915`-`0x6e6925`); vmangos resolves it to the item the partner has there
+    /// (`SpellCastTargetsInfo.cpp:131-135`).
+    TradeItem(u8),
     /// `TARGET_FLAG_SOURCE_LOCATION` and three `f32` coords (`BindLocation`, `0x6e60f0`); only
     /// items carrying spell 265, such as Martin Fury, use it. vmangos reads it before the dest.
     Source([f32; 3]),
     /// A corpse bit and the corpse's packed guid: Goblin Jumper Cables' Defibrillate
     /// (`Targets 0x8000`) on a released player's corpse.
     Corpse(super::spells::CorpseTarget, u64),
+    /// The record's whole mask, which more than one bind wrote: a spell that held on part of its
+    /// word (`0x6e60c1`) and bound the rest later ([`HeldTargets`]).
+    Held(HeldTargets),
+}
+
+/// A targets block as the record's mask (`0xceac5c`) gathered it over binds, every binder or-ing
+/// its bit (`0x6e5e13`, `0x6e5fc7`). `0x7e4e10` writes the mask, then the object's packed guid
+/// for any bit in `0x8a02` (`+0x18`), the item's for `0x1010` (`+0x20`), the source point for
+/// `0x20` (`+0x30`) and the destination for `0x40` (`+0x3c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeldTargets {
+    pub mask: u16,
+    pub object: u64,
+    pub item: u64,
+    pub src: [f32; 3],
+    pub dest: [f32; 3],
+}
+
+impl HeldTargets {
+    /// `target`'s bind written over the record: its bit or-ed into the mask, its guid or point in
+    /// its slot, the object slot taking the last object bound.
+    pub fn with(mut self, target: UseItemTarget) -> Self {
+        match target {
+            UseItemTarget::SelfImplicit => {}
+            UseItemTarget::Unit(guid) => {
+                self.mask |= TARGET_FLAG_UNIT;
+                self.object = guid;
+            }
+            UseItemTarget::Object(guid) => {
+                self.mask |= TARGET_FLAG_GAMEOBJECT;
+                self.object = guid;
+            }
+            UseItemTarget::Corpse(corpse, guid) => {
+                self.mask |= corpse.target_flag();
+                self.object = guid;
+            }
+            UseItemTarget::Item(guid) => {
+                self.mask |= TARGET_FLAG_ITEM;
+                self.item = guid;
+            }
+            UseItemTarget::TradeItem(slot) => {
+                self.mask |= TARGET_FLAG_TRADE_ITEM;
+                self.item = u64::from(slot);
+            }
+            UseItemTarget::Dest(dest) => {
+                self.mask |= TARGET_FLAG_DEST_LOCATION;
+                self.dest = dest;
+            }
+            UseItemTarget::Source(src) => {
+                self.mask |= TARGET_FLAG_SOURCE_LOCATION;
+                self.src = src;
+            }
+            UseItemTarget::Held(held) => self = held,
+        }
+        self
+    }
 }
 
 /// Body of `CMSG_USE_ITEM` (opcode 171): bag index (a bag's player-array slot 19-22, or
@@ -473,10 +574,17 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
     body.push(bag_index);
     body.push(slot);
     body.push(spell_slot);
+    write_cast_targets(&mut body, target);
+    body
+}
+
+/// The targets block every cast request ends in (`0x7e4e10`, called from `SendCast 0x6e54f0`):
+/// the `u16` mask, then the packed guid or the three coords its bit asks for.
+pub(super) fn write_cast_targets(body: &mut Vec<u8>, target: UseItemTarget) {
     let guid = match target {
         UseItemTarget::SelfImplicit => {
             body.extend_from_slice(&0u16.to_le_bytes());
-            return body;
+            return;
         }
         UseItemTarget::Unit(guid) => {
             body.extend_from_slice(&TARGET_FLAG_UNIT.to_le_bytes());
@@ -490,6 +598,10 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
             body.extend_from_slice(&TARGET_FLAG_ITEM.to_le_bytes());
             guid
         }
+        UseItemTarget::TradeItem(slot) => {
+            body.extend_from_slice(&TARGET_FLAG_TRADE_ITEM.to_le_bytes());
+            u64::from(slot)
+        }
         UseItemTarget::Corpse(corpse, guid) => {
             body.extend_from_slice(&corpse.target_flag().to_le_bytes());
             guid
@@ -499,24 +611,73 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
             for c in dest {
                 body.extend_from_slice(&c.to_le_bytes());
             }
-            return body;
+            return;
         }
         UseItemTarget::Source(src) => {
             body.extend_from_slice(&TARGET_FLAG_SOURCE_LOCATION.to_le_bytes());
             for c in src {
                 body.extend_from_slice(&c.to_le_bytes());
             }
-            return body;
+            return;
+        }
+        UseItemTarget::Held(held) => {
+            write_held_targets(body, held);
+            return;
         }
     };
-    crate::wire::write_packed_guid(guid, &mut body).expect("write to Vec cannot fail");
-    body
+    crate::wire::write_packed_guid(guid, body).expect("write to Vec cannot fail");
+}
+
+/// `0x7e4e10` over a gathered mask: the mask (`0x7e4e25`), the object's packed guid for a bit in
+/// `0x8a02` (`0x7e4e2a`), the item's for `0x1010` (`0x7e4e48`), the source point for `0x20`
+/// (`0x7e4e66`) and the destination for `0x40` (`0x7e4e8d`), in that order.
+fn write_held_targets(body: &mut Vec<u8>, held: HeldTargets) {
+    body.extend_from_slice(&held.mask.to_le_bytes());
+    if held.mask & 0x8a02 != 0 {
+        crate::wire::write_packed_guid(held.object, body).expect("write to Vec cannot fail");
+    }
+    if held.mask & 0x1010 != 0 {
+        crate::wire::write_packed_guid(held.item, body).expect("write to Vec cannot fail");
+    }
+    for (bit, point) in [
+        (TARGET_FLAG_SOURCE_LOCATION, held.src),
+        (TARGET_FLAG_DEST_LOCATION, held.dest),
+    ] {
+        if held.mask & bit != 0 {
+            for c in point {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
 }
 
 /// Body of `CMSG_OPEN_ITEM` (opcode 172, `Server/Packets/Spell.h:36-45`): bag index and slot, as
 /// in [`use_item`]. The server loots the item on its own guid, or unwraps a gift in place.
 pub fn open_item(bag_index: u8, slot: u8) -> Vec<u8> {
     vec![bag_index, slot]
+}
+
+/// Body of `CMSG_READ_ITEM` (opcode 173, `0x5ec500`): the container byte, 255 for the player's own
+/// slots or the equipped bag's inventory slot, then the slot, as in [`open_item`].
+pub fn read_item(bag: u8, slot: u8) -> Vec<u8> {
+    vec![bag, slot]
+}
+
+/// `SMSG_READ_ITEM_FAILED`'s tail (`0x5ec600`): the reason byte (0 shows the page, 1 shows it
+/// untranslated with the translation time, anything else closes the reader), and for 1 the time in
+/// milliseconds. vmangos writes neither (`ItemHandler.cpp:445-452`): the reference's failed read of
+/// the byte leaves its stack slot as it was, the high byte of an address, 0, so an absent reason is
+/// 0; a failed read of the time (`0x418e30`) leaves the handler's first argument in its slot, the
+/// opcode 0xaf, so an absent time is 175 ms.
+pub fn read_read_item_failed(r: &mut &[u8]) -> io::Result<(u64, u8, i32)> {
+    let guid = read_u64_le(r)?;
+    let reason = read_u8(r).unwrap_or(0);
+    let milliseconds = if reason == 1 {
+        read_i32_le(r).unwrap_or(i32::from(super::opcode::SMSG_READ_ITEM_FAILED))
+    } else {
+        0
+    };
+    Ok((guid, reason, milliseconds))
 }
 
 /// Body of `CMSG_WRAP_ITEM` (opcode 467, `Server/Packets/Item.cpp:121-127`): the paper's bag and
@@ -628,6 +789,25 @@ mod tests {
     // The query-response parse goldens are in `tests/items.rs`; do not duplicate them here.
 
     // Item-move body goldens follow vmangos `Server/Packets/Item.cpp`; every field is a `u8`.
+
+    /// The item query's body: the entry, then the owner id, both little-endian. A profession or
+    /// trainer getter's owner is `0xb0000000` over the row's spell id (`0x4d9078`-`0x4d9093`),
+    /// the ammo and cooldown lookups' the active player (`0x4c83ad`-`0x4c83c4`, `0x6e2eef`).
+    #[test]
+    fn item_query_bodies_are_byte_exact() {
+        assert_eq!(
+            item_query(2589, 0xb000_0000_0000_07e2),
+            [0x1d, 0x0a, 0, 0, 0xe2, 0x07, 0, 0, 0, 0, 0, 0xb0]
+        );
+        assert_eq!(
+            item_query(2512, 0x0000_0000_0000_002a),
+            [0xd0, 0x09, 0, 0, 0x2a, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            item_query(900, 0),
+            [0x84, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
 
     #[test]
     fn open_container_decodes() {

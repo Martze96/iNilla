@@ -237,13 +237,13 @@ fn scale_propagates_multiplicatively() {
     let child = a.create(FrameKind::Frame, None, Some(root));
     let grand = a.create(FrameKind::Frame, None, Some(child));
 
-    a.set_scale(root, 2.0);
-    a.set_scale(child, 3.0);
+    a.set_scale(root, 2.0, false);
+    a.set_scale(child, 3.0, false);
     assert_eq!(a.frame(root).unwrap().effective_scale, 2.0);
     assert_eq!(a.frame(child).unwrap().effective_scale, 6.0); // 2 * 3
     assert_eq!(a.frame(grand).unwrap().effective_scale, 6.0); // 2 * 3 * 1
 
-    a.set_scale(grand, 0.5);
+    a.set_scale(grand, 0.5, false);
     assert_eq!(a.frame(grand).unwrap().effective_scale, 3.0); // 6 * 0.5
 }
 
@@ -252,12 +252,12 @@ fn scale_epsilon_gate_skips_subthreshold_change() {
     let mut a = arena();
     let root = a.create(FrameKind::Frame, None, None);
     let child = a.create(FrameKind::Frame, None, Some(root));
-    a.set_scale(child, 4.0);
+    a.set_scale(child, 4.0, false);
     assert_eq!(a.frame(child).unwrap().effective_scale, 4.0);
 
     // A sub-ε change to the root prunes the recursion, so the child keeps its exact value.
     let tiny = 1.0 + (SCALE_EPS as f32) / 4.0;
-    a.set_scale(root, tiny);
+    a.set_scale(root, tiny, false);
     assert_eq!(
         a.frame(child).unwrap().effective_scale,
         4.0,
@@ -272,9 +272,9 @@ fn reparent_reinherits_visibility_and_scale() {
     let mut a = arena();
     let hidden = a.create(FrameKind::Frame, None, None);
     a.set_shown(hidden, false);
-    a.set_scale(hidden, 2.0);
+    a.set_scale(hidden, 2.0, false);
     let visible = a.create(FrameKind::Frame, None, None);
-    a.set_scale(visible, 3.0);
+    a.set_scale(visible, 3.0, false);
 
     let child = a.create(FrameKind::Frame, None, Some(visible));
     assert!(a.frame(child).unwrap().effective_visible);
@@ -349,19 +349,49 @@ fn set_alpha_overwrites_the_subtree() {
     let root = a.create(FrameKind::Frame, None, None);
     let child = a.create(FrameKind::Frame, None, Some(root));
     let grandchild = a.create(FrameKind::Frame, None, Some(child));
-    a.set_alpha(root, 0.5);
+    a.set_alpha(root, 127);
     for h in [root, child, grandchild] {
-        assert_eq!(a.frame(h).unwrap().alpha, 0.5);
-        assert_eq!(a.frame(h).unwrap().effective_alpha, 0.5);
+        assert_eq!(a.frame(h).unwrap().alpha, 127);
     }
     // Last write wins: the child's own SetAlpha holds until the parent sets again.
-    a.set_alpha(child, 1.0);
-    assert_eq!(a.frame(root).unwrap().effective_alpha, 0.5);
-    assert_eq!(a.frame(child).unwrap().effective_alpha, 1.0);
-    assert_eq!(a.frame(grandchild).unwrap().effective_alpha, 1.0);
-    // A frame created under a dimmed parent starts at 1.0.
+    a.set_alpha(child, 255);
+    assert_eq!(a.frame(root).unwrap().alpha, 127);
+    assert_eq!(a.frame(child).unwrap().alpha, 255);
+    assert_eq!(a.frame(grandchild).unwrap().alpha, 255);
+    // A frame created under a dimmed parent starts opaque.
     let late = a.create(FrameKind::Frame, None, Some(root));
-    assert_eq!(a.frame(late).unwrap().effective_alpha, 1.0);
+    assert_eq!(a.frame(late).unwrap().alpha, 255);
+}
+
+/// The walk ends at a frame whose byte is already the new one (`0x76a69a`), at every level: the
+/// root re-set to its own byte leaves a child's later write alone, and a child already at the new
+/// byte shields its subtree.
+#[test]
+fn set_alpha_stops_at_an_unchanged_byte() {
+    let mut a = arena();
+    let root = a.create(FrameKind::Frame, None, None);
+    let child = a.create(FrameKind::Frame, None, Some(root));
+    let grandchild = a.create(FrameKind::Frame, None, Some(child));
+    a.set_alpha(root, 127);
+    a.set_alpha(child, 255);
+    a.set_alpha(root, 127);
+    assert_eq!(
+        a.frame(child).unwrap().alpha,
+        255,
+        "the root was already 127"
+    );
+    assert_eq!(a.frame(grandchild).unwrap().alpha, 255);
+
+    a.set_alpha(child, 64);
+    a.set_alpha(grandchild, 200);
+    a.set_alpha(root, 64);
+    assert_eq!(a.frame(root).unwrap().alpha, 64);
+    assert_eq!(a.frame(child).unwrap().alpha, 64);
+    assert_eq!(
+        a.frame(grandchild).unwrap().alpha,
+        200,
+        "the child was already 64, so the walk ended there"
+    );
 }
 
 // ── The per-kind registries ──────────────────────────────────────────────────────────────────
@@ -446,4 +476,27 @@ fn a_region_leaving_its_parent_empties_the_kind_slot_that_held_it() {
         unreachable!()
     };
     assert_eq!((s.checked_tex, s.normal), (None, None));
+}
+
+// ── Region places ────────────────────────────────────────────────────────────────────────────
+
+/// A renumber at the key's cap keeps the registration order, not the list order: a region
+/// registered again stays behind the one it passed.
+#[test]
+fn the_decl_renumber_keeps_the_registration_order() {
+    let mut a = arena();
+    let f = a.create(FrameKind::Frame, None, None);
+    let layer = crate::order::DrawLayer::Artwork;
+    let first = a.create_region(f, RegionKind::Texture, layer, 0).unwrap();
+    let second = a.create_region(f, RegionKind::Texture, layer, 0).unwrap();
+    let third = a.create_region(f, RegionKind::Texture, layer, 0).unwrap();
+    a.restamp_region(first);
+    a.frame_mut(f).unwrap().next_decl = crate::order::DECL_CAP;
+    a.restamp_region(third);
+    let decl = |a: &WidgetArena, r| a.region(r).unwrap().decl_seq;
+    // Renumbered as second, third, first; then third registers again at the tail.
+    assert_eq!(
+        [decl(&a, second), decl(&a, first), decl(&a, third)],
+        [0, 2, 3]
+    );
 }

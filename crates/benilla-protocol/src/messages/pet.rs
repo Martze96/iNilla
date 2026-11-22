@@ -51,10 +51,6 @@ pub const PET_STATE_BAR_DISABLED: u32 = 0x0800_0000;
 /// (`0x4bd075`). `UNIT_FLAG_POSSESSED` is not among them: a possessed unit's bar must work.
 pub const PET_UNUSABLE_UNIT_FLAGS: u32 = 0x0004_0000 | 0x0040_0000 | 0x0080_0000;
 
-/// Permanent-cooldown marker OR-ed into a pet cooldown's category duration (vmangos
-/// `Unit.cpp:11270-11271`); strip it before using the number as a duration.
-pub const PET_COOLDOWN_PERMANENT: u32 = 0x0800_0000;
-
 /// One packed pet action word, as the client decodes it (`0x4bdcc7`/`0x4bdccd`/`0x4bdce3`): the
 /// action in bits 0-15, the type in 24-29, autocast allowed in 31 and on in 30; bits 16-23 are
 /// never read. The raw word is kept because the client echoes it verbatim in [`pet_action`].
@@ -73,7 +69,7 @@ impl PetActionEntry {
         ((self.packed >> 24) & 0x3F) as u8
     }
     /// Client types 1-5 take the spell branch. Deviation: a type outside 1-7 reads as nothing
-    /// rather than the reference's default arm, which under-pushes its returns.
+    /// rather than the reference's default arm, because that arm under-pushes its returns.
     pub fn is_spell(self) -> bool {
         (PET_TYPE_SPELL_FIRST..=PET_TYPE_SPELL_LAST).contains(&self.kind())
     }
@@ -114,7 +110,7 @@ pub struct PetSpellCooldown {
     pub spell_id: u32,
     pub category: u16,
     pub spell_cd_ms: u32,
-    /// The category remainder, possibly carrying [`PET_COOLDOWN_PERMANENT`] in its top bits.
+    /// The category remainder in ms, bit 31 the held flag (`0x4bda97`).
     pub category_cd_ms: u32,
 }
 
@@ -193,7 +189,7 @@ pub(super) fn read_pet_spells(r: &mut &[u8]) -> io::Result<PetSpells> {
 /// The trailing cooldown block. The client reads `u8 count` then 12-byte entries
 /// `{u16 spell, u16 category, u32, u32}` (`0x4bda58`); vmangos writes `u16 count` then 14-byte
 /// entries with a `u32` spell (`Unit.cpp:11245-11278`). Deviation: both are read, told apart
-/// exactly by the tail length (`12n` vs `1 + 14n`), since the 1.12 client mis-parses vmangos's.
+/// exactly by the tail length (`12n` vs `1 + 14n`), because the 1.12 client mis-parses vmangos's.
 fn read_cooldown_block(r: &mut &[u8]) -> io::Result<Vec<PetSpellCooldown>> {
     let count = usize::from(read_u8(r)?);
     // At `count == 0` vmangos still leaves its `u16` count's high byte; it is consumed so the
@@ -312,6 +308,18 @@ pub fn pet_action(pet_guid: u64, packed: u32, target_guid: u64) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_PET_CAST_SPELL` (opcode 0x1f0), which `SendCast` (`0x6e54f0`) writes for a cast
+/// whose caster is not the active player (`0x6e5808`): the caster's `u64` guid (`0x6e582d`), the
+/// `u32` spell, then the targets block every cast request ends in (`0x7e4e10`). vmangos reads it
+/// in that order (`Packets/Pet.cpp:65-70`) and casts only for its pet or its charm.
+pub fn pet_cast_spell(caster_guid: u64, spell_id: u32, target: super::UseItemTarget) -> Vec<u8> {
+    let mut body = Vec::with_capacity(14);
+    body.extend_from_slice(&caster_guid.to_le_bytes());
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    super::items::write_cast_targets(&mut body, target);
+    body
+}
+
 /// Body of `CMSG_PET_STOP_ATTACK` (opcode 746, vmangos `Packets/Pet.cpp:33-36`): the pet guid,
 /// sent by the Attack button's second press (`PetActionBarFrame.lua:258-262`).
 pub fn pet_stop_attack(pet_guid: u64) -> Vec<u8> {
@@ -373,6 +381,13 @@ pub fn pet_rename(pet_guid: u64, name: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hx(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     /// A hunter pet's `SMSG_PET_SPELLS` as vmangos builds it, with one spell and one cooldown.
     fn pet_spells_body() -> Vec<u8> {
@@ -533,6 +548,30 @@ mod tests {
         );
 
         assert_eq!(pet_stop_attack(0x2A), 0x2Au64.to_le_bytes());
+
+        // CMSG_PET_CAST_SPELL: the caster's whole guid, the spell, then the block CMSG_CAST_SPELL
+        // and CMSG_USE_ITEM end in. A unit packs to its mask byte and the nonzero bytes; a ground
+        // cast carries the 0x0040 bit and three f32 coords; mask 0 ends the body.
+        assert_eq!(
+            pet_cast_spell(
+                0xF140_0000_0000_0077,
+                6358,
+                crate::messages::UseItemTarget::Unit(0xF130_0000_0000_0001)
+            ),
+            hx("77000000000040f1d61800000200c10130f1")
+        );
+        assert_eq!(
+            pet_cast_spell(
+                0x2A,
+                11829,
+                crate::messages::UseItemTarget::Dest([1.0, 2.0, 3.0])
+            ),
+            hx("2a00000000000000352e000040000000803f0000004000004040")
+        );
+        assert_eq!(
+            pet_cast_spell(0x2A, 19474, crate::messages::UseItemTarget::SelfImplicit),
+            hx("2a00000000000000124c00000000")
+        );
 
         assert_eq!(
             pet_cancel_aura(0x2A, 2645),

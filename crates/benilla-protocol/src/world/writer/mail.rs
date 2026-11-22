@@ -80,18 +80,23 @@ impl WorldWriter {
 
     /// `CMSG_MAIL_CREATE_TEXT_ITEM`: a permanent copy of the letter; acked with
     /// [`messages::mail_action::MADE_PERMANENT`].
-    pub fn mail_create_text_item(&mut self, mailbox: u64, mail_id: u32) -> Result<()> {
+    pub fn mail_create_text_item(
+        &mut self,
+        mailbox: u64,
+        mail_id: u32,
+        template_id: u32,
+    ) -> Result<()> {
         self.send(
             opcode::CMSG_MAIL_CREATE_TEXT_ITEM,
-            &messages::mail_create_text_item(mailbox, mail_id),
+            &messages::mail_create_text_item(mailbox, mail_id, template_id),
         )
     }
 
     /// `CMSG_ITEM_TEXT_QUERY`: a letter's body, asked once per mail with a nonzero `item_text_id`.
-    pub fn item_text_query(&mut self, text_id: u32, mail_id: u32) -> Result<()> {
+    pub fn item_text_query(&mut self, text_id: u32, key: u64) -> Result<()> {
         self.send(
             opcode::CMSG_ITEM_TEXT_QUERY,
-            &messages::item_text_query(text_id, mail_id),
+            &messages::item_text_query(text_id, key),
         )
     }
 

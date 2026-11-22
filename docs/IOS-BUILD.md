@@ -29,7 +29,7 @@ Release files do not count against the Actions storage quota; run artifacts do (
 
 | step | where | why |
 |---|---|---|
-| the whole Rust build → `libinilla_ios.a` | Linux (`ios/build-staticlib.sh`) | A static library is an archive, not a link: no Apple linker or SDK is involved. The handful of C files in the graph (Lua, blake3, ring, tracing-oslog's wrapper) compile with the host clang against the open-source Darwin libc headers that Zig distributes (`ios/toolchain/linux-env.sh`, pinned by hash), plus a small `<os/log.h>` shim. |
+| the whole Rust build → `libinilla_ios.a` | Linux (`ios/build-staticlib.sh`) | A static library is an archive, not a link: no Apple linker or SDK is involved. The handful of C files in the graph (blake3, ring, tracing-oslog's wrapper) compile with the host clang against the open-source Darwin libc headers that Zig distributes (`ios/toolchain/linux-env.sh`, pinned by hash), plus a small `<os/log.h>` shim. |
 | link + bundle + sign + zip → `iNilla.ipa` | macOS (`ios/package-ipa.sh`) | The link needs the iPhoneOS SDK's framework stubs. A couple of minutes. |
 
 Why it matters: on a **private** repository GitHub counts macOS minutes **10×** against the plan's
@@ -61,7 +61,7 @@ INILLA_FEATURES=dev ios/build-staticlib.sh    # with benilla's dev instruments
 
 Beside the archive: `native-libs.txt` (the frameworks and system libraries rustc reports for the
 link) and `lib/`, the native archives a build script links without bundling them into the
-staticlib (`liblua5.1.a`, from `third_party/lua-src`).
+staticlib (none in today's graph: benilla's Lua is its own Rust VM, `benilla-lua`).
 
 and on a Mac with Xcode:
 
@@ -127,6 +127,8 @@ id). Documents, the game data and the Keychain are kept.
 
 - The app opens and closes at once → the session log from the attempt is in
   Files → On My iPhone → iNilla → benilla-config → Diagnostics (`session-*.log`, `crash-*.txt`).
-- "Warden" in the login error → the server runs Warden; benilla cannot join it.
+- Disconnected a short while after entering the world → the server may run Warden. benilla does
+  not answer Warden, so such a server ends the session after its response timeout; play needs a
+  server with Warden off.
 - A black screen after login → Settings → Debug → turn on the perf overlay (memory headroom) and
   the remote console, and read the log live ([DEBUGGING.md](DEBUGGING.md)).

@@ -10,7 +10,7 @@ use benilla_assets::coords::wow_to_bevy;
 
 use benilla_assets::{RenderConfig, WorldAssets};
 use benilla_world::terrain_stream::SPAWN_XY;
-use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, NEARCLIP_DEFAULT};
+use benilla_world::view::{world_fovy, WorldCamera, CAM_FAR, NEARCLIP_DEFAULT};
 
 use super::{
     CameraControl, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_DIST_DEFAULT, CAPSULE_HEIGHT,
@@ -102,7 +102,8 @@ pub(super) fn setup_player(
             // Frame zero only: `view::stamp_near_clip` re-stamps the live `nearclip` every frame,
             // as `0x511bc0` overwrites the reference camera's `[cam+0x38]`.
             near: NEARCLIP_DEFAULT,
-            fov: CAM_FOVY,
+            // Frame zero only: `view::stamp_world_fov` derives it from the viewport's aspect.
+            fov: world_fovy(16.0 / 9.0),
             ..default()
         }),
         // A linear `Rgba16Float` target without tonemapping: the shaders light in clamped gamma
@@ -138,12 +139,12 @@ pub(super) fn setup_player(
 /// is wider than `world_is_live`, as the world streams in under the cover, but waits until the
 /// cover is presented, so the cover's first frame is not spent on a cold world render.
 pub(super) fn gate_world_camera(
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     loading: Res<crate::loading_screen::LoadingScreen>,
     cover: Res<crate::loading_screen::EntryCover>,
     mut cams: Query<&mut Camera, With<WorldCamera>>,
 ) {
-    let active = (*state.get() == crate::char_select::ClientState::InWorld || loading.covering())
+    let active = (*state.get() == crate::client_state::ClientState::InWorld || loading.covering())
         && !cover.owes_a_present();
     for mut cam in &mut cams {
         if cam.is_active != active {

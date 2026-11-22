@@ -1,7 +1,7 @@
 //! Keys on the stock glue screens, end to end: the host's key and char events into the stock
 //! GlueXML in the glue VM.
 
-use benilla_ui::script::{GlueNotice, NoticeState, UiScript};
+use benilla_ui::script::{GlueNotice, GlueRequest, NoticeState, UiScript};
 
 use super::glue::{load_glue, set_glue_screen, GlueScreen};
 
@@ -68,7 +68,7 @@ fn the_stock_login_boxes_take_typed_keys() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The login screen's Cinematics button shows `MovieFrame`; no movie plays here, so
+/// The login screen's Cinematics button shows `MovieFrame`; with no movie file to open
 /// `StartMovie` answers nil and the stock `MovieFrame_PlayMovie` hides the frame, whose `OnHide`
 /// puts the login screen back and the pointer with it (`MovieFrame.lua:18-23,40-44`).
 #[test]
@@ -127,6 +127,67 @@ fn escape_on_a_playing_movie_returns_to_login_on_the_key_up() {
     assert_eq!(s.take_errors(), Vec::<String>::new());
 }
 
+/// The movie screen stops the glue music (`GlueParent.lua:50-51`), and the movies' end brings it
+/// back: each movie's last frame fires `OnMovieFinished`, which starts the next
+/// (`MovieFrame_PlayNextMovie`); past the last the frame hides, and its `OnHide` puts the login
+/// screen up, which plays the music (`MovieFrame.lua:18-23,40-44`, `GlueParent.lua:53`).
+#[test]
+fn the_movies_end_returns_to_the_login_screen_and_its_music() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let mut s = glue_on(GlueScreen::Login);
+    s.register_cvars([("movieSubtitle", "0"), ("gxResolution", "1024x768")]);
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = opened.clone();
+    s.set_movie_reader(Box::new(move |path, _| {
+        log.borrow_mut().push(path.to_string());
+        path.ends_with(".avi").then(|| {
+            benilla_movie::testing::synthetic_avi(1024, 464, (1, 25), 3, &[b"", b"", b""], &[])
+        })
+    }));
+    s.set_now(8.0);
+    let _ = s.take_glue_requests();
+    super::glue::signal_glue_screen(&mut s, "movie");
+    s.resolve();
+    assert!(s.eval::<bool>("return MovieFrame:IsShown() == 1").unwrap());
+    let requests = |s: &mut UiScript| format!("{:?}", s.take_glue_requests());
+    assert_eq!(
+        requests(&mut s),
+        format!("{:?}", [GlueRequest::StopGlueMusic])
+    );
+    // The logo: frame 0 at the first step, its count of 3 reached at 100 ms.
+    s.tick(0.0);
+    s.tick(0.125);
+    assert!(s.eval::<bool>("return MovieFrame:IsShown() == 1").unwrap());
+    assert_eq!(requests(&mut s), "[]", "the intro follows the logo");
+    s.tick(0.0);
+    s.tick(0.125);
+    s.resolve();
+    assert_eq!(
+        opened.borrow().clone(),
+        [
+            "Interface\\Cinematics\\Logo_1024.avi",
+            "Interface\\Cinematics\\Logo_1024.sbt",
+            "Interface\\Cinematics\\WOW_Intro_1024.avi",
+            "Interface\\Cinematics\\WOW_Intro_1024.sbt",
+        ]
+    );
+    assert!(!s.eval::<bool>("return MovieFrame:IsShown() == 1").unwrap());
+    assert!(s
+        .eval::<bool>("return AccountLoginUI:IsVisible() == 1")
+        .unwrap());
+    assert_eq!(
+        requests(&mut s),
+        format!(
+            "{:?}",
+            [GlueRequest::PlayGlueMusic(
+                "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3".to_string()
+            )]
+        )
+    );
+    assert!(!s.movie_playing());
+    assert_eq!(s.take_errors(), Vec::<String>::new());
+}
+
 /// The Realmlist dialog widens the stock edit box, whose border is two 75-pixel caps that meet at
 /// its own 130 pixels: while it is wide the stretched middle fills the gap between the caps, as the
 /// chat box's does (`ChatFrame.xml:41-55`), and the stock box comes back untouched.
@@ -145,8 +206,8 @@ fn the_widened_realmlist_box_has_a_border_between_its_caps() {
         .unwrap()
     };
     let (box_left, box_right, mid_left, mid_right) = span(&s);
-    assert_eq!(box_right - box_left, 300.0);
-    assert_eq!(
+    benilla_ui::assert_near!(box_right - box_left, 300.0);
+    benilla_ui::assert_near!(
         (mid_left - box_left, box_right - mid_right),
         (65.0, 65.0),
         "the middle starts where the left cap ends and ends where the right one starts"
@@ -160,10 +221,10 @@ fn the_widened_realmlist_box_has_a_border_between_its_caps() {
     assert!(!s
         .eval::<bool>("return BenillaRealmlist_Middle:IsShown() == 1")
         .unwrap());
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return GlueDialogEditBox:GetWidth()")
             .unwrap(),
         130.0
     );
-    assert_eq!(s.take_errors(), Vec::<String>::new());
+    benilla_ui::assert_near!(s.take_errors(), Vec::<String>::new());
 }

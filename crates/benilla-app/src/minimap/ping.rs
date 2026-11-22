@@ -1,157 +1,173 @@
 //! The minimap ping, engine-owned and pinned to a world point.
 //!
-//! The world `(x, y)` is the only stored position: the stock `Minimap_OnUpdate` re-seats the
-//! `MiniMapPing` frame every frame from `GetPingPosition()`, the normalized offset
-//! [`drive_minimap_ping`] republishes against the live view radius, so the marker follows the pan
-//! and the zoom with no second copy to fall out of step.
+//! The world `(x, y)` is the only stored position, in the VM's minimap statics: `PingLocation`
+//! sets it and signals `MINIMAP_PING` inside the call, and `GetPingPosition()` recomputes its
+//! offset from the player at every call (`benilla_ui`'s `MinimapStatics`), so the marker follows
+//! the pan and the zoom with no second copy to fall out of step.
 //!
-//! - In: the stock `Minimap_OnClick` calls `Minimap:PingLocation(dx, dy)` in the minimap's units
-//!   from the centre, which the engine hands over in root units; the renderer converts them with
-//!   the geometry of the frame it draws: root units × the seam scale = window px, ÷ `px_per_yd` =
-//!   yards.
-//! - Across: our ping sends `MSG_MINIMAP_PING` (raw world floats, relayed to the rest of the group
-//!   only, `GroupHandler.cpp:384-391`); a member's seats the same way. A ping seats locally at
-//!   click time, so a solo ping works.
-//! - Out: `MINIMAP_PING (unitToken, nx, ny)` fires with the relay `0x4ee330`'s offsets
-//!   `(−dy·k, dx·k)`, `k = 1/(2·radius)`; `Minimap:GetPingPosition()` reads them back.
+//! - In: the stock `Minimap_OnClick` calls `Minimap:PingLocation(dx, dy)`; the VM turns it into a
+//!   world point against the frame's own size and the zoom diameter. A group member's
+//!   `MSG_MINIMAP_PING` (raw world floats) applies at its packet ([`on_minimap_ping`]), its
+//!   `MINIMAP_PING` on the notice lane.
+//! - Out: our own ping goes on the wire when grouped (relayed to the rest of the group only,
+//!   `GroupHandler.cpp:384-391`), inside its call ([`MinimapSteps`]).
 //!
-//! The reference keeps the world point in two statics nothing clears (`0xbc787c`/`0xbc7880`), and
-//! the stock `Minimap.lua` owns everything visible: it shows the `MiniMapPing` `<Model>`
-//! (`Interface\MiniMap\Ping\MinimapPing.mdx`, rendered by `crate::ui_models`), holds it 5 s and
-//! fades it 0.5 s (`MINIMAPPING_TIMER`, `MINIMAPPING_FADE_TIMER`). `WorldMapPing` is the same model
-//! on the world map.
+//! The reference keeps the world point in two statics nothing clears (`0xbc787c`/`0xbc7880`),
+//! across a `ReloadUI` too, so [`MinimapPing`] keeps the process's copy, which a new VM is seeded
+//! with as it is built. The stock `Minimap.lua` owns everything visible: it shows the
+//! `MiniMapPing` `<Model>` (`Interface\MiniMap\Ping\MinimapPing.mdx`, rendered by
+//! `crate::ui_models`), holds it 5 s and fades it 0.5 s (`MINIMAPPING_TIMER`,
+//! `MINIMAPPING_FADE_TIMER`). `WorldMapPing` is the same model on the world map.
 //!
 //! Reaching a ping does not clear it: the reference's 10-yd `d² < 100` auto-clear belongs to the
 //! `SMSG_GOSSIP_POI` marker (`0x6d99aa`–`0x6d9a4c`).
 
 use bevy::prelude::*;
 
-use benilla_assets::coords::bevy_to_wow;
-use benilla_ui::script::{ScriptValue, UiScript};
+use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
-use super::blips::BlipCtx;
 use crate::net::{ClientCommand, Guid, NetCommands, SelfPlayer};
 use crate::player::Player;
 
-/// The stored ping, the reference's two statics: one, never cleared, with no map tag (after a
-/// worldport the old point re-projects and the stock Lua's disc test hides it).
-struct LivePing {
-    /// The WoW `(x, y)` this ping marks; the screen seat is re-derived from it every frame.
-    world: (f32, f32),
-    /// The pinger's guid, `0` for ourselves: the event's unit token, and whether it is sent.
-    sender: u64,
-}
-
-/// The engine-owned ping, seated by a click or a group member's `MSG_MINIMAP_PING`, announced by
-/// [`drive_minimap_ping`] and drawn by the stock `MiniMapPing` frame.
+/// The process's copy of the ping statics, which a new VM inherits.
 #[derive(Resource, Default)]
 pub(crate) struct MinimapPing {
-    live: Option<LivePing>,
-    /// Seated since the last [`drive_minimap_ping`]: owes a `MINIMAP_PING` event, and the wire send
-    /// if ours.
-    fresh: bool,
+    /// The last ping's WoW `(x, y)`; the statics start at zero.
+    world: (f32, f32),
 }
 
 impl MinimapPing {
-    /// Seat a ping at a world point, replacing the live one, as the reference's re-ping does.
-    pub(crate) fn seat(&mut self, world: (f32, f32), sender: u64) {
-        self.live = Some(LivePing { world, sender });
-        self.fresh = true;
+    /// The stored point, a new VM's seed.
+    pub(crate) fn point(&self) -> (f32, f32) {
+        self.world
+    }
+
+    /// `sender`'s ping at the world point `at` (`0x4ee330`): the point stored (`0x4ee366`,
+    /// `0x4ee373`), and the signal that follows, its token resolved against `group` as it stands,
+    /// `me` our own guid.
+    pub(crate) fn member(
+        &mut self,
+        at: (f32, f32),
+        sender: u64,
+        me: Option<u64>,
+        group: Option<&crate::ui_party::GroupState>,
+    ) -> MemberPing {
+        self.world = at;
+        MemberPing {
+            token: PingToken::of(sender, me, group),
+            x: at.0.to_bits(),
+            y: at.1.to_bits(),
+        }
     }
 }
 
-/// A `Minimap:PingLocation(x, y)` click to the world point it names: `ui` is centre-relative root
-/// units (x right, y up), `seam` window px per root unit ([`crate::ui_script::seam_scale`]), `ctx`
-/// the map as drawn this frame. The inverse of [`BlipCtx::offset`]: screen right is −WoW y, screen
-/// up +WoW x. `None` outside the disc, the stock test (`Minimap.lua:135`) in yards.
-fn click_to_world(ctx: &BlipCtx, ui: (f32, f32), seam: f32) -> Option<(f32, f32)> {
-    if ctx.px_per_yd <= 0.0 || seam <= 0.0 {
-        return None;
-    }
-    let right_yd = ui.0 * seam / ctx.px_per_yd;
-    let up_yd = ui.1 * seam / ctx.px_per_yd;
-    if right_yd.hypot(up_yd) >= ctx.radius_yd {
-        return None;
-    }
-    Some((ctx.wx + up_yd, ctx.wy - right_yd))
+/// The pinger's unit token (`0x4ee330`): ourselves, else the sender's party slot (`party%d`,
+/// `0x4ee412`), else its raid row (`raid%d`, `0x4ee41b`), each 1-based, the party scan first; a
+/// sender in neither leaves `player`, the buffer's first text (`0x4ee379`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PingToken {
+    Player,
+    Party(u8),
+    Raid(u8),
 }
 
-/// Seat this frame's `Minimap:PingLocation` click inside the renderer, against the geometry the
-/// map drew this frame, so a click is never converted at a stale scale.
-pub(super) fn seat_click(ctx: &BlipCtx, ping: &mut MinimapPing, click: Option<(f32, f32)>) {
-    if let Some(world) = click.and_then(|c| click_to_world(ctx, c, ctx.seam)) {
-        ping.seat(world, 0);
+impl PingToken {
+    /// The token `sender` resolves to against `group` as it stands, `me` our own guid.
+    fn of(sender: u64, me: Option<u64>, group: Option<&crate::ui_party::GroupState>) -> Self {
+        if Some(sender) == me {
+            return Self::Player;
+        }
+        let Some(group) = group else {
+            return Self::Player;
+        };
+        if let Some(i) = group.party_slots().position(|m| m.guid == sender) {
+            Self::Party(i as u8 + 1)
+        } else if let Some(i) = group.raid_rows().position(|g| g == sender) {
+            Self::Raid(i as u8 + 1)
+        } else {
+            Self::Player
+        }
+    }
+
+    fn text(self) -> String {
+        match self {
+            Self::Player => "player".to_string(),
+            Self::Party(n) => format!("party{n}"),
+            Self::Raid(n) => format!("raid{n}"),
+        }
     }
 }
 
-/// Republish the ping's normalized position and announce a fresh ping. Runs before the script
-/// tick, so the `MINIMAP_PING` event and `Minimap:GetPingPosition()` land in the same tick.
-pub(super) fn drive_minimap_ping(
-    script: Option<bevy::ecs::system::NonSendMut<UiScript>>,
-    mut ping: ResMut<MinimapPing>,
+/// A group member's ping as the notice lane carries it: the token its packet resolved and the
+/// world point, the floats by their bits so the notice compares exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemberPing {
+    token: PingToken,
+    x: u32,
+    y: u32,
+}
+
+impl MemberPing {
+    /// `MINIMAP_PING` with the token and the point's offset from the player (`0x4ee48d`), and the
+    /// VM's statics storing the point; nothing with no player position pushed (`0x4ee35e`).
+    pub(crate) fn fire(self, script: &mut benilla_ui::script::UiScript) {
+        let world = (f32::from_bits(self.x), f32::from_bits(self.y));
+        script.apply_minimap_ping(world, &self.token.text());
+    }
+}
+
+/// Push the active player's position the ping methods read at the call (`0x4eecdf`, `0x4ef021`):
+/// the player object's own, which unit movement writes in frame time. Runs before the script tick.
+pub(super) fn feed_minimap_player(
+    mut hosted_vm: crate::script_calls::HostedVm,
     player: Res<Player>,
-    widget: Res<super::MinimapWidget>,
-    inside: Res<super::MinimapInside>,
-    group: Res<crate::ui_party::GroupState>,
-    self_q: Query<&Guid, With<SelfPlayer>>,
-    commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else { return };
-    let Some(live) = ping.live.as_ref() else {
-        return;
-    };
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        let wow = bevy_to_wow(player.pos);
+        script.set_minimap_player(player.active.then_some((wow[0], wow[1])));
+    })
+}
 
-    // The relay's `(−dy·k, dx·k)`, `k = 1/(2·radius)`, recomputed every tick. With the map hidden
-    // there is no live zoom, so the registered default stands in.
-    let wow = bevy_to_wow(player.pos);
-    let radius = super::view_radius_yd(
-        widget
-            .0
-            .as_ref()
-            .map_or(super::MINIMAP_DEFAULT_ZOOM, |s| s.zoom),
-        widget
-            .0
-            .as_ref()
-            .map_or(super::MINIMAP_DEFAULT_ZOOM, |s| s.inside_zoom),
-        inside.0,
-    );
-    let k = 1.0 / (2.0 * radius);
-    let norm = ((wow[1] - live.world.1) * k, (live.world.0 - wow[0]) * k);
-    script.set_minimap_ping(norm);
+/// Our own `PingLocation` inside its call ([`benilla_ui::script::MinimapCall`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MinimapSteps<'w> {
+    /// Absent in a harness without the minimap.
+    ping: Option<ResMut<'w, MinimapPing>>,
+    group: Option<Res<'w, crate::ui_party::GroupState>>,
+    commands: Res<'w, NetCommands>,
+    /// The streamed terrain the ground cast's trace reads.
+    terrain: benilla_world::world_point::TerrainHeights<'w>,
+}
 
-    if !std::mem::take(&mut ping.fresh) {
-        return;
+impl MinimapSteps<'_> {
+    /// The ground cast's point under the world point `(x, y)`: the terrain-only trace down the
+    /// column from z 100000 to -100000 (`0x672170` with flags `0x100`, `0x4eee91`), whose hit is
+    /// the heightfield's height there, raised by `[0x807b10]` (`0x4eeee9`). `None` is a miss: no
+    /// tile streamed there, or a hole.
+    pub(crate) fn ground_under(&self, x: f32, y: f32) -> Option<[f32; 3]> {
+        let z = self.terrain.under(wow_to_bevy([x, y, 0.0]))?;
+        Some(ground_cast_point(x, y, z))
     }
-    let Some(live) = ping.live.as_ref() else {
-        return;
-    };
-    // Ours goes on the wire only when grouped, as the reference's `PingLocation` (`0x4eeca0`)
-    // sends; the local ping stands either way.
-    if live.sender == 0 && group.in_group {
-        let _ = commands.0.send(ClientCommand::MinimapPing {
-            x: live.world.0,
-            y: live.world.1,
-        });
+
+    /// The ping at the world point `(x, y)`: the process's ping now, and on the wire when grouped
+    /// (`0x4eef15`, `0x4eef26`, `0x4eef72`), before the VM applies it (`0x4eefb5`).
+    pub(crate) fn ping(&mut self, x: f32, y: f32) {
+        if let Some(ping) = self.ping.as_deref_mut() {
+            ping.world = (x, y);
+        }
+        if self.group.as_deref().is_some_and(|g| g.in_group) {
+            let _ = self.commands.0.send(ClientCommand::MinimapPing { x, y });
+        }
     }
-    // The event's unit token: ourselves or the sender's party slot. An unresolved sender still
-    // pings; the stock handler ignores arg1.
-    let self_guid = self_q.iter().next().map(|g| g.0);
-    let token = if live.sender == 0 || Some(live.sender) == self_guid {
-        "player".to_string()
-    } else {
-        group
-            .party_slots()
-            .position(|m| m.guid == live.sender)
-            .map_or_else(|| "party1".to_string(), |i| format!("party{}", i + 1))
-    };
-    script.fire_event(
-        "MINIMAP_PING",
-        vec![
-            ScriptValue::Str(token),
-            ScriptValue::Number(f64::from(norm.0)),
-            ScriptValue::Number(f64::from(norm.1)),
-        ],
-    );
+}
+
+/// `[0x807b10]`, the lift `PingLocation` puts on the trace's hit (`0x4eeee9`).
+const GROUND_CAST_LIFT: f32 = 8.0;
+
+/// The bound point of a ground cast whose trace hit the terrain at height `z`.
+fn ground_cast_point(x: f32, y: f32, z: f32) -> [f32; 3] {
+    [x, y, z + GROUND_CAST_LIFT]
 }
 
 /// Register the ping's packet handler.
@@ -163,139 +179,222 @@ pub(super) fn register(app: &mut App) {
     );
 }
 
-/// A group member's ping: raw world floats, seated as the pin.
-fn on_minimap_ping(In(ev): In<benilla_protocol::SessionEvent>, mut ping: ResMut<MinimapPing>) {
-    if let benilla_protocol::SessionEvent::MinimapPing { guid, x, y } = ev {
-        ping.seat((x, y), guid);
+/// A group member's ping (`0x5e4185` → `0x5e41bd` → `0x4ee330`), with the active player held
+/// (`0x4ee341`-`0x4ee35e`): the point stored (`0x4ee366`, `0x4ee373`), the pinger's token
+/// resolved against the group as the packet finds it ([`MinimapPing::member`]), and `MINIMAP_PING`
+/// on the notice lane at the packet's place. Absent in a harness without the notice lane.
+fn on_minimap_ping(
+    In(ev): In<benilla_protocol::SessionEvent>,
+    mut ping: ResMut<MinimapPing>,
+    me: Query<&Guid, With<SelfPlayer>>,
+    group: Option<Res<crate::ui_party::GroupState>>,
+    lane: Option<ResMut<crate::field_watch::NoticeLane>>,
+) {
+    let benilla_protocol::SessionEvent::MinimapPing { guid, x, y } = ev else {
+        return;
+    };
+    let Some(me) = me.iter().next().map(|g| g.0) else {
+        return;
+    };
+    let signal = ping.member((x, y), guid, Some(me), group.as_deref());
+    if let Some(mut lane) = lane {
+        lane.write(crate::field_watch::FieldNotice::MinimapPing(signal));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::UiScript;
 
-    /// A `BlipCtx` for a 140-px-side map at a 100-yd view radius, player at the origin.
-    fn ctx() -> BlipCtx {
-        let side = 140.0;
-        let radius = 100.0;
-        BlipCtx {
-            center: Vec2::new(500.0, 200.0),
-            side,
-            px_per_yd: (side * 0.5) / radius,
-            radius_yd: radius,
-            z: 0,
-            alpha: 1.0,
-            wx: 0.0,
-            wy: 0.0,
-            wz: 0.0,
-            cursor: None,
-            seam: 1.0,
+    /// The player-position push over a VM with a Minimap and a `MINIMAP_PING` listener, the player
+    /// at WoW (100, 200), in a group or not; the ping's handler and the notice lane beside it.
+    fn ping_app(in_group: bool) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let mut app = App::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let group = crate::ui_party::GroupState {
+            in_group,
+            ..Default::default()
+        };
+        let mut player = Player::default();
+        player.active = true;
+        player.pos = benilla_assets::coords::wow_to_bevy([100.0, 200.0, 0.0]);
+        app.insert_resource(NetCommands(tx))
+            .insert_resource(group)
+            .insert_resource(player)
+            .init_resource::<MinimapPing>()
+            .init_resource::<crate::field_watch::NoticeLane>()
+            .add_systems(Update, feed_minimap_player);
+        register(&mut app);
+        let mut script = UiScript::new().unwrap();
+        script.keep_calls();
+        script
+            .run(
+                r#"m = CreateFrame("Minimap", "Minimap") m:SetWidth(140) m:SetHeight(140)
+                   seen = {}
+                   local f = CreateFrame("Frame")
+                   f:RegisterEvent("MINIMAP_PING")
+                   f:SetScript("OnEvent", function() table.insert(seen, arg1) end)"#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        (app, rx)
+    }
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut::<UiScript>()
+    }
+
+    /// `sender`'s ping through its handler, then each notice it wrote fired on the VM.
+    fn pinged(app: &mut App, sender: u64, point: (f32, f32)) {
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::MinimapPing {
+                guid: sender,
+                x: point.0,
+                y: point.1,
+            }],
+        );
+        let notices: Vec<_> = app
+            .world_mut()
+            .resource_mut::<crate::field_watch::NoticeLane>()
+            .drain()
+            .collect();
+        let mut s = script(app);
+        for notice in notices {
+            match notice {
+                crate::field_watch::FieldNotice::MinimapPing(p) => p.fire(&mut s),
+                other => panic!("{other:?}"),
+            }
         }
     }
 
-    /// The click is in root units and `px_per_yd` in window px: on a 1080p window the seam is
-    /// ≈1.41, and a conversion that skips it seats every ping ≈41 % too far out.
+    /// A member's ping stores the point and signals with its token at its packet, an unknown
+    /// sender's leaving `player` (`0x4ee330`); the getter answers it at once. With no player
+    /// object the handler stores and signals nothing (`0x4ee35e`).
     #[test]
-    fn a_click_converts_through_the_seam_scale() {
-        let c = ctx();
-        let seam = 1080.0 / 768.0;
-        // 20 root units right → 20·seam px → yards west (−y).
-        let (x, y) = click_to_world(&c, (20.0, 0.0), seam).expect("inside the disc");
-        let expect_yd = 20.0 * seam / c.px_per_yd;
-        assert!((x - 0.0).abs() < 1e-3, "no northing from a due-east click");
-        assert!(
-            (y + expect_yd).abs() < 1e-3,
-            "screen right is WoW −y (west): {y} vs {}",
-            -expect_yd
+    fn a_members_ping_signals_with_its_token_and_seats_the_statics() {
+        let (mut app, _rx) = ping_app(true);
+        app.update();
+        pinged(&mut app, 0xDEAD, (100.0, 200.0 - 50.0));
+        assert_eq!(app.world().resource::<MinimapPing>().point(), (0.0, 0.0));
+        assert!(script(&mut app)
+            .eval::<Option<String>>("return seen[1]")
+            .unwrap()
+            .is_none());
+        app.world_mut().spawn((Guid(0x10), SelfPlayer));
+        pinged(&mut app, 0xDEAD, (100.0, 200.0 - 50.0));
+        assert_eq!(
+            app.world().resource::<MinimapPing>().point(),
+            (100.0, 150.0)
         );
-        // Without the seam multiply every click lands off by the same factor.
-        let naive = 20.0 / c.px_per_yd;
-        assert!(
-            (expect_yd - naive).abs() > 5.0,
-            "the seam is load-bearing, not a rounding difference"
+        let s = script(&mut app);
+        assert_eq!(s.eval::<String>("return seen[1]").unwrap(), "player");
+        let (x, y) = s.eval::<(f64, f64)>("return m:GetPingPosition()").unwrap();
+        let d = 2.0 * f64::from(benilla_ui::widget::minimap_radius_yd(3, 3, false));
+        assert!((x - 50.0 / d).abs() < 1e-6 && y.abs() < 1e-9, "{x} {y}");
+    }
+
+    /// The token is the party scan's `party%d` first, then the raid scan's `raid%d` (`0x4ee412`,
+    /// `0x4ee41b`), each 1-based; ourselves, and a sender in neither, leave `player`.
+    #[test]
+    fn a_pingers_token_is_its_party_slot_else_its_raid_row() {
+        use benilla_protocol::messages::GroupMemberEntry;
+        let (mut app, _rx) = ping_app(true);
+        const ME: u64 = 0x10;
+        app.world_mut().spawn((Guid(ME), SelfPlayer));
+        let member = |guid: u64, flags: u8| GroupMemberEntry {
+            name: format!("m{guid:x}"),
+            guid,
+            status: 1,
+            flags,
+        };
+        {
+            let mut group = app
+                .world_mut()
+                .resource_mut::<crate::ui_party::GroupState>();
+            group.group_type = crate::ui_party::GROUPTYPE_RAID;
+            group.own_flags = 0;
+            // Subgroup 0 (ours) holds 0xA1; 0xB1 and 0xB2 are in subgroup 1. The rows are the
+            // wire's order, then us.
+            group.members = vec![member(0xB1, 1), member(0xA1, 0), member(0xB2, 1)];
+            group.rebuild_raid(ME);
+        }
+        app.update();
+        for (sender, want) in [
+            (0xA1, "party1"),
+            (0xB2, "raid3"),
+            (0xB1, "raid1"),
+            (ME, "player"),
+            (0xDEAD, "player"),
+        ] {
+            pinged(&mut app, sender, (100.0, 150.0));
+            let s = script(&mut app);
+            assert_eq!(
+                s.eval::<String>("return seen[table.getn(seen)]").unwrap(),
+                want,
+                "{sender:#x}"
+            );
+        }
+    }
+
+    /// Our own ping goes on the wire when grouped and only then, and becomes the process's copy,
+    /// which a new VM is seeded with as the reference's statics outlive a `ReloadUI`.
+    #[test]
+    fn our_ping_is_sent_when_grouped_and_becomes_the_process_copy() {
+        for grouped in [true, false] {
+            let (mut app, rx) = ping_app(grouped);
+            app.update();
+            script(&mut app).run("m:PingLocation(0, 70)").unwrap();
+            // The call as the host applies it.
+            let pings = script(&mut app).take_minimap_pings_sent();
+            let mut steps = bevy::ecs::system::SystemState::<MinimapSteps>::new(app.world_mut());
+            for (x, y) in pings {
+                steps.get_mut(app.world_mut()).ping(x, y);
+            }
+            let sent: Vec<_> = rx.try_iter().collect();
+            assert_eq!(sent.len(), usize::from(grouped), "grouped: {grouped}");
+            let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
+            let want = (100.0 + 0.5 * d, 200.0);
+            if let Some(ClientCommand::MinimapPing { x, y }) = sent.first() {
+                assert!((x - want.0).abs() < 1e-3 && (y - want.1).abs() < 1e-3);
+            }
+            let (x, y) = app.world().resource::<MinimapPing>().point();
+            assert!((x - want.0).abs() < 1e-3 && (y - want.1).abs() < 1e-3);
+        }
+    }
+
+    /// A trace's hit binds 8 above the ground (`0x4eeee9`) as the waiting spell's DEST (`0x40`,
+    /// `0x6e612c`), and the bind empties the word and sends (`0x6e6177`).
+    #[test]
+    fn a_ground_hit_binds_eight_above_the_terrain_as_the_spells_location() {
+        const BLIZZARD: u32 = 10;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.world_mut()
+            .resource_mut::<crate::spell::targeting::SpellTargeting>()
+            .enter(BLIZZARD, crate::spell::CastCommit::Spell, 0x40);
+        let mut cursor =
+            bevy::ecs::system::SystemState::<crate::spell::ScriptCursor>::new(app.world_mut());
+        cursor
+            .get_mut(app.world_mut())
+            .bind_location(ground_cast_point(100.0, 200.0, 30.5));
+        cursor.apply(app.world_mut());
+        let sent: Vec<_> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CastSpellAtDest { spell_id, dest } => Some((spell_id, dest)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [(BLIZZARD, [100.0, 200.0, 38.5])]);
+        assert_eq!(
+            app.world()
+                .resource::<crate::spell::targeting::SpellTargeting>()
+                .spell(),
+            None,
+            "the bind ends the mode"
         );
-    }
-
-    /// Screen up is WoW +x (north), [`BlipCtx::offset`]'s inverse, so a ping seated from a click
-    /// draws back under the cursor.
-    #[test]
-    fn a_click_round_trips_through_the_blip_mapping() {
-        let c = ctx();
-        let ui = (18.0, -25.0);
-        let world = click_to_world(&c, ui, 1.0).expect("inside the disc");
-        let back = c.offset([world.0, world.1, 0.0]);
-        // `offset` is y-DOWN screen space; the click was y-up.
-        assert!((back.x - ui.0).abs() < 1e-3, "{back:?} vs {ui:?}");
-        assert!((back.y + ui.1).abs() < 1e-3, "{back:?} vs {ui:?}");
-    }
-
-    /// The reference's own disc test, in yards: a click outside the map's radius is not a ping.
-    #[test]
-    fn a_click_outside_the_disc_is_no_ping() {
-        let c = ctx();
-        // The disc is 70 px of the 140-px side; 69 px in is a ping, 71 px out is not.
-        assert!(click_to_world(&c, (69.0, 0.0), 1.0).is_some());
-        assert!(click_to_world(&c, (71.0, 0.0), 1.0).is_none());
-        assert!(
-            click_to_world(&c, (50.0, 50.0), 1.0).is_none(),
-            "the corner"
-        );
-    }
-
-    /// The stored form is a world point, so walking moves the marker by exactly the player's
-    /// displacement.
-    #[test]
-    fn the_marker_tracks_the_world_as_the_player_walks() {
-        let mut c = ctx();
-        let mut ping = MinimapPing::default();
-        ping.seat((30.0, 0.0), 0); // 30 yd north of the player
-        let live = ping.live.as_ref().unwrap();
-        let before = c.offset([live.world.0, live.world.1, 0.0]);
-        assert!(before.y < 0.0, "north draws UP the screen: {before:?}");
-        // Walk 10 yd north. The ping is now 20 yd away, so it draws 10 yd closer to the centre.
-        c.wx += 10.0;
-        let after = c.offset([live.world.0, live.world.1, 0.0]);
-        assert!(
-            (after.y - (before.y + 10.0 * c.px_per_yd)).abs() < 1e-3,
-            "{before:?} → {after:?}"
-        );
-    }
-
-    /// No proximity clear: the 10-yd `d² < 100` auto-clear is the `SMSG_GOSSIP_POI` marker's
-    /// (`0x6d99aa`–`0x6d9a4c`), and the ping's statics are never cleared. A frame with no click
-    /// seats nothing over it.
-    #[test]
-    fn reaching_the_ping_does_not_clear_it() {
-        let mut c = ctx();
-        let mut ping = MinimapPing::default();
-        ping.seat((1.0, 1.0), 0);
-        // Walk onto the point: the pin stands.
-        c.wx = 1.0;
-        c.wy = 1.0;
-        seat_click(&c, &mut ping, None);
-        let live = ping.live.as_ref().expect("a reached ping is still a ping");
-        assert_eq!(live.world, (1.0, 1.0));
-    }
-
-    /// A click seats a fresh pin at the clicked world point, replacing the last one; the
-    /// announcement flag rides the seat.
-    #[test]
-    fn a_click_seats_a_fresh_pin() {
-        let c = ctx();
-        let mut ping = MinimapPing::default();
-        ping.seat((5.0, 5.0), 0);
-        ping.fresh = false;
-        seat_click(&c, &mut ping, Some((0.0, 20.0))); // 20 UI units up = 20 px = 28.57 yd north
-        let live = ping.live.as_ref().unwrap();
-        assert!((live.world.0 - 20.0 / c.px_per_yd).abs() < 1e-3 && live.world.1.abs() < 1e-3);
-        assert!(ping.fresh, "a seat owes the world its event");
-    }
-
-    /// A click before the map has drawn (no scale) is dropped, not seated at a garbage point.
-    #[test]
-    fn a_click_before_the_map_has_drawn_is_dropped() {
-        let mut c = ctx();
-        c.px_per_yd = 0.0;
-        assert!(click_to_world(&c, (10.0, 10.0), 1.0).is_none());
     }
 }

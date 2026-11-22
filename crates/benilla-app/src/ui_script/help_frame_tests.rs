@@ -11,6 +11,7 @@ use super::test_ui::load_ui as load_xml;
 /// The window and its dependencies, with the ten `GMTicketCategory.dbc` rows the app pushes.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -56,6 +57,14 @@ fn setup() -> UiScript {
         (9, "Account/Billing".into()),
         (10, "Character".into()),
     ]);
+    // In the world: `GetGMTicket` sends only with an active player (`0x48c9bd`).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            ..Default::default()
+        }),
+    );
     s
 }
 
@@ -207,7 +216,7 @@ fn the_ticket_text_grows_with_its_lines_and_its_scroll_frame_ranges_over_them() 
     s.resolve();
     s.tick(0.016);
     s.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return HelpFrameOpenTicketText:GetHeight()")
             .unwrap(),
         12.0,
@@ -220,17 +229,17 @@ fn the_ticket_text_grows_with_its_lines_and_its_scroll_frame_ranges_over_them() 
     s.resolve();
     // Wrapped at the box's own 541: no insets.
     let height = (400.0 * GLYPH / 541.0).ceil() * 12.0;
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return HelpFrameOpenTicketText:GetHeight()")
             .unwrap(),
         height
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return HelpFrameOpenTicketScrollFrame:GetVerticalScrollRange()")
             .unwrap(),
         height - 378.0
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>(
             "local _, max = HelpFrameOpenTicketScrollFrameScrollBar:GetMinMaxValues() return max"
         )

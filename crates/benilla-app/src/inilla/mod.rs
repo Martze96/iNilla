@@ -46,7 +46,7 @@ use inilla_core::profiles::Launcher;
 use inilla_core::settings::InillaSettings;
 use inilla_core::touch::TouchLayout;
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 
 pub(crate) use session::world_address;
 
@@ -112,40 +112,27 @@ impl Plugin for InillaPlugin {
                 .before(bevy::input::InputSystems),
         )
         .configure_sets(PreUpdate, InputProducers.before(bevy::input::InputSystems))
+        // The chat lines and the console's Lua after the frame's packets, ahead of the tick that
+        // services them (the input records run before the packets, `UiInput` → `WorldStage::Net`).
         .add_systems(
             Update,
             synth::run_vm_ops
                 .after(benilla_world::schedule::WorldStage::Net)
-                .before(crate::ui_script::UiInput),
+                .before(crate::ui_script::UiTick),
         )
+        // Inside the binding pass, where a key record's binding runs, so the commands' edges are
+        // this frame's for the controller (`WorldStage::Input`).
         .add_systems(
             Update,
             synth::apply
                 .in_set(crate::ui_script::UiInput)
-                .after(crate::bindings::BindingSet)
-                .before(benilla_world::schedule::WorldStage::Input),
+                .after(crate::bindings::BindingHead)
+                .before(crate::bindings::BindingTail),
         )
         .add_systems(OnEnter(ClientState::InWorld), synth::release_all)
         .add_systems(OnExit(ClientState::InWorld), synth::release_all)
-        .add_systems(Last, save_when_changed)
-        .add_systems(Update, follow_data_language);
+        .add_systems(Last, save_when_changed);
     }
-}
-
-/// The game data's language, handed to the two places that report it: the logon challenge (so
-/// the server sends its quests, items and NPC names in it) and `GetLocale()` (so addons such as
-/// pfQuest pick their own translation). Once, as soon as the archives are open.
-fn follow_data_language(mut done: Local<bool>) {
-    if *done {
-        return;
-    }
-    let Some(locale) = benilla_formats::data_locale() else {
-        return;
-    };
-    *done = true;
-    benilla_protocol::auth::set_client_locale(locale);
-    benilla_ui::script::set_locale(locale);
-    info!("inilla: the game data is {locale}");
 }
 
 /// The `PreUpdate` systems that produce synthetic input (touch, controller) — ahead of

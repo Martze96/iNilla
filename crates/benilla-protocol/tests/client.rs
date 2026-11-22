@@ -574,7 +574,8 @@ fn name_and_creature_query_roundtrip() {
         "01000000",               // type = 1 (Beast)
         "01000000",               // pet_family = 1 (Wolf)
         "02000000",               // rank = 2 (rare elite)
-        "0000000000000000",       // unk, pet_spell_list_id
+        "00000000",               // unk
+        "a4160000",               // pet_spell_list_id = 5796, Claw
         "15020000",               // display_id = 533, the model a stabled pet is drawn from
         "0101"                    // civilian, racial_leader
     ));
@@ -590,6 +591,7 @@ fn name_and_creature_query_roundtrip() {
                     pet_family: 1,
                     rank: 2,
                     type_flags: 0x10,
+                    pet_spell_list: 5796,
                     civilian: true,
                     racial_leader: true,
                     display_id: 533,
@@ -644,6 +646,38 @@ fn creature_query_empty_subname_decodes_to_none() {
             assert_eq!(subname.as_deref(), Some("Test"));
         }
         other => panic!("expected one CreatureName event, got {other:?}"),
+    }
+}
+
+/// `0x5588e0`: a game object key with its top bit set is a refusal, which the template cache
+/// frees a node on. It reaches the app as a refusal, never as a zeroed template.
+#[test]
+fn gameobject_query_miss_decodes_to_a_refusal_not_a_zeroed_template() {
+    let parse = |b: &[u8]| {
+        messages::parse_server(messages::opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, b).unwrap()
+    };
+    // Entry 1731 with the top bit set, and nothing after it.
+    match decode(parse(&hx("c3060080"))).as_slice() {
+        [SessionEvent::GameObjectUnknown { entry }] => assert_eq!(*entry, 1731),
+        other => panic!("expected one GameObjectUnknown event, got {other:?}"),
+    }
+    // A hit: entry, type 3 (chest), display 259, "Chest", four empty names, 24 data dwords.
+    let mut hit = hx("c3060000030000000301000043686573740000000000");
+    hit.extend((0..24u32).flat_map(|i| (i + 1).to_le_bytes()));
+    match decode(parse(&hit)).as_slice() {
+        [SessionEvent::GameObjectInfo {
+            entry,
+            type_id,
+            display_id,
+            name,
+            data,
+        }] => {
+            assert_eq!((*entry, *type_id, *display_id), (1731, 3, 259));
+            assert_eq!(name, "Chest");
+            assert_eq!(data[0], 1);
+            assert_eq!(data[23], 24);
+        }
+        other => panic!("expected one GameObjectInfo event, got {other:?}"),
     }
 }
 

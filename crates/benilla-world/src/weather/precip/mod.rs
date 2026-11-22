@@ -31,7 +31,8 @@ pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 // ===== The reference's constants =====
 
 /// The weather leg: the reference runs the shader leg unless `useWeatherShaders` (default 1,
-/// `0x67b81d`) is 0 or its ARB programs fail to validate (`0x58b360`); this always runs it.
+/// `0x67b81d`) is 0 or a shader's loaded flag is clear (`0x58b360`): the file read sets it
+/// (`0x595216`), and only OpenGL resets it from the compile (`0x59e544`). This always runs it.
 const SHADER_LEG: bool = true;
 /// Per-packet record capacity, 6144 (`0x80ffc8` as a float, which the open stamp divides by the
 /// rate). Not a population cap: packets form a growing list, so demand bounds the population.
@@ -205,7 +206,7 @@ fn setup_precip(
         return;
     }
     // Streaks keep their mips; the splash and mist cut-outs load mip 0 only, as their thin arms
-    // collapse under the chain; the flake keeps its 7 mips, drawn 4.5× to 64× minified.
+    // collapse under the chain; the flake keeps its authored mips, drawn 4.5× to 64× minified.
     let effect = |s: &mut benilla_assets::BlpLoaderSettings| {
         s.variant = benilla_assets::BlpVariant::Effect;
     };
@@ -403,7 +404,7 @@ fn push_precip(
             world_per_px: match proj {
                 Projection::Perspective(p) => (p.fov * 0.5).tan(),
                 // The reference has no orthographic mode; this keeps the sprites sane.
-                _ => (crate::view::CAM_FOVY * 0.5).tan(),
+                _ => (crate::view::world_fovy(16.0 / 9.0) * 0.5).tan(),
             } / SNOW_PX_REF_HEIGHT,
         });
     let spec = |texture: &Handle<Image>, blend: EffectBlend, fog: EffectFog| EffectDrawSpec {

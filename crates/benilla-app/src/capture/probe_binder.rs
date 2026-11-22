@@ -27,7 +27,6 @@ use crate::net::{ChatKind, ClientCommand, Guid, HomeBind, NetCommands, NetEntity
 use crate::player::Player;
 use crate::ui_binder::BinderState;
 use crate::ui_gossip::GossipState;
-use crate::ui_session::NpcSession;
 
 /// Innkeeper Keldamyr's spawn (vmangos `creature` guid 46343), the `.go xyz` target.
 const INNKEEPER_AT: [f32; 3] = [9802.21, 982.608, 1313.98];
@@ -179,259 +178,288 @@ fn vm_bind_location(script: &UiScript) -> String {
         .unwrap_or_default()
 }
 
+/// The gossip menu as the step reads it, taken outside the VM: the gossip verbs write the state
+/// in the host, which the step's Lua runs with.
+struct Menu {
+    npc: Option<u64>,
+    options: Vec<benilla_protocol::messages::GossipOption>,
+}
+
+impl Menu {
+    fn of(gossip: &GossipState) -> Self {
+        Menu {
+            npc: gossip.npc,
+            options: gossip.options.clone(),
+        }
+    }
+}
+
 fn binder_probe(
     time: ProbeClock,
     mut probe: ResMut<BinderProbe>,
-    gossip: Res<GossipState>,
     binder: Res<BinderState>,
-    mut home: ResMut<HomeBind>,
     areas: Option<Res<AreaTableRes>>,
-    script: Option<NonSendMut<UiScript>>,
+    // The gossip slots, read outside the VM: the gossip verbs write them in the host; and the bind
+    // point, which the trainer's description getters read through it.
+    mut vm: crate::script_calls::VmWith<(Res<'static, GossipState>, ResMut<'static, HomeBind>)>,
     self_player: Query<(), With<SelfPlayer>>,
     player: Res<Player>,
     units: Query<(&Guid, &NetEntity, &ObjectStore, &Transform), Without<SelfPlayer>>,
     net: Res<NetCommands>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if self_player.is_empty() {
-        return; // not in-world yet
-    }
-    let Some(script) = script else {
-        return; // no UI VM in this build, so nothing to drive
+    // The step's Lua runs with the host lent, so the calls it makes apply inside their verbs.
+    let (gossip, mut home) = {
+        let (gossip, home) = vm.own();
+        (Menu::of(&gossip), home.0)
     };
-    let now = time.elapsed_secs_f64();
-    let phase = probe.phase;
+    let was = home;
+    vm.run(|script| {
+        if self_player.is_empty() {
+            return; // not in-world yet
+        }
+        let Some(script) = script else {
+            return; // no UI VM in this build, so nothing to drive
+        };
+        let now = time.elapsed_secs_f64();
+        let phase = probe.phase;
 
-    match phase {
-        Phase::Wait => {
-            // The `CONFIRM_BINDER` and `CHAT_MSG_SYSTEM` hook, live before the question can arrive.
-            if let Err(e) = script.run(
-                r#"
-                if not ProbeBinderHooked then
-                    ProbeBinderHooked = true
-                    ProbeBinderEvents = {}
-                    ProbeBinderSystemLines = {}
-                    local f = CreateFrame("Frame")
-                    f:RegisterEvent("CONFIRM_BINDER")
-                    f:RegisterEvent("CHAT_MSG_SYSTEM")
-                    f:SetScript("OnEvent", function()
-                        if event == "CONFIRM_BINDER" then
-                            table.insert(ProbeBinderEvents, arg1 or "")
-                        else
-                            table.insert(ProbeBinderSystemLines, arg1 or "")
-                        end
-                    end)
-                end
-                "#,
-            ) {
-                error!("PROBE_BINDER: installing the CONFIRM_BINDER hook: {e}");
-            }
-            let [x, y, z] = INNKEEPER_AT;
-            info!(
-                "PROBE_BINDER: hopping to Innkeeper Keldamyr (entry {INNKEEPER_ENTRY}) at \
-                 ({x}, {y}, {z}) map {INNKEEPER_MAP}"
-            );
-            let _ = net.0.send(ClientCommand::Chat {
-                kind: ChatKind::Say,
-                target: None,
-                text: format!(".go xyz {x} {y} {z} {INNKEEPER_MAP}"),
-                language: None,
-            });
-            probe.phase = Phase::Settling { sent_at: now };
-        }
-        Phase::Settling { sent_at } => {
-            if now - sent_at < SETTLE_SECS {
-                return;
-            }
-            let me = player.pos;
-            let found = units.iter().find(|(_, net_e, store, tf)| {
-                net_e.kind == EntityKind::Unit
-                    && (store.0.object_entry() == Some(INNKEEPER_ENTRY)
-                        || store.0.unit_npc_flags() & NPC_FLAG_INNKEEPER != 0)
-                    && tf.translation.distance(me) < SCAN_RANGE
-            });
-            if let Some((guid, ..)) = found {
+        match phase {
+            Phase::Wait => {
+                // The `CONFIRM_BINDER` and `CHAT_MSG_SYSTEM` hook, live before the question can
+                // arrive.
+                if let Err(e) = script.run(
+                    r#"
+                    if not ProbeBinderHooked then
+                        ProbeBinderHooked = true
+                        ProbeBinderEvents = {}
+                        ProbeBinderSystemLines = {}
+                        local f = CreateFrame("Frame")
+                        f:RegisterEvent("CONFIRM_BINDER")
+                        f:RegisterEvent("CHAT_MSG_SYSTEM")
+                        f:SetScript("OnEvent", function()
+                            if event == "CONFIRM_BINDER" then
+                                table.insert(ProbeBinderEvents, arg1 or "")
+                            else
+                                table.insert(ProbeBinderSystemLines, arg1 or "")
+                            end
+                        end)
+                    end
+                    "#,
+                ) {
+                    error!("PROBE_BINDER: installing the CONFIRM_BINDER hook: {e}");
+                }
+                let [x, y, z] = INNKEEPER_AT;
                 info!(
-                    "PROBE_BINDER: PASS (1 hop) — innkeeper {:#x} streamed within {SCAN_RANGE}yd \
-                     of the landing",
-                    guid.0
+                    "PROBE_BINDER: hopping to Innkeeper Keldamyr (entry {INNKEEPER_ENTRY}) at \
+                     ({x}, {y}, {z}) map {INNKEEPER_MAP}"
                 );
-                probe.passes += 1;
-                probe.innkeeper = Some(guid.0);
-                let _ = net.0.send(ClientCommand::GossipHello { guid: guid.0 });
-                info!("PROBE_BINDER: (2 menu) GossipHello({:#x}) sent", guid.0);
-                probe.phase = Phase::Menu { sent_at: now };
-            } else if now - sent_at > SCAN_TIMEOUT_SECS {
-                warn!(
-                    "PROBE_BINDER: SKIP (1 hop) — no entry {INNKEEPER_ENTRY}/innkeeper-flagged \
-                     unit streamed in within {SCAN_TIMEOUT_SECS}s of the hop (the `.go` may have \
-                     been refused, or Teldrassil never streamed) — environmental, not a defect"
-                );
-                probe.phase = Phase::Done;
+                let _ = net.0.send(ClientCommand::Chat {
+                    kind: ChatKind::Say,
+                    target: None,
+                    text: format!(".go xyz {x} {y} {z} {INNKEEPER_MAP}"),
+                    language: None,
+                });
+                probe.phase = Phase::Settling { sent_at: now };
             }
-        }
-        Phase::Menu { sent_at } => {
-            let Some(innkeeper) = probe.innkeeper else {
-                probe.phase = Phase::Done;
-                return;
-            };
-            let open = gossip.npc == Some(innkeeper) && !gossip.options.is_empty();
-            // Wait for the feed's push as well as the parse: step 3 reads the icon type back out
-            // of the VM, so the snapshot must already be there.
-            let pushed = vm_gossip_values(&script) as usize == gossip.options.len() * 2;
-            if open && pushed {
-                info!(
-                    "PROBE_BINDER: PASS (2 menu) — {} option(s) open on {innkeeper:#x}: {}",
-                    gossip.options.len(),
-                    gossip
-                        .options
-                        .iter()
-                        .map(|o| format!("[{} icon={} {:?}]", o.index, o.icon, o.message))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                probe.passes += 1;
-                assert_icon_and_select(&mut probe, &gossip, &script, &net, innkeeper, now);
-            } else if now - sent_at > MENU_TIMEOUT_SECS {
-                error!(
-                    "PROBE_BINDER: FAIL (2 menu) — no gossip menu for {innkeeper:#x} within \
-                     {MENU_TIMEOUT_SECS}s (parsed npc={:?} options={} vm_values={})",
-                    gossip.npc,
-                    gossip.options.len(),
-                    vm_gossip_values(&script)
-                );
-                probe.fails += 1;
-                probe.phase = Phase::Done;
-            }
-        }
-        Phase::Confirm {
-            since,
-            events_baseline,
-        } => {
-            let Some(innkeeper) = probe.innkeeper else {
-                probe.phase = Phase::Done;
-                return;
-            };
-            let pending = binder.npc() == Some(innkeeper);
-            let fired = events_len(&script) > events_baseline;
-            let area = last_event(&script);
-            if pending && fired && !area.is_empty() {
-                info!(
-                    "PROBE_BINDER: PASS (5 confirm) — SMSG_BINDER_CONFIRM parked on \
-                     {innkeeper:#x} and CONFIRM_BINDER fired with area {area:?} (the dialog reads \
-                     \"Do you want to make {area} your new home?\")"
-                );
-                probe.passes += 1;
-                probe.phase = Phase::Accept {
-                    since: now,
-                    sent: false,
-                };
-            } else if now - since > CONFIRM_TIMEOUT_SECS {
-                error!(
-                    "PROBE_BINDER: FAIL (5 confirm) — no answered question within \
-                     {CONFIRM_TIMEOUT_SECS}s of the select: BinderState pending={:?} (wanted \
-                     {innkeeper:#x}), CONFIRM_BINDER fired={fired}, arg1={area:?}. A packet with \
-                     no parse arm at all falls through to \
-                     ServerPacket::Other — that is what this reading looks like.",
-                    binder.npc()
-                );
-                probe.fails += 1;
-                probe.phase = Phase::Done;
-            }
-        }
-        Phase::Accept { since, sent } => {
-            if !sent {
-                // Clear the bind before answering: a rebind to the same area re-sends an
-                // identical `SMSG_BINDPOINTUPDATE`, so only None → Some proves a fresh packet.
-                probe.baseline_area = home.0;
-                home.0 = None;
-                if let Err(e) = script.run("ConfirmBinder()") {
-                    warn!(
-                        "PROBE_BINDER: SKIP (6 bind) — ConfirmBinder() would not run in the live \
-                         VM: {e} (environmental, not a wire failure)"
-                    );
-                    probe.phase = Phase::Done;
+            Phase::Settling { sent_at } => {
+                if now - sent_at < SETTLE_SECS {
                     return;
                 }
-                info!(
-                    "PROBE_BINDER: (6 bind) ConfirmBinder() run in the live VM — HomeBind cleared \
-                     from {:?}, waiting for a fresh SMSG_BINDPOINTUPDATE",
-                    probe.baseline_area
-                );
-                probe.phase = Phase::Accept {
-                    since: now,
-                    sent: true,
+                let me = player.pos;
+                let found = units.iter().find(|(_, net_e, store, tf)| {
+                    net_e.kind == EntityKind::Unit
+                        && (store.0.object_entry() == Some(INNKEEPER_ENTRY)
+                            || store.0.unit_npc_flags() & NPC_FLAG_INNKEEPER != 0)
+                        && tf.translation.distance(me) < SCAN_RANGE
+                });
+                if let Some((guid, ..)) = found {
+                    info!(
+                        "PROBE_BINDER: PASS (1 hop) — innkeeper {:#x} streamed within \
+                         {SCAN_RANGE}yd of the landing",
+                        guid.0
+                    );
+                    probe.passes += 1;
+                    probe.innkeeper = Some(guid.0);
+                    let _ = net.0.send(ClientCommand::GossipHello { guid: guid.0 });
+                    info!("PROBE_BINDER: (2 menu) GossipHello({:#x}) sent", guid.0);
+                    probe.phase = Phase::Menu { sent_at: now };
+                } else if now - sent_at > SCAN_TIMEOUT_SECS {
+                    warn!(
+                        "PROBE_BINDER: SKIP (1 hop) — no entry {INNKEEPER_ENTRY}/innkeeper-flagged \
+                         unit streamed in within {SCAN_TIMEOUT_SECS}s of the hop (the `.go` may \
+                         have been refused, or Teldrassil never streamed) — environmental, not a \
+                         defect"
+                    );
+                    probe.phase = Phase::Done;
+                }
+            }
+            Phase::Menu { sent_at } => {
+                let Some(innkeeper) = probe.innkeeper else {
+                    probe.phase = Phase::Done;
+                    return;
                 };
-                return;
+                let open = gossip.npc == Some(innkeeper) && !gossip.options.is_empty();
+                // Wait for the feed's push as well as the parse: step 3 reads the icon type back
+                // out of the VM, so the snapshot must already be there.
+                let pushed = vm_gossip_values(script) as usize == gossip.options.len() * 2;
+                if open && pushed {
+                    info!(
+                        "PROBE_BINDER: PASS (2 menu) — {} option(s) open on {innkeeper:#x}: {}",
+                        gossip.options.len(),
+                        gossip
+                            .options
+                            .iter()
+                            .map(|o| format!("[{} icon={} {:?}]", o.index, o.icon, o.message))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    probe.passes += 1;
+                    assert_icon_and_select(&mut probe, &gossip, script, &net, innkeeper, now);
+                } else if now - sent_at > MENU_TIMEOUT_SECS {
+                    error!(
+                        "PROBE_BINDER: FAIL (2 menu) — no gossip menu for {innkeeper:#x} within \
+                         {MENU_TIMEOUT_SECS}s (parsed npc={:?} options={} vm_values={})",
+                        gossip.npc,
+                        gossip.options.len(),
+                        vm_gossip_values(script)
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
             }
-            let name = home
-                .0
-                .and_then(|id| areas.as_deref()?.0.name(id))
-                .unwrap_or_default()
-                .to_string();
-            let vm = vm_bind_location(&script);
-            if !name.is_empty() && vm == name {
+            Phase::Confirm {
+                since,
+                events_baseline,
+            } => {
+                let Some(innkeeper) = probe.innkeeper else {
+                    probe.phase = Phase::Done;
+                    return;
+                };
+                let pending = binder.pending() == Some(innkeeper);
+                let fired = events_len(script) > events_baseline;
+                let area = last_event(script);
+                if pending && fired && !area.is_empty() {
+                    info!(
+                        "PROBE_BINDER: PASS (5 confirm) — SMSG_BINDER_CONFIRM parked on \
+                         {innkeeper:#x} and CONFIRM_BINDER fired with area {area:?} (the dialog \
+                         reads \"Do you want to make {area} your new home?\")"
+                    );
+                    probe.passes += 1;
+                    probe.phase = Phase::Accept {
+                        since: now,
+                        sent: false,
+                    };
+                } else if now - since > CONFIRM_TIMEOUT_SECS {
+                    error!(
+                        "PROBE_BINDER: FAIL (5 confirm) — no answered question within \
+                         {CONFIRM_TIMEOUT_SECS}s of the select: BinderState pending={:?} (wanted \
+                         {innkeeper:#x}), CONFIRM_BINDER fired={fired}, arg1={area:?}. A packet \
+                         with no parse arm at all falls through to ServerPacket::Other — that is \
+                         what this reading looks like.",
+                        binder.pending()
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
+            }
+            Phase::Accept { since, sent } => {
+                if !sent {
+                    // Clear the bind before answering: a rebind to the same area re-sends an
+                    // identical `SMSG_BINDPOINTUPDATE`, so only None → Some proves a fresh packet.
+                    probe.baseline_area = home;
+                    home = None;
+                    if let Err(e) = script.run("ConfirmBinder()") {
+                        warn!(
+                            "PROBE_BINDER: SKIP (6 bind) — ConfirmBinder() would not run in the \
+                             live VM: {e} (environmental, not a wire failure)"
+                        );
+                        probe.phase = Phase::Done;
+                        return;
+                    }
+                    info!(
+                        "PROBE_BINDER: (6 bind) ConfirmBinder() run in the live VM — HomeBind \
+                         cleared from {:?}, waiting for a fresh SMSG_BINDPOINTUPDATE",
+                        probe.baseline_area
+                    );
+                    probe.phase = Phase::Accept {
+                        since: now,
+                        sent: true,
+                    };
+                    return;
+                }
+                let name = home
+                    .and_then(|id| areas.as_deref()?.0.name(id))
+                    .unwrap_or_default()
+                    .to_string();
+                let vm = vm_bind_location(script);
+                if !name.is_empty() && vm == name {
+                    info!(
+                        "PROBE_BINDER: PASS (6 bind) — HomeBind repopulated to area {:?} = \
+                         {name:?} (was {:?}), and the VM's GetBindLocation() agrees: {vm:?}",
+                        home, probe.baseline_area
+                    );
+                    probe.passes += 1;
+                    probe.bound_name = name;
+                    probe.phase = Phase::Line { since: now };
+                } else if now - since > BIND_TIMEOUT_SECS {
+                    error!(
+                        "PROBE_BINDER: FAIL (6 bind) — the hearthstone did not take within \
+                         {BIND_TIMEOUT_SECS}s of ConfirmBinder(): HomeBind={:?} AreaTable \
+                         name={name:?} GetBindLocation()={vm:?} (was area {:?} before the clear)",
+                        home, probe.baseline_area
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
+            }
+            Phase::Line { since } => {
+                // `SMSG_PLAYERBOUND` prints `ERR_DEATHBIND_SUCCESS_S` as a system line
+                // (`0x5e3d3f`).
+                let want = bound_line(&probe.bound_name);
+                let lines = system_lines(script);
+                if lines.iter().any(|l| l == &want) {
+                    info!("PROBE_BINDER: PASS (7 line) — the bind announced itself: {want:?}");
+                    probe.passes += 1;
+                    probe.phase = Phase::Done;
+                } else if now - since > LINE_TIMEOUT_SECS {
+                    error!(
+                        "PROBE_BINDER: FAIL (7 line) — no {want:?} within {LINE_TIMEOUT_SECS}s of \
+                         the bind; CHAT_MSG_SYSTEM lines seen: {lines:?}"
+                    );
+                    probe.fails += 1;
+                    probe.phase = Phase::Done;
+                }
+            }
+            Phase::Done => {
+                if probe.exited {
+                    return;
+                }
+                probe.exited = true;
                 info!(
-                    "PROBE_BINDER: PASS (6 bind) — HomeBind repopulated to area {:?} = {name:?} \
-                     (was {:?}), and the VM's GetBindLocation() agrees: {vm:?}",
-                    home.0, probe.baseline_area
+                    "PROBE_BINDER: DONE pass={} fail={}",
+                    probe.passes, probe.fails
                 );
-                probe.passes += 1;
-                probe.bound_name = name;
-                probe.phase = Phase::Line { since: now };
-            } else if now - since > BIND_TIMEOUT_SECS {
-                error!(
-                    "PROBE_BINDER: FAIL (6 bind) — the hearthstone did not take within \
-                     {BIND_TIMEOUT_SECS}s of ConfirmBinder(): HomeBind={:?} AreaTable name={name:?} \
-                     GetBindLocation()={vm:?} (was area {:?} before the clear)",
-                    home.0, probe.baseline_area
-                );
-                probe.fails += 1;
-                probe.phase = Phase::Done;
+                // `ProbeExitPlugin::fire_probe_exit`'s pattern: `AppExit` plus a hard backstop, so
+                // a teardown hang cannot leave a client holding the probe account.
+                exit.write(AppExit::Success);
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    warn!("PROBE_BINDER: still alive 5s after AppExit — hard exit");
+                    std::process::exit(0);
+                });
             }
         }
-        Phase::Line { since } => {
-            // `SMSG_PLAYERBOUND` prints `ERR_DEATHBIND_SUCCESS_S` as a system line (`0x5e3d3f`).
-            let want = bound_line(&probe.bound_name);
-            let lines = system_lines(&script);
-            if lines.iter().any(|l| l == &want) {
-                info!("PROBE_BINDER: PASS (7 line) — the bind announced itself: {want:?}");
-                probe.passes += 1;
-                probe.phase = Phase::Done;
-            } else if now - since > LINE_TIMEOUT_SECS {
-                error!(
-                    "PROBE_BINDER: FAIL (7 line) — no {want:?} within {LINE_TIMEOUT_SECS}s of the \
-                     bind; CHAT_MSG_SYSTEM lines seen: {lines:?}"
-                );
-                probe.fails += 1;
-                probe.phase = Phase::Done;
-            }
-        }
-        Phase::Done => {
-            if probe.exited {
-                return;
-            }
-            probe.exited = true;
-            info!(
-                "PROBE_BINDER: DONE pass={} fail={}",
-                probe.passes, probe.fails
-            );
-            // `ProbeExitPlugin::fire_probe_exit`'s pattern: `AppExit` plus a hard backstop, so a
-            // teardown hang cannot leave a client holding the probe account.
-            exit.write(AppExit::Success);
-            std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                warn!("PROBE_BINDER: still alive 5s after AppExit — hard exit");
-                std::process::exit(0);
-            });
-        }
+    });
+    if home != was {
+        vm.own().1 .0 = home;
     }
 }
 
 /// Steps 3 and 4: the bind row's icon, then the click. Sets `probe.phase` on every path.
 fn assert_icon_and_select(
     probe: &mut BinderProbe,
-    gossip: &GossipState,
+    gossip: &Menu,
     script: &UiScript,
     net: &NetCommands,
     innkeeper: u64,
@@ -510,6 +538,7 @@ fn assert_icon_and_select(
     let _ = net.0.send(ClientCommand::GossipSelectOption {
         guid: innkeeper,
         option: opt.index,
+        code: None,
     });
     info!(
         "PROBE_BINDER: (4 select) GossipSelectOption({innkeeper:#x}, wire index {}) sent for {:?}",

@@ -85,20 +85,28 @@ fn bind_arm(word: u16, f: CorpseFacts) -> Option<CorpseTarget> {
     }
 }
 
-/// The world pick's corpse admission as the frame began, which [`crate::target`]'s hover reads:
+/// The world pick's corpse admission as the feed published it, which [`crate::target`]'s hover reads:
 /// `None` outside targeting, where the pick flags carry `0x5c` and so `0x40`, and every corpse is a
 /// candidate (`0x480816`); while targeting, the standing word, through [`pick_admits`].
 #[derive(Resource, Default)]
 pub(crate) struct CorpsePick(pub(crate) Option<u16>);
 
-/// Publish [`CorpsePick`] before the input pass, beside [`super::PicksSelf`].
+/// Publish [`CorpsePick`] in the feed, after the packets and the clicks, beside
+/// [`super::PicksSelf`].
 pub(crate) fn publish_corpse_pick(
     targeting: Res<super::SpellTargeting>,
     mut pick: ResMut<CorpsePick>,
 ) {
-    let now = targeting.0.as_ref().map(|t| t.word);
-    if pick.0 != now {
-        pick.0 = now;
+    pick.publish(&targeting);
+}
+
+impl CorpsePick {
+    /// The word `targeting` stands at.
+    pub(crate) fn publish(&mut self, targeting: &super::SpellTargeting) {
+        let now = targeting.0.as_ref().map(|t| t.word);
+        if self.0 != now {
+            self.0 = now;
+        }
     }
 }
 
@@ -108,21 +116,21 @@ impl super::SpellTargeting {
     pub(crate) fn can_target_corpse(&self, entity: Entity, checks: &super::BindChecks) -> bool {
         self.0.as_ref().is_some_and(|t| {
             checks
-                .corpse_facts(entity)
+                .corpse_facts(t.commit, entity)
                 .is_some_and(|f| bind_arm(t.word, f).is_some())
-                && checks.corpse_range_refusal(t.spell_id, entity).is_none()
+                && checks
+                    .corpse_range_refusal(t.spell_id, t.commit, entity)
+                    .is_none()
         })
     }
 }
 
 /// `BindTarget 0x6e5b40`'s corpse arm for the world click (`0x493540` at `4935d5`): a corpse no
-/// arm binds leaves the cursor up; otherwise the merge's range test and the commit, with the
-/// corpse's guid and its bit (`0x7e4e10` writes the guid for any mask bit in `0x8a02`).
-///
-/// The reference sends only once the word is empty (`6e60c1`), so a word the corpse bit does not
-/// empty waits for another click with the corpse parked. No player spell has one (every shipped
-/// `0x8000` word with another bit is an NPC or test spell), and as the unit arm does, this binds
-/// only a click that empties the word.
+/// arm binds leaves the cursor up; otherwise the merge's range test (`6e602c`), then the commit
+/// of an emptied word with the corpse's guid and its bit (`0x7e4e10` writes the guid for any mask
+/// bit in `0x8a02`). A word the corpse bit does not empty holds, as the unit arm's does: the corpse
+/// parked in the record with its bit in the mask (`6e5fbe`, `6e5fc7`, `6e5fda`), nothing sent,
+/// and the cursor up for the rest (`6e60c1`).
 pub(super) fn bind_target_corpse(
     ladder: &mut crate::spell::CastLadder,
     checks: &super::BindChecks,
@@ -132,13 +140,18 @@ pub(super) fn bind_target_corpse(
     let Some((spell_id, commit, word)) = ladder.ground.pending() else {
         return;
     };
-    let Some(bit) = checks.corpse_facts(entity).and_then(|f| bind_arm(word, f)) else {
+    let Some(bit) = checks
+        .corpse_facts(commit, entity)
+        .and_then(|f| bind_arm(word, f))
+    else {
         return;
     };
-    if word & !bit.target_flag() != 0 {
+    let rest = word & !bit.target_flag();
+    let range = checks.corpse_range_refusal(spell_id, commit, entity);
+    if rest != 0 && range.is_none() {
+        ladder.bind_partial(guid, bit.target_flag(), rest);
         return;
     }
-    let range = checks.corpse_range_refusal(spell_id, entity);
     super::merge(
         ladder,
         spell_id,
@@ -174,8 +187,7 @@ pub(crate) mod fixture {
             group_mask,
             friend_group_mask,
             enemy_group_mask,
-            enemies: [0; 4],
-            friends: [0; 4],
+            ..Default::default()
         };
         Factions::from_catalog(FactionCatalog::from_rows(
             HashMap::from([(1, tpl(1, 3, 2, 12)), (2, tpl(2, 5, 4, 10))]),

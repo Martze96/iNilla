@@ -35,6 +35,9 @@ mod device;
 #[cfg(not(target_os = "macos"))]
 #[path = "cpal.rs"]
 mod device;
+// The stand-ins `cpal.rs` tries for a default that will not open; tested on every platform.
+#[cfg(any(test, not(target_os = "macos")))]
+mod fallback;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -63,9 +66,11 @@ const HANDBACK_WAIT: Duration = Duration::from_millis(250);
 pub(super) const DEVICE_BUFFER_FRAMES: u32 = 512;
 
 /// How far ahead of the device the mix runs. The reference registers `SoundBufferSize`, FMOD 3's
-/// mix-ahead, at `"50"` or `"100"` by host (`0x457520`, strings at `0x835e10`/`0x835e0c`); this is
-/// the larger on every host, since the depth exists to hide a stall a whole IO cycle long.
-pub(super) const MIX_AHEAD_MS: u32 = 100;
+/// mix-ahead, at `"50"` when its processor frequency reads above 1500 MHz and `"100"` below
+/// (`0x457520`, `0x6414c0`, strings at `0x835e10`/`0x835e0c`). A host with more than 4 logical CPUs
+/// reads the calibrated counter rate (`0x42c0e0`, `0x884060`), above 1500 MHz on a current x86
+/// part; this is the first.
+pub(super) const MIX_AHEAD_MS: u32 = 50;
 
 /// Whether an output stream is open, set only by the backend around the stream's life. The stall
 /// watchdog stands down while it is set: `/usr/bin/sample` suspends the IO thread too, and every
@@ -650,8 +655,8 @@ fn render_loop(
     period_ns: u64,
 ) {
     // Held for the thread's life: on Windows its drop hands the MMCSS registration back.
-    // `WOW_AUDIO_NO_RT=1` skips realtime for the user-interactive QoS fallback, an A/B lever for
-    // the render thread preempting the compute pools.
+    // `WOW_AUDIO_NO_RT=1` skips realtime for the fallback (user-interactive QoS on macOS), an A/B
+    // lever for the render thread preempting the compute pools.
     let no_rt = std::env::var_os("WOW_AUDIO_NO_RT").is_some();
     let realtime = if no_rt {
         Err(anyhow::anyhow!("WOW_AUDIO_NO_RT=1"))
@@ -667,7 +672,13 @@ fn render_loop(
             Some(realtime)
         }
         Err(e) => {
-            warn!("audio: render thread could not go realtime ({e}); using user-interactive QoS");
+            // `promote_current_thread` is a no-op off macOS, so the thread keeps its normal priority.
+            let fallback = if cfg!(target_os = "macos") {
+                "user-interactive QoS"
+            } else {
+                "normal thread priority"
+            };
+            warn!("audio: render thread could not go realtime ({e}); using {fallback}");
             benilla_world::thread_qos::promote_current_thread(
                 benilla_world::thread_qos::QosClass::UserInteractive,
             );
@@ -732,6 +743,16 @@ fn render_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A device read on a thread whose predecessor read first and exited answers as that one did,
+    /// as each test builds its client on a thread of its own. On Windows the second read went
+    /// through a COM object that died with the first reader, and faulted (`cpal.rs`, `host`).
+    #[test]
+    fn the_device_reads_the_same_once_its_first_reader_has_exited() {
+        let first = std::thread::spawn(probe_sample_rate).join().unwrap();
+        let again = std::thread::spawn(probe_sample_rate).join().unwrap();
+        assert_eq!(first, again);
+    }
 
     /// Opt-in (`WOW_AUDIO_LIVE=1`) since it opens the real output device: does the device layer
     /// open a stream, does the callback run, and does the render thread keep ahead? Off macOS it

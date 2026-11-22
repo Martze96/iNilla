@@ -1,20 +1,29 @@
-//! The taxi map's app side: [`TaxiState`] holds the `SMSG_SHOWTAXINODES` map and the one-shot
-//! replies, [`feed_taxi`] pushes the known nodes on the current node's continent with their
-//! routes (built in [`routing`]) and fires the map events, and [`drain_taxi`] sends the activate.
+//! The taxi map's app side: [`TaxiState`] holds the `SMSG_SHOWTAXINODES` map, whose open builds
+//! the known nodes on the current node's continent with their routes ([`routing`]) inside its
+//! handler; the getters read them through the host as they run ([`live`]), the handlers signal on
+//! the taxi lane ([`lane`]), and [`TaxiSteps`] applies the verbs inside their calls.
 
 use benilla_protocol::messages::TaxiMask;
 use bevy::prelude::*;
 
-use benilla_ui::script::{TaxiUiState, UiScript};
+#[cfg(test)]
+use benilla_ui::script::UiScript;
 
-use crate::names::NameCache;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::player::UNIT_FLAG_TAXI_FLIGHT;
-use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
-use crate::ui_session::{close_npc_session_out_of_range, sweep_close, NpcSession};
+#[cfg(test)]
+use crate::net::{ObjectStore, SelfPlayer};
 
+use crate::ui_script::{SweepApp, SweepLeg};
+use crate::ui_session::{LatchApp, LatchedWindow, NpcWindow};
+
+mod calls;
+pub(crate) mod lane;
+pub(crate) mod live;
 mod routing;
-use routing::{build_nodes, load_taxi_catalogs, taxi_error_key, TaxiCatalogs, TaxiRouteCache};
+pub(crate) use calls::TaxiSteps;
+pub(crate) use lane::{TaxiEvent, TaxiLane};
+pub(crate) use live::TaxiLive;
+pub(crate) use routing::TaxiCatalogs;
+use routing::{build_nodes_for, load_taxi_catalogs, taxi_error_key, TaxiRouteCache};
 
 /// The open map, `SMSG_SHOWTAXINODES` as the wire gave it.
 pub(crate) struct TaxiOpen {
@@ -25,18 +34,16 @@ pub(crate) struct TaxiOpen {
     pub(crate) known: TaxiMask,
 }
 
-/// The taxi session: the open map, plus the one-shot replies [`feed_taxi`] consumes.
+/// The taxi session: the open map, the flight master's cell `[0xbb4ab8]`.
 #[derive(Resource, Default)]
 pub(crate) struct TaxiState {
     pub(crate) open: Option<TaxiOpen>,
-    /// The last `SMSG_ACTIVATETAXIREPLY` code, for [`feed_taxi`] to show, or on `OK` to close the
-    /// map.
+    /// The last `SMSG_ACTIVATETAXIREPLY` code, which the taxi probe reads.
     pub(crate) reply: Option<u32>,
-    /// A first-visit learn (`SMSG_NEW_TAXI_PATH`) for [`feed_taxi`] to announce.
-    pub(crate) discovered: bool,
 }
 
 impl TaxiState {
+    #[cfg(test)]
     pub(crate) fn open(&mut self, flightmaster: u64, nearest_node: u32, known: TaxiMask) {
         self.open = Some(TaxiOpen {
             flightmaster,
@@ -45,29 +52,153 @@ impl TaxiState {
         });
     }
 
-    /// A client-side close; the staged replies stay.
+    /// A client-side close.
     pub(crate) fn clear(&mut self) {
         self.open = None;
     }
 
-    /// The disconnect clear, staged replies included.
+    /// The disconnect clear.
     pub(crate) fn clear_session(&mut self) {
         self.open = None;
         self.reply = None;
-        self.discovered = false;
     }
 }
 
-/// The leave-world sweep's taxi leg (`0x490ad0` → `0x4db700` → `0x4dc0f0`): an open map closes
-/// with `TAXIMAP_CLOSED` (`0x4dc15f`) in the VM the sweep runs in.
-fn close_taxi_on_leave_world(script: Option<NonSendMut<UiScript>>, mut state: ResMut<TaxiState>) {
-    if sweep_close(&mut *state).is_none() {
+/// The flight master's cell `[0xbb4ab8]`; `CloseTaxiMap` (`0x4dcce0`) is the core itself, run
+/// inside its call ([`crate::script_calls::ScriptCallHost`]).
+impl LatchedWindow for TaxiState {
+    const WINDOW: NpcWindow = NpcWindow::Taxi;
+
+    fn cell(&self) -> Option<u64> {
+        self.open.as_ref().map(|o| o.flightmaster)
+    }
+
+    fn dispatched(world: &mut World) {
+        close_core(world);
+    }
+}
+
+/// The close core `0x4dc0f0`: with a map open, the latch release (`0x4dc105`), the cell cleared
+/// (`0x4dc113`) and each slot's route freed (`0x4dc130`-`0x4dc145`), then `TAXIMAP_CLOSED`
+/// (`0x4dc15f`). The slots stay, their fares 0 with no flight master (`0x4dc423`). An activate's
+/// `OK` (`0x5ed203`), a map from another flight master
+/// (`0x4db73a`) and the leave-world sweep's leg ([`leave_world`]) call it as it is;
+/// `CloseTaxiMap` runs it inside its call ([`TaxiSteps`]). The session closes here; the signal
+/// waits behind what the lane still holds ([`lane::close_signal`]), so it never fires ahead of the
+/// open it closes.
+pub(crate) fn close_core(world: &mut World) {
+    let Some(flightmaster) = world.resource::<TaxiState>().cell() else {
         return;
+    };
+    let waits = lane::close_waits(world);
+    crate::ui_session::release(world, flightmaster);
+    world.resource_mut::<TaxiState>().clear();
+    if let Some(mut cache) = world.get_resource_mut::<TaxiRouteCache>() {
+        for slot in &mut cache.slots {
+            slot.chain.clear();
+        }
     }
-    if let Some(mut script) = script {
-        script.set_taxi(None);
-        script.fire_event("TAXIMAP_CLOSED", vec![]);
+    lane::close_signal(world, waits);
+}
+
+/// The leave-world sweep's leg `0x4db700`: the free `0x4db630` (the map art at `0x4db6d0`, the
+/// lines, and the slot count to 0 at `0x4db6bf`), then the close core, which finds no slot.
+fn leave_world(world: &mut World) {
+    if let Some(mut cache) = world.get_resource_mut::<TaxiRouteCache>() {
+        cache.slots.clear();
+        cache.art = None;
     }
+    close_core(world);
+}
+
+/// `SMSG_SHOWTAXINODES`'s open (`0x4db710`): a map already on this flight master takes nothing
+/// (`0x4db730`); one on another is closed first through the core (`0x4db73a`); then the slots
+/// reset (`0x4db748`) and the build ([`build_map`]). A build of no slot ends there, with no
+/// latch, no cell and no event (`0x4dba40`, `0x4dbab0`); else the latch (`0x4dba5c`), the cell
+/// (`0x4dba63`), and `TAXIMAP_OPENED` with the Travel tutorial after it (`0x4dba96`,
+/// `0x4dbaa2`).
+pub(crate) fn open_map(world: &mut World, flightmaster: u64, nearest_node: u32, known: TaxiMask) {
+    match world.resource::<TaxiState>().cell() {
+        Some(open) if open == flightmaster => return,
+        Some(_) => close_core(world),
+        None => {}
+    }
+    let open = TaxiOpen {
+        flightmaster,
+        nearest_node,
+        known,
+    };
+    let Ok(Some(open)) = world.run_system_cached_with(build_map, open) else {
+        return;
+    };
+    crate::ui_session::register(world, flightmaster);
+    world.resource_mut::<TaxiState>().open = Some(open);
+    if let Some(mut lane) = world.get_resource_mut::<TaxiLane>() {
+        lane.push(TaxiEvent::Opened);
+    }
+}
+
+/// The builder `0x4db710`: the slots of the known nodes on the current node's continent, their
+/// routes and lines ([`build_nodes_for`]), the route search skipping the other side's nodes by the
+/// player's race (`0x4dbd2d`), and the continent's art. Hands the open back when it built a slot.
+/// The fares are the getters', at the call ([`live`]).
+fn build_map(
+    In(open): In<TaxiOpen>,
+    catalogs: Option<Res<TaxiCatalogs>>,
+    relations: crate::target::RelationWorld,
+    mut cache: ResMut<TaxiRouteCache>,
+) -> Option<TaxiOpen> {
+    cache.slots.clear();
+    let catalogs = catalogs?;
+    let player = relations
+        .me()
+        .zip(relations.factions())
+        .map(|(me, factions)| (me.race, factions.catalog()));
+    let (map_id, _, resolved) = build_nodes_for(&open, &catalogs, None, player)?;
+    cache.current = open.nearest_node;
+    cache.slots = resolved;
+    cache.art = Some(format!("Interface\\TaxiFrame\\TAXIMAP{map_id}"));
+    Some(open)
+}
+
+/// [`open_map`]'s latch and cell on `flightmaster`, as an open whose build made a slot leaves
+/// them, the build itself skipped: a harness without the taxi tables.
+#[cfg(test)]
+pub(crate) fn open_unbuilt(world: &mut World, flightmaster: u64) {
+    match world.resource::<TaxiState>().cell() {
+        Some(open) if open == flightmaster => return,
+        Some(_) => close_core(world),
+        None => {}
+    }
+    crate::ui_session::register(world, flightmaster);
+    world
+        .resource_mut::<TaxiState>()
+        .open(flightmaster, 1, TaxiMask::default());
+}
+
+/// The map built on `flightmaster` and its cell written, with no latch and no event, as a
+/// harness without the session seats it.
+#[cfg(test)]
+pub(super) fn seat_map(world: &mut World, flightmaster: u64, nearest_node: u32, known: TaxiMask) {
+    let open = TaxiOpen {
+        flightmaster,
+        nearest_node,
+        known,
+    };
+    if let Ok(Some(open)) = world.run_system_cached_with(build_map, open) {
+        world.resource_mut::<TaxiState>().open = Some(open);
+    }
+    mirror(world);
+}
+
+/// The VM's copy set to what the getters read through the host now, for a harness that runs Lua
+/// with no host to ask.
+#[cfg(test)]
+pub(super) fn mirror(world: &mut World) {
+    let view = world
+        .run_system_cached(|live: TaxiLive| live.view())
+        .expect("the map's reads");
+    world.non_send_resource_mut::<UiScript>().set_taxi(view);
 }
 
 /// A flight master's `SMSG_TAXINODE_STATUS`: `known = false` shows the green `TalkToMeGreen`
@@ -80,221 +211,6 @@ pub(crate) struct FlightMasterStatus {
     pub(crate) known: bool,
 }
 
-/// The range guard closes the map, as the close button does, when the flight master is out of
-/// range or gone.
-impl NpcSession for TaxiState {
-    fn npc(&self) -> Option<u64> {
-        self.open.as_ref().map(|o| o.flightmaster)
-    }
-
-    fn close(&mut self) {
-        self.clear();
-    }
-}
-
-/// Push the map into the VM and fire its events, show an activate refusal or close on `OK`, and
-/// announce a first-visit discovery.
-fn feed_taxi(
-    script: Option<NonSendMut<UiScript>>,
-    mut state: ResMut<TaxiState>,
-    catalogs: Option<Res<TaxiCatalogs>>,
-    names: Res<NameCache>,
-    commands: Res<NetCommands>,
-    mut cache: ResMut<TaxiRouteCache>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    reactions: crate::target::ReactionInputs,
-    mut last: crate::ui_script::WindowMemo<Option<TaxiUiState>>,
-    mut last_name: crate::ui_script::WindowMemo<Option<String>>,
-    mut sink: crate::ui_action::MessageSink,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let last = last.get(&script);
-    let last_name = last_name.get(&script);
-
-    // The activate reply: a refusal shows where its message row says; `OK` closes the map, as
-    // the reference's handler does for code 0.
-    if let Some(code) = state.reply.take() {
-        match taxi_error_key(code) {
-            Some(key) => {
-                let text = script
-                    .lua()
-                    .globals()
-                    .get::<String>(key)
-                    .unwrap_or_default();
-                if !text.is_empty() {
-                    crate::ui_action::show_messages(
-                        &mut script,
-                        &mut sink,
-                        "ui_taxi",
-                        [crate::ui_action::Shown::keyed(key, text)],
-                    );
-                }
-            }
-            None => state.open = None,
-        }
-    }
-
-    // The first-visit learn: the reference shows message `0xf2`, `ERR_NEWTAXIPATH`, whose row
-    // routes it to the yellow `UI_INFO_MESSAGE` (`0x4945b0`) and plays its `TaxiNodeDiscovered`
-    // sound kit (`0x458030`); the catalog row carries both.
-    if std::mem::take(&mut state.discovered) {
-        let text = script
-            .lua()
-            .globals()
-            .get::<String>("ERR_NEWTAXIPATH")
-            .unwrap_or_default();
-        if !text.is_empty() {
-            crate::ui_action::show_messages(
-                &mut script,
-                &mut sink,
-                "ui_taxi",
-                [crate::ui_action::Shown::keyed("ERR_NEWTAXIPATH", text)],
-            );
-        }
-    }
-
-    let Some(catalogs) = catalogs else {
-        return;
-    };
-
-    // The continent is the current node's own, as the packet left it (`build_nodes`). The fares
-    // take the flight master's price discount for the player (`0x4dc45d`, `0x4dc4a2`).
-    let fresh = state.open.as_ref().and_then(|open| {
-        let flightmaster = index
-            .0
-            .get(&open.flightmaster)
-            .and_then(|&e| stores.get(e).ok());
-        let discount = flightmaster.zip(self_q.iter().next()).map(|(master, me)| {
-            crate::target::vendor_price_discount(
-                reactions.factions.as_deref(),
-                &reactions.reputations,
-                master,
-                me,
-            )
-        });
-        let (map_id, nodes, resolved) = build_nodes(open, &catalogs, discount)?;
-        cache.0 = resolved;
-        Some(TaxiUiState {
-            art: format!("Interface\\TaxiFrame\\TAXIMAP{map_id}"),
-            nodes,
-        })
-    });
-    if fresh.is_none() {
-        cache.0.clear();
-    }
-
-    // The flight master's name is tracked so its landing re-fires `TAXIMAP_OPENED`, whose stock
-    // handler titles the map with `UnitName("npc")` (`TaxiFrame.lua:27`); the reference fires it
-    // only on open.
-    let flightmaster_name = state
-        .open
-        .as_ref()
-        .and_then(|open| names.resolve(open.flightmaster, &commands))
-        .map(str::to_string);
-    let name_changed = *last_name != flightmaster_name;
-
-    if fresh != *last || (fresh.is_some() && name_changed) {
-        script.set_taxi(fresh.clone());
-        match (&*last, &fresh) {
-            // No arguments: the event's one fire site, `0x4dba96`, is a plain
-            // `FrameScript_SignalEvent` (`0x703e50`).
-            (None, Some(_)) | (Some(_), Some(_)) => {
-                script.fire_event("TAXIMAP_OPENED", Vec::new());
-            }
-            (Some(_), None) => script.fire_event("TAXIMAP_CLOSED", vec![]),
-            (None, None) => {}
-        }
-        *last = fresh;
-        *last_name = flightmaster_name;
-    }
-}
-
-/// Push `UnitOnTaxi("player")`: the reference's verb (`0x517a40`) answers bit 20 of
-/// `UNIT_FIELD_FLAGS` (`0x517a86`), which vmangos sets only for a flight
-/// (`FlightPathMovementGenerator`). Any other server spline, such as a fear, is not a taxi: stock
-/// `UIParent.lua:474-478` closes the windows on `PLAYER_CONTROL_LOST` unless on a taxi. No self
-/// store reads as not on a taxi.
-fn feed_on_taxi(
-    script: Option<NonSendMut<UiScript>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut last: Local<crate::ui_script::VmMemo<Option<bool>>>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let last = last.get(&script);
-    let on_taxi = self_q
-        .iter()
-        .next()
-        .is_some_and(|s| s.0.unit_flags() & UNIT_FLAG_TAXI_FLIGHT != 0);
-    if *last != Some(on_taxi) {
-        script.set_on_taxi(on_taxi);
-        *last = Some(on_taxi);
-    }
-}
-
-/// Drain the Lua intents. `TakeTaxiNode(i)` sends `CMSG_ACTIVATETAXI` when a direct `TaxiPath`
-/// edge joins the current node and the target, even if the drawn route detours, and otherwise
-/// `CMSG_ACTIVATETAXIEXPRESS` with the chain and its fare, as the reference's `0x4dbad0` test
-/// decides; the `Current` node sends nothing. `CloseTaxiMap()` clears locally, with no packet.
-fn drain_taxi(
-    script: Option<NonSendMut<UiScript>>,
-    mut state: ResMut<TaxiState>,
-    cache: Res<TaxiRouteCache>,
-    catalogs: Option<Res<TaxiCatalogs>>,
-    commands: Res<NetCommands>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for idx in script.take_taxi_node() {
-        let Some(open) = &state.open else { continue };
-        let Some(resolved) = idx.checked_sub(1).and_then(|i| cache.0.get(i)) else {
-            continue;
-        };
-        let chain = resolved.chain.as_slice();
-        let (Some(&src), Some(&dest)) = (chain.first(), chain.last()) else {
-            continue;
-        };
-        if src == dest {
-            debug!("ui_taxi: TakeTaxiNode({idx}) is the current node — ignored");
-            continue;
-        }
-        let direct = catalogs
-            .as_ref()
-            .is_some_and(|c| c.paths.between(src, dest).is_some());
-        if direct {
-            debug!(
-                "ui_taxi: activate {src} -> {dest} (direct edge, {} copper)",
-                resolved.cost
-            );
-            let _ = commands.0.send(ClientCommand::ActivateTaxi {
-                guid: open.flightmaster,
-                source_node: src,
-                dest_node: dest,
-            });
-        } else {
-            debug!(
-                "ui_taxi: activate express {chain:?} ({} copper)",
-                resolved.cost
-            );
-            let _ = commands.0.send(ClientCommand::ActivateTaxiExpress {
-                guid: open.flightmaster,
-                total_cost: resolved.cost,
-                nodes: chain.to_vec(),
-            });
-        }
-    }
-    if script.take_taxi_close() {
-        debug!("ui_taxi: client-side close (no packet)");
-        state.clear();
-    }
-}
-
 mod net;
 
 pub(crate) struct UiTaxiPlugin;
@@ -302,67 +218,27 @@ pub(crate) struct UiTaxiPlugin;
 impl Plugin for UiTaxiPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
+        lane::add_taxi_lane(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
-            .add_sweep_leg(SweepLeg::Taxi, close_taxi_on_leave_world)
-            .add_systems(
-                Update,
-                (
-                    load_taxi_catalogs,
-                    // Range-close first so the clear fires `TAXIMAP_CLOSED` the same frame.
-                    close_npc_session_out_of_range::<TaxiState>.before(feed_taxi),
-                    feed_taxi.in_set(UiFeed),
-                    feed_on_taxi.in_set(UiFeed),
-                    drain_taxi.after(UiInput),
-                ),
-            );
+            .add_latched_window::<TaxiState>()
+            .add_sweep_leg(SweepLeg::Taxi, leave_world)
+            .add_systems(Update, load_taxi_catalogs);
     }
 }
 
 #[cfg(test)]
+mod call_tests;
+#[cfg(test)]
+mod drain_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::names::NameCache;
+    use crate::net::{ClientCommand, GuidIndex, NetCommands};
     use benilla_protocol::field::FIELD_UNIT_FLAGS;
     use benilla_protocol::ObjectFields;
-
-    /// `1` with the bit, `nil` without it; the feed reads nothing about server splines.
-    #[test]
-    fn unit_on_taxi_reads_the_taxi_flight_flag() {
-        let mut app = App::new();
-        app.add_systems(Update, feed_on_taxi);
-        app.insert_non_send_resource(UiScript::new().unwrap());
-        let me = app
-            .world_mut()
-            .spawn((
-                SelfPlayer,
-                ObjectStore(ObjectFields::from_pairs(&[(FIELD_UNIT_FLAGS, 0x1000)])),
-            ))
-            .id();
-        let on_taxi = |app: &mut App| -> bool {
-            app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
-            s.eval::<Option<i64>>(r#"return UnitOnTaxi("player")"#)
-                .unwrap()
-                .is_some()
-        };
-        assert!(!on_taxi(&mut app), "no TAXI_FLIGHT bit: nil");
-
-        app.world_mut()
-            .entity_mut(me)
-            .insert(ObjectStore(ObjectFields::from_pairs(&[(
-                FIELD_UNIT_FLAGS,
-                0x1000 | UNIT_FLAG_TAXI_FLIGHT,
-            )])));
-        assert!(on_taxi(&mut app), "the bit set: 1");
-
-        app.world_mut()
-            .entity_mut(me)
-            .insert(ObjectStore(ObjectFields::from_pairs(&[(
-                FIELD_UNIT_FLAGS,
-                0,
-            )])));
-        assert!(!on_taxi(&mut app), "landed: nil again");
-    }
 
     /// The map's fares take the flight master's discount and the express leg sends the raw route
     /// sum (`0x4dc3d0` against `0x4dc96f`). Honored, a PvP-flagged flight master and honor rank
@@ -392,14 +268,21 @@ mod tests {
             .init_resource::<NameCache>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
             .insert_resource(NetCommands(tx))
             .insert_resource(catalogs)
             .insert_resource(factions)
             .insert_resource(reps)
             .insert_non_send_resource(UiScript::new().unwrap());
+        // A human warrior player: the master's standing leg needs the player's type, flag `0x8`
+        // and template (`0x606576`-`0x6065b6`).
         app.world_mut().spawn((
             SelfPlayer,
+            crate::net::Guid(0x10),
             ObjectStore(ObjectFields::from_pairs(&[
+                (2, 0x19), // OBJECT_FIELD_TYPE
+                (FIELD_UNIT_FACTIONTEMPLATE, 1),
+                (benilla_protocol::field::FIELD_UNIT_FLAGS, 0x8),
                 (BYTES_0, crate::target::HUMAN_WARRIOR),
                 (PLAYER_BYTES_3, 6 << 24),
             ])),
@@ -419,7 +302,8 @@ mod tests {
             .0
             .insert(MASTER, master);
         // At Stormwind (2), knowing Sentinel Hill (4), Ironforge (6) and Thelsamar (8).
-        app.world_mut().resource_mut::<TaxiState>().open(
+        seat_map(
+            app.world_mut(),
             MASTER,
             2,
             TaxiMask([0b1010_1010, 0, 0, 0, 0, 0, 0, 0]),
@@ -435,18 +319,24 @@ mod tests {
                 ))
                 .unwrap()
         };
-        app.world_mut().run_system_once(feed_taxi).unwrap();
         assert_eq!(node(&mut app, "Sentinel Hill, Westfall").1, 94);
         assert_eq!(node(&mut app, "Ironforge, Dun Morogh").1, 42);
         let (thelsamar, shown) = node(&mut app, "Thelsamar, Loch Modan");
         assert_eq!(shown, 136);
 
+        let mut calls = {
+            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            script.keep_calls();
+            script.run(&format!("TakeTaxiNode({thelsamar})")).unwrap();
+            script.take_taxi_calls()
+        };
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .run(&format!("TakeTaxiNode({thelsamar})"))
+            .run_system_once(move |mut steps: TaxiSteps| {
+                for call in std::mem::take(&mut calls) {
+                    steps.apply(call);
+                }
+            })
             .unwrap();
-        app.world_mut().run_system_once(drain_taxi).unwrap();
-        // The feed's name lookup queries the flight master; only the activates matter here.
         let sent: Vec<_> = rx
             .try_iter()
             .filter(|c| {
@@ -469,35 +359,148 @@ mod tests {
             .resource_mut::<GuidIndex>()
             .0
             .remove(&MASTER);
-        app.world_mut().run_system_once(feed_taxi).unwrap();
+        mirror(app.world_mut());
         assert_eq!(node(&mut app, "Sentinel Hill, Westfall").1, 0);
+    }
+
+    /// `SMSG_SHOWTAXINODES` counts the mask's known nodes (`0x5eced7`-`0x5ecf2e`): under two
+    /// (`0x5ecf39`) it shows `0xb5`, `ERR_TAXINOPATHS`, inside the handler (`0x5ecf44` →
+    /// `0x496720`), then closes the gossip menu (`0x4e1fa0` with a zero guid, `0x5ecf55`), whose
+    /// `GOSSIP_CLOSED` follows the line, and returns before the builder (`0x5ecf6f`): no
+    /// `TAXIMAP_OPENED`. Both fire inside the handler's packet. Two open it.
+    #[test]
+    fn a_mask_with_fewer_than_two_known_nodes_opens_no_map() {
+        use benilla_protocol::SessionEvent;
+        const MASTER: u64 = 0xF130_0000_0000_0099;
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                ERR_TAXINOPATHS = "no paths"
+                HEARD = ""
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("GOSSIP_CLOSED")
+                f:RegisterEvent("UI_INFO_MESSAGE")
+                f:RegisterEvent("UI_ERROR_MESSAGE")
+                f:RegisterEvent("TAXIMAP_OPENED")
+                f:SetScript("OnEvent", function()
+                    HEARD = HEARD .. event .. "(" .. tostring(arg1) .. ") "
+                end)
+                "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.world_mut()
+            .resource_mut::<crate::ui_gossip::GossipState>()
+            .npc = Some(MASTER);
+        // What the packet's listeners heard, inside the packet: the lane fires at its end.
+        let shown = |app: &mut App, known: [u32; 8]| {
+            crate::net::handlers::dispatch(
+                app.world_mut(),
+                vec![SessionEvent::TaxiNodesShown {
+                    flightmaster: MASTER,
+                    nearest_node: 2,
+                    known_mask: TaxiMask(known),
+                }],
+            );
+            app.world_mut().flush();
+            assert!(
+                app.world().resource::<TaxiLane>().stamped().is_empty(),
+                "the lane fired inside the packet"
+            );
+            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let heard = script.eval::<String>("return HEARD").unwrap();
+            script.run("HEARD = ''").unwrap();
+            heard
+        };
+        let heard = shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(heard, "UI_ERROR_MESSAGE(no paths) GOSSIP_CLOSED(nil) ");
+        assert_eq!(app.world().resource::<TaxiState>().cell(), None);
+        assert_eq!(
+            app.world().resource::<crate::ui_gossip::GossipState>().npc,
+            None,
+            "the gossip menu closed"
+        );
+        // The count spans the whole mask: two bits in different words open the map, over the
+        // shipped tables, which build its one slot.
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        app.insert_resource(TaxiCatalogs::load(&mut chain).expect("taxi DBCs"));
+        assert_eq!(
+            shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0x8000_0000]),
+            "TAXIMAP_OPENED(nil) "
+        );
+        assert_eq!(app.world().resource::<TaxiState>().cell(), Some(MASTER));
+    }
+
+    /// `SMSG_NEW_TAXI_PATH` shows `ERR_NEWTAXIPATH` and then closes the gossip menu (`0x5e3e50`
+    /// → `0x496720`, `0x5e3e68` → `0x4e1fa0` with a zero guid), whose `GOSSIP_CLOSED` follows the
+    /// line; with no menu open, the line alone (`0x4e1fb8`).
+    #[test]
+    fn a_new_path_shows_its_line_then_closes_the_gossip_menu() {
+        use benilla_protocol::SessionEvent;
+        const MASTER: u64 = 0xF130_0000_0000_0099;
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                ERR_NEWTAXIPATH = "new path"
+                HEARD = ""
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("GOSSIP_CLOSED")
+                f:RegisterEvent("UI_INFO_MESSAGE")
+                f:SetScript("OnEvent", function()
+                    HEARD = HEARD .. event .. "(" .. tostring(arg1) .. ") "
+                end)
+                "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let learned = |app: &mut App| {
+            crate::net::handlers::dispatch(app.world_mut(), vec![SessionEvent::NewTaxiPath]);
+            app.world_mut().flush();
+            crate::lanes::fire_in_order(app.world_mut());
+            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let heard = script.eval::<String>("return HEARD").unwrap();
+            script.run("HEARD = ''").unwrap();
+            heard
+        };
+        app.world_mut()
+            .resource_mut::<crate::ui_gossip::GossipState>()
+            .npc = Some(MASTER);
+        assert_eq!(
+            learned(&mut app),
+            "UI_INFO_MESSAGE(new path) GOSSIP_CLOSED(nil) "
+        );
+        assert_eq!(
+            app.world().resource::<crate::ui_gossip::GossipState>().npc,
+            None,
+            "the gossip menu closed"
+        );
+        assert_eq!(learned(&mut app), "UI_INFO_MESSAGE(new path) ");
     }
 
     #[test]
     fn open_close_and_session_clear() {
         let mut state = TaxiState::default();
-        assert_eq!(state.npc(), None);
+        assert_eq!(state.cell(), None);
 
         state.open(0x42, 2, TaxiMask([0xA, 0, 0, 0, 0, 0, 0, 0]));
-        assert_eq!(state.npc(), Some(0x42));
+        assert_eq!(state.cell(), Some(0x42));
         assert_eq!(state.open.as_ref().unwrap().nearest_node, 2);
 
         // A client-side close drops the map, nothing else.
         state.reply = Some(3);
-        state.discovered = true;
-        NpcSession::close(&mut state);
-        assert_eq!(state.npc(), None);
-        assert_eq!(
-            state.reply,
-            Some(3),
-            "close leaves staged reply/discovery alone"
-        );
+        state.clear();
+        assert_eq!(state.cell(), None);
+        assert_eq!(state.reply, Some(3), "close leaves the last reply alone");
 
         // Disconnect drops everything.
         state.open(0x42, 2, TaxiMask::default());
         state.clear_session();
-        assert_eq!(state.npc(), None);
+        assert_eq!(state.cell(), None);
         assert_eq!(state.reply, None);
-        assert!(!state.discovered);
     }
 }

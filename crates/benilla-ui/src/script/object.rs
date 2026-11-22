@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use mlua::{LightUserData, Lua, ObjectLike, Table, Value};
+use mlua::{LightUserData, Lua, MultiValue, ObjectLike, Table, Value};
 
 use super::binding_abi::optional_string;
 use super::glue::VmKind;
@@ -20,9 +20,10 @@ use crate::widget::{FrameHandle, FrameKind, KindState};
 // The frame method clusters, split out for size.
 pub(crate) mod anchor_args;
 mod events_regions;
+pub(crate) use events_regions::{broken_handler, xml_title_region};
 mod frame_state;
 mod layout_methods;
-pub(crate) use layout_methods::eff_scale;
+pub(crate) use layout_methods::{eff_scale, layout_scale};
 pub(in crate::script) use layout_methods::{settle_frame, settle_region};
 pub(crate) mod movable;
 pub(crate) mod toplevel;
@@ -36,17 +37,25 @@ pub(super) fn id_to_lud(id: u32) -> LightUserData {
     LightUserData(id as usize as *mut c_void)
 }
 
-/// Read the id out of a wrapper table's `T[0]` lightuserdata (`0x701bd0` writes it).
+/// The member prologue's three lines for a bad receiver (`Frame:Show` `0x775750`,
+/// `Texture:IsShown` `0x79b9b0`, the Font methods from `0x79fda0`): no table (`0x847ef8`), a table
+/// with no object at `[0]` (`0x847ec0`), an object that fails the class's type test (`0x847e98`).
+pub(crate) const ERR_NON_TABLE: &str =
+    "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)";
+pub(crate) const ERR_NO_OBJECT: &str = "Attempt to find 'this' in non-framescript object";
+pub(crate) const ERR_WRONG_TYPE: &str = "Wrong object type for member function";
+
+/// Read the id out of a wrapper table's `T[0]` lightuserdata (`0x701bd0` writes it); a table with
+/// none raises the member prologue's line for it ([`ERR_NO_OBJECT`]).
 pub(crate) fn decode_id(this: &Table) -> mlua::Result<u32> {
     match this.raw_get::<Value>(0)? {
         Value::LightUserData(l) => Ok(l.0 as usize as u32),
-        _ => Err(mlua::Error::runtime(
-            "not a benilla frame/region object (missing T[0] identity)",
-        )),
+        _ => Err(mlua::Error::runtime(ERR_NO_OBJECT)),
     }
 }
 
-/// Resolve `self` (a frame wrapper) to its live [`FrameHandle`].
+/// Resolve `self` (a frame wrapper) to its live [`FrameHandle`]; an object that is no frame fails
+/// the Frame type test ([`ERR_WRONG_TYPE`]).
 pub(super) fn frame_handle_of(lua: &Lua, this: &Table) -> mlua::Result<FrameHandle> {
     let id = decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -54,7 +63,209 @@ pub(super) fn frame_handle_of(lua: &Lua, this: &Table) -> mlua::Result<FrameHand
         .id_to_frame
         .get(&id)
         .copied()
-        .ok_or_else(|| mlua::Error::runtime("stale or invalid frame handle"))
+        .ok_or_else(|| mlua::Error::runtime(ERR_WRONG_TYPE))
+}
+
+/// The class a method table's methods test their receiver against, the type id the reference's
+/// prologue hands the object's `IsA` slot (`call [eax+0x10]`, `0x775894`).
+#[derive(Clone, Copy)]
+enum Class {
+    /// Any frame: the `Frame` table (`[0xcf0c10]`).
+    Frame,
+    /// A frame whose kind's method chain reaches this table ([`kind_method_registries`]): a
+    /// `CheckButton` is a `Button` (`0x495ab0` answers each base's id), a `Button` no
+    /// `CheckButton`.
+    FrameKind(&'static str),
+    /// A region of this kind. A region's `IsA` answers its own id and the Region id alone
+    /// (`0x773550`, a FontString's: `[0xcf2ccc]`, `[0xcf0c3c]`), so a FontString fails the
+    /// Texture test (`[0xcf4cdc]`, `0x79b9b0`) and the Font test (`[0xcf4ea8]`, `0x79fda0`).
+    Region(crate::widget::RegionKind),
+    /// Any widget, frame or region: the Region id (`[0xcf0c3c]`).
+    Widget,
+    /// A Font object (`[0xcf4ea8]`).
+    Font,
+}
+
+impl Class {
+    fn admits(self, model: &Model, id: u32) -> bool {
+        match self {
+            Class::Frame => model.id_to_frame.contains_key(&id),
+            Class::FrameKind(table) => model
+                .id_to_frame
+                .get(&id)
+                .and_then(|&h| model.arena.frame(h))
+                .is_some_and(|f| kind_method_registries(Some(f.kind)).contains(&table)),
+            Class::Region(kind) => model
+                .id_to_region
+                .get(&id)
+                .and_then(|&rh| model.arena.region(rh))
+                .is_some_and(|r| r.kind == kind),
+            Class::Widget => {
+                model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id)
+            }
+            Class::Font => model.fonts.of_handle(id).is_some(),
+        }
+    }
+}
+
+/// The methods whose reference opens with no member prologue, so they keep their own order:
+/// `(table, name)`. Every other method of the tables [`guard_receivers`] reaches opens with it,
+/// read at each function the reference's pair tables name (`0x878ec0` and the rest).
+const NO_PROLOGUE: &[(&str, &str)] = &[
+    // No receiver read at all.
+    (super::minimap::REG_MINIMAP_METHODS, "GetZoomLevels"), // 0x4eebe0
+    (super::minimap::REG_MINIMAP_METHODS, "GetZoom"),       // 0x4eec20
+    (super::minimap::REG_MINIMAP_METHODS, "SetZoom"),       // 0x4eec60
+    (super::minimap::REG_MINIMAP_METHODS, "GetPingPosition"), // 0x4eefd0
+    (super::tabard::REG_TABARDMODEL_METHODS, "CanSaveTabardNow"), // 0x503910
+    // An argument is read first, and the prologue runs only after it passes.
+    (super::minimap::REG_MINIMAP_METHODS, "PingLocation"), // 0x4eeca0: 0x4eed0b, 0x4eed1f
+    (super::tooltip::REG_TOOLTIP_METHODS, "SetBuybackItem"), // 0x536300: 0x536322
+    (
+        super::messageframe::REG_SCROLLINGMESSAGEFRAME_METHODS,
+        "SetScrollFromBottom",
+    ), // 0x793070: 0x793078
+];
+
+/// Put the member prologue in front of every host method of every widget method table: a
+/// receiver that is no table (`0x847ef8`), holds no object (`0x847ec0`) or fails the table's
+/// [`Class`] (`0x847e98`) raises its line before the method converts an argument. Left as they
+/// are: the [`NO_PROLOGUE`] methods, and each of the Region table's names
+/// ([`super::REGION_MAP_METHODS`]), one function every widget table shares, which checks its own
+/// receiver ([`super::region_map::install`]). Runs once, after the last table is built.
+pub(super) fn guard_receivers(lua: &Lua) -> mlua::Result<()> {
+    use crate::widget::RegionKind;
+    let mut tables: Vec<(&'static str, Class)> = vec![
+        (REG_FRAME_METHODS, Class::Frame),
+        (super::REG_REGION_METHODS, Class::Widget),
+        (
+            super::REG_TEXTURE_METHODS,
+            Class::Region(RegionKind::Texture),
+        ),
+        (
+            super::REG_FONTSTRING_METHODS,
+            Class::Region(RegionKind::FontString),
+        ),
+        (super::REG_TITLE_METHODS, Class::Region(RegionKind::Title)),
+        (super::font::REG_FONT_METHODS, Class::Font),
+    ];
+    for kind in every_frame_kind() {
+        for &table in kind_method_registries(Some(kind)) {
+            if !tables.iter().any(|(t, _)| *t == table) {
+                tables.push((table, Class::FrameKind(table)));
+            }
+        }
+    }
+    let region: Table = lua.named_registry_value(super::REG_REGION_METHODS)?;
+    let shared: Vec<Value> = super::REGION_MAP_METHODS
+        .iter()
+        .map(|name| region.raw_get::<Value>(*name))
+        .collect::<mlua::Result<_>>()?;
+    for (key, class) in tables {
+        let Value::Table(methods) = lua.named_registry_value::<Value>(key)? else {
+            continue;
+        };
+        let entries: Vec<(Value, Value)> = methods
+            .pairs::<Value, Value>()
+            .collect::<mlua::Result<_>>()?;
+        for (name, method) in entries {
+            if shared.contains(&method) {
+                continue;
+            }
+            if let Value::String(n) = &name {
+                let n = n.to_string_lossy();
+                if NO_PROLOGUE.iter().any(|&(t, m)| t == key && m == n) {
+                    continue;
+                }
+            }
+            let Value::Function(method) = method else {
+                continue;
+            };
+            let guarded = lua.guard_receiver(&method, move |lua, receiver| match receiver {
+                mlua::Receiver::NotTable => Err(mlua::Error::runtime(ERR_NON_TABLE)),
+                mlua::Receiver::NoObject => Err(mlua::Error::runtime(ERR_NO_OBJECT)),
+                mlua::Receiver::Object(p) => {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    if class.admits(&model, p as u32) {
+                        Ok(())
+                    } else {
+                        Err(mlua::Error::runtime(ERR_WRONG_TYPE))
+                    }
+                }
+            })?;
+            if let Some(guarded) = guarded {
+                methods.raw_set(name, guarded)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The member prologue for a [`NO_PROLOGUE`] method that runs it late, after its own argument
+/// checks: `this` must be a table holding a frame of a kind whose method chain reaches `table`.
+pub(crate) fn receiver_in(lua: &Lua, this: &Value, table: &'static str) -> mlua::Result<Table> {
+    let Value::Table(t) = this else {
+        return Err(mlua::Error::runtime(ERR_NON_TABLE));
+    };
+    let id = decode_id(t)?;
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    if Class::FrameKind(table).admits(&model, id) {
+        Ok(t.clone())
+    } else {
+        Err(mlua::Error::runtime(ERR_WRONG_TYPE))
+    }
+}
+
+/// Every frame kind, so [`guard_receivers`] reaches every kind's method tables. The match makes
+/// a new kind a compile error until it is listed here.
+fn every_frame_kind() -> [FrameKind; 20] {
+    let kinds = [
+        FrameKind::Frame,
+        FrameKind::WorldFrame,
+        FrameKind::Button,
+        FrameKind::LootButton,
+        FrameKind::CheckButton,
+        FrameKind::EditBox,
+        FrameKind::StatusBar,
+        FrameKind::Slider,
+        FrameKind::ScrollFrame,
+        FrameKind::Model,
+        FrameKind::PlayerModel,
+        FrameKind::DressUpModel,
+        FrameKind::TabardModel,
+        FrameKind::MessageFrame,
+        FrameKind::ScrollingMessageFrame,
+        FrameKind::ColorSelect,
+        FrameKind::SimpleHtml,
+        FrameKind::MovieFrame,
+        FrameKind::GameTooltip,
+        FrameKind::Minimap,
+    ];
+    for kind in kinds {
+        match kind {
+            FrameKind::Frame
+            | FrameKind::WorldFrame
+            | FrameKind::Button
+            | FrameKind::LootButton
+            | FrameKind::CheckButton
+            | FrameKind::EditBox
+            | FrameKind::StatusBar
+            | FrameKind::Slider
+            | FrameKind::ScrollFrame
+            | FrameKind::Model
+            | FrameKind::PlayerModel
+            | FrameKind::DressUpModel
+            | FrameKind::TabardModel
+            | FrameKind::MessageFrame
+            | FrameKind::ScrollingMessageFrame
+            | FrameKind::ColorSelect
+            | FrameKind::SimpleHtml
+            | FrameKind::MovieFrame
+            | FrameKind::GameTooltip
+            | FrameKind::Minimap => {}
+        }
+    }
+    kinds
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -149,6 +360,71 @@ pub(crate) fn resolve_named_target(model: &Model, target: &NamedTarget) -> Optio
     (model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id)).then_some(id)
 }
 
+/// The error lines of a method that takes a frame by name or by table: `SetParent` (`0x7a1550`)
+/// and `ScrollFrame:SetScrollChild` (`0x790fa0`) fork alike and differ only in these words.
+pub(crate) struct FrameArgLines {
+    /// The method, as its lines name it: `SetParent`.
+    pub(crate) verb: &'static str,
+    /// What a name miss says it looked for: `region` (`0x87cb48`) or `frame` (`0x87b4c4`).
+    pub(crate) miss: &'static str,
+    /// The role in the `'this'` and type lines: `parent` (`0x87cbb4`, `0x87cb78`) or `child`
+    /// (`0x87b538`, `0x87b4f8`).
+    pub(crate) role: &'static str,
+}
+
+/// `SetParent`'s lines, the Frame's and the Region's alike (both are `0x7a1550`).
+pub(crate) const SET_PARENT_LINES: FrameArgLines = FrameArgLines {
+    verb: "SetParent",
+    miss: "region",
+    role: "parent",
+};
+
+/// A frame argument as `0x7a1550` and `0x790fa0` read one, with no `Model` borrow alive: nil is
+/// `Ok(None)`; a string or number (`lua_isstring`) is a name for `0x76c760`, which accepts only a
+/// frame, with no `$parent` expansion; a table's `[0]` must hold an object (else the `'this'`
+/// line) and that object must be a frame (else the type line). An absent argument (type -1) or
+/// any other type raises the miss line with the name `lua_tostring` gives it, NULL (`0x7a1761`,
+/// `0x7911ce`), which `pushstr` prints as `(null)` (`0x6f5bc8`). `who` is the receiver's name.
+pub(crate) fn frame_arg(
+    lua: &Lua,
+    who: &str,
+    lines: &FrameArgLines,
+    arg: Option<Value>,
+) -> mlua::Result<Option<FrameHandle>> {
+    let FrameArgLines { verb, miss, role } = lines;
+    let raise = |text: String| mlua::Error::runtime(format!("{who}:{verb}(): {text}"));
+    let miss_line = |name: &str| raise(format!("Couldn't find {miss} named '{name}'"));
+    match arg {
+        Some(Value::Nil) => Ok(None),
+        Some(Value::Table(t)) => {
+            let id = match t.raw_get::<Value>(0)? {
+                Value::LightUserData(l) if !l.0.is_null() => l.0 as usize as u32,
+                _ => return Err(raise(format!("Couldn't find 'this' in {role} object"))),
+            };
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let h = model.id_to_frame.get(&id).copied();
+            h.map(Some)
+                .ok_or_else(|| raise(format!("Wrong {role} object type, expected frame")))
+        }
+        Some(v @ (Value::String(_) | Value::Number(_) | Value::Integer(_))) => {
+            let nt = match &v {
+                Value::String(s) => match s.to_str() {
+                    Ok(n) => prefetch_named_target(lua, n.as_ref(), None),
+                    Err(_) => NamedTarget::unreadable(),
+                },
+                _ => {
+                    prefetch_named_target(lua, &optional_string(lua, &v).unwrap_or_default(), None)
+                }
+            };
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let h = resolve_named_target(&model, &nt)
+                .and_then(|id| model.id_to_frame.get(&id).copied());
+            h.map(Some).ok_or_else(|| miss_line(&nt.name))
+        }
+        _ => Err(miss_line("(null)")),
+    }
+}
+
 /// What a leading `$parent` expands to: the first non-empty name at or above `start` (`0x76c5b0`'s
 /// `+0x9c` walk), else [`crate::framexml::DEFAULT_PARENT_NAME`] (`0x76c5dd`). `start` is the
 /// anchoring widget's parent: a frame's enclosing frame, a region's owner.
@@ -173,7 +449,7 @@ pub(crate) fn frame_parent_token_base(model: &Model, h: FrameHandle) -> String {
 // String → enum parsing
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-pub(super) fn point_from_str(s: &str) -> Option<Point> {
+pub(crate) fn point_from_str(s: &str) -> Option<Point> {
     Some(match s.to_ascii_uppercase().as_str() {
         "TOPLEFT" => Point::TopLeft,
         "TOP" => Point::Top,
@@ -203,11 +479,11 @@ pub(super) fn point_name(p: Point) -> &'static str {
     }
 }
 
-/// An enum token, trimmed and uppercased; trimmed here rather than at the attribute read, since a
-/// `text=` value's spaces count. The reference's strata lookup compares the whole token,
-/// case-insensitively (`0x6f17ee`), so a padded `"BACKGROUND "` misses there.
+/// An enum token, uppercased for a case-blind match of the whole string: the strata, draw-layer
+/// and frame-type lookups each compare with `SStrCmpI` to the end (`0x6f17ee`, `0x6f18ce`,
+/// `0x6ee32c`), so a padded `"HIGH "` misses.
 fn enum_token(s: &str) -> String {
-    s.trim().to_ascii_uppercase()
+    s.to_ascii_uppercase()
 }
 
 /// A strata name, from the reference's eight-row table (`0x8119f8`), `BACKGROUND`..`TOOLTIP`, walked
@@ -341,13 +617,46 @@ pub(super) fn tonumber_f32(lua: &Lua, v: &Value) -> f32 {
     super::binding_abi::coerced_number(lua, Some(v.clone())) as f32
 }
 
-/// A colour's alpha argument: `lua_isnumber`-gated (`0x781037`, `0x79f5a2`, ...), so a numeric
-/// string counts and anything else, a table or boolean included, stages 1.0 without raising.
-pub(super) fn alpha_f32(lua: &Lua, v: &Value) -> f32 {
-    lua.coerce_number(v.clone())
-        .ok()
-        .flatten()
-        .map_or(1.0, |n| n as f32)
+/// A colour setter's four arguments as every one reads them: r, g and b by [`tonumber_f64`],
+/// alpha by [`alpha_arg`] over a staged 1.0 (`0x79f59b`), packed
+/// ([`crate::color::Rgba8::pack`]).
+pub(crate) fn colour_args(
+    lua: &Lua,
+    r: &Value,
+    g: &Value,
+    b: &Value,
+    a: &Value,
+) -> crate::color::Rgba8 {
+    crate::color::Rgba8::pack(
+        tonumber_f64(lua, r),
+        tonumber_f64(lua, g),
+        tonumber_f64(lua, b),
+        alpha_arg(lua, a).unwrap_or(1.0),
+    )
+}
+
+/// A colour's alpha argument as a double: `lua_isnumber`-gated (`0x781037`, `0x79f5a2`, ...), so a
+/// numeric string counts, and `None` for anything else, a table or boolean included, which never
+/// raises.
+pub(crate) fn alpha_arg(lua: &Lua, a: &Value) -> Option<f64> {
+    lua.coerce_number(a.clone()).ok().flatten()
+}
+
+/// The four values a colour getter pushes: each byte times the float at `0x81c6b4`, red first
+/// ([`crate::color::Rgba8::channels`]).
+pub(crate) fn colour_values(c: crate::color::Rgba8) -> MultiValue {
+    let (r, g, b, a) = c.channels();
+    MultiValue::from_vec([r, g, b, a].into_iter().map(Value::Number).collect())
+}
+
+/// [`colour_values`] as the getters that stage green, blue and alpha in `f32` locals push them:
+/// red the double product, the other three rounded through `fstp dword` (FontString:GetTextColor
+/// `0x79d92a`-`0x79d969`, GetStatusBarColor `0x78fb90`-`0x78fbc7`, Texture:GetVertexColor
+/// `0x79ab3a`-`0x79ab79`).
+pub(crate) fn colour_values_f32_gba(c: crate::color::Rgba8) -> (f64, f64, f64, f64) {
+    let (r, g, b, a) = c.channels();
+    let f = |x: f64| f64::from(x as f32);
+    (r, f(g), f(b), f(a))
 }
 
 /// [`tonumber_f32`] in `f64`, for `ColorSelect:SetColorRGB`, whose quantizer an `f32` detour could
@@ -393,20 +702,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// state's `GetScreenWidth`/`GetScreenHeight` are other bindings (`0x46dd30`/`0x46dd80`), and it
 /// has no modifier-key or fullscreen-scale verb.
 pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
-    // `GetScreenWidth`/`GetScreenHeight` (`0x48b480`/`0x48b4d0`): the screen root's size divided by
-    // `UIParent`'s scale (`GetUiScale`, `0x494590`), so they answer in `UIParent`'s units.
+    // `GetScreenWidth`/`GetScreenHeight` (`0x48b480`/`0x48b4d0`): the screen root's layout extent
+    // divided by `UIParent`'s scale (`GetUiScale`, `0x494590`) as a float, through the getter steps,
+    // so they answer in `UIParent`'s units ([`crate::layout::LayoutSpace::screen_size`]).
     lua.globals().set(
         "GetScreenWidth",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.width() / super::ui_scale::ui_parent_scale(&model))
+            let u = super::ui_scale::ui_parent_scale(&model);
+            Ok(model.layout_space().screen_size(Some(u)).0)
         })?,
     )?;
     lua.globals().set(
         "GetScreenHeight",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.height() / super::ui_scale::ui_parent_scale(&model))
+            let u = super::ui_scale::ui_parent_scale(&model);
+            Ok(model.layout_space().screen_size(Some(u)).1)
         })?,
     )?;
 
@@ -432,7 +744,7 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             }
             let scale = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                fullscreen_scale(model.screen.width() / model.screen.height())
+                fullscreen_scale(model.screen_aspect())
             };
             frame.call_method::<()>("SetScale", scale)
         })?,
@@ -546,17 +858,24 @@ fn kind_method_registries(kind: Option<FrameKind>) -> &'static [&'static str] {
 /// `CreateFrame(kind, name?, parent?, inherits?)` (`0x7060b0`), the runtime frame factory.
 /// `inherits` names one template, applied after the frame is made
 /// ([`crate::loader::apply_template`]) so its `OnLoad` sees the frame's real name and its `$parent`
-/// resolves against the caller's name. An unknown template raises `Couldn't find inherited node`
-/// and creates nothing (`0x7061dd`); a known but unusable one (not virtual, or the wrong shape)
-/// only warns, since the lookup itself succeeded.
+/// resolves against the caller's name. The gates run in the reference's order, each a raise that
+/// creates nothing: the type and the parent's tag (the usage line), a table parent that is no
+/// frame, an unknown template (`Couldn't find inherited node`, `0x7061dd`), then an unknown type
+/// (`0x7062a0`). A known but unusable template (not virtual, or the wrong shape) only warns, since
+/// the lookup itself succeeded.
 pub(super) fn create_frame(
     lua: &Lua,
-    (kind, name, parent, inherits): (String, Option<Value>, Option<Value>, Option<Value>),
+    (kind, name, parent, inherits): (Option<Value>, Option<Value>, Option<Value>, Option<Value>),
 ) -> mlua::Result<Table> {
-    // An unknown type raises. The reference's message (`0x872fa8`) capitalises `Unknown`, and it
-    // tests the template first (`0x7061dd`), raising for the type only at `0x7062a0`.
-    let frame_kind = registered_frame_kind(lua, &kind)
-        .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
+    const USAGE: &str = r#"Usage: CreateFrame("frameType" [, "name"] [, parent] [, "template"])"#;
+    // `lua_isstring(1)` (`0x7060d5`), then the parent's tag must be none, nil or a table
+    // (`0x7060e9`-`0x706112`): a parent given by name raises.
+    let Some(kind) = kind.as_ref().and_then(|v| optional_string(lua, v)) else {
+        return Err(mlua::Error::runtime(USAGE));
+    };
+    if !matches!(parent, None | Some(Value::Nil) | Some(Value::Table(_))) {
+        return Err(mlua::Error::runtime(USAGE));
+    }
     // `name` and `inherits` go through `lua_tostring` (`0x6f3690`) unguarded, so a number is a
     // string: `CreateFrame("Frame", 5)` names the frame "5". For `inherits` the conversion runs
     // before the string-type gate and retags the slot (`0x70613f`, `0x6f7cb1`), so a number there
@@ -564,18 +883,32 @@ pub(super) fn create_frame(
     let name: Option<String> = name.as_ref().and_then(|v| optional_string(lua, v));
     let template: Option<String> = inherits.as_ref().and_then(|v| optional_string(lua, v));
 
-    // A table is the parent and a name string is looked up; anything else is no parent. The
-    // reference raises `Usage: CreateFrame(...)` (`0x872f60`) for anything but a table or nil
-    // (`0x706112`).
-    let parent_handle: Option<FrameHandle> = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        match &parent {
-            Some(Value::Table(t)) => decode_id(t)
-                .ok()
-                .and_then(|id| model.id_to_frame.get(&id).copied()),
-            Some(Value::String(s)) => s.to_str().ok().and_then(|n| model.arena.lookup(n.as_ref())),
-            _ => None,
+    // A table parent is the object in its `[0]` (`0x706162`): none raises `Couldn't find 'this'
+    // in parent object` (`0x87303c`), and an object that is no frame (a region, a Font object)
+    // `Wrong parent object type, expected frame` (`0x7061ab`, `0x873004`).
+    let parent_handle: Option<FrameHandle> = match &parent {
+        Some(Value::Table(t)) => {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            match t.raw_get::<Value>(0)? {
+                Value::LightUserData(l) => Some(
+                    model
+                        .id_to_frame
+                        .get(&(l.0 as usize as u32))
+                        .copied()
+                        .ok_or_else(|| {
+                            mlua::Error::runtime(
+                                "CreateFrame: Wrong parent object type, expected frame",
+                            )
+                        })?,
+                ),
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "CreateFrame: Couldn't find 'this' in parent object",
+                    ))
+                }
+            }
         }
+        _ => None,
     };
 
     // The reference silently ignores a fourth argument that is neither string nor number
@@ -587,7 +920,7 @@ pub(super) fn create_frame(
                 "CreateFrame: the 4th argument (inherits) must be a template-name string, got {}; \
                  ignored for '{}'",
                 v.type_name(),
-                name.as_deref().unwrap_or("<unnamed>")
+                name.as_deref().unwrap_or(super::binding_abi::UNNAMED)
             ));
         }
     }
@@ -595,9 +928,10 @@ pub(super) fn create_frame(
     // The template lookup comes before anything is built: a miss (`0x7061dd` → `0x6ee6f0`) raises
     // at `0x7061ed`, before the node build (`0x706208`) and the name store (`0x70622d`), so it
     // leaves no partial widget and no global. The raise never returns and `pcall` catches it, as
-    // the widget dispatcher (`0x704f10`) does for every handler.
-    if let Some(t) = template.as_deref().filter(|t| !t.is_empty()) {
-        // One name, verbatim, case-folded, as `framexml::expand` resolves it.
+    // the widget dispatcher (`0x704f10`) does for every handler. Any string fourth argument is
+    // looked up (`lua_type` 4, `0x7061cb`), the empty one included, which no template names.
+    if let Some(t) = template.as_deref() {
+        // One name, verbatim, case-folded, as the XML load resolves it (`0x6ee6f0`).
         let known = lua
             .app_data_ref::<Model>()
             .expect("model app_data")
@@ -611,6 +945,10 @@ pub(super) fn create_frame(
         }
     }
 
+    // The node build fails for a type no factory knows (`0x70628b` → `0x7062a0`, `0x872fa8`).
+    let frame_kind = registered_frame_kind(lua, &kind)
+        .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: Unknown frame type '{kind}'")))?;
+
     // A leading `$parent` in the name expands as in XML: `CreateFrame` sets `name=` on a synthetic
     // node (`0x70622d`) for the XML builder `0x6ee280`, so the name reaches `SetName` (`0x76c650`),
     // whose `0x76c691` call expands it against the parent's first named ancestor.
@@ -620,7 +958,7 @@ pub(super) fn create_frame(
     });
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
-    let id = {
+    let (id, h) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let h = model.arena.create(frame_kind, name, parent_handle);
         if frame_kind == FrameKind::WorldFrame {
@@ -646,8 +984,13 @@ pub(super) fn create_frame(
         model.layout_load_begin(h);
         // No handler is bound yet, so the resolve this owes fires nothing.
         let _ = model.layout_load_end(h);
-        id
+        (id, h)
     };
+    // The `CMinimap` ctor's last act, so a `CreateFrame("Minimap")` has its nine children before
+    // its `OnLoad` too.
+    if frame_kind == FrameKind::Minimap {
+        super::minimap::build_engine_children(lua, h);
+    }
 
     // The wrapper exists, published under its name, before the template's `OnLoad` runs inside
     // this call, so the handler can reach the frame by name.
@@ -655,11 +998,32 @@ pub(super) fn create_frame(
     if let Some(template) = template {
         let report = crate::loader::apply_template(lua, &wrapper, &kind, &template);
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        for (log, heard) in report.raised() {
-            model.record_script_error(log.to_string(), heard.to_string());
+        for log in report.errors {
+            model.record_error(log);
         }
         for w in report.warnings {
             model.record_warning(w);
+        }
+    } else {
+        super::tooltip_post_load(lua, &wrapper);
+    }
+    // The builder's post-load hook (`0x6ee4ea`) is `CMinimap::LoadXML` (`0x4ee2b0`) for a Minimap:
+    // after the `OnLoad`, the two model attributes, which the synthetic node never carries, so
+    // the stock models (`0x84c768`, `0x8453c0`).
+    let xml = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .xml_creating;
+    if frame_kind == FrameKind::Minimap && !xml {
+        let failed = super::minimap::apply_model_attrs(
+            lua,
+            &wrapper,
+            crate::widget::MINIMAP_DEFAULT_ARROW_MODEL,
+            crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+        )?;
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        for line in failed {
+            model.record_warning(line.to_string());
         }
     }
     Ok(wrapper)
@@ -736,5 +1100,96 @@ mod fullscreen_scale_tests {
             let err = s.run(call).unwrap_err().to_string();
             assert!(err.contains(needle), "{call}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod receiver_tests {
+    use crate::script::UiScript;
+    use mlua::{MultiValue, Table, Value};
+
+    /// The registry table that holds a reference method table's methods, by its address.
+    fn registry_key(table: &str) -> &'static str {
+        use crate::script as s;
+        match table {
+            "0x878ec0" => s::REG_FRAME_METHODS,
+            "0x87c9b8" => s::REG_REGION_METHODS,
+            "0x87c128" => s::REG_TEXTURE_METHODS,
+            "0x87c1d8" => s::REG_FONTSTRING_METHODS,
+            "0x87c7c8" => s::font::REG_FONT_METHODS,
+            "0x879d00" => s::button::REG_BUTTON_METHODS,
+            "0x87bf74" => s::button::REG_CHECKBUTTON_METHODS,
+            "0x847ce4" => s::loot::REG_LOOTBUTTON_METHODS,
+            "0x87bb68" => s::editbox::REG_EDITBOX_METHODS,
+            "0x87b010" => s::statusbar::REG_STATUSBAR_METHODS,
+            "0x87b260" => s::slider::REG_SLIDER_METHODS,
+            "0x87b3c0" => s::scrollframe::REG_SCROLLFRAME_METHODS,
+            "0x87b5c0" => s::messageframe::REG_SCROLLINGMESSAGEFRAME_METHODS,
+            "0x87b960" => s::messageframe::REG_MESSAGEFRAME_METHODS,
+            "0x87ba80" => s::simplehtml::REG_SIMPLEHTML_METHODS,
+            "0x87abb0" => s::colorselect::REG_COLORSELECT_METHODS,
+            "0x87ab4c" => s::movieframe::REG_MOVIEFRAME_METHODS,
+            "0x878948" => s::modelframe::REG_MODEL_METHODS,
+            "0x84f1fc" => s::modelframe::REG_PLAYERMODEL_METHODS,
+            "0x84f190" => s::dressup::REG_DRESSUPMODEL_METHODS,
+            "0x84ee40" => s::tabard::REG_TABARDMODEL_METHODS,
+            "0x854198" => s::tooltip::REG_TOOLTIP_METHODS,
+            "0x84c538" => s::minimap::REG_MINIMAP_METHODS,
+            other => panic!("no registry table for the reference's method table {other}"),
+        }
+    }
+
+    /// The eight methods whose reference opens with no member prologue, by table and name: the
+    /// Minimap's four getters and setter (`0x4eebe0`, `0x4eec20`, `0x4eec60`, `0x4eefd0`),
+    /// `CanSaveTabardNow` (`0x503910`), and three that read an argument first, `PingLocation`
+    /// (`0x4eeca0`), `SetBuybackItem` (`0x536300`) and `SetScrollFromBottom` (`0x793070`).
+    const NO_PROLOGUE: [(&str, &str); 8] = [
+        ("0x84c538", "GetZoomLevels"),
+        ("0x84c538", "GetZoom"),
+        ("0x84c538", "SetZoom"),
+        ("0x84c538", "GetPingPosition"),
+        ("0x84c538", "PingLocation"),
+        ("0x84ee40", "CanSaveTabardNow"),
+        ("0x854198", "SetBuybackItem"),
+        ("0x87b5c0", "SetScrollFromBottom"),
+    ];
+
+    /// Every widget method of `reference/bindings.tsv` is in its table and, called with no
+    /// receiver, raises the member prologue's first line (`0x847ef8`) before anything else; the
+    /// eight without a prologue raise something else or nothing. A method that is missing, or one
+    /// the receiver check passed over, fails by name.
+    #[test]
+    fn every_reference_widget_method_opens_with_the_prologue() {
+        let s = UiScript::new().unwrap();
+        let lua = s.lua();
+        let tsv = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/bindings.tsv");
+        let text = std::fs::read_to_string(tsv).expect("reference/bindings.tsv");
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.get(4) != Some(&"widget") {
+                continue;
+            }
+            let (name, table) = (f[0], f[3]);
+            let methods: Table = lua.named_registry_value(registry_key(table)).unwrap();
+            let Ok(Value::Function(method)) = methods.raw_get::<Value>(name) else {
+                failures.push(format!("{table} {name}: not in its table"));
+                continue;
+            };
+            checked += 1;
+            let raised = method
+                .call::<MultiValue>(())
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            let prologue = raised.contains(super::ERR_NON_TABLE);
+            let excepted = NO_PROLOGUE.contains(&(table, name));
+            if prologue == excepted {
+                failures.push(format!("{table} {name}: raised {raised:?}"));
+            }
+        }
+        assert!(checked > 450, "only {checked} methods checked");
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

@@ -30,7 +30,7 @@ use inilla_core::touch::{slot_binding, Element, ElementKind, TouchLayout};
 use super::platform::SafeArea;
 use super::touch::TouchState;
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 
 /// One action slot, as the HUD draws it.
 #[derive(Clone, Debug, Default)]

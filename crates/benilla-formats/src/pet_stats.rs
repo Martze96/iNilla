@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::chain::Chain;
-use crate::dbc::{f32_at, parse, str_at, u32_at};
+use crate::dbc::{f32_at, loc_str, parse, u32_at};
 
 const PET_PERSONALITY: &str = "DBFilesClient\\PetPersonality.dbc";
 const PET_LOYALTY: &str = "DBFilesClient\\PetLoyalty.dbc";
@@ -18,7 +18,7 @@ const PET_LOYALTY: &str = "DBFilesClient\\PetLoyalty.dbc";
 /// `PetPersonality.dbc`'s column count, which `benilla-dbc` checks against the header.
 const PERSONALITY_FIELDS: usize = 19;
 const LOYALTY_FIELDS: usize = 10;
-/// The enUS `Name` column in both files, the `+4` in the client's `[row + 4*locale + 4]`.
+/// The `Name` block's first column in both files, the `+4` in the client's `[row + 4*locale + 4]`.
 const NAME_FIELD: usize = 1;
 
 const THRESHOLD_FIELD: usize = 0x28 / 4;
@@ -76,6 +76,11 @@ impl PetPersonality {
 pub struct PetPersonalities(HashMap<u32, PetPersonality>);
 
 impl PetPersonalities {
+    /// The table from its rows by id, as a loader or a test builds it.
+    pub fn from_rows(rows: HashMap<u32, PetPersonality>) -> Self {
+        Self(rows)
+    }
+
     /// The row for personality `id`, or the client's fallback row. The reference keys this table
     /// by `[[pet+0xb30]+0x24]` (`0x605600`), a field of the cached creature-query record whose
     /// wire source is untraced, so callers pass `None` and get row 1.
@@ -97,6 +102,11 @@ impl PetPersonalities {
 pub struct PetLoyaltyNames(HashMap<u32, String>);
 
 impl PetLoyaltyNames {
+    /// The table from its names by loyalty level, as a loader or a test builds it.
+    pub fn from_names(names: HashMap<u32, String>) -> Self {
+        Self(names)
+    }
+
     /// The name for a loyalty level. `None` is `GetPetLoyalty`'s nil, for level `0` and past the
     /// table (`0x4be700` bounds it against `[0xc0d9f8]`).
     pub fn name(&self, level: u32) -> Option<&str> {
@@ -169,10 +179,11 @@ pub fn load_pet_loyalty_names(chain: &mut Chain) -> Result<PetLoyaltyNames> {
         .read_file(PET_LOYALTY)
         .with_context(|| format!("reading {PET_LOYALTY}"))?;
     let rs = parse(&bytes, loyalty_schema(), "PetLoyalty.dbc")?;
+    let locale = chain.locale();
     let mut by_id = HashMap::new();
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
-        if let Some(name) = str_at(&rs, r, NAME_FIELD) {
+        if let Some(name) = loc_str(&rs, r, NAME_FIELD, locale) {
             by_id.insert(id, name);
         }
     }

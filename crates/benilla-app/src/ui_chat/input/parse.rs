@@ -53,8 +53,6 @@ pub(in crate::ui_chat) enum ParsedChat {
     Help,
     /// An `EmotesText` command (`/wave` is 101), sent as `CMSG_TEXT_EMOTE` at the selection.
     TextEmote { text_id: u32, arg: Option<String> },
-    /// A channel verb the stock handler parsed and the VM queued; never from [`parse_line`].
-    Channel(benilla_ui::script::ChannelCommand),
     /// `/castvis`: a locally synthesized [`crate::creature_anim::CastEvent`], at the selection
     /// or self.
     CastVis {
@@ -99,9 +97,6 @@ pub(in crate::ui_chat) enum ParsedChat {
     Follow { name: Option<String> },
     /// `/macrohelp`: `ChatFrame_DisplayMacroHelpText`'s five `MACRO_HELP_TEXT_LINE`s.
     MacroHelp,
-    /// A `/console` line the CVar store did not consume, for the `ConsoleCommand` registry
-    /// ([`crate::console::execute`]).
-    Console { line: String },
     /// A slash line matching neither a command nor an `EmotesText` name.
     Unknown,
 }
@@ -287,8 +282,8 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
         },
         S::MacroHelp => ParsedChat::MacroHelp,
         // `SlashCmdList["CONSOLE"]` (`ChatFrame.lua:671`) is `ConsoleExec(msg)`. A typed line runs
-        // it; one that skipped the edit box calls the same verb, so a CVar line writes the CVar
-        // and anything else comes back through `engine_verbs`.
+        // it; one that skipped the edit box calls the same verb, which runs the line inside the
+        // call.
         S::Console => ParsedChat::Lua {
             body: format!("ConsoleExec({})", lua_quoted_string(args)),
         },

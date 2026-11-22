@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use crate::net::Embodied;
 use crate::player::{head_height, CameraPivot, Player};
+use crate::query_cache::Ask;
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
@@ -31,6 +32,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod movie;
 mod net;
 // Crate-visible for the dev stall watchdog, which asks `output::device_open`.
 pub(crate) mod output;
@@ -48,13 +50,16 @@ pub(crate) use emote::EmoteSounds;
 pub(crate) fn kit_decodes() -> u32 {
     kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub(crate) use glue::{GlueMusicRequest, GlueSound};
+pub(crate) use glue::GlueMusicRequest;
 pub(crate) use greeting::NpcGreetingRequest;
 /// Named by the schedule tests' class table (`game_plugins::schedule_tests::Classes`).
 #[cfg(test)]
 pub(crate) use kit::SoundKits;
 pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
+pub(crate) use movie::{MovieAudioReports, MovieAudioRequest};
+#[cfg(test)]
+pub(crate) use spell::HoldLoops;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
 pub(crate) use zone::ExplorationSounds;
 
@@ -97,8 +102,8 @@ pub(crate) struct SoundConfig {
     /// preset (`0x45a75b`) and the per-channel wet send (`0x458f13`). Read by
     /// [`reverb::zone_reverb`].
     ///
-    /// Deviation: default off where the reference registers "1". Its reverb is FMOD 3's EAX API,
-    /// which renders only with hardware 3D mixing, so off is what the reference is heard to
+    /// Deviation: default off where the reference registers "1", because its reverb is FMOD 3's EAX
+    /// API, which renders only with hardware 3D mixing, so off is what the reference is heard to
     /// produce (inferred: `fmod.dll`'s render side is untraced).
     pub reverb: bool,
     /// Not a CVar: set while the loading cover is up ([`feed_world_hold`]). No new sound starts
@@ -115,9 +120,9 @@ pub(crate) struct SoundConfig {
     /// it would save music off for a player who quits mid-cinematic. So the reference's restore
     /// latch (`[0xb4e278]`), needed there because its flag is the CVar itself, is not carried.
     pub music_suppressed: bool,
-    /// Deviation: `SoundOutputLimiter`, not a 1.12 CVar, default on, so overlapping full-scale
-    /// kits are limited rather than clipped. The reference has no headroom mechanism and clips at
-    /// full scale, as kira's hard clamp would (see [`limiter`]).
+    /// Deviation: `SoundOutputLimiter`, not a 1.12 CVar, default on, because that way overlapping
+    /// full-scale kits are limited rather than clipped. The reference has no headroom mechanism and
+    /// clips at full scale, as kira's hard clamp would (see [`limiter`]).
     pub limiter: bool,
     /// `SoundListenerAtCharacter` (default "1", `0x457890`), read once per frame at `0x483125`.
     /// `1` puts the listener on the mover with the character's facing, `0` at the camera eye with
@@ -133,6 +138,11 @@ pub(crate) struct SoundConfig {
     /// `ZoneMusic.dbc` silence interval between plays of one zone's track
     /// ([`zone::next_track_time`], `0x4601f0`). A zone change is immediate either way.
     pub zone_music_no_delay: bool,
+    /// `MapWaterSounds` (default "1", `0x462ac9`): its handler `0x462af0` on 0 hard-stops all four
+    /// liquid-class loops (`0x462b10` → `0x462780(1)` → `Sound::Stop`, no fade), and the loop
+    /// driver `0x462b50` arms nothing while it is 0 (`0x462b59`-`0x462b67`). Read by
+    /// [`liquid_loop`].
+    pub liquid_sounds: bool,
 }
 
 impl SoundConfig {
@@ -171,6 +181,7 @@ impl Default for SoundConfig {
             listener_at_character: true,
             emote_sounds: true,
             zone_music_no_delay: false,
+            liquid_sounds: true,
         }
     }
 }
@@ -223,8 +234,8 @@ fn feed_music_suppression(
     }
 }
 
-/// The backend output; `mixer` is `None` with no device or under `$WOW_NOSOUND`. Non-Send: the
-/// device stream is not `Send` on every platform, so audio systems run on the main thread.
+/// The backend output; `mixer` is `None` with no device, under `$WOW_NOSOUND` or in a test.
+/// Non-Send: the device stream is not `Send` on every platform, so audio systems run on the main thread.
 pub(crate) struct SoundOutput {
     pub(crate) mixer: Option<Mixer>,
     /// Live kit channels, pumped by [`kit::pump_channels`].
@@ -238,6 +249,8 @@ pub(crate) struct SoundOutput {
     pub(crate) zone_streams: usize,
     pub(crate) glue_streams: usize,
     pub(crate) cinematic_streams: usize,
+    /// The movie frame's audio ([`movie`]).
+    pub(crate) movie_streams: usize,
     /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
     /// live was quieter.
     pub(crate) voices_stolen: u64,
@@ -249,7 +262,11 @@ pub(crate) struct SoundOutput {
 impl SoundOutput {
     /// Everything the device is mixing, the number [`kit::SOFTWARE_CHANNELS`] bounds.
     pub(crate) fn live_voices(&self) -> usize {
-        self.channels.len() + self.zone_streams + self.glue_streams + self.cinematic_streams
+        self.channels.len()
+            + self.zone_streams
+            + self.glue_streams
+            + self.cinematic_streams
+            + self.movie_streams
     }
 }
 
@@ -281,13 +298,13 @@ pub(super) fn worn_chest_material(
     store: Option<&crate::net::ObjectStore>,
     objects: &crate::net::Objects,
     items: &crate::items::Items,
-    net: &crate::net::NetCommands,
 ) -> Option<u32> {
     /// The fifth 8-byte guid of the inv-slot array (`0x62fa50`/`0x62fb86`).
     const EQUIPMENT_SLOT_CHEST: u8 = 4;
     let guid = store?.0.player_inv_slot(EQUIPMENT_SLOT_CHEST)?;
     let entry = objects.object(guid)?.object_entry()?;
-    Some(items.held(entry, net)?.material)
+    // A worn item's record only read: its create asked.
+    Some(items.held(entry, Ask::Read)?.material)
 }
 
 /// This frame's listener pose in Bevy space, set by [`update_audio_listener`] and read by every
@@ -310,17 +327,20 @@ impl Default for AudioListener {
 /// The world soundscape is live: in the world and seated on the avatar. The seat check matters
 /// after a logout, when the camera still sits at the old spot until the next take-control.
 fn world_audio_live(
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     player: Res<Player>,
 ) -> bool {
-    *state.get() == crate::char_select::ClientState::InWorld && player.active
+    *state.get() == crate::client_state::ClientState::InWorld && player.active
 }
 
 pub(crate) struct SoundPlugin;
 
 /// The sound CVars' change callback: volumes clamp to `[0, 1]`, enables are `!= 0` as the
 /// reference parses them (`0x4574d0`: `setne al`).
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<SoundConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut sound: bevy::prelude::Mut<'_, SoundConfig>,
+) {
     let v = ev.num();
     match ev.key().as_str() {
         "mastervolume" => sound.master = v.clamp(0.0, 1.0),
@@ -337,6 +357,8 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
         "soundlisteneratcharacter" => sound.listener_at_character = v != 0.0,
         "emotesounds" => sound.emote_sounds = v != 0.0,
         "soundzonemusicnodelay" => sound.zone_music_no_delay = v != 0.0,
+        // The record's integer (`SStrToInt`, `0x462af6`), not its float: "0.5" is off.
+        "mapwatersounds" => sound.liquid_sounds = ev.flag(),
         _ => {}
     }
 }
@@ -344,20 +366,21 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.add_observer(on_cvar);
-        // `$WOW_NOSOUND` (a silent unattended run) and `$WOW_CAPTURE` open no device at all, so
-        // they never hold the audio hardware against a session someone is listening to.
+        // `$WOW_NOSOUND` (a silent unattended run), `$WOW_CAPTURE` and a test build open no device
+        // at all, so they never hold the audio hardware against a session someone is listening to.
         let silent = ["WOW_NOSOUND", "WOW_CAPTURE"]
             .into_iter()
-            .find(|v| std::env::var_os(v).is_some());
+            .find(|v| std::env::var_os(v).is_some())
+            .map(|v| format!("${v} set"))
+            .or_else(|| cfg!(test).then(|| "a test build".to_owned()));
         // Before the mixer: the probe's taps are main-track effects, fixed when kira builds it.
         let probe_dir = if silent.is_some() {
             None
         } else {
             probe::output_dir()
         };
-        let mixer = if let Some(var) = silent {
-            info!("${var} set — audio disabled");
+        let mixer = if let Some(why) = silent {
+            info!("{why} — audio disabled");
             None
         } else {
             match Mixer::new(probe_dir.as_deref()) {
@@ -382,6 +405,7 @@ impl Plugin for SoundPlugin {
             zone_streams: 0,
             glue_streams: 0,
             cinematic_streams: 0,
+            movie_streams: 0,
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,
@@ -402,9 +426,11 @@ impl Plugin for SoundPlugin {
             (
                 // After Input writes the pose and camera, before Present's consumers read it.
                 update_audio_listener.in_set(WorldStage::Stream),
-                toggle_mute,
-                apply_master_volume.after(toggle_mute),
-                apply_focus_gate,
+                // The volumes are CVar knobs a call's callback writes: the mute key's write
+                // before the calls, which read it, and the apply after them.
+                toggle_mute.before(crate::vm_pass::VmPass::Start),
+                (apply_master_volume.after(toggle_mute), apply_focus_gate)
+                    .after(crate::vm_pass::VmPass::End),
                 poll_mix_health,
             ),
         );
@@ -431,6 +457,7 @@ impl Plugin for SoundPlugin {
         vocal::plugin(app);
         message::plugin(app);
         glue::plugin(app);
+        movie::plugin(app);
         money::plugin(app);
         reverb::plugin(app);
         interior::plugin(app);

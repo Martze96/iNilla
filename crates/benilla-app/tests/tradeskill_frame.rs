@@ -3,8 +3,8 @@
 //! the reagent slots and the list rows' selection and hover.
 
 use benilla_ui::script::{
-    CraftRecipe, CraftState, CraftTooltip, TradeSkillDifficulty, TradeSkillReagent,
-    TradeSkillRecipe, TradeSkillState, UiScript,
+    CraftDifficulty, CraftRecipe, CraftState, CraftTooltip, TradeSkillDifficulty,
+    TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
 };
 
 mod common;
@@ -60,7 +60,7 @@ fn recipe(
         icon: Some("Interface\\Icons\\INV_Misc_ArmorKit_04".into()),
         min_made: 1,
         max_made: 1,
-        cooldown_secs: None,
+        cooldown: None,
         product_item: spell_id + 10_000,
         product_inv_type,
         product_item_level: 0, // neutral: ordering falls through to the name
@@ -72,6 +72,8 @@ fn recipe(
             have: 5,
         }],
         tools: vec![("Anvil".into(), true)],
+        icon_pending: None,
+        tools_pending: Vec::new(),
     }
 }
 
@@ -95,6 +97,8 @@ fn state() -> TradeSkillState {
 fn collapse_all_tab_and_filter_dropdowns_work_end_to_end() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // `ToggleDropDownMenu` reads `useUiScale` (`UIDropDownMenu.lua:525`), which the client registers.
+    s.register_cvars([("useUiScale", "0"), ("uiScale", "1.0")]);
     load_ui(&s);
 
     s.set_trade_skill(Some(state()));
@@ -229,7 +233,7 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
         };
 
         // QuestItemTemplate's <Size>.
-        assert_eq!(
+        benilla_ui::assert_near!(
             (
                 num(&format!("{w}1:GetWidth()")),
                 num(&format!("{w}1:GetHeight()"))
@@ -239,20 +243,20 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
         );
 
         // Reagent2 anchors LEFT to Reagent1's RIGHT at zero offset, so the pitch is the row width,
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}2:GetLeft()")) - num(&format!("{w}1:GetLeft()")),
             147.0,
             "{w} column pitch"
         );
         // and row 2 drops one row height plus a 2px gutter.
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}3:GetTop()")) - num(&format!("{w}1:GetTop()")),
             -43.0,
             "{w} row step"
         );
 
         // `$parentIconTexture`: 39×39, flush in the row's TOPLEFT corner.
-        assert_eq!(
+        benilla_ui::assert_near!(
             (
                 num(&format!("{w}1IconTexture:GetWidth()")),
                 num(&format!("{w}1IconTexture:GetHeight()"))
@@ -260,12 +264,12 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
             (39.0, 39.0),
             "{w}1 icon"
         );
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1IconTexture:GetLeft()")),
             num(&format!("{w}1:GetLeft()")),
             "{w}1 icon flush left"
         );
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1IconTexture:GetTop()")),
             num(&format!("{w}1:GetTop()")),
             "{w}1 icon flush top"
@@ -278,7 +282,7 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
             "Interface\\QuestFrame\\UI-QuestItemNameFrame",
             "{w}1 name plate art"
         );
-        assert_eq!(
+        benilla_ui::assert_near!(
             (
                 num(&format!("{w}1NameFrame:GetWidth()")),
                 num(&format!("{w}1NameFrame:GetHeight()"))
@@ -286,14 +290,14 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
             (128.0, 64.0),
             "{w}1 plate size"
         );
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1NameFrame:GetLeft()")) - num(&format!("{w}1IconTexture:GetRight()")),
             -10.0,
             "{w}1 plate rides the icon's right edge"
         );
 
         // The name sits on the plate, 15 from its left, vertically centred.
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1Name:GetLeft()")) - num(&format!("{w}1NameFrame:GetLeft()")),
             15.0,
             "{w}1 name inset"
@@ -310,12 +314,12 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
         );
 
         // The count sits on the icon's bottom-right corner (-4, +1).
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1Count:GetRight()")) - num(&format!("{w}1IconTexture:GetRight()")),
             -4.0,
             "{w}1 count x"
         );
-        assert_eq!(
+        benilla_ui::assert_near!(
             num(&format!("{w}1Count:GetBottom()")) - num(&format!("{w}1IconTexture:GetBottom()")),
             1.0,
             "{w}1 count y"
@@ -525,7 +529,7 @@ fn a_hovered_or_selected_craft_row_paints_its_label_white() {
         spell_id,
         name: name.into(),
         sub_name: String::new(),
-        difficulty: TradeSkillDifficulty::Medium,
+        difficulty: CraftDifficulty::Medium,
         num_available: 1,
         icon: Some("Interface\\Icons\\Spell_Holy_Heal".into()),
         description: None,
@@ -534,9 +538,15 @@ fn a_hovered_or_selected_craft_row_paints_its_label_white() {
         tools: vec![],
         tooltip: CraftTooltip::Spell(spell_id),
         spell_level: 0,
+        group: 0,
+        skill_line: None,
+        training_point_cost: 0,
+        required_level: 0,
+        tools_pending: Vec::new(),
     };
     s.set_craft(Some(CraftState {
         name: "Enchanting".into(),
+        display_line: Some("Enchanting".into()),
         rank: 100,
         max_rank: 150,
         craft_type: 3,

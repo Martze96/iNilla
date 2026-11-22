@@ -150,8 +150,8 @@ fn register_event_matches_the_table_case_insensitively_and_drops_unknown_names()
     );
 }
 
-/// Callers ask before hooking, when nothing is set yet (`Tablet-2.0.lua:2409`). Our kind table is
-/// flat where the reference's is per widget type, so a Frame also answers true for `OnClick`.
+/// Callers ask before hooking, when nothing is set yet (`Tablet-2.0.lua:2409`). The answer is the
+/// frame type's own script map (`0x774772`): a Frame has no `OnClick`.
 #[test]
 fn has_script_reports_the_kind_is_supported_not_that_one_is_set() {
     let s = script();
@@ -185,11 +185,54 @@ fn has_script_reports_the_kind_is_supported_not_that_one_is_set() {
         .unwrap();
     assert!(fired, "the guarded hook must install and run");
 
-    // The flat table: a Frame says true for a Button-only kind, where the reference says false.
     assert!(
-        s.eval::<bool>(r#"return f:HasScript("OnClick")"#).unwrap(),
-        "over-permissive by design today — see the comment at the binding"
+        !s.eval::<bool>(r#"return f:HasScript("OnClick")"#).unwrap(),
+        "a plain Frame's map has no OnClick"
     );
+}
+
+/// `SetScript`, `GetScript` and `HasScript` look the name up in the frame type's own map (slot
+/// 0xc): a plain Frame has `OnEvent` and sixteen names, a Button adds `OnClick` and
+/// `OnDoubleClick`, and a type lacking the name raises `%s doesn't have a "%s" script` from the
+/// first two (`0x879678`, `0x7749d1`, `0x774884`) and answers nil to the third (`0x774772`).
+#[test]
+fn the_script_verbs_ask_the_frame_types_own_map() {
+    let s = script();
+    s.run(
+        r#"
+        F = CreateFrame("Frame", "ScriptMapFrame")
+        B = CreateFrame("Button", "ScriptMapButton")
+        SB = CreateFrame("StatusBar", "ScriptMapBar")
+        function raised(f, a, b, c) local ok, e = pcall(f, a, b, c) return ok and "" or tostring(e) end
+    "#,
+    )
+    .unwrap();
+    let eval = |code: &str| s.eval::<String>(code).unwrap();
+
+    let want = r#"ScriptMapFrame doesn't have a "OnClick" script"#;
+    assert!(eval(r#"return raised(F.SetScript, F, "OnClick", function() end)"#).ends_with(want));
+    assert!(eval(r#"return raised(F.GetScript, F, "OnClick")"#).ends_with(want));
+    assert!(
+        eval(r#"return tostring(F:HasScript("OnClick"))"#) == "nil",
+        "HasScript answers nil"
+    );
+    // A mistyped name raises where it used to read nil, and keeps the spelling it was given.
+    assert!(eval(r#"return raised(B.GetScript, B, "OnClik")"#)
+        .ends_with(r#"ScriptMapButton doesn't have a "OnClik" script"#));
+    // The other types' additions stay with their types.
+    assert!(eval(r#"return raised(SB.GetScript, SB, "OnTextChanged")"#)
+        .ends_with(r#"ScriptMapBar doesn't have a "OnTextChanged" script"#));
+    assert!(!eval(r#"return raised(SB.GetScript, SB, "OnValueChanged")"#).contains("doesn't"));
+    assert_eq!(
+        eval(r#"return tostring(B:HasScript("ONDOUBLECLICK"))"#),
+        "1"
+    );
+    // Names are matched ignoring case and stored under the type's spelling.
+    s.run(r#"B:SetScript("onclick", function() end)"#).unwrap();
+    assert!(s
+        .eval::<bool>(r#"return B:GetScript("OnClick") ~= nil"#)
+        .unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// The walk saves the next node before the handler runs (`0x703ee8`); AceEvent-2.0's fire-once
@@ -200,7 +243,9 @@ fn a_self_unregistering_handler_does_not_rob_its_successor() {
     s.run(
         r#"
         log = {}
-        for _, n in ipairs({"WalkA", "WalkB", "WalkC"}) do
+        for _, name in ipairs({"WalkA", "WalkB", "WalkC"}) do
+            -- A body local: the loop's own variable is one for the whole loop, nil after it.
+            local n = name
             local f = CreateFrame("Frame", n)
             f:RegisterEvent("PLAYER_LOGIN")
             f:SetScript("OnEvent", function()
@@ -224,64 +269,122 @@ fn a_self_unregistering_handler_does_not_rob_its_successor() {
     assert_eq!(log, vec!["WalkA", "WalkB", "WalkC", "WalkA", "WalkC"]);
 }
 
-/// Unregistering the walk's saved next ends the dispatch, as the reference frees that node and
-/// walks into its zeroed links; a frame registered mid-dispatch tail-appends and is still visited.
-#[test]
-fn mid_dispatch_removal_of_the_next_stops_and_append_is_visited() {
-    let mut s = script();
-    s.run(
+/// Fire `event` to listeners `names`, in that order, each logging its name and then running
+/// `bodies[name]` if it has one, and return the log.
+fn walk_log(
+    s: &mut crate::script::UiScript,
+    event: &str,
+    names: &[&str],
+    bodies: &str,
+) -> Vec<String> {
+    let names = names
+        .iter()
+        .map(|n| format!("{n:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    s.run(&format!(
         r#"
-        log = {}
-        local function reg(n, body)
+        log = {{}}
+        local bodies = {bodies}
+        for _, name in ipairs({{{names}}}) do
+            local n = name
             local f = CreateFrame("Frame", n)
-            f:RegisterEvent("PLAYER_LOGOUT")
-            f:SetScript("OnEvent", function() table.insert(log, n); if body then body() end end)
-            return f
+            f:RegisterEvent("{event}")
+            f:SetScript("OnEvent", function()
+                table.insert(log, n)
+                if bodies[n] then bodies[n]() end
+            end)
         end
-        reg("NxA", function()
-            NxB:UnregisterEvent("PLAYER_LOGOUT")   -- kill the walk's saved next
-        end)
-        reg("NxB")
-        reg("NxC")
-    "#,
-    )
+    "#
+    ))
     .unwrap();
+    s.fire_event(event, vec![]);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    s.eval("return log").unwrap()
+}
+
+/// A handler that unregisters the walk's saved next (`0x703ee8`) leaves the walk on that node,
+/// whose links the unlink zeroed (`0x70559d`, `0x7055a3`) and whose free keeps its object
+/// (`0x645eb0`): it runs once more, then the zero link ends the walk.
+#[test]
+fn unregistering_the_saved_next_runs_it_once_and_ends_the_walk() {
+    let mut s = script();
+    let log = walk_log(
+        &mut s,
+        "PLAYER_LOGOUT",
+        &["NxA", "NxB", "NxC"],
+        r#"{ NxA = function() NxB:UnregisterEvent("PLAYER_LOGOUT") end }"#,
+    );
+    assert_eq!(
+        log,
+        vec!["NxA", "NxB"],
+        "B runs once more, C misses the event"
+    );
+    // The unregistration stands: the next signal reaches A and C only.
+    s.run("log = {}").unwrap();
     s.fire_event("PLAYER_LOGOUT", vec![]);
     let log: Vec<String> = s.eval("return log").unwrap();
-    assert_eq!(
-        log,
-        vec!["NxA"],
-        "removing the saved next ends the dispatch"
-    );
+    assert_eq!(log, vec!["NxA", "NxC"]);
+}
 
-    s.run(
-        r#"
-        log = {}
-        local function reg(n, body)
-            local f = CreateFrame("Frame", n)
-            f:RegisterEvent("PLAYER_ALIVE")
-            f:SetScript("OnEvent", function() table.insert(log, n); if body then body() end end)
-        end
-        reg("ApA", function()
-            local f = CreateFrame("Frame", "ApLate")
-            f:RegisterEvent("PLAYER_ALIVE")
-            f:SetScript("OnEvent", function() table.insert(log, "ApLate") end)
-        end)
-        reg("ApB")
-    "#,
-    )
-    .unwrap();
-    s.fire_event("PLAYER_ALIVE", vec![]);
-    let log: Vec<String> = s.eval("return log").unwrap();
-    assert_eq!(
-        log,
-        vec!["ApA", "ApB", "ApLate"],
-        "a tail-append during dispatch is still visited this dispatch"
+/// A handler that unregisters itself still reaches its successor, read before it ran
+/// (`0x703ee8`), even when it unregisters that successor too: the successor runs once more.
+#[test]
+fn a_self_unregistering_handler_reaches_the_next_it_also_unregistered() {
+    let mut s = script();
+    let log = walk_log(
+        &mut s,
+        "PLAYER_ALIVE",
+        &["SnA", "SnB", "SnC"],
+        r#"{ SnA = function() SnA:UnregisterEvent("PLAYER_ALIVE") SnB:UnregisterEvent("PLAYER_ALIVE") end }"#,
+    );
+    assert_eq!(log, vec!["SnA", "SnB"]);
+}
+
+/// A handler that unregisters a listener further on unlinks it (`0x705570`) before the walk reads
+/// its predecessor's link (`0x703ee8`), so the walk passes over it to the one after.
+#[test]
+fn unregistering_a_listener_further_on_skips_only_it() {
+    let mut s = script();
+    let log = walk_log(
+        &mut s,
+        "PLAYER_ALIVE",
+        &["FoA", "FoB", "FoC", "FoD"],
+        r#"{ FoA = function() FoC:UnregisterEvent("PLAYER_ALIVE") end }"#,
+    );
+    assert_eq!(log, vec!["FoA", "FoB", "FoD"]);
+}
+
+/// A frame registered during the signal tail-appends (`0x7052d0`) and is reached, unless the
+/// running listener is the last: its successor was read as the list's end (`0x703ee8`).
+#[test]
+fn a_frame_registered_mid_dispatch_is_reached_unless_the_last_registered_it() {
+    let mut s = script();
+    let late = |name: &str, event: &str| {
+        format!(
+            r#"function()
+                local f = CreateFrame("Frame", "{name}")
+                f:RegisterEvent("{event}")
+                f:SetScript("OnEvent", function() table.insert(log, "{name}") end)
+            end"#
+        )
+    };
+    let bodies = format!("{{ ApA = {} }}", late("ApLate", "PLAYER_ALIVE"));
+    let log = walk_log(&mut s, "PLAYER_ALIVE", &["ApA", "ApB"], &bodies);
+    assert_eq!(log, vec!["ApA", "ApB", "ApLate"]);
+
+    let bodies = format!("{{ LsB = {} }}", late("LsLate", "PLAYER_LOGOUT"));
+    let log = walk_log(&mut s, "PLAYER_LOGOUT", &["LsA", "LsB"], &bodies);
+    assert_eq!(log, vec!["LsA", "LsB"]);
+    assert!(
+        s.eval::<bool>("return LsLate ~= nil").unwrap(),
+        "the late frame was made"
     );
 }
 
-/// `RegisterAllEvents` (`0x774c20`, table `0x878ec0`, argc 1, arity 0) sends every event to the
-/// frame's `OnEvent`; `UnregisterAllEvents` clears it too, which is how AceEvent-2.0 gets back to
+/// `RegisterAllEvents` (`0x774c20`, table `0x878ec0`, argc 1, arity 0) registers the frame on every
+/// event the VM's table holds (`0x7023e0`); an event off the table reaches no frame, as events
+/// fire by id (`0x703e50`). `UnregisterAllEvents` clears it, which is how AceEvent-2.0 gets back to
 /// per-event registration.
 #[test]
 fn register_all_events_takes_every_event_and_unregister_all_clears_it() {
@@ -306,13 +409,10 @@ fn register_all_events_takes_every_event_and_unregister_all_clears_it() {
     }
     assert_eq!(
         s.eval::<i64>("return table.getn(seen)").unwrap(),
-        3,
-        "every event dispatched, whatever its name"
+        2,
+        "every tabled event dispatched, a name off the table reaching nothing"
     );
-    assert_eq!(
-        s.eval::<String>("return seen[3]").unwrap(),
-        "SOME_SERVER_EVENT_NOBODY_LISTED"
-    );
+    assert_eq!(s.eval::<String>("return seen[2]").unwrap(), "UNIT_HEALTH");
 
     // All-events plus an explicit registration of the same event is still one listener.
     s.run(r#"seen = {}; All:RegisterAllEvents(); All:RegisterEvent("UNIT_HEALTH")"#)
@@ -349,7 +449,7 @@ fn register_all_events_takes_every_event_and_unregister_all_clears_it() {
 }
 
 #[test]
-fn an_all_events_listener_runs_after_the_events_own() {
+fn an_all_events_listener_runs_in_registration_order_with_a_named_one() {
     let mut s = script();
     s.run(
         r#"
@@ -368,6 +468,211 @@ fn an_all_events_listener_runs_after_the_events_own() {
     assert_eq!(s.eval::<String>("return order[1]").unwrap(), "named");
     assert_eq!(s.eval::<String>("return order[2]").unwrap(), "all");
     assert_eq!(s.eval::<i64>("return table.getn(order)").unwrap(), 2);
+
+    // The other way round: the all-events frame registered first runs first.
+    s.run(
+        r#"
+        order = {}
+        Everything:UnregisterAllEvents()
+        Named:UnregisterAllEvents()
+        Everything:RegisterAllEvents()
+        Named:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    )
+    .unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(
+        s.eval::<String>("return table.concat(order, ',')").unwrap(),
+        "all,named",
+        "one list per event, walked from the head (`0x703e50`)"
+    );
+}
+
+/// Run `setup`, fire `PLAYER_LOGIN` and answer the comma-joined `log` it built.
+fn login_log(s: &mut UiScript, setup: &str) -> String {
+    s.run(setup).unwrap();
+    s.run("log = {}").unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    s.eval::<String>("return table.concat(log, ',')").unwrap()
+}
+
+/// A frame whose `OnEvent` appends `name` to `log`.
+const LOGGER: &str = r#"
+    function Logger(name)
+        local f = CreateFrame("Frame")
+        f:SetScript("OnEvent", function() table.insert(log, name) end)
+        return f
+    end
+"#;
+
+/// `RegisterAllEvents` appends to every event's list like a named registration (`0x702440`), so
+/// a named frame, an all-events frame and another named frame run in the order they registered.
+#[test]
+fn named_and_all_events_registrations_interleave_in_registration_order() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        log = {}
+        A = Logger("A"); All = Logger("All"); B = Logger("B")
+        A:RegisterEvent("PLAYER_LOGIN")
+        All:RegisterAllEvents()
+        B:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    );
+    assert_eq!(got, "A,All,B");
+}
+
+/// `UnregisterEvent` removes that event's node only (`0x702280`), an all-events frame's too;
+/// registering again appends at the tail.
+#[test]
+fn unregister_event_removes_one_event_from_an_all_events_frame() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    s.run(
+        r#"
+        log = {}
+        A = Logger("A"); All = Logger("All")
+        A:RegisterEvent("PLAYER_LOGIN"); A:RegisterEvent("UNIT_HEALTH")
+        All:RegisterAllEvents()
+        All:UnregisterEvent("UNIT_HEALTH")
+        "#,
+    )
+    .unwrap();
+    s.fire_event("UNIT_HEALTH", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "A,A,All",
+        "UNIT_HEALTH reaches only A; PLAYER_LOGIN still reaches both"
+    );
+
+    s.run(
+        r#"
+        log = {}
+        All:UnregisterEvent("PLAYER_LOGIN"); All:RegisterEvent("PLAYER_LOGIN")
+        A:UnregisterEvent("PLAYER_LOGIN"); A:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    )
+    .unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "All,A",
+        "unregister then register goes last"
+    );
+}
+
+/// Registering by name while already present keeps its place (`0x7021a8` → `0x702264`), and a
+/// second `RegisterAllEvents` appends nothing (`0x7024c7`).
+#[test]
+fn a_repeated_register_all_events_keeps_its_place_and_fires_once() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        All = Logger("All"); B = Logger("B")
+        All:RegisterAllEvents()
+        B:RegisterEvent("PLAYER_LOGIN")
+        All:RegisterAllEvents()
+        All:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    );
+    assert_eq!(got, "All,B");
+}
+
+/// The walk takes each listener's successor before its call (`0x703ee8`): a frame appended by
+/// `RegisterAllEvents` from the tail listener is not reached this signal, from an earlier one it
+/// is reached at the tail.
+#[test]
+fn register_all_events_during_a_dispatch_is_reached_unless_from_the_tail() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        Late = Logger("Late")
+        Tail = CreateFrame("Frame")
+        Tail:SetScript("OnEvent", function() table.insert(log, "Tail"); Late:RegisterAllEvents() end)
+        Tail:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    );
+    assert_eq!(got, "Tail", "the tail's append waits for the next signal");
+    s.run("log = {}").unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "Tail,Late"
+    );
+
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        Late = Logger("Late"); Last = Logger("Last")
+        Head = CreateFrame("Frame")
+        Head:SetScript("OnEvent", function() table.insert(log, "Head"); Late:RegisterAllEvents() end)
+        Head:RegisterEvent("PLAYER_LOGIN")
+        Last:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    );
+    assert_eq!(got, "Head,Last,Late");
+}
+
+/// A frame registered by name and for all events holds one node per event (`0x702264`), so
+/// unregistering the event in its handler leaves it fired once.
+#[test]
+fn a_frame_both_named_and_all_events_fires_once_and_unregisters_its_node() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        Both = CreateFrame("Frame")
+        Both:SetScript("OnEvent", function()
+            table.insert(log, "Both")
+            Both:UnregisterEvent("PLAYER_LOGIN")
+        end)
+        Both:RegisterEvent("PLAYER_LOGIN")
+        Both:RegisterAllEvents()
+        "#,
+    );
+    assert_eq!(got, "Both");
+    s.run("log = {}").unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        ""
+    );
+}
+
+/// `event` is set once before the walk and restored after it (`0x703ea4`, `0x703f04`); the
+/// per-listener runner (`0x704d50`) never writes it, so one handler's assignment reaches the next.
+#[test]
+fn event_is_set_once_per_walk_and_restored_after() {
+    let mut s = script();
+    s.run(LOGGER).unwrap();
+    let got = login_log(
+        &mut s,
+        r#"
+        event = "outer"
+        First = CreateFrame("Frame")
+        First:SetScript("OnEvent", function()
+            table.insert(log, event)
+            event = "changed"
+        end)
+        Second = CreateFrame("Frame")
+        Second:SetScript("OnEvent", function() table.insert(log, event) end)
+        First:RegisterEvent("PLAYER_LOGIN")
+        Second:RegisterEvent("PLAYER_LOGIN")
+        "#,
+    );
+    assert_eq!(got, "PLAYER_LOGIN,changed");
+    assert_eq!(s.eval::<String>("return event").unwrap(), "outer");
 }
 
 /// The world-enter cascade (`0x4908c0`) fires `PLAYER_LOGIN` (`0x490959`) only while a load's arm
@@ -413,5 +718,32 @@ fn the_world_enter_cascade_spends_the_login_arm_once_and_plays_nothing() {
         s.take_sounds().len(),
         1,
         "and the bracket closed behind them"
+    );
+}
+
+/// The cascade collects in full before its events (`0x490941`-`0x490946` → `0x703bc0`, the
+/// threshold set to 0 at `0x703bd6`), so a `PLAYER_LOGIN` handler's `gcinfo()` counts no garbage
+/// the load left.
+#[test]
+fn the_world_enter_cascade_collects_before_player_login() {
+    let mut s = script();
+    s.run(
+        r#"
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("PLAYER_LOGIN")
+        f:SetScript("OnEvent", function() AtLogin = gcinfo() end)
+        Junk = {}
+        for i = 1, 20000 do Junk[i] = { i } end
+        Junk = nil
+        Before = gcinfo()
+        "#,
+    )
+    .unwrap();
+    s.arm_player_login();
+    s.fire_world_enter();
+    let (before, at_login) = s.eval::<(i64, i64)>("return Before, AtLogin").unwrap();
+    assert!(
+        at_login + 256 < before,
+        "the load's garbage is collected: {before} KB, then {at_login} KB at PLAYER_LOGIN"
     );
 }

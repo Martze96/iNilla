@@ -1,11 +1,12 @@
 //! Click to Move's walks (`AutoInteract`, "Toggles auto-move to interact target"). With the option
 //! on, a right-click on an NPC, a body to loot or skin, or a GameObject beyond the verb's reach
 //! walks the player there and the verb runs on arrival; a right-click on the ground walks to the
-//! point (mode 4), one on the sky walks that way until stopped (mode 8), and an attack on an enemy
+//! point (mode 4, the click-to-move walk), one on the sky walks that way until stopped (mode 8), and an attack on an enemy
 //! out of melee walks to where it stood (mode 10). It is [`super::follow`]'s auto-move: one cell
 //! holds either (mode `0xc4d888`, guid `0xc4d980`), so arming one ends the other (`0x611130` calls
 //! the canceller `0x60fb60` first), the same input cancels both, and nothing goes on the wire but
-//! the movement; an attack on an enemy already in melee only turns to face it (mode 2).
+//! the movement; an attack on an enemy already in melee only turns to face it (mode 2, the facing
+//! turn).
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -77,6 +78,9 @@ pub(crate) struct Approach {
     goal: Option<Goal>,
     /// The pending cells `0x60f940` fills (`0xc4da28`, `0xc4da78`, `0xc4d950`, `0xc4da20`).
     pub(crate) arrived: Option<(ApproachVerb, u64)>,
+    /// A walk's arm ended a follow, whose `AUTOFOLLOW_END` (`0x611130` → `0x60fb84`) the
+    /// dispatcher that armed it signals as it returns ([`AutoMove::signal_follow_end`]).
+    owes_follow_end: bool,
 }
 
 /// What a walk heads for, by its mode in `0xc4d888`.
@@ -84,14 +88,14 @@ pub(crate) struct Approach {
 enum Toward {
     /// Modes 5-7 and 9: the object's live position.
     Object { verb: ApproachVerb, guid: u64 },
-    /// Mode 4.
-    Ground(Anchor),
+    /// Mode 4, the click-to-move walk: a right-click on the ground (`0x6102b0`).
+    ClickToMove(Anchor),
     /// Mode 10.
     Melee(Anchor),
     /// Mode 8: a facing (`0xc4d9a8`), with no stop.
     Sky(f32),
-    /// Mode 2: a facing, turned to and done.
-    Face(f32),
+    /// Mode 2, the facing turn: an attack on an enemy in melee turns to it and is done (`0x6100a0`).
+    FacingTurn(f32),
 }
 
 /// A point fixed at the arm (`0xc4d890`), held in the frame of the transport the player stands on
@@ -154,15 +158,14 @@ impl Approach {
         self.goal.as_ref().map(|g| g.stop)
     }
 
-    #[cfg(test)]
-    pub(crate) fn facing(&self) -> bool {
+    /// Mode 2, the facing turn (`0x6100a0`).
+    pub(crate) fn facing_turn(&self) -> bool {
         self.goal
             .as_ref()
-            .is_some_and(|g| matches!(g.toward, Toward::Face(_)))
+            .is_some_and(|g| matches!(g.toward, Toward::FacingTurn(_)))
     }
 }
 
-/// `CanAutoInteract` (`0x60f900`): alive, driving our own body, and the option on.
 /// The canceller `0x60fb60(0, 1)` as the UI shutdown's `/reload` guard calls it (`0x490c1b`): a
 /// follow or a walk in flight ends and the mover stops (`0x60fc05`-`0x60fc18`, the mode reset
 /// `0x60fc30`). `true` when it ended a follow, mode 3, which owes `AUTOFOLLOW_END` (`0x60fb84`).
@@ -174,11 +177,142 @@ pub(crate) fn cancel_move_action_on_ui_shutdown(
     follow.stop()
 }
 
-pub(crate) fn can_auto_interact(enabled: bool, me: Option<&ObjectStore>, player: &Player) -> bool {
+/// The canceller `CGUnit_C::StopAutoMove` (`0x60fb60`) where a packet's handler calls it on a unit:
+/// the taxi flag's rise (`0x5ff55a`), a death (`0x605938`), our own swing's report (`0x625a21`),
+/// a mover switch (`0x600742`), the mover's release (`0x5fbc3b` → `0x6006c2`) and a near
+/// teleport (`0x60300e` → `0x60e9b5`). It acts only on the active mover with an auto-move in
+/// flight (`IsAutoMoving 0x6103a0`, the early-out `0x60fb70`); past that it is [`end_auto_move`].
+/// The handlers whose scene holds the mover's claim call that directly.
+#[derive(SystemParam)]
+pub(crate) struct AutoMoveStop<'w> {
+    /// The active mover `0xc4da98`. Each absent in a harness without the mover's state, which
+    /// stops nothing.
+    claim: Option<Res<'w, crate::net::MoverClaim>>,
+    follow: Option<ResMut<'w, FollowState>>,
+    approach: Option<ResMut<'w, Approach>>,
+    autorun: Option<ResMut<'w, super::press::CallAutorun>>,
+}
+
+impl AutoMoveStop<'_> {
+    /// `StopAutoMove` on `guid`, a no-op unless `guid` is the active mover; `true` if it ended an
+    /// auto-move.
+    pub(crate) fn stop(
+        &mut self,
+        guid: u64,
+        lane: Option<&mut crate::field_watch::NoticeLane>,
+    ) -> bool {
+        self.claim.as_deref().is_some_and(|c| c.holds(guid)) && self.end(lane)
+    }
+
+    /// [`Self::stop`] unless the auto-move is mode 2, the facing turn: the swing report's gate
+    /// `IsAutoMovingInModes` with the mode mask 4, bit 2 (`0x625a0e`-`0x625a19`).
+    pub(crate) fn stop_unless_facing_turn(
+        &mut self,
+        guid: u64,
+        lane: Option<&mut crate::field_watch::NoticeLane>,
+    ) -> bool {
+        let facing = self.approach.as_deref().is_some_and(Approach::facing_turn);
+        !facing && self.stop(guid, lane)
+    }
+
+    /// The active mover `0xc4da98`.
+    pub(crate) fn mover(&self) -> Option<u64> {
+        self.claim.as_deref().and_then(crate::net::MoverClaim::get)
+    }
+
+    /// `StopAutoMove` on the active mover, whoever it is: a mover switch's stop of the outgoing one
+    /// (`0x600731`-`0x600742`); `None` names no mover, which stops nothing.
+    pub(crate) fn stop_mover(&mut self, lane: Option<&mut crate::field_watch::NoticeLane>) -> bool {
+        self.mover().is_some() && self.end(lane)
+    }
+
+    fn end(&mut self, lane: Option<&mut crate::field_watch::NoticeLane>) -> bool {
+        end_auto_move(
+            self.follow.as_deref_mut(),
+            self.approach.as_deref_mut(),
+            self.autorun.as_deref_mut(),
+            lane,
+        )
+    }
+}
+
+/// The canceller past its gate (`0x60fb76` on), with its release: a follow signals
+/// `AUTOFOLLOW_END` first, on the notice lane at the caller's place ([`super::follow::end`]), and
+/// the mode returns to 12 (`0x60fc30`), so a walk ends too; `true` if either ended.
+///
+/// The release lets go of the move, turn and pitch commands (`0x60fc05`-`0x60fc18`). For modes 3
+/// to 10, whose row's first byte is set (`0x860a58`, filled at `0x60e5b2`-`0x60e65c`), the forward
+/// release `0x60e7f0` queues a move stop (`MoveStop 0x60dc90`) and clears autorun (`0x514630`)
+/// while the input owns the mover (`0x5144e0`), and where it fails (a death, far sight, a server
+/// spline) the tick clears autorun itself (`0x514748`), after the signal either way. Here a
+/// follow's clear runs on the notice lane right behind its `AUTOFOLLOW_END`, a walk's in place
+/// ([`super::press::CallAutorun::clear`]), so a call after the stop reads the bit clear, and the
+/// frame's steer applies it ([`FollowState::owe_release`]) ahead of the controller, whose step
+/// sends the stop, as the reference's mover update sends the one it queued. The `face` leg (`0x60fb92`-`0x60fbe8`) turns no unit: it keeps the target's
+/// heading at `0xc4d8c4` for the camera (`0x60e8f0`; its readers `0x510904` and `0x510ef6`, through
+/// `0x611660`) and presses command 0x800000, which the release lets go of in the same call
+/// (`0x60fc10`). The canceller itself sends nothing.
+pub(crate) fn end_auto_move(
+    follow: Option<&mut FollowState>,
+    approach: Option<&mut Approach>,
+    autorun: Option<&mut super::press::CallAutorun>,
+    lane: Option<&mut crate::field_watch::NoticeLane>,
+) -> bool {
+    // Mode 2, the facing turn, has no forward release.
+    let (walked, faced) = approach.map_or((false, false), |a| {
+        let ended = (a.active(), a.facing_turn());
+        a.stop();
+        ended
+    });
+    let Some(follow) = follow else {
+        return walked;
+    };
+    let mut lane = lane;
+    let followed = super::follow::end(follow, lane.as_deref_mut());
+    if followed || (walked && !faced) {
+        follow.owe_release();
+        // `AUTOFOLLOW_END` goes out before the release clears autorun (`0x60fb84`, then `0x60fc08`
+        // → `0x60e83f`), so a follow's clear waits on the lane behind it; a walk signals nothing
+        // and clears in place.
+        match (followed, lane) {
+            (true, Some(lane)) => lane.write(crate::field_watch::FieldNotice::AutorunClear),
+            _ => {
+                if let Some(autorun) = autorun {
+                    autorun.clear();
+                }
+            }
+        }
+    }
+    walked || followed
+}
+
+/// [`AutoMoveStop::stop`] on `guid` from a handler's world, its signal on the notice lane at the
+/// place it runs.
+pub(crate) fn stop_auto_move(world: &mut World, guid: u64) {
+    if let Err(e) = world.run_system_cached_with(stop_auto_move_of, guid) {
+        // A harness without the mover's claim stops nothing.
+        debug!("auto-move: the stop did not run: {e}");
+    }
+}
+
+fn stop_auto_move_of(
+    In(guid): In<u64>,
+    mut stop: AutoMoveStop,
+    mut lane: Option<ResMut<crate::field_watch::NoticeLane>>,
+) {
+    stop.stop(guid, lane.as_deref_mut());
+}
+
+/// `CanAutoInteract` (`0x60f900`): alive, driving our own body, and the option on.
+pub(crate) fn can_auto_interact(
+    enabled: bool,
+    me: Option<&ObjectStore>,
+    lock: &super::MoverLock,
+) -> bool {
     enabled
         && me.is_some_and(|s| s.0.unit_health().unwrap_or(0) > 0)
-        && player.foreign_mover.is_none()
-        && !player.control_lost
+        && lock.foreign_mover.is_none()
+        && !lock.control_lost
 }
 
 /// The start: the gates (`0x60fed0`, `0x610300`, `CanAutoInteract` for the rest) and the arm
@@ -188,17 +322,27 @@ pub(crate) struct AutoMove<'w, 's> {
     pub(crate) approach: ResMut<'w, Approach>,
     follow: ResMut<'w, FollowState>,
     player: Res<'w, Player>,
+    lock: Res<'w, super::MoverLock>,
     me: Query<'w, 's, (&'static Guid, &'static ObjectStore), With<SelfPlayer>>,
-    stand: MessageWriter<'w, super::StandStateRequest>,
     transports: Query<'w, 's, &'static Transform>,
 }
 
 impl AutoMove<'_, '_> {
+    /// The `AUTOFOLLOW_END` a walk's arm owes, signalled on `script`, in the call or the click
+    /// that armed it.
+    pub(crate) fn signal_follow_end(&mut self, script: Option<&mut benilla_ui::script::UiScript>) {
+        if std::mem::take(&mut self.approach.owes_follow_end) {
+            if let Some(script) = script {
+                script.fire_event("AUTOFOLLOW_END", vec![]);
+            }
+        }
+    }
+
     pub(crate) fn can_auto_interact(&self) -> bool {
         can_auto_interact(
             self.approach.enabled,
             self.me.single().ok().map(|(_, s)| s),
-            &self.player,
+            &self.lock,
         )
     }
 
@@ -210,6 +354,7 @@ impl AutoMove<'_, '_> {
         subject: Subject,
         at: Vec3,
         stop: f32,
+        stand: &mut MessageWriter<super::StandStateRequest>,
     ) -> Result<(), Refused> {
         let Ok((me, store)) = self.me.single() else {
             return Err(Refused::Silent);
@@ -223,33 +368,42 @@ impl AutoMove<'_, '_> {
         };
         if !admitted
             || guid == me.0
-            || self.player.foreign_mover.is_some()
-            || self.player.control_lost
+            || self.lock.foreign_mover.is_some()
+            || self.lock.control_lost
             || store.0.unit_health().unwrap_or(0) == 0
         {
             return Err(Refused::Silent);
         }
-        self.arm(Toward::Object { verb, guid }, at, stop)
+        self.arm(Toward::Object { verb, guid }, at, stop, stand)
     }
 
     /// `0x6102b0`, the right-click on the ground (`0x5e0378`).
-    pub(crate) fn walk_to_ground(&mut self, at: Vec3) -> bool {
+    pub(crate) fn walk_to_ground(
+        &mut self,
+        at: Vec3,
+        stand: &mut MessageWriter<super::StandStateRequest>,
+    ) -> bool {
         if !self.can_auto_interact() {
             return false;
         }
         let anchor = self.anchor(at);
-        self.arm(Toward::Ground(anchor), at, GROUND_STOP).is_ok()
+        self.arm(Toward::ClickToMove(anchor), at, GROUND_STOP, stand)
+            .is_ok()
     }
 
     /// `0x610100`, the right-click on the sky (`0x492dca`), along the press's ray.
-    pub(crate) fn walk_toward_sky(&mut self, ray: Vec3) -> bool {
+    pub(crate) fn walk_toward_sky(
+        &mut self,
+        ray: Vec3,
+        stand: &mut MessageWriter<super::StandStateRequest>,
+    ) -> bool {
         let dir = ray.normalize_or_zero();
         if dir == Vec3::ZERO || !self.can_auto_interact() {
             return false;
         }
         let facing = follow::bearing_to(Vec3::new(dir.x, 0.0, dir.z));
         let at = self.player.pos;
-        if self.arm(Toward::Sky(facing), at, 0.0).is_err() {
+        if self.arm(Toward::Sky(facing), at, 0.0, stand).is_err() {
             return false;
         }
         if let Some(goal) = self.approach.goal.as_mut() {
@@ -263,29 +417,39 @@ impl AutoMove<'_, '_> {
     /// Deviation: the reference re-projects the point's height onto the first walkable facet a
     /// zero-size box gather finds at the enemy (`0x60fe25`-`0x60fe51`); here it keeps the enemy's
     /// height. The snap radius is the stop, so the two differ only while swimming or on a steep facet.
-    /// Deviation: the reference stores the world point unconverted and reads it back as deck-local
-    /// (`0x60fe6c`, `0x610e95`), so on a transport it walks astray; here it rides the deck.
-    pub(crate) fn walk_into_melee(&mut self, at: Vec3, stop: f32) -> Result<(), Refused> {
+    /// Deviation: here it rides the deck, because the reference stores the world point unconverted
+    /// and reads it back as deck-local (`0x60fe6c`, `0x610e95`) and so, on a transport, walks
+    /// astray.
+    pub(crate) fn walk_into_melee(
+        &mut self,
+        at: Vec3,
+        stop: f32,
+        stand: &mut MessageWriter<super::StandStateRequest>,
+    ) -> Result<(), Refused> {
         if !self.can_auto_interact() {
             return Err(Refused::Silent);
         }
         let anchor = self.anchor(at);
-        self.arm(Toward::Melee(anchor), at, stop)
+        self.arm(Toward::Melee(anchor), at, stop, stand)
     }
 
     /// `0x6100a0`, for an attack on an enemy in melee: turn to face `at`.
-    pub(crate) fn face(&mut self, at: Vec3) -> bool {
+    pub(crate) fn face(
+        &mut self,
+        at: Vec3,
+        stand: &mut MessageWriter<super::StandStateRequest>,
+    ) -> bool {
         if !self.can_auto_interact() {
             return false;
         }
         let delta = at - self.player.pos;
         let facing = follow::bearing_to(Vec3::new(delta.x, 0.0, delta.z));
-        self.arm(Toward::Face(facing), at, 0.0).is_ok()
+        self.arm(Toward::FacingTurn(facing), at, 0.0, stand).is_ok()
     }
 
-    /// Deviation: the reference converts back through the transport the player stands on each
-    /// frame (`0x610e6b`), so stepping off mid-walk sends the point astray; here the deck is fixed
-    /// at the arm.
+    /// Deviation: here the deck is fixed at the arm, because the reference converts back through
+    /// the transport the player stands on each frame (`0x610e6b`), so stepping off mid-walk sends
+    /// the point astray.
     fn anchor(&self, at: Vec3) -> Anchor {
         let frame = self.player.ride.as_ref().map(|r| r.entity);
         match frame.and_then(|e| self.transports.get(e).ok().map(|tf| (e, tf))) {
@@ -298,12 +462,21 @@ impl AutoMove<'_, '_> {
     }
 
     /// `0x611130`: the canceller, then the leash on the world point `at`, then the goal.
-    fn arm(&mut self, toward: Toward, at: Vec3, stop: f32) -> Result<(), Refused> {
+    fn arm(
+        &mut self,
+        toward: Toward,
+        at: Vec3,
+        stop: f32,
+        stand: &mut MessageWriter<super::StandStateRequest>,
+    ) -> Result<(), Refused> {
         let standing = self
             .me
             .single()
             .is_ok_and(|(_, s)| s.0.unit_stand_state() == 0);
-        self.follow.stop();
+        // The canceller first (`0x61113e` → `0x60fb60(0, 0)`), whose follow leg owes `END`.
+        if self.follow.stop() {
+            self.approach.owes_follow_end = true;
+        }
         self.approach.stop();
         if toward.leashed() && self.player.pos.distance_squared(at) >= LEASH_SQ {
             return Err(Refused::TooFar);
@@ -319,7 +492,10 @@ impl AutoMove<'_, '_> {
             pitch: None,
         });
         if !standing {
-            self.stand.write(super::StandStateRequest { state: 0 });
+            stand.write(super::StandStateRequest {
+                state: 0,
+                sent: false,
+            });
         }
         Ok(())
     }
@@ -431,7 +607,7 @@ pub(super) fn steer_approach(
             }
             Some(tf.translation)
         }
-        Toward::Ground(anchor) | Toward::Melee(anchor) => match anchor.frame {
+        Toward::ClickToMove(anchor) | Toward::Melee(anchor) => match anchor.frame {
             None => Some(anchor.at),
             Some(frame) => {
                 let Ok((tf, ..)) = targets.get(frame) else {
@@ -442,7 +618,7 @@ pub(super) fn steer_approach(
                 Some(tf.transform_point(anchor.at))
             }
         },
-        Toward::Sky(_) | Toward::Face(_) => None,
+        Toward::Sky(_) | Toward::FacingTurn(_) => None,
     };
     let delta = target.map(|t| t - player.pos);
     let d2 = delta.map(|d| goal_distance_sq(toward, goal.stop, d, speed, player.swimming));
@@ -463,7 +639,7 @@ pub(super) fn steer_approach(
         }
     }
     let bearing = match (toward, delta) {
-        (Toward::Sky(facing) | Toward::Face(facing), _) => facing,
+        (Toward::Sky(facing) | Toward::FacingTurn(facing), _) => facing,
         (_, Some(d)) => follow::bearing_to(Vec3::new(d.x, 0.0, d.z)),
         (_, None) => player.face_yaw,
     };
@@ -472,14 +648,14 @@ pub(super) fn steer_approach(
     if turning {
         let rate = *goal.turn_rate.get_or_insert_with(|| turn_rate(remaining));
         player.face_yaw = follow::steer(player.face_yaw, bearing, rate, time.delta_secs());
-    } else if let Toward::Face(_) = toward {
+    } else if let Toward::FacingTurn(_) = toward {
         // `0x6108c3`: the facing walk ends once lined up, never holding forward.
         approach.goal = None;
         return;
     } else {
         goal.aligned = true;
     }
-    if let Toward::Face(_) = toward {
+    if let Toward::FacingTurn(_) = toward {
         return;
     }
     if let (Some(d2), Some(delta)) = (d2, delta) {
@@ -487,8 +663,8 @@ pub(super) fn steer_approach(
         if d2 <= arrive * arrive {
             info!("approach: arrived at {:.2} yd", d2.sqrt());
             // The canceller faces the armed guid (`0x60fbe8`): the object, and none for the ground.
-            // Deviation: the melee arm names the player's own guid (`0x60fe5f`), so the reference
-            // turns to face itself, a fixed heading; here the melee walk does not turn.
+            // Deviation: here the melee walk does not turn, because the reference's melee arm names
+            // the player's own guid (`0x60fe5f`), so it turns to face itself, a fixed heading.
             if let Toward::Object { verb, guid } = toward {
                 if delta.x * delta.x + delta.z * delta.z > f32::EPSILON {
                     player.face_yaw = bearing;
@@ -516,19 +692,23 @@ pub(super) fn steer_approach(
     player.auto_forward = hold;
 }
 
-fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut approach: ResMut<Approach>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut approach: bevy::prelude::Mut<'_, Approach>,
+) {
     if ev.is("AutoInteract") {
         approach.enabled = ev.flag();
     }
 }
 
 pub(super) fn plugin(app: &mut App) {
-    app.init_resource::<Approach>().add_observer(on_cvar);
+    app.init_resource::<Approach>();
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::state::{MoveSpeed, PlayerRide};
+    use super::super::StandStateRequest;
     use super::*;
     use benilla_protocol::messages::ObjectFields;
     use bevy::ecs::system::RunSystemOnce;
@@ -559,11 +739,11 @@ mod tests {
     #[test]
     fn the_ground_stop_scales_with_speed_and_the_melee_stop_does_not() {
         assert_eq!(
-            arrive_distance(Toward::Ground(POINT), GROUND_STOP, 7.0),
+            arrive_distance(Toward::ClickToMove(POINT), GROUND_STOP, 7.0),
             0.5
         );
         assert_eq!(
-            arrive_distance(Toward::Ground(POINT), GROUND_STOP, 14.0),
+            arrive_distance(Toward::ClickToMove(POINT), GROUND_STOP, 14.0),
             1.0
         );
         assert_eq!(arrive_distance(Toward::Melee(POINT), 1.9, 14.0), 1.9);
@@ -610,11 +790,12 @@ mod tests {
             .init_resource::<Approach>()
             .init_resource::<FollowState>()
             .init_resource::<Player>()
+            .init_resource::<super::super::MoverLock>()
             .init_resource::<GuidIndex>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<crate::bindings::BindingsState>()
             .init_resource::<super::super::camera::CameraControl>()
-            .init_resource::<super::super::view_subject::ViewSubject>()
+            .init_resource::<super::super::view_subject::FarSight>()
             .insert_resource(MoveSpeed {
                 value: 7.0,
                 env_override: false,
@@ -644,9 +825,11 @@ mod tests {
 
     fn start(app: &mut App, verb: ApproachVerb, subject: Subject, at: Vec3) -> Result<(), Refused> {
         app.world_mut()
-            .run_system_once(move |mut auto: AutoMove| {
-                auto.start(verb, VENDOR, subject, at, TALK_STOP)
-            })
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| {
+                    auto.start(verb, VENDOR, subject, at, TALK_STOP, &mut stand)
+                },
+            )
             .unwrap()
     }
 
@@ -798,6 +981,8 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Forward);
+        // Autorun's on press, which the command press toggled ahead of this (`super::press`).
+        app.world_mut().resource_mut::<Player>().autorun = true;
         frame(&mut app, true);
         let approach = app.world().resource::<Approach>();
         assert!(!approach.active() && approach.arrived.is_none());
@@ -850,7 +1035,10 @@ mod tests {
         let mut app = world(Vec3::new(40.0, 0.0, 0.0), 0);
         assert!(app
             .world_mut()
-            .run_system_once(move |mut auto: AutoMove| auto.walk_to_ground(point))
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_to_ground(point, &mut stand)
+            )
             .unwrap());
         assert!(run_until_idle(&mut app, 300) < 300, "never arrived");
         let left = app.world().resource::<Player>().pos.distance(point);
@@ -865,7 +1053,10 @@ mod tests {
         let far = Vec3::new(0.0, 0.0, -120.0);
         assert!(app
             .world_mut()
-            .run_system_once(move |mut auto: AutoMove| auto.walk_to_ground(far))
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_to_ground(far, &mut stand)
+            )
             .unwrap());
         for _ in 0..30 {
             frame(&mut app, true);
@@ -880,10 +1071,12 @@ mod tests {
         app.world_mut().resource_mut::<Approach>().enabled = false;
         let armed = app
             .world_mut()
-            .run_system_once(|mut auto: AutoMove| {
-                auto.walk_to_ground(Vec3::new(0.0, 0.0, -10.0))
-                    || auto.walk_toward_sky(Vec3::new(1.0, 0.5, 0.0))
-            })
+            .run_system_once(
+                |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| {
+                    auto.walk_to_ground(Vec3::new(0.0, 0.0, -10.0), &mut stand)
+                        || auto.walk_toward_sky(Vec3::new(1.0, 0.5, 0.0), &mut stand)
+                },
+            )
             .unwrap();
         assert!(!armed);
     }
@@ -895,7 +1088,10 @@ mod tests {
         let mut app = world(Vec3::new(14.0, 0.0, 0.0), 0);
         assert!(app
             .world_mut()
-            .run_system_once(|mut auto: AutoMove| auto.walk_toward_sky(Vec3::new(1.0, 0.4, 0.0)))
+            .run_system_once(
+                |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_toward_sky(Vec3::new(1.0, 0.4, 0.0), &mut stand)
+            )
             .unwrap());
         for _ in 0..600 {
             frame(&mut app, true);
@@ -918,11 +1114,15 @@ mod tests {
             guid: 0xB0A7,
             local_pos: Vec3::ZERO,
             boat_yaw: 0.0,
+            placed: true,
         });
         let point = Vec3::new(0.0, 0.0, -10.0);
         assert!(app
             .world_mut()
-            .run_system_once(move |mut auto: AutoMove| auto.walk_to_ground(point))
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_to_ground(point, &mut stand)
+            )
             .unwrap());
         app.world_mut()
             .entity_mut(boat)
@@ -945,7 +1145,10 @@ mod tests {
         let mut app = world(Vec3::new(40.0, 0.0, 0.0), 0);
         assert_eq!(
             app.world_mut()
-                .run_system_once(move |mut auto: AutoMove| auto.walk_into_melee(at, stop))
+                .run_system_once(
+                    move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                        .walk_into_melee(at, stop, &mut stand)
+                )
                 .unwrap(),
             Ok(())
         );
@@ -965,7 +1168,10 @@ mod tests {
         let enemy = Vec3::new(3.0, 0.0, 0.0);
         assert!(app
             .world_mut()
-            .run_system_once(move |mut auto: AutoMove| auto.face(enemy))
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .face(enemy, &mut stand)
+            )
             .unwrap());
         assert!(app.world().resource::<FollowState>().guid.is_none());
         let mut walked = false;
@@ -993,11 +1199,15 @@ mod tests {
             guid: 0xB0A7,
             local_pos: Vec3::ZERO,
             boat_yaw: 0.0,
+            placed: true,
         });
         let point = Vec3::new(0.0, 0.0, -10.0);
         assert!(app
             .world_mut()
-            .run_system_once(move |mut auto: AutoMove| auto.walk_to_ground(point))
+            .run_system_once(
+                move |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_to_ground(point, &mut stand)
+            )
             .unwrap());
         app.world_mut()
             .entity_mut(boat)
@@ -1018,7 +1228,10 @@ mod tests {
         app.world_mut().resource_mut::<Player>().swimming = true;
         assert!(app
             .world_mut()
-            .run_system_once(|mut auto: AutoMove| auto.walk_toward_sky(Vec3::new(1.0, 1.0, 0.0)))
+            .run_system_once(
+                |mut auto: AutoMove, mut stand: MessageWriter<StandStateRequest>| auto
+                    .walk_toward_sky(Vec3::new(1.0, 1.0, 0.0), &mut stand)
+            )
             .unwrap());
         frame(&mut app, false);
         let pitch = app.world().resource::<Player>().mover_pitch;

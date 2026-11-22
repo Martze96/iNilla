@@ -75,10 +75,10 @@ pub(super) fn spawn_menagerie(
     // vertex-coloured. Statics are render-world-only, so their Aabb is inserted explicitly.
     let mut layouts: Vec<(Handle<Mesh>, Option<bevy::camera::primitives::Aabb>, bool)> = Vec::new();
     for colors in [false, true] {
-        let stat = benilla_assets::submesh_to_static_mesh(&warm_quad(colors, false));
+        let stat = benilla_assets::submesh_to_static_mesh(&warm_quad(colors, false, false));
         let aabb = stat.compute_aabb();
         layouts.push((meshes.add(stat), aabb, false));
-        let skin = benilla_assets::submesh_to_skinned_mesh(&warm_quad(colors, true));
+        let skin = benilla_assets::submesh_to_skinned_mesh(&warm_quad(colors, true, false));
         layouts.push((meshes.add(skin), None, true));
     }
 
@@ -113,8 +113,11 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
+                        None, // no transparent-order keys: the order is no pipeline key
                         None,
                         None,
                         None,
@@ -150,8 +153,11 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
+                        None, // no transparent-order keys: the order is no pipeline key
                         None,
                         None,
                         None,
@@ -167,7 +173,7 @@ pub(super) fn spawn_menagerie(
         // The depth-prime twin (colour writes masked off), plain and cutout.
         for cutout in [false, true] {
             mats.push(zfill_material(
-                cache, materials, None, two_sided, cutout, light,
+                cache, materials, None, false, None, two_sided, cutout, light,
             ));
         }
         // The WMO-skybox lane: `sky_depth` is a `WowModelKey` axis (the forced-far-depth branch).
@@ -196,8 +202,11 @@ pub(super) fn spawn_menagerie(
                     false, // depth-test on
                     FogPolicy::Off,
                     false,
+                    None, // stage 1: a uniform and a binding, not pipeline state
+                    None, // …nor the stage-0 combine
                     ShadeSel::Lit,
                     0,
+                    None, // no transparent-order keys: the order is no pipeline key
                     None,
                     None,
                     None,
@@ -231,8 +240,11 @@ pub(super) fn spawn_menagerie(
                 FogPolicy::Scene,
                 // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                 false,
+                None, // stage 1: a uniform and a binding, not pipeline state
+                None, // …nor the stage-0 combine
                 ShadeSel::Lit,
                 0,
+                None, // no transparent-order keys: the order is no pipeline key
                 None,
                 None,
                 None,
@@ -278,8 +290,11 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
+                        None, // no transparent-order keys: the order is no pipeline key
                         None,
                         None,
                         None,
@@ -363,7 +378,7 @@ pub(super) fn spawn_menagerie(
     // reaches a booth.
     for colors in [false, true] {
         for slot in [false, true] {
-            let part = std::sync::Arc::new(warm_quad(colors, false));
+            let part = std::sync::Arc::new(warm_quad(colors, false, false));
             let (mesh, mn, mx, _center) = benilla_assets::merged_static_mesh_faded(
                 &[(part, Transform::IDENTITY)],
                 &[Vec4::new(0.0, 0.0, 0.0, 1.0)],
@@ -378,13 +393,53 @@ pub(super) fn spawn_menagerie(
         }
     }
 
+    // UV set 1 (`ATTRIBUTE_UV_1`, the `VERTEX_UVS_B` def), which only a stage 1 on a UV set
+    // brings: no stock batch has one, so the static, skinned and merged layouts with it take the
+    // main cross on the world camera alone, untinted; a custom model's rarer variants compile
+    // at first sight.
+    let uv1_static = {
+        let mesh = benilla_assets::submesh_to_static_mesh(&warm_quad(false, false, true));
+        let aabb = mesh.compute_aabb();
+        (meshes.add(mesh), aabb)
+    };
+    {
+        let skin = benilla_assets::submesh_to_skinned_mesh(&warm_quad(false, true, true));
+        let part = std::sync::Arc::new(warm_quad(false, false, true));
+        let (merged, mn, mx, _center) = benilla_assets::merged_static_mesh_faded(
+            &[(part, Transform::IDENTITY)],
+            &[Vec4::new(0.0, 0.0, 0.0, 1.0)],
+            None,
+        );
+        let merged_aabb = Some(bevy::camera::primitives::Aabb::from_min_max(mn, mx));
+        let rows = [
+            (uv1_static.0.clone(), uv1_static.1, false),
+            (meshes.add(skin), None, true),
+            (meshes.add(merged), merged_aabb, false),
+        ];
+        for (mesh, aabb, skinned) in &rows {
+            for mat in &mats {
+                spawn_model_rig(commands, cam, None, mesh, aabb, *skinned, mat);
+                count += 1;
+            }
+        }
+    }
+
     // The WMO-skybox rows: `skybox::build_skybox` inserts POSITION + NORMAL + UV_0, exactly
-    // `layouts[0]`, on the world camera only.
+    // `layouts[0]`, and UV_1 beside them for a stage 1 on a UV set, on the world camera only.
     {
         let (plain_mesh, plain_aabb, _) = &layouts[0];
         for mat in &sky_mats {
             spawn_model_rig(commands, cam, None, plain_mesh, plain_aabb, false, mat);
-            count += 1;
+            spawn_model_rig(
+                commands,
+                cam,
+                None,
+                &uv1_static.0,
+                &uv1_static.1,
+                false,
+                mat,
+            );
+            count += 2;
         }
     }
 
@@ -698,7 +753,7 @@ fn warm_liquid_mesh(body_color: bool) -> Mesh {
 
 /// A unit quad in each attribute combination the model lane ships. Every `RenderSubmesh` field is
 /// spelled out so a new field breaks this build.
-fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
+fn warm_quad(colors: bool, skinned: bool, uv1: bool) -> RenderSubmesh {
     let n = 4usize;
     RenderSubmesh {
         positions: vec![
@@ -709,6 +764,11 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         ],
         normals: vec![[0.0, 0.0, 1.0]; n],
         uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        uvs2: if uv1 {
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        } else {
+            Vec::new()
+        },
         indices: vec![0, 1, 2, 0, 2, 3],
         texture: None,
         skin_slot: None,
@@ -739,8 +799,11 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         additive: false,
         no_depth_write: false,
         no_depth_test: false,
+        no_hit_test: false,
         fog_policy: FogPolicy::Scene,
         env_map: false,
+        stage1: None,
+        combine: 1,
         billboard: None,
         welded_billboard: false,
         alpha_anim: None,
@@ -750,6 +813,7 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         rgb_seq: None,
         wmo_batch: None,
         section: None,
+        order: None,
     }
 }
 

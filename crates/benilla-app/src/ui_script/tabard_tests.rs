@@ -2,12 +2,14 @@
 //! cycle the design, Save follows `CanSaveTabardNow`, and closing calls `CloseTabardCreation`.
 
 use benilla_ui::script::{
-    emblem_mask_path, TabardHost, TabardIntent, UiScript, UnitGuild, UnitState,
+    emblem_mask_path, TabardCall, TabardHost, UiScript, UnitGuild, UnitState,
 };
 
 /// The player in a guild at `rank`, 0 the master; `GetGuildInfo("player")` reads the unit's guild.
 fn harness(rank: u32) -> UiScript {
     let mut s = UiScript::new().unwrap();
+    // `Save` is a call the client's host applies; this VM keeps it.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for (token, name, guild) in [
         (
@@ -107,8 +109,8 @@ fn the_open_event_seeds_the_design_paints_the_cells_and_shows_the_window() {
     // Save sends the five values; the pending latch greys the button (`TabardFrame.lua:38`).
     s.run("TabardFrameAcceptButton:Click()").unwrap();
     assert_eq!(
-        s.take_tabard_intents(),
-        vec![TabardIntent::Save([13, 4, 1, 2, 7])]
+        s.take_tabard_calls(),
+        vec![TabardCall::Save([13, 4, 1, 2, 7])]
     );
     s.set_tabard_host(TabardHost {
         guild_record: Some([12, 4, 1, 2, 9]),
@@ -125,7 +127,7 @@ fn the_open_event_seeds_the_design_paints_the_cells_and_shows_the_window() {
     s.run("TabardFrameCancelButton:Click()").unwrap();
     s.resolve();
     assert!(!s.eval::<bool>("return TabardFrame:IsVisible()").unwrap());
-    assert_eq!(s.take_tabard_intents(), vec![TabardIntent::Close]);
+    assert_eq!(s.take_tabard_calls(), vec![TabardCall::Close]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -152,4 +154,26 @@ fn a_non_master_gets_the_no_guild_greeting_and_no_save() {
     s.resolve();
     assert!(!s.eval::<bool>("return TabardFrame:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// `OPEN_TABARD_FRAME` binds the designer's pane to the player (`TabardFrame.lua:26`).
+#[test]
+fn the_designer_pane_binds_the_player() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness(0);
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 0x42,
+        ..Default::default()
+    });
+    s.set_tabard_host(TabardHost {
+        guild_record: Some([12, 4, 1, 2, 9]),
+        save_pending: false,
+    });
+    s.fire_event("OPEN_TABARD_FRAME", vec![]);
+    let pane = s
+        .character_pane(s.frame_handle("TabardModel").unwrap())
+        .expect("a character pane");
+    assert_eq!(pane.guid, 0x42);
+    assert!(pane.pending(), "the shown pane asks for its copy");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }

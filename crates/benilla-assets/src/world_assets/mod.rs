@@ -12,7 +12,11 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-use benilla_formats::{blp_to_rgba, read_texture_native_chain, tga_to_rgba, Chain, ModelBlend};
+use benilla_formats::{
+    blp_to_rgba, makes_device_texture, tga_texture_size, tga_to_rgba, Chain, ModelBlend,
+    TGA_GATE_PREFIX,
+};
+pub use benilla_formats::{LooseFile, LooseIndex, LooseIndexCell, LooseOpen};
 
 /// BLP and RGBA to `Image` helpers, re-exported.
 mod images;
@@ -28,24 +32,13 @@ pub struct WorldAssets {
     /// Decoded GPU textures by `(normalized path, wrap_u, wrap_v)`: one BLP can be sampled both
     /// ways (tiled on a wall, clamped on a cutout card), and the address mode lives on the sampler.
     pub textures: SpatialCache<(String, bool, bool), Handle<Image>>,
-    /// UI sprites by resolved path, misses cached as `None` so a bad path never re-walks the chain
-    /// per frame.
-    sprites: HashMap<String, Option<Handle<Image>>>,
-    /// UI sprites by path and per-axis wrap, since the sampler bakes into the `Image`.
-    tiled_sprites: HashMap<(String, bool, bool), Option<Handle<Image>>>,
-    /// Sprites resampled to an exact physical size, by `(path, w, h)`.
-    resampled_sprites: HashMap<(String, u32, u32), Option<Handle<Image>>>,
-    /// The decoded pixels behind [`Self::resampled_sprites`], so a resize does not re-decode.
-    resample_sources: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
-    /// Portrait sprites, the circular mask baked in ([`portrait_image`]).
-    portraits: HashMap<String, Option<Handle<Image>>>,
-    /// Coverage masks ([`mask_image`]): the minimap's circular clip.
-    masks: HashMap<String, Option<Handle<Image>>>,
+    /// The UI sprite caches.
+    cache: SpriteCaches,
     /// UI sprites whose pixels the client computes ([`Self::generated_sprite`]).
     generated: HashMap<&'static str, Handle<Image>>,
-    /// The AddOns folder, where `Interface\AddOns\` paths resolve as loose files, as the reference
-    /// reads them from the game directory; `None` until the app installs it and in capture runs.
-    loose_root: Option<PathBuf>,
+    /// The loose files a flagged open reads before the chain: the install's index, and the AddOns
+    /// folder once the app installs it (never in capture runs).
+    loose: LooseFiles,
     /// Materials deduped by [`MaterialKey`].
     pub model_materials: SpatialCache<MaterialKey, Handle<WowModelMaterial>>,
     /// The shared global-light buffer, cloned into every deduped model material's `light_buf`.
@@ -95,55 +88,95 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
 
 /// The texel size of a UI sprite, which `CSimpleTexture`'s size getters read (`[tex+0x144]`,
 /// `[tex+0x148]`; `0x770720`, `0x770790`) for a region with no authored size, one texel per
-/// FrameXML unit. Decoded, so layout gets the size the screen shows.
+/// FrameXML unit. Decoded, so layout gets the size the screen shows, and read by an
+/// interface texture's open ([`LooseOpen::Index`]).
 pub fn sprite_dimensions(
     chain: &Mutex<Chain>,
-    loose_root: Option<&Path>,
+    loose: &LooseFiles,
     path: &str,
 ) -> Option<(u32, u32)> {
-    decode_sprite(chain, loose_root, path).map(|(w, h, _)| (w, h))
+    decode_texture(chain, loose, path, LooseOpen::Index).map(|(w, h, _)| (w, h))
 }
 
-/// Decode the first of [`sprite_candidates`] that reads and decodes, from the chain and then the
-/// AddOns folder, as the reference's two loaders fail silently. A miss warns, once per key since
-/// every cache stores its misses: a missing sprite draws nothing, and nothing else says why.
+/// Decode the first of [`sprite_candidates`] that reads and decodes, each read by
+/// [`read_loose_or_chain`]'s rule for `open`, as the reference's two loaders fail silently. A miss
+/// warns, once per key since every cache stores its misses: a missing sprite draws nothing, and
+/// nothing else says why.
 fn decode_sprite(
     chain: &Mutex<Chain>,
-    loose_root: Option<&Path>,
+    loose: &LooseFiles,
     path: &str,
+    open: LooseOpen,
 ) -> Option<(u32, u32, Vec<u8>)> {
+    decode_sprite_as(chain, loose, path, open, OnRefusal::Miss)
+}
+
+/// [`decode_sprite`] for a load that `TextureCreate` (`0x449d90`) makes: the first candidate that
+/// makes a texture is the texture, whether or not its pixels decode
+/// ([`OnRefusal::WhiteDefault`]).
+fn decode_texture(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+) -> Option<(u32, u32, Vec<u8>)> {
+    decode_sprite_as(chain, loose, path, open, OnRefusal::WhiteDefault)
+}
+
+/// What a candidate file that opens but will not decode becomes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnRefusal {
+    /// Nothing: the next candidate is tried, then the sprite is a miss.
+    Miss,
+    /// `TextureCreate`'s TGA loader `0x44a140` returns the texture once the header opens
+    /// (`0x44a169`) and decodes later, in the callback `0x44a260`; a refused decode fills opaque
+    /// white at the header's size (`0x44a2eb` into `0x448920`) and logs the reference's line
+    /// (`0x835538`), with no next candidate. A header that makes no texture (`0x448450`, see
+    /// [`tga_texture_size`]) fails the candidate as a missing file does, whether the pixels would
+    /// decode or not. The BLP loader `0x44a310` returns the texture once the file opens
+    /// (`0x44a399`), and a parse, a decode or a size (`0x448450`, see [`makes_device_texture`]) its
+    /// callback refuses (`0x44a560`) leaves the solid green texture (`0x44a50e`), with no next
+    /// candidate either.
+    WhiteDefault,
+}
+
+fn decode_sprite_as(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+    on_refusal: OnRefusal,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let open = loose_open_for(path, open);
     let candidates = sprite_candidates(path);
+    // Asked before the chain's lock, so an index build never stalls an archive reader.
+    let hits: Vec<Option<LooseFile>> = candidates.iter().map(|c| loose.find(c, open)).collect();
     let mut chain = chain.lock_recover();
-    for candidate in &candidates {
-        if let Ok(bytes) = chain.read_file(candidate) {
-            if let Ok(decoded) = decode_sprite_bytes(&bytes) {
-                return Some(decoded);
-            }
-        }
-        if let Some(file) = loose_root.and_then(|root| loose_addon_file(root, candidate)) {
-            if let Ok(decoded) = std::fs::read(&file)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| decode_sprite_bytes(&bytes))
-            {
-                return Some(decoded);
-            }
+    for (candidate, hit) in candidates.iter().zip(&hits) {
+        // A loose file answers the candidate whether or not it decodes ([`read_loose_or_chain`]).
+        let bytes = match hit {
+            Some(file) => file.read(),
+            None => chain.read_file(candidate).ok(),
+        };
+        match bytes.map(|b| decode_candidate(candidate, &b, on_refusal)) {
+            Some(Candidate::Pixels(width, height, rgba)) => return Some((width, height, rgba)),
+            Some(Candidate::Next) | None => {}
         }
     }
     // "Not there" and "there but would not decode" are different faults; say which.
     let found_but_undecodable: Vec<&String> = candidates
         .iter()
-        .filter(|c| {
-            chain.read_file(c).is_ok()
-                || loose_root.is_some_and(|root| loose_addon_file(root, c).is_some())
-        })
+        .zip(&hits)
+        .filter(|(c, hit)| hit.is_some() || chain.read_file(c).is_ok())
+        .map(|(c, _)| c)
         .collect();
     if found_but_undecodable.is_empty() {
         warn!(
             "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
-            if loose_root.is_some() {
-                " or the AddOns folder"
-            } else {
+            if open == LooseOpen::Archives {
                 ""
+            } else {
+                ", the install's loose files or the AddOns folder"
             },
             candidates.join(", ")
         );
@@ -161,38 +194,316 @@ fn decode_sprite(
     None
 }
 
-/// Decode by content, not extension, since addon folders mislabel both ways: a `BLP2` magic is a
-/// BLP, anything else goes to the TGA decoder, whose header check is the gate.
-fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
-    if bytes.starts_with(b"BLP2") {
-        blp_to_rgba(bytes)
+/// The open a name makes: `open`, unless the name is written with `/`, which no loose file
+/// answers ([`LooseFiles::find`]), so it reads as an open with flag 0 would. The candidates the
+/// sprite loaders try are normalized, so the rule is taken from the name as the caller wrote it.
+fn loose_open_for(path: &str, open: LooseOpen) -> LooseOpen {
+    if path.contains('/') {
+        LooseOpen::Archives
     } else {
-        tga_to_rgba(bytes)
+        open
     }
 }
 
-/// Read a file from the patch chain, then, for an `Interface\AddOns\` path, the loose addon folder:
-/// how art, fonts and audio an addon ships all load. The reference asks the install tree first
-/// (`0x647e60`'s attempt #4 is the MPQ); the chain holds no `AddOns\` path, so the order is moot.
-pub fn read_chain_or_loose(
-    chain: &Mutex<Chain>,
-    loose_root: Option<&Path>,
-    path: &str,
-) -> Option<Vec<u8>> {
-    if let Ok(bytes) = chain.lock_recover().read(path) {
-        return Some(bytes);
-    }
-    let file = loose_addon_file(loose_root?, &normalize_path(path))?;
-    std::fs::read(file).ok()
+/// Whether an interface texture's open of `path` makes a texture, in the loose files or the chain,
+/// for the probes that answer `SetTexture`'s 1|nil before anything decodes: a candidate that opens
+/// and, if it is a TGA, whose header passes the size gate ([`makes_texture`]). A fresh
+/// [`SpriteProbe`] answers it, reading a TGA each time; a host asked per frame keeps one.
+pub fn sprite_found(chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> bool {
+    SpriteProbe::default().found(chain, loose, path)
 }
+
+/// `SetTexture`'s 1|nil probe ([`sprite_found`]), which keeps the size gate's answer for each
+/// resolved file it has read: an addon sets an icon from its `OnUpdate`, every frame. The host
+/// makes one probe per UI load, so an answer lasts that load and a `/reload` asks again; a file
+/// edited meanwhile is not read again. A file that will not read is asked again, and whether a
+/// name opens at all is asked each time, since the loose index can change.
+#[derive(Default)]
+pub struct SpriteProbe {
+    /// The gate's answer by resolved file ([`source_key`]).
+    gate: std::cell::RefCell<HashMap<String, bool>>,
+    /// How many TGA headers [`Self::found`] has read.
+    header_reads: std::cell::Cell<usize>,
+}
+
+impl SpriteProbe {
+    /// See [`sprite_found`].
+    pub fn found(&self, chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> bool {
+        let open = loose_open_for(path, LooseOpen::Index);
+        let candidates = sprite_candidates(path);
+        // The loose files first, outside the chain's lock.
+        let hits: Vec<Option<LooseFile>> = candidates.iter().map(|c| loose.find(c, open)).collect();
+        candidates.iter().zip(hits).any(|(candidate, hit)| {
+            let opens = hit.is_some() || chain.lock_recover().contains(candidate);
+            if !opens || !is_tga_name(candidate) {
+                return opens;
+            }
+            let key = match &hit {
+                Some(file) => source_key(file),
+                None => format!("chain:{candidate}"),
+            };
+            self.gate(&key, candidate, || match hit {
+                Some(file) => file.read_prefix(TGA_GATE_PREFIX),
+                None => chain.lock_recover().read_file(candidate).ok(),
+            })
+        })
+    }
+
+    /// Whether a `.tga` candidate makes a texture, from the bytes `read` gives, for the resolved
+    /// file `key` names.
+    fn gate(&self, key: &str, candidate: &str, read: impl FnOnce() -> Option<Vec<u8>>) -> bool {
+        if let Some(&answer) = self.gate.borrow().get(key) {
+            return answer;
+        }
+        self.header_reads.set(self.header_reads.get() + 1);
+        let Some(bytes) = read() else {
+            return false;
+        };
+        let answer = makes_texture(candidate, &bytes);
+        self.gate.borrow_mut().insert(key.to_string(), answer);
+        answer
+    }
+}
+
+/// The file an entry opens, as a key: the path on disk, and an archive's member.
+fn source_key(file: &LooseFile) -> String {
+    match file {
+        LooseFile::Plain(path) => path.display().to_string(),
+        LooseFile::Archive { archive, member } => format!("{}!{member}", archive.display()),
+    }
+}
+
+/// Whether `TextureCreate` (`0x449d90`) makes a texture of a candidate's bytes: a TGA the loader
+/// `0x44a140` reads needs a header that `0x448450` makes a device texture at ([`tga_texture_size`]),
+/// decoded or not, whatever the bytes are. A `.blp` candidate makes one once it opens.
+fn makes_texture(candidate: &str, bytes: &[u8]) -> bool {
+    !is_tga_name(candidate) || tga_texture_size(bytes).is_some()
+}
+
+/// Whether `candidate` is read by the TGA loader: `TextureCreate` picks the loader by the
+/// candidate's extension (`0x449e16`-`0x449e3d`), never by its bytes.
+fn is_tga_name(candidate: &str) -> bool {
+    candidate.ends_with(".tga")
+}
+
+/// What one candidate file yields for a load.
+#[derive(Debug, PartialEq)]
+enum Candidate {
+    /// Pixels to draw.
+    Pixels(u32, u32, Vec<u8>),
+    /// No texture: the next candidate is tried.
+    Next,
+}
+
+/// `TextureCreate`'s solid texture, the colour `0xff00ff00` (`0x447c00`) in an 8 by 8 texture
+/// (`0x44a900`), as RGBA.
+fn solid_green() -> (u32, u32, Vec<u8>) {
+    (8, 8, [0, 0xff, 0, 0xff].repeat(64))
+}
+
+/// One candidate's bytes through the decoder its name picks ([`decode_by_name`]). By
+/// `on_refusal`, a TGA load gates its header's size first ([`makes_texture`]), decoded or not, and
+/// a refused decode of one that passes leaves that size of opaque white; a refused BLP, or a
+/// decoded one at a size the device texture path refuses ([`makes_device_texture`]), is the solid
+/// green.
+fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Candidate {
+    let texture = on_refusal == OnRefusal::WhiteDefault;
+    let size = if texture && is_tga_name(candidate) {
+        match tga_texture_size(bytes) {
+            Some(size) => Some(size),
+            None => return Candidate::Next,
+        }
+    } else {
+        None
+    };
+    if let Ok((width, height, rgba)) = decode_by_name(candidate, bytes) {
+        // The BLP callback `0x44a560` asks `0x448450` for a texture of the decoded size; a size it
+        // or `GxTexCreate` refuses (`0x448665`, `0x58ab40`) returns 0 and `0x44a500` leaves the
+        // solid green (`0x44a50e`), with no next candidate.
+        let refused = texture && !is_tga_name(candidate) && !makes_device_texture(width, height);
+        if !refused {
+            return Candidate::Pixels(width, height, rgba);
+        }
+    }
+    match size {
+        Some((width, height)) => {
+            warn!("Texture {candidate} not loaded -- replaced with default.");
+            Candidate::Pixels(
+                width,
+                height,
+                vec![0xff; width as usize * height as usize * 4],
+            )
+        }
+        None if texture => {
+            warn!("Texture failure: \"{candidate}\" -- replaced with the solid texture.");
+            let (width, height, rgba) = solid_green();
+            Candidate::Pixels(width, height, rgba)
+        }
+        None => Candidate::Next,
+    }
+}
+
+/// Decode a candidate by its name: a `.tga` through the TGA decoder, anything else through the BLP
+/// one, as `TextureCreate` picks its loader (`0x449e16`-`0x449e3d`). A file whose bytes are the
+/// other format is refused by the decoder its name picks.
+fn decode_by_name(candidate: &str, bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    if is_tga_name(candidate) {
+        tga_to_rgba(bytes)
+    } else {
+        blp_to_rgba(bytes)
+    }
+}
+
+/// The pixels of a minimap mask, read by `open`: a `TextureCreate` load (`Minimap:SetMaskTexture`
+/// at `0x4ee5e4`, the world-entry load at `0x4ed862`), so a candidate that opens and will not
+/// decode is the white or green default ([`decode_texture`]), and `None` only a name that does
+/// not resolve.
+fn mask_rgba(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+) -> Option<(u32, u32, Vec<u8>)> {
+    decode_texture(chain, loose, path, open)
+}
+
+/// One BLP file decoded, read with the loose flag ([`LooseOpen::Index`], or the archives for a
+/// `path` written with `/`): the loads that open a `.blp` by name and nothing else.
+fn decode_blp_file(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    name: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let bytes = read_loose_or_chain(chain, loose, name, loose_open_for(path, LooseOpen::Index));
+    match bytes.map(|b| blp_to_rgba(&b)) {
+        Some(Ok(decoded)) => Some(decoded),
+        Some(Err(e)) => {
+            warn!("texture miss: '{name}' RESOLVES but will not decode as a BLP: {e:#}");
+            None
+        }
+        None => {
+            warn!("texture miss: '{name}' does not resolve");
+            None
+        }
+    }
+}
+
+/// The files a tabard emblem cell reads: its name with `.BLP` appended (`0x50338a`, `0x83574c`),
+/// whatever it ends in, and nothing else.
+fn emblem_names(path: &str) -> Vec<String> {
+    vec![format!("{}.blp", normalize_path(path))]
+}
+
+/// The pixels of a tabard emblem cell, read from the archives alone (`0x5a7b40` with flag 0) and
+/// decoded as a BLP ([`emblem_names`]).
+fn emblem_rgba(chain: &Mutex<Chain>, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+    let chain = chain.lock_recover();
+    emblem_names(path).into_iter().find_map(|name| {
+        let bytes = chain.read(&name).ok()?;
+        decode_by_name(&name, &bytes).ok()
+    })
+}
+
+/// The pixels of a portrait: the sink `0x525d30` formats `%s.blp` onto the name as written
+/// (`0x525e0f`, whatever it ends in) and reads it with the BLP reader `0x5a7b40` and flag 1
+/// (`0x525e37`), so no `.tga` is read and `Foo.tga` opens `Foo.tga.blp`.
+fn portrait_rgba(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
+    decode_blp_file(chain, loose, path, &format!("{}.blp", normalize_path(path)))
+}
+
+/// The pixels of a picture the cursor code opens through `0x449610`: `SetCursor`'s custom cursor
+/// (`0x523c86`) and the dragged icon (`0x5239f7`, `0x523a3e`, `0x523af7`, `0x523bb1`), all with the
+/// loose flag. It strips a three-letter extension (`0x449590` at `0x44963c`) and appends `.blp`
+/// (`0x449641`), and the bytes decode as a BLP (`0x449840`): `Foo.tga` opens `Foo.blp`, and no
+/// `.tga` is read.
+pub fn file_texture_rgba(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
+    decode_blp_file(chain, loose, path, &format!("{}.blp", sprite_key(path)))
+}
+
+/// The loose files an open that sets the loose flag reads before the archive chain, as the
+/// reference's resolver (`0x647e60`) answers from its index of the install (`0x647f89`) before the
+/// chain (`0x648116`): the install's index for any path, and benilla's AddOns folder for an
+/// `Interface\AddOns\` path ([`loose_addon_file`]), which stands in for the install's by a
+/// written deviation (`benilla-app`'s `ui_script::addons::root`).
+#[derive(Clone, Default)]
+pub struct LooseFiles {
+    /// benilla's AddOns folder, or `None` (always under `$WOW_CAPTURE`).
+    pub addons: Option<PathBuf>,
+    /// The install's index ([`benilla_formats::install_index`]), or `None` for a test's chain.
+    pub install: Option<Arc<LooseIndexCell>>,
+}
+
+impl LooseFiles {
+    /// The player's install, with no AddOns folder until the app installs one.
+    pub fn install() -> Self {
+        LooseFiles {
+            addons: None,
+            install: Some(benilla_formats::install_index()),
+        }
+    }
+
+    /// The loose file that answers an open of `path` with `open`, or `None` for the archives:
+    /// the font open's bare name first ([`LooseOpen::BareNameFirst`]), then the whole name, an
+    /// `Interface\AddOns\` one in the AddOns folder, which the install's index leaves out. A name
+    /// written with `/` finds nothing, as the index's compare does not read it as `\` (`0x647f37`);
+    /// a caller whose path benilla joined with `/` turns it back first.
+    pub fn find(&self, path: &str, open: LooseOpen) -> Option<LooseFile> {
+        if open == LooseOpen::Archives || path.contains('/') {
+            return None;
+        }
+        let install = self.install.as_ref().map(|cell| cell.get());
+        if open == LooseOpen::BareNameFirst {
+            let bare = path.rsplit('\\').next().unwrap_or(path);
+            if let Some(file) = install.as_ref().and_then(|ix| ix.get(bare)) {
+                return Some(file);
+            }
+        }
+        let norm = normalize_path(path);
+        if norm.starts_with(ADDONS_PREFIX) {
+            return self
+                .addons
+                .as_deref()
+                .and_then(|root| loose_addon_file(root, &norm))
+                .map(LooseFile::Plain);
+        }
+        install.as_ref().and_then(|ix| ix.get(&norm))
+    }
+}
+
+/// Read a file by path for an open of kind `open`: the loose file that answers it
+/// ([`LooseFiles::find`]), else the patch chain. A file the loose files answer and the read then
+/// fails is a miss, with no turn to the chain (`0x647865`).
+pub fn read_loose_or_chain(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+) -> Option<Vec<u8>> {
+    match loose.find(path, open) {
+        Some(file) => file.read(),
+        None => chain.lock_recover().read(path).ok(),
+    }
+}
+
+/// The normalized prefix of an addon path.
+const ADDONS_PREFIX: &str = "interface\\addons\\";
 
 /// Map a normalized `interface\addons\…` path onto a file under the addon root, matching each
 /// component case-insensitively as the Windows reference does; a dot-component, or one the host
 /// reads as more than a plain name (a Windows `C:`), is refused, so a path cannot escape the root.
 pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
-    let rel = candidate.strip_prefix("interface\\addons\\")?;
+    let rel = candidate.strip_prefix(ADDONS_PREFIX)?;
     let mut at = root.to_path_buf();
-    for comp in rel.split('\\') {
+    for (depth, comp) in rel.split('\\').enumerate() {
         let plain = matches!(
             Path::new(comp).components().collect::<Vec<_>>()[..],
             [std::path::Component::Normal(_)]
@@ -200,19 +511,120 @@ pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
         if !plain || comp.starts_with('.') {
             return None;
         }
-        let direct = at.join(comp);
-        if direct.exists() {
-            at = direct;
-            continue;
+        at = child_ignoring_case(&at, comp)?;
+        if depth == 0 && moved_aside(&at, comp) {
+            return None;
         }
-        let found = std::fs::read_dir(&at).ok()?.flatten().find(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case(comp))
-        })?;
-        at = found.path();
     }
     at.is_file().then_some(at)
+}
+
+/// `dir`'s entry named `name` without regard to case, as on the reference's Windows filesystem.
+fn child_ignoring_case(dir: &Path, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let found = std::fs::read_dir(dir).ok()?.flatten().find(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })?;
+    Some(found.path())
+}
+
+/// Whether the AddOns folder `dir`, named `name`, is one the glue build moves aside before the
+/// add-on scan: a `Blizzard*` folder holding `<name>\<name>.toc` (`0x51fbf0`, walked by `0x51fb50`
+/// at `0x46a8eb`), renamed `%s.old` so the stock add-on loads from the archive. benilla moves
+/// nothing a player put there; it registers no add-on from such a folder and reads no file in it.
+pub fn moved_aside(dir: &Path, name: &str) -> bool {
+    name.get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("blizzard"))
+        && child_ignoring_case(dir, &format!("{name}.toc")).is_some_and(|toc| toc.is_file())
+}
+
+/// Sprite handles by key, a miss as `None`, each with the open that made it. The key holds no
+/// open: the reference's texture cache keys on the stripped name and the flags word `0x449ae0`
+/// builds from the filter and force arguments (`0x449dd2` to `0x449dec`, compared at `0x449f39`
+/// and `0x449f47`), and the file flag is read only by the loaders (`0x449e20`, `0x449e32`), so a
+/// name's first open wins while it is cached (`0x449df3`).
+struct Opened<K>(HashMap<K, (LooseOpen, Option<Handle<Image>>)>);
+
+impl<K> Default for Opened<K> {
+    fn default() -> Self {
+        Opened(HashMap::new())
+    }
+}
+
+impl<K: Eq + std::hash::Hash> Opened<K> {
+    /// The cached answer, `Some(None)` for a cached miss.
+    fn get(&self, key: &K) -> Option<Option<Handle<Image>>> {
+        self.0.get(key).map(|(_, handle)| handle.clone())
+    }
+
+    fn insert(&mut self, key: K, open: LooseOpen, handle: Option<Handle<Image>>) {
+        self.0.insert(key, (open, handle));
+    }
+
+    /// Keep the entries `keep(key, open, hit)` says to.
+    fn retain(&mut self, mut keep: impl FnMut(&K, LooseOpen, bool) -> bool) {
+        self.0
+            .retain(|key, (open, handle)| keep(key, *open, handle.is_some()));
+    }
+}
+
+/// The UI sprite caches, and the install index's generation they were filled under.
+#[derive(Default)]
+struct SpriteCaches {
+    /// UI sprites by [`sprite_key`].
+    sprites: Opened<String>,
+    /// UI sprites loaded with the wrap flag, by key: the sampler bakes into the `Image`.
+    tiled: Opened<String>,
+    /// Sprites resampled to an exact physical size, by `(path, w, h)`, always opened loose.
+    resampled: HashMap<(String, u32, u32), Option<Handle<Image>>>,
+    /// The decoded pixels behind [`Self::resampled`], so a resize does not re-decode.
+    resample_sources: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
+    /// Portrait sprites, the circular mask baked in ([`portrait_image`]).
+    portraits: Opened<String>,
+    /// Coverage masks ([`mask_image`]): the minimap's circular clip.
+    masks: Opened<String>,
+    /// The [`LooseIndexCell::generation`] the entries opened loose were filled under.
+    loose_generation: u64,
+}
+
+impl SpriteCaches {
+    /// Drop every entry opened with the loose flag when the install's index was emptied since
+    /// they filled, so the next request opens again, as the reference opens a texture again once
+    /// it was released (every UI texture at a `ReloadUI` or a logout, the moments that empty the
+    /// index). Entries opened with flag 0 stay: nothing loose answered them.
+    fn sync(&mut self, generation: Option<u64>) {
+        let Some(generation) = generation.filter(|g| *g != self.loose_generation) else {
+            return;
+        };
+        self.loose_generation = generation;
+        let archives = |_: &_, open: LooseOpen, _| open == LooseOpen::Archives;
+        self.sprites.retain(archives);
+        self.tiled.retain(|_, open, _| open == LooseOpen::Archives);
+        self.portraits.retain(archives);
+        self.masks.retain(archives);
+        self.resampled.clear();
+        self.resample_sources.clear();
+    }
+
+    /// Drop every miss and every `Interface\AddOns\` entry, when the AddOns folder changes: a path
+    /// asked before it existed gets a second look, and a loose file shadows the chain's
+    /// ([`read_loose_or_chain`]); any other hit came from the chain and stays.
+    fn drop_addons_and_misses(&mut self) {
+        // `emblem_mask_texture` prefixes its `sprites` key, so the test looks past a tag.
+        let stays =
+            |key: &str, hit: bool| hit && !normalize_path(key).contains("interface\\addons\\");
+        self.sprites.retain(|k, _, hit| stays(k, hit));
+        self.tiled.retain(|k, _, hit| stays(k, hit));
+        self.resampled.retain(|k, v| stays(&k.0, v.is_some()));
+        self.resample_sources.retain(|k, v| stays(k, v.is_some()));
+        self.portraits.retain(|k, _, hit| stays(k, hit));
+        self.masks.retain(|k, _, hit| stays(k, hit));
+    }
 }
 
 /// Mutate an asset only when `differs` says it does not already match: `Assets::get_mut` alone
@@ -258,6 +670,25 @@ impl<T> LockRecover<T> for Mutex<T> {
     }
 }
 
+/// The chain a model texture name resolves to, as `TextureCreate` resolves it (`0x449d90`): the
+/// first of [`sprite_candidates`] that makes a texture ([`makes_texture`]). A `.tga` takes the
+/// levels of the files beside it ([`crate::tga_chain`]).
+fn model_texture_chain(chain: &Chain, path: &str) -> Option<benilla_formats::BlpMipChain> {
+    sprite_candidates(path).iter().find_map(|candidate| {
+        let bytes = chain.read(candidate).ok()?;
+        if !makes_texture(candidate, &bytes) {
+            return None;
+        }
+        if !is_tga_name(candidate) {
+            return benilla_formats::blp_bytes_to_native_chain(&bytes).ok();
+        }
+        let stem = candidate.strip_suffix(".tga").unwrap_or(candidate);
+        crate::tga_chain::tga_texture_chain(&bytes, |n| {
+            chain.read(&crate::tga_chain::mip_file_name(stem, n)).ok()
+        })
+    })
+}
+
 impl WorldAssets {
     /// Open the store over an opened patch chain. `shared_light` is a raw `Buffer`, not the
     /// client's `SharedLightBuffer`, which keeps this crate below the renderer.
@@ -265,77 +696,100 @@ impl WorldAssets {
         Self {
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
-            sprites: HashMap::new(),
-            resampled_sprites: HashMap::new(),
-            resample_sources: HashMap::new(),
-            tiled_sprites: HashMap::new(),
-            portraits: HashMap::new(),
-            masks: HashMap::new(),
+            cache: SpriteCaches::default(),
             generated: HashMap::new(),
-            loose_root: None,
+            loose: LooseFiles::install(),
             model_materials: SpatialCache::default(),
             shared_light,
         }
     }
 
-    /// [`read_chain_or_loose`] over this store, for an asset class with no decoder here (audio:
-    /// `PlayMusic`, `PlaySoundFile`).
+    /// [`read_loose_or_chain`] over this store with the loose flag set ([`LooseOpen::Index`]), for
+    /// an open with no decoder here: every sound file (`0x7a8860`), as FMOD's file callbacks open
+    /// with flag 1, and the glue's own interface files.
     pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
-        read_chain_or_loose(&self.chain, self.loose_root.as_deref(), path)
+        read_loose_or_chain(&self.chain, &self.loose, path, LooseOpen::Index)
+    }
+
+    /// The loose files this store reads, for a probe that must answer what draws.
+    pub fn loose(&self) -> &LooseFiles {
+        &self.loose
     }
 
     /// Install or clear the AddOns folder. Cached misses are evicted so a path asked before it
-    /// existed gets a second look; a cached hit came from the chain and stays right.
+    /// existed gets a second look, and so is every `Interface\AddOns\` entry, since a loose file
+    /// shadows the chain's ([`read_loose_or_chain`]); any other hit came from the chain and stays.
     pub fn set_loose_addon_root(&mut self, root: Option<PathBuf>) {
-        if self.loose_root == root {
+        if self.loose.addons == root {
             return;
         }
-        self.loose_root = root;
-        self.sprites.retain(|_, v| v.is_some());
-        self.tiled_sprites.retain(|_, v| v.is_some());
-        self.portraits.retain(|_, v| v.is_some());
-        self.masks.retain(|_, v| v.is_some());
+        self.loose.addons = root;
+        self.cache.drop_addons_and_misses();
     }
 
-    /// Decode and upload a BLP once per path and wrap; later requests share the handle.
+    /// [`SpriteCaches::sync`] to the install index's generation.
+    fn sync_loose(&mut self) {
+        let generation = self.loose.install.as_ref().map(|c| c.generation());
+        self.cache.sync(generation);
+    }
+
+    /// Decode and upload a model texture once per name and wrap; later requests share the handle.
+    /// The name resolves as `TextureCreate` resolves it (`0x449d90`): [`sprite_candidates`], keyed
+    /// on [`sprite_key`], the first candidate that makes a texture ([`makes_texture`]) being it.
     pub fn texture(
         &mut self,
         path: &str,
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = (normalize_path(path), wrap.0, wrap.1);
+        let key = (sprite_key(path), wrap.0, wrap.1);
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
-        // World art uploads as the BLP stores it; nothing reads it main-side.
-        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
+        // World art uploads as the file stores it; nothing reads it main-side.
+        let chain = model_texture_chain(&self.chain.lock_recover(), path)?;
         let handle = images.add(repeat_texture_authored(crate::for_upload(chain), wrap));
         self.textures.insert(key, handle.clone());
         Some(handle)
     }
 
-    /// A clamp-sampled sRGB sprite, mip 0 only: the celestial discs and every UI quad.
+    /// A clamp-sampled sRGB sprite, mip 0 only, opened as an interface texture
+    /// ([`LooseOpen::Index`], as `CSimpleTexture::SetTexture` loads at `0x770281`): every UI quad.
     pub fn sprite_texture(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
+        self.sprite_texture_opened(path, LooseOpen::Index, images)
+    }
+
+    /// [`Self::sprite_texture`] with the open the caller's reference load makes: the celestial
+    /// discs, the loading screen and the minimap's default art open with flag 0
+    /// ([`LooseOpen::Archives`]).
+    pub fn sprite_texture_opened(
+        &mut self,
+        path: &str,
+        open: LooseOpen,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.sync_loose();
         let key = sprite_key(path);
         // Hits and misses are cached: the UI extractor asks per quad per frame, and a fresh handle
         // would defeat its dirty check.
-        if let Some(cached) = self.sprites.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.cache.sprites.get(&key) {
+            return cached;
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+        let loaded = decode_texture(&self.chain, &self.loose, path, open)
             .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
-        self.sprites.insert(key, loaded.clone());
+        let open = loose_open_for(path, open);
+        self.cache.sprites.insert(key, open, loaded.clone());
         loaded
     }
 
-    /// Decode a UI sprite to raw RGBA8 without uploading or caching, for a caller that resamples.
-    pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+    /// Decode a sprite to raw RGBA8 without uploading or caching, for a caller that resamples,
+    /// read by `open`.
+    pub fn decode_rgba(&mut self, path: &str, open: LooseOpen) -> Option<(u32, u32, Vec<u8>)> {
+        decode_sprite(&self.chain, &self.loose, path, open)
     }
 
     /// A UI sprite resampled to an exact pixel size by the caller's kernel, cached by size: the
@@ -347,35 +801,39 @@ impl WorldAssets {
         images: &mut Assets<Image>,
         resample: impl FnOnce(&[u8], u32, u32, u32, u32) -> Vec<u8>,
     ) -> Option<Handle<Image>> {
+        self.sync_loose();
         let key = (path.to_string(), w, h);
-        if let Some(cached) = self.resampled_sprites.get(&key) {
+        if let Some(cached) = self.cache.resampled.get(&key) {
             return cached.clone();
         }
-        if !self.resample_sources.contains_key(path) {
-            let decoded = decode_sprite(&self.chain, self.loose_root.as_deref(), path);
-            self.resample_sources.insert(path.to_string(), decoded);
+        if !self.cache.resample_sources.contains_key(path) {
+            let decoded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index);
+            self.cache
+                .resample_sources
+                .insert(path.to_string(), decoded);
         }
-        let made = self.resample_sources[path]
+        let made = self.cache.resample_sources[path]
             .as_ref()
             .map(|(sw, sh, src)| images.add(sprite_image(w, h, resample(src, *sw, *sh, w, h))));
-        self.resampled_sprites.insert(key, made.clone());
+        self.cache.resampled.insert(key, made.clone());
         made
     }
 
-    /// A UI sprite repeating on the axes `wrap` names ([`sprite_image_wrapped`]).
+    /// A UI sprite loaded with the wrap flag, repeating on both axes ([`sprite_image_tiled`]).
     pub fn sprite_texture_wrapped(
         &mut self,
         path: &str,
-        wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = (sprite_key(path), wrap.0, wrap.1);
-        if let Some(cached) = self.tiled_sprites.get(&key) {
-            return cached.clone();
+        self.sync_loose();
+        let key = sprite_key(path);
+        if let Some(cached) = self.cache.tiled.get(&key) {
+            return cached;
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(sprite_image_wrapped(w, h, rgba, wrap)));
-        self.tiled_sprites.insert(key, loaded.clone());
+        let loaded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index)
+            .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
+        let open = loose_open_for(path, LooseOpen::Index);
+        self.cache.tiled.insert(key, open, loaded.clone());
         loaded
     }
 
@@ -396,76 +854,87 @@ impl WorldAssets {
         handle
     }
 
-    /// A unit-frame portrait, the circular mask baked in ([`portrait_image`]).
+    /// A portrait, the circular mask baked in ([`portrait_image`]): `<path>.blp` as the sink
+    /// `0x525d30` opens it ([`portrait_rgba`]). Keyed by the whole name, since `Foo` and `Foo.blp`
+    /// open different files.
     pub fn portrait_texture(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = sprite_key(path);
-        if let Some(cached) = self.portraits.get(&key) {
-            return cached.clone();
+        self.sync_loose();
+        let key = normalize_path(path);
+        if let Some(cached) = self.cache.portraits.get(&key) {
+            return cached;
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+        let loaded = portrait_rgba(&self.chain, &self.loose, path)
             .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
-        self.portraits.insert(key, loaded.clone());
+        let open = loose_open_for(path, LooseOpen::Index);
+        self.cache.portraits.insert(key, open, loaded.clone());
         loaded
     }
 
     /// The tabard designer's emblem cell for the caller to tint: white carrying its own alpha,
     /// `(a << 24) | 0x00FFFFFF` per texel (the reference's `0x503431` loop). A file that fails to
-    /// open gives `None`, where the reference keeps its static array's stale contents.
+    /// open gives `None`, where the reference keeps its static array's stale contents. Read from
+    /// the archives alone, as the emblems' `0x5a7b40` opens with flag 0.
     pub fn emblem_mask_texture(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
         let key = format!("emblem-mask:{}", sprite_key(path));
-        if let Some(cached) = self.sprites.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.cache.sprites.get(&key) {
+            return cached;
         }
-        let loaded =
-            decode_sprite(&self.chain, self.loose_root.as_deref(), path).map(|(w, h, mut rgba)| {
-                for px in rgba.as_chunks_mut::<4>().0 {
-                    px[0] = 0xFF;
-                    px[1] = 0xFF;
-                    px[2] = 0xFF;
-                }
-                images.add(sprite_image(w, h, rgba))
-            });
-        self.sprites.insert(key, loaded.clone());
+        let open = LooseOpen::Archives;
+        let loaded = emblem_rgba(&self.chain, path).map(|(w, h, mut rgba)| {
+            for px in rgba.as_chunks_mut::<4>().0 {
+                px[0] = 0xFF;
+                px[1] = 0xFF;
+                px[2] = 0xFF;
+            }
+            images.add(sprite_image(w, h, rgba))
+        });
+        self.cache.sprites.insert(key, open, loaded.clone());
         loaded
     }
 
-    /// A coverage mask, its bytes handed to the shader 1:1 ([`mask_image`]): the minimap's circle.
+    /// A coverage mask, its bytes handed to the shader 1:1 ([`mask_image`]), read by `open`: the
+    /// minimap's circle.
     pub fn mask_texture(
         &mut self,
         path: &str,
+        open: LooseOpen,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
+        self.sync_loose();
         let key = sprite_key(path);
-        if let Some(cached) = self.masks.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.cache.masks.get(&key) {
+            return cached;
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+        let loaded = mask_rgba(&self.chain, &self.loose, path, open)
             .map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
-        self.masks.insert(key, loaded.clone());
+        let open = loose_open_for(path, open);
+        self.cache.masks.insert(key, open, loaded.clone());
         loaded
     }
 
-    /// Decode a cursor BLP (`Interface\Cursor\Point.blp`) for winit's custom OS cursor; macOS
-    /// drives `NSCursor` from the raw RGBA instead.
+    /// A cursor picture's RGBA, a mode's (`Interface\Cursor\Point.blp`), the custom cursor's or a
+    /// dragged icon's, opened as the cursor code's `0x449610` opens it ([`file_texture_rgba`]).
+    pub fn cursor_rgba(&self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+        file_texture_rgba(&self.chain, &self.loose, path)
+    }
+
+    /// Decode a cursor BLP ([`Self::cursor_rgba`]) for winit's custom OS cursor; macOS drives
+    /// `NSCursor` from the raw RGBA instead.
     #[cfg(not(target_os = "macos"))]
     pub fn decode_cursor(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let (w, h, rgba) = benilla_formats::read_texture_rgba(
-            &mut self.chain.lock_recover(),
-            &normalize_path(path),
-        )
-        .ok()?;
+        let (w, h, rgba) = self.cursor_rgba(path)?;
         Some(images.add(cursor_texture(w, h, rgba)))
     }
 
@@ -559,7 +1028,11 @@ impl WorldAssets {
                 tint: Vec4::ONE, // clutter has no animated M2Color tint and is not a WMO batch
                 sidn: Vec4::ZERO, // clutter is never SIDN/WINDOW glass (WMO-only)
                 anim_slots: Vec4::ZERO,
+                stage1: Vec4::ZERO, // a tuft is one texture
+                stage1_uv: Vec4::ZERO,
+                stage1_texture: None,
                 light_buf: self.shared_light.clone(),
+                order: None, // clutter sorts by its own centre
             },
         });
         self.model_materials.insert(key, handle.clone());
@@ -587,6 +1060,24 @@ pub enum AssetSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model texture the clutter and skybox loads name resolves whatever extension it spells.
+    #[test]
+    fn a_world_asset_texture_resolves_through_the_texturecreate_chain() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Chain::open(&data).expect("open the chain");
+        let blp = model_texture_chain(&chain, "Environments\\Stars\\Stars.blp")
+            .expect("the stock spelling resolves");
+        for raw in [
+            "Environments\\Stars\\Stars",
+            "Environments\\Stars\\Stars.tga",
+        ] {
+            let got = model_texture_chain(&chain, raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!((got.width, got.height), (blp.width, blp.height), "{raw}");
+            assert_eq!(got.mips.len(), blp.mips.len(), "{raw}");
+        }
+        assert!(model_texture_chain(&chain, "Environments\\Stars\\NoSuchStars").is_none());
+    }
 
     #[test]
     fn loose_addon_file_maps_addon_paths_case_insensitively() {
@@ -620,10 +1111,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Against the real chain: a client file must still come from the archive, and the loose
-    /// folder is a fallback, not a shadow over it.
+    /// Against the real chain: a client file comes from the archive, an addon's own file from
+    /// disk, and a loose copy of a path the archive also holds shadows it, as `0x647e60` asks the
+    /// install tree (`0x647f89`) before the chain (`0x648116`), even when it will not read.
     #[test]
-    fn read_chain_or_loose_asks_the_chain_then_an_addons_own_file_on_disk() {
+    fn read_loose_or_chain_asks_an_addons_own_file_on_disk_then_the_chain() {
         let data = benilla_formats::wow_data_or_skip!();
         let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
         let root =
@@ -631,32 +1123,740 @@ mod tests {
         let addons = root.join("AddOns");
         std::fs::create_dir_all(addons.join("Jukebox")).unwrap();
         std::fs::write(addons.join("Jukebox").join("Track.mp3"), b"ID3!").unwrap();
+        let folder = LooseFiles {
+            addons: Some(addons.clone()),
+            install: None,
+        };
+        let none = LooseFiles::default();
+        let open = LooseOpen::Index;
 
         // The archive leg: a client track the chain does carry.
-        let theme = read_chain_or_loose(
+        let theme = read_loose_or_chain(
             &chain,
-            Some(&addons),
+            &folder,
             "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3",
+            open,
         )
         .expect("the glue theme lives in sound.MPQ");
         assert!(theme.len() > 1_000_000, "the theme is a ~3 MB stored MP3");
 
         // The loose leg: an addon's own track, named by the virtual path, spelt in its own case.
         assert_eq!(
-            read_chain_or_loose(
+            read_loose_or_chain(
                 &chain,
-                Some(&addons),
-                "Interface\\AddOns\\Jukebox\\Track.mp3"
+                &folder,
+                "Interface\\AddOns\\Jukebox\\Track.mp3",
+                open
             )
             .as_deref(),
             Some(&b"ID3!"[..])
         );
+
+        // The shadow: a stock addon's file the archive carries, with a loose copy on disk.
+        let stock = "Interface\\AddOns\\Blizzard_AuctionUI\\Blizzard_AuctionUI.lua";
+        let archived = chain
+            .lock_recover()
+            .read(stock)
+            .expect("interface.MPQ carries it");
+        assert_eq!(
+            read_loose_or_chain(&chain, &none, stock, open).as_deref(),
+            Some(&archived[..]),
+            "with no folder the archive answers"
+        );
+        std::fs::create_dir_all(addons.join("Blizzard_AuctionUI")).unwrap();
+        std::fs::write(
+            addons
+                .join("Blizzard_AuctionUI")
+                .join("Blizzard_AuctionUI.lua"),
+            b"-- loose",
+        )
+        .unwrap();
+        assert_eq!(
+            read_loose_or_chain(&chain, &folder, stock, open).as_deref(),
+            Some(&b"-- loose"[..]),
+            "the loose copy shadows the archive's"
+        );
+        // An open with flag 0 never sees it.
+        assert_eq!(
+            read_loose_or_chain(&chain, &folder, stock, LooseOpen::Archives).as_deref(),
+            Some(&archived[..]),
+            "a flag-0 open reads the archive"
+        );
+        // A loose file that will not read is a miss: the index answered, so the archive is not
+        // asked (`0x647865`).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let loose = addons
+                .join("Blizzard_AuctionUI")
+                .join("Blizzard_AuctionUI.lua");
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = std::fs::read(&loose).is_err();
+            let got = read_loose_or_chain(&chain, &folder, stock, open);
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+            if unreadable {
+                assert_eq!(got, None, "no fallback to the archive copy");
+            }
+        }
+
+        // The folder holding its own `.toc` is moved aside: the archive's copy answers again.
+        std::fs::write(
+            addons
+                .join("Blizzard_AuctionUI")
+                .join("Blizzard_AuctionUI.toc"),
+            b"## Interface: 11200",
+        )
+        .unwrap();
+        assert_eq!(
+            read_loose_or_chain(&chain, &folder, stock, open).as_deref(),
+            Some(&archived[..]),
+            "a moved-aside folder answers nothing"
+        );
+
         // In neither store: a plain miss, which every caller renders as silence.
-        assert!(read_chain_or_loose(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
+        assert!(read_loose_or_chain(&chain, &folder, "Sound\\Music\\nope.mp3", open).is_none());
         // No folder configured (a capture run, where `local_state` is hermetic): chain only.
         assert!(
-            read_chain_or_loose(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
+            read_loose_or_chain(&chain, &none, "Interface\\AddOns\\Jukebox\\Track.mp3", open)
+                .is_none()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A fresh folder under the temp dir, removed when dropped.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Tree {
+            let dir = std::env::temp_dir().join(format!(
+                "benilla-loose-files-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Tree(dir)
+        }
+
+        fn file(&self, rel: &str, body: &str) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn body(file: Option<LooseFile>) -> Option<String> {
+        file.map(|f| String::from_utf8(f.read().unwrap()).unwrap())
+    }
+
+    /// A flagged open finds an install's loose file by its path below the install or `Data\`, a
+    /// font's by its bare name first; an `Interface\AddOns\` path reads benilla's AddOns folder
+    /// alone; an open with flag 0, or a name written with `/`, finds nothing loose.
+    #[test]
+    fn loose_files_answer_the_flagged_opens_from_the_install_and_the_addons_folder() {
+        let install = Tree::new("install");
+        install.file("Fonts/FRIZQT__.TTF", "fonts dir");
+        install.file("Data/FRIZQT__.TTF", "data root");
+        install.file("Data/Interface/Glues/Common/Glues-WoW-Logo.blp", "logo");
+        install.file("Interface/AddOns/Atlas/Atlas.toc", "install addon");
+        let addons = Tree::new("addons");
+        addons.file("Atlas/Atlas.toc", "benilla addon");
+        let root = install.0.clone();
+        let cell = LooseIndexCell::new(move || LooseIndex::build(Some(&root), &root.join("Data")));
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: Some(Arc::new(cell)),
+        };
+        let logo = "Interface\\Glues\\Common\\Glues-WoW-Logo.blp";
+        assert_eq!(
+            body(loose.find(logo, LooseOpen::Index)).as_deref(),
+            Some("logo")
+        );
+        assert_eq!(loose.find(logo, LooseOpen::Archives), None);
+        let font = "Fonts\\FRIZQT__.TTF";
+        assert_eq!(
+            body(loose.find(font, LooseOpen::Index)).as_deref(),
+            Some("fonts dir")
+        );
+        assert_eq!(
+            body(loose.find(font, LooseOpen::BareNameFirst)).as_deref(),
+            Some("data root")
+        );
+        assert_eq!(
+            body(loose.find("Interface\\AddOns\\atlas\\ATLAS.toc", LooseOpen::Index)).as_deref(),
+            Some("benilla addon")
+        );
+        assert_eq!(
+            loose.find(
+                "Interface/Glues/Common/Glues-WoW-Logo.blp",
+                LooseOpen::Index
+            ),
+            None
+        );
+        assert_eq!(
+            loose.find("Fonts/FRIZQT__.TTF", LooseOpen::BareNameFirst),
+            None
+        );
+        assert_eq!(
+            loose.find("Interface/AddOns/Atlas/Atlas.toc", LooseOpen::Index),
+            None
+        );
+        let no_folder = LooseFiles {
+            addons: None,
+            install: loose.install.clone(),
+        };
+        assert_eq!(
+            no_folder.find("Interface\\AddOns\\Atlas\\Atlas.toc", LooseOpen::Index),
+            None,
+            "the install's AddOns folder is never read"
+        );
+    }
+
+    /// `SetTexture`'s probe and decode find a texture loose in the install by its name as written
+    /// with `\`, and not when it is written with `/`, which the index's compare does not fold.
+    #[test]
+    fn a_loose_texture_answers_its_backslash_name_and_not_its_slash_name() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let bytes = chain
+            .lock_recover()
+            .read("Interface\\Icons\\INV_Misc_QuestionMark.blp")
+            .expect("the question-mark icon is in the chain");
+        let install = Tree::new("slash");
+        let path = install.0.join("Interface/Glues/Loose/Custom.blp");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let root = install.0.clone();
+        let cell = LooseIndexCell::new(move || LooseIndex::build(Some(&root), &root.join("Data")));
+        let loose = LooseFiles {
+            addons: None,
+            install: Some(Arc::new(cell)),
+        };
+        let back = "Interface\\Glues\\Loose\\Custom";
+        let slash = "Interface/Glues/Loose/Custom";
+        assert!(sprite_found(&chain, &loose, back));
+        assert!(sprite_dimensions(&chain, &loose, back).is_some());
+        assert!(!sprite_found(&chain, &loose, slash));
+        assert!(sprite_dimensions(&chain, &loose, slash).is_none());
+    }
+
+    /// An emptied index drops every sprite opened with the loose flag, hit or miss, and keeps those
+    /// opened with flag 0; the same generation again drops nothing.
+    #[test]
+    fn a_new_index_generation_drops_the_loose_opened_sprites() {
+        let mut c = SpriteCaches::default();
+        let hit = Some(Handle::<Image>::default());
+        c.sprites.insert("ui".into(), LooseOpen::Index, hit.clone());
+        c.sprites.insert("miss".into(), LooseOpen::Index, None);
+        c.sprites
+            .insert("sun".into(), LooseOpen::Archives, hit.clone());
+        c.tiled.insert("ui".into(), LooseOpen::Index, hit.clone());
+        c.portraits
+            .insert("p".into(), LooseOpen::Index, hit.clone());
+        c.masks
+            .insert("mask".into(), LooseOpen::Archives, hit.clone());
+        c.resampled.insert(("ui".into(), 4, 4), hit.clone());
+        c.sync(Some(0));
+        assert!(
+            c.sprites.get(&"ui".to_string()).is_some(),
+            "an unchanged generation keeps all"
+        );
+        c.sync(Some(1));
+        assert!(c.sprites.get(&"ui".to_string()).is_none());
+        assert!(c.sprites.get(&"miss".to_string()).is_none());
+        assert!(c.sprites.get(&"sun".to_string()).is_some());
+        assert!(c.tiled.get(&"ui".to_string()).is_none());
+        assert!(c.portraits.get(&"p".to_string()).is_none());
+        assert!(c.masks.get(&"mask".to_string()).is_some());
+        assert!(c.resampled.is_empty());
+    }
+
+    /// A `Blizzard*` folder holding its own `.toc`, any case, is moved aside and answers no path;
+    /// one without it, or a folder of another name, answers as before.
+    #[test]
+    fn a_blizzard_folder_with_its_toc_is_moved_aside() {
+        let addons = Tree::new("aside");
+        addons.file("Blizzard_Foo/Blizzard_Foo.toc", "toc");
+        addons.file("Blizzard_Foo/Foo.lua", "foo");
+        addons.file("BLIZZARD_Bar/blizzard_bar.TOC", "toc");
+        addons.file("BLIZZARD_Bar/Bar.lua", "bar");
+        addons.file("Blizzard_AuctionUI/Blizzard_AuctionUI.pub", "pub");
+        addons.file("Blizzard_AuctionUI/Templates.xml", "templates");
+        addons.file("MyBlizzard/MyBlizzard.toc", "toc");
+        addons.file("MyBlizzard/Mine.lua", "mine");
+        let root = &addons.0;
+        assert!(moved_aside(&root.join("Blizzard_Foo"), "Blizzard_Foo"));
+        assert!(moved_aside(&root.join("BLIZZARD_Bar"), "BLIZZARD_Bar"));
+        assert!(!moved_aside(
+            &root.join("Blizzard_AuctionUI"),
+            "Blizzard_AuctionUI"
+        ));
+        assert!(!moved_aside(&root.join("MyBlizzard"), "MyBlizzard"));
+        let get = |p: &str| body(loose_addon_file(root, &normalize_path(p)).map(LooseFile::Plain));
+        assert_eq!(get("Interface\\AddOns\\Blizzard_Foo\\Foo.lua"), None);
+        assert_eq!(get("Interface\\AddOns\\blizzard_bar\\Bar.lua"), None);
+        assert_eq!(
+            get("Interface\\AddOns\\Blizzard_AuctionUI\\Templates.xml").as_deref(),
+            Some("templates")
+        );
+        assert_eq!(
+            get("Interface\\AddOns\\MyBlizzard\\Mine.lua").as_deref(),
+            Some("mine")
+        );
+    }
+    /// A TGA header of `w` by `h` at 32 bits with no alpha bits and `data` after it. `0x5a37e0`
+    /// refuses the pixels, and `0x44a140` still makes the texture.
+    fn refused_tga(w: u16, h: u16, data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; 18];
+        out[2] = 2;
+        out[12..14].copy_from_slice(&w.to_le_bytes());
+        out[14..16].copy_from_slice(&h.to_le_bytes());
+        out[16] = 32;
+        out[17] = 0x20;
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// `0x44a140` returns the texture once the header opens, and the refused decode in `0x44a260`
+    /// fills it opaque white (`0x44a2eb` into `0x448920`) at the size `0x448450` made it. A header
+    /// that makes no texture fails the candidate as a missing file does, whether the pixels would
+    /// decode or not, and so does any refused load that is not `TextureCreate`'s.
+    #[test]
+    fn a_refused_tga_texture_is_opaque_white_at_its_headers_size() {
+        let tga = "interface\\addons\\foo\\icon.tga";
+        let white =
+            |candidate, bytes: &[u8]| decode_candidate(candidate, bytes, OnRefusal::WhiteDefault);
+        let bytes = refused_tga(16, 8, &[0; 512]);
+        assert!(tga_to_rgba(&bytes).is_err(), "the decoder refuses it");
+        assert_eq!(
+            white(tga, &bytes),
+            Candidate::Pixels(16, 8, vec![0xff; 16 * 8 * 4])
+        );
+        // The pixels need not be there at all.
+        assert_eq!(
+            white(tga, &refused_tga(8, 512, &[])),
+            Candidate::Pixels(8, 512, vec![0xff; 8 * 512 * 4])
+        );
+
+        // Next candidate: not a size `0x448450` makes (decoded or not), a side below the 8
+        // `GxTexCreate` takes (`0x58ab40`), a header that does not open.
+        let mut wide = refused_tga(24, 8, &[9; 24 * 8 * 4]);
+        wide[17] = 0x28;
+        assert!(
+            tga_to_rgba(&wide).is_ok(),
+            "it decodes, and still fails the gate"
+        );
+        for bytes in [
+            refused_tga(24, 8, &[0; 24]),
+            refused_tga(2048, 8, &[0; 24]),
+            refused_tga(4, 8, &[0; 128]),
+            refused_tga(0, 8, &[]),
+            wide,
+            vec![2, 0, 2],
+        ] {
+            assert_eq!(white(tga, &bytes), Candidate::Next);
+        }
+        // A load that is no `TextureCreate`'s leaves them all to the next candidate.
+        for bytes in [&bytes, &refused_tga(24, 8, &[0; 24])] {
+            assert_eq!(
+                decode_candidate(tga, bytes, OnRefusal::Miss),
+                Candidate::Next
+            );
+        }
+
+        // A TGA that decodes is its pixels, white or not.
+        let mut ok = refused_tga(8, 8, &[1, 2, 3, 77].repeat(64));
+        ok[17] = 0x28;
+        assert_eq!(
+            white(tga, &ok),
+            Candidate::Pixels(8, 8, [3, 2, 1, 77].repeat(64))
+        );
+    }
+
+    /// The addon corpus' three `BigWigs` ready-check icons are 32-bit TGAs with no alpha bits:
+    /// `0x44a140` returns each as a texture of its header's size once the header opens, and the
+    /// refused decode leaves it white (`0x44a2eb`).
+    #[test]
+    fn the_corpus_ready_check_icons_are_textures_of_their_size() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let corpus = benilla_formats::addon_corpus_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let loose = LooseFiles {
+            addons: Some(corpus),
+            install: None,
+        };
+        for name in ["Ready", "Waiting", "NotReady"] {
+            let path = format!("Interface\\AddOns\\BigWigs\\Icons\\ReadyCheck-{name}");
+            assert!(sprite_found(&chain, &loose, &path), "{name}");
+            assert_eq!(
+                sprite_dimensions(&chain, &loose, &path),
+                Some((64, 64)),
+                "{name}"
+            );
+            let (_, _, rgba) = decode_texture(&chain, &loose, &path, LooseOpen::Index).unwrap();
+            assert!(rgba.iter().all(|&b| b == 0xff), "{name}: opaque white");
+        }
+    }
+
+    /// Through the store: a refused `.tga` in the AddOns folder is a texture of its header's size
+    /// for `SetTexture`'s loads. A header that makes no texture (`0x448450` takes powers of two
+    /// below 1024, `GxTexCreate` no side below 8) is a miss, its pixels decoded or not.
+    #[test]
+    fn a_refused_tga_in_the_addons_folder_is_a_texture_of_its_size() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("white");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Icon.tga"), refused_tga(16, 8, &[0; 512])).unwrap();
+        std::fs::write(dir.join("Odd.tga"), refused_tga(6, 8, &[0; 192])).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let icon = "Interface\\AddOns\\Foo\\Icon";
+        assert!(sprite_found(&chain, &loose, icon));
+        assert_eq!(sprite_dimensions(&chain, &loose, icon), Some((16, 8)));
+        let (w, h, rgba) = decode_texture(&chain, &loose, icon, LooseOpen::Index).unwrap();
+        assert_eq!((w, h, rgba.len()), (16, 8, 16 * 8 * 4));
+        assert!(rgba.iter().all(|&b| b == 0xff));
+        // A load that is not `TextureCreate`'s still gets no pixels.
+        assert!(decode_sprite(&chain, &loose, icon, LooseOpen::Index).is_none());
+        // Not a size `0x448450` makes (`0x4484ae`-`0x4484d0`): `TextureCreate` fails the candidate
+        // whether its pixels decode or not, and `SetTexture` answers nil.
+        std::fs::write(dir.join("Wide.tga"), decodable_tga(24, 8)).unwrap();
+        std::fs::write(dir.join("Small.tga"), decodable_tga(4, 8)).unwrap();
+        std::fs::write(dir.join("Zero.tga"), refused_tga(0, 8, &[])).unwrap();
+        std::fs::write(dir.join("Fine.tga"), decodable_tga(8, 16)).unwrap();
+        for (name, found, size) in [
+            ("Odd", false, None),
+            ("Wide", false, None),
+            ("Small", false, None),
+            ("Zero", false, None),
+            ("Fine", true, Some((8, 16))),
+        ] {
+            let path = format!("Interface\\AddOns\\Foo\\{name}");
+            assert_eq!(sprite_found(&chain, &loose, &path), found, "{name}");
+            assert_eq!(sprite_dimensions(&chain, &loose, &path), size, "{name}");
+        }
+    }
+
+    /// A palette BLP2 (compression 1, no alpha bits, no mips) of `w` by `h`, every texel palette
+    /// entry 0, red `r`.
+    fn tiny_blp(w: u32, h: u32, r: u8) -> Vec<u8> {
+        let mut b = vec![0u8; 148 + 1024];
+        b[0..4].copy_from_slice(b"BLP2");
+        b[4..8].copy_from_slice(&1u32.to_le_bytes());
+        b[8] = 1;
+        b[12..16].copy_from_slice(&w.to_le_bytes());
+        b[16..20].copy_from_slice(&h.to_le_bytes());
+        b[20..24].copy_from_slice(&(148u32 + 1024).to_le_bytes());
+        b[84..88].copy_from_slice(&(w * h).to_le_bytes());
+        b[148 + 2] = r;
+        b.extend(vec![0u8; (w * h) as usize]);
+        b
+    }
+
+    /// `TextureCreate`'s solid texture, `0xff00ff00` (`0x447c00`), 8 by 8 (`0x44a900`).
+    fn green() -> Candidate {
+        Candidate::Pixels(8, 8, [0, 0xff, 0, 0xff].repeat(64))
+    }
+
+    /// The BLP callback `0x44a560` hands `0x448450` the decoded size: it makes no texture for a
+    /// side that is not a power of two or is 1024 or more (`0x4484ae`-`0x4484d0`), `GxTexCreate`
+    /// refuses a side below 8 (`0x58ab40`, `0x58ab4c`), and `0x44a500` leaves the solid green
+    /// (`0x44a50e`) with no next candidate. A side of 8 to 16 goes to `GxTexCreate` and passes.
+    #[test]
+    fn a_blp_texture_size_the_device_path_refuses_is_the_solid_green() {
+        let blp = "interface\\addons\\foo\\icon.blp";
+        let load = |w, h| decode_candidate(blp, &tiny_blp(w, h, 7), OnRefusal::WhiteDefault);
+        for (w, h) in [
+            (8, 8),
+            (16, 16),
+            (16, 8),
+            (64, 32),
+            (512, 512),
+            (8, 512),
+            (512, 8),
+        ] {
+            assert!(
+                matches!(load(w, h), Candidate::Pixels(pw, ph, _) if (pw, ph) == (w, h)),
+                "{w}x{h} is the image"
+            );
+        }
+        for (w, h) in [
+            (7, 7),
+            (7, 8),
+            (8, 7),
+            (4, 4),
+            (3, 4),
+            (1, 1),
+            (24, 8),
+            (8, 24),
+            (1024, 8),
+            (8, 1024),
+            (1024, 1024),
+            (2048, 64),
+        ] {
+            assert_eq!(load(w, h), green(), "{w}x{h} is the solid green");
+        }
+        // A load that is not `TextureCreate`'s makes no `0x448450` request.
+        assert!(matches!(
+            decode_candidate(blp, &tiny_blp(1024, 8, 7), OnRefusal::Miss),
+            Candidate::Pixels(1024, 8, _)
+        ));
+    }
+
+    /// `TextureCreate` takes the loader by the candidate's extension (`0x449e16`-`0x449e3d`), never
+    /// by the bytes. BLP bytes under a `.tga` name reach the TGA loader `0x44a140`, whose header
+    /// is the BLP's: its height word is the BLP width's high half, 0, which `GxTexCreate` refuses
+    /// (`0x58ab4c`), so the next candidate is tried. Any bytes under a `.blp` name open as the BLP
+    /// loader's texture (`0x44a399`), and a refused parse (the magic, `0x5a83dc`) or decode leaves
+    /// the solid green (`0x44a50e`), with no next candidate.
+    #[test]
+    fn the_loader_is_the_candidates_extension_not_its_content() {
+        let tga = "interface\\addons\\foo\\icon.tga";
+        let blp = "interface\\addons\\foo\\icon.blp";
+        let white =
+            |candidate, bytes: &[u8]| decode_candidate(candidate, bytes, OnRefusal::WhiteDefault);
+        let good_blp = tiny_blp(16, 8, 7);
+        let good_tga = decodable_tga(8, 8);
+        assert!(matches!(white(blp, &good_blp), Candidate::Pixels(16, 8, _)));
+        assert!(matches!(white(tga, &good_tga), Candidate::Pixels(8, 8, _)));
+
+        assert_eq!(
+            white(tga, &good_blp),
+            Candidate::Next,
+            "a BLP under a .tga name"
+        );
+        assert_eq!(white(blp, &good_tga), green(), "a TGA under a .blp name");
+        assert_eq!(white(blp, b"BLP2"), green(), "a BLP that will not parse");
+        assert_eq!(white(blp, &[]), green(), "an empty .blp");
+
+        // A load that is not `TextureCreate`'s takes the same decoder, and a refusal is a miss.
+        assert_eq!(
+            decode_candidate(tga, &good_blp, OnRefusal::Miss),
+            Candidate::Next
+        );
+        assert_eq!(
+            decode_candidate(blp, &good_tga, OnRefusal::Miss),
+            Candidate::Next
+        );
+    }
+
+    /// Through the store: a `.tga` name holding BLP bytes is passed over for its `.blp`
+    /// candidate (`0x449e4b`), and a `.blp` that will not decode is green, whatever `.tga` lies
+    /// beside it.
+    #[test]
+    fn a_mislabelled_addon_file_does_not_draw() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("mislabel");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Art.tga"), tiny_blp(16, 16, 1)).unwrap();
+        std::fs::write(dir.join("Art.blp"), tiny_blp(8, 8, 2)).unwrap();
+        std::fs::write(dir.join("Pic.blp"), decodable_tga(8, 8)).unwrap();
+        std::fs::write(dir.join("Pic.tga"), decodable_tga(16, 16)).unwrap();
+        std::fs::write(dir.join("Only.tga"), tiny_blp(16, 16, 1)).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let load = |name: &str| {
+            decode_texture(
+                &chain,
+                &loose,
+                &format!("Interface\\AddOns\\Foo\\{name}"),
+                LooseOpen::Index,
+            )
+        };
+        let (w, h, rgba) = load("Art.tga").unwrap();
+        assert_eq!((w, h, rgba[0]), (8, 8, 2), "the .blp beside it draws");
+        let (w, h, rgba) = load("Pic").unwrap();
+        assert_eq!((w, h, &rgba[..4]), (8, 8, &[0, 0xff, 0, 0xff][..]), "green");
+        assert!(load("Only.tga").is_none(), "no candidate makes a texture");
+        assert!(!sprite_found(
+            &chain,
+            &loose,
+            "Interface\\AddOns\\Foo\\Only.tga"
+        ));
+    }
+
+    /// The minimap's mask loads through `TextureCreate` (`Minimap:SetMaskTexture` at `0x4ee5e4`,
+    /// the world-entry load at `0x4ed862`): a `.tga` whose header opens and whose pixels the
+    /// decoder refuses is opaque white at its header's size (`0x44a2eb` into `0x448920`), not a
+    /// miss the minimap would paint green.
+    #[test]
+    fn a_refused_tga_mask_is_opaque_white() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("mask");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Mask.tga"), refused_tga(16, 8, &[0; 512])).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let (w, h, rgba) = mask_rgba(
+            &chain,
+            &loose,
+            "Interface\\AddOns\\Foo\\Mask",
+            LooseOpen::Index,
+        )
+        .unwrap();
+        assert_eq!((w, h), (16, 8));
+        assert!(rgba.iter().all(|&b| b == 0xff));
+        assert!(
+            mask_rgba(
+                &chain,
+                &loose,
+                "Interface\\AddOns\\Foo\\None",
+                LooseOpen::Index
+            )
+            .is_none(),
+            "a name that resolves nowhere stays the minimap's green"
+        );
+    }
+
+    /// The portrait sink formats `%s.blp` onto the name as written (`0x525e0f`, format
+    /// `0x8540b4`) and reads that file with the BLP reader (`0x5a7b40` at `0x525e37`, flag 1): a
+    /// `.tga` is never read, and a name ending `.tga` opens `<name>.tga.blp`.
+    #[test]
+    fn a_portrait_opens_its_name_with_blp_appended() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("portrait");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Icon.tga"), decodable_tga(64, 64)).unwrap();
+        std::fs::write(dir.join("Bag.blp"), tiny_blp(64, 64, 3)).unwrap();
+        std::fs::write(dir.join("Odd.tga.blp"), tiny_blp(64, 64, 4)).unwrap();
+        std::fs::write(dir.join("Odd.blp"), tiny_blp(64, 64, 5)).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let red = |name: &str| {
+            portrait_rgba(&chain, &loose, &format!("Interface\\AddOns\\Foo\\{name}"))
+                .map(|(_, _, rgba)| rgba[0])
+        };
+        assert_eq!(red("Icon"), None, "no Icon.blp, and the .tga is not read");
+        assert_eq!(red("Icon.tga"), None, "Icon.tga.blp");
+        assert_eq!(red("Bag"), Some(3));
+        assert_eq!(red("Bag.blp"), None, "Bag.blp.blp");
+        assert_eq!(red("Odd.tga"), Some(4), "Odd.tga.blp, not Odd.blp");
+    }
+
+    /// The cursor code opens every picture through `0x449610`, `SetCursor`'s (`0x523c86`) and
+    /// the dragged icon's (`0x5239f7`, `0x523a3e`, `0x523af7`, `0x523bb1`) alike: it strips a
+    /// three-letter extension (`0x449590` at `0x44963c`), appends `.blp` (`0x449641`) and decodes
+    /// the bytes as a BLP (`0x449840`), so `Foo.tga` opens `Foo.blp` and no `.tga` is read.
+    #[test]
+    fn a_cursor_picture_opens_only_its_blp() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("cursorpic");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Arrow.tga"), decodable_tga(32, 32)).unwrap();
+        std::fs::write(dir.join("Both.tga"), decodable_tga(16, 16)).unwrap();
+        std::fs::write(dir.join("Both.blp"), tiny_blp(32, 32, 6)).unwrap();
+        std::fs::write(dir.join("Fake.blp"), decodable_tga(32, 32)).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let pic = |name: &str| {
+            file_texture_rgba(&chain, &loose, &format!("Interface\\AddOns\\Foo\\{name}"))
+                .map(|(w, h, rgba)| (w, h, rgba[0]))
+        };
+        assert_eq!(pic("Arrow"), None);
+        assert_eq!(pic("Arrow.tga"), None);
+        assert_eq!(pic("Both.tga"), Some((32, 32, 6)), "Both.blp, not Both.tga");
+        assert_eq!(pic("Both"), Some((32, 32, 6)));
+        assert_eq!(pic("Fake"), None, "TGA bytes under a .blp name");
+    }
+
+    /// The emblem cell appends `.BLP` to its name (`0x50338a`, `0x83574c`) and reads that one file
+    /// with the BLP reader `0x5a7b40` and flag 0: no `.tga` of the same stem is read.
+    #[test]
+    fn an_emblem_cell_reads_only_its_blp() {
+        let stem = "Textures\\GuildEmblems\\Emblem_01_02_TU_U";
+        assert_eq!(
+            emblem_names(stem),
+            vec![format!("{}.blp", normalize_path(stem))]
+        );
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let (w, h, _) = emblem_rgba(&chain, stem).expect("the emblem BLP decodes");
+        assert!(w > 0 && h > 0);
+    }
+
+    /// A 32-bit TGA with 8 alpha bits, `w` by `h`, that the decoder reads.
+    fn decodable_tga(w: u16, h: u16) -> Vec<u8> {
+        let mut out = refused_tga(w, h, &vec![9; usize::from(w) * usize::from(h) * 4]);
+        out[17] = 0x28;
+        out
+    }
+    /// `SetTexture` runs per frame in the addons that set an icon every `OnUpdate`: a TGA's header
+    /// is read once for a resolved file, and a read that fails is asked again.
+    #[test]
+    fn the_size_gate_reads_a_resolved_file_once() {
+        let probe = SpriteProbe::default();
+        let tga = "interface\\addons\\foo\\icon.tga";
+        let good = refused_tga(16, 8, &[]);
+        let reads = std::cell::Cell::new(0);
+        let read = |bytes: Option<&Vec<u8>>| {
+            reads.set(reads.get() + 1);
+            bytes.cloned()
+        };
+        for _ in 0..3 {
+            assert!(probe.gate("loose", tga, || read(Some(&good))));
+        }
+        assert_eq!(reads.get(), 1, "the same file answered from the memo");
+        assert_eq!(probe.header_reads.get(), 1);
+
+        // Another resolved file under the same name is its own question: the chain's copy, once a
+        // loose one shadows it, or the other way round.
+        assert!(!probe.gate("chain", tga, || read(Some(&refused_tga(3, 8, &[])))));
+        assert!(!probe.gate("chain", tga, || read(Some(&good))));
+        assert_eq!(reads.get(), 2);
+
+        // A file that will not read says no and is asked again.
+        assert!(!probe.gate("gone", tga, || read(None)));
+        assert!(probe.gate("gone", tga, || read(Some(&good))));
+        assert_eq!(reads.get(), 4);
+    }
+
+    /// The same, through the store: a second `SetTexture` of the path reads no file.
+    #[test]
+    fn a_second_probe_of_a_tga_reads_no_file() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("probe");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Icon.tga"), refused_tga(16, 8, &[0; 512])).unwrap();
+        std::fs::write(dir.join("Odd.tga"), refused_tga(6, 8, &[0; 192])).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let probe = SpriteProbe::default();
+        for _ in 0..3 {
+            assert!(probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Icon"));
+            assert!(!probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Odd"));
+            assert!(!probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Missing"));
+        }
+        // One read each of the two files, and none of a name that is not there.
+        assert_eq!(probe.header_reads.get(), 2);
     }
 }

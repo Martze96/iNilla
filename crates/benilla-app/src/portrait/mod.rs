@@ -1,21 +1,24 @@
-//! Unit-frame portraits and the full-body model panes, baked off-screen.
+//! Unit-frame portraits and the character model panes, baked off-screen.
 //!
 //! The 1.12 client renders a unit's model once into a 64² texture, frozen until the model
 //! changes, and stamps a round stencil into it (`0x524f60`). A booth here bakes the same still and
-//! the UI cuts the circle at draw time. The body panes run the same pipeline, square at 512²,
-//! framed through the model's `<PlayerModel>` camera ([`framing::body_frame`]) and spun to a yaw.
+//! the UI cuts the circle at draw time. The character panes (`PlayerModel`, `DressUpModel`,
+//! `TabardModel`) are live booths of their own, one per visible pane ([`panes`]).
 //!
 //! A booth mirrors the unit's live dressed look ([`PortraitPart`]), so a gear change re-bakes;
-//! until the model loads the slot shows a 2D stand-in, where the reference leaves it blank
-//! (`0x519fcc`) and loads a stand-in only for a unit it holds no object for (`0x525ba0`).
+//! until the model loads the slot is empty, as the reference's bake binds nothing then
+//! (`0x519fcc`, `0x525874`). A 2D stand-in is only for a unit the client holds no object for: a
+//! player's (`0x525ba0`) or a group pet record's (`0x525cb0`). The portrait list and its events
+//! are [`drain`].
 //! Framing is the model's
 //! authored portrait camera, the one `cameraLookup[0]` selects (`0x713540`), through the
 //! diagonal-FOV projection ([`WowPortraitProjection`]); a camera-less model falls back to
 //! [`frame`]. The bake is a fresh instance frozen at Stand (`0x707400`, `0x7121a0`).
 //!
 //! Deviation: the round portraits bake at 256², not 64², because the 64² still is a resolution
-//! limit, not a look; and under a fixed studio light, not the ambient state, because that neutral
-//! light is the chosen portrait look (`light::BoothLight`).
+//! limit, not a look; and under benilla's studio light (`light::BoothLight`), the chosen portrait
+//! look, in place of the reference's own fixed rig (`0x525b10`, pushed at `0x52562e`: a 0.45 grey
+//! ambient and a white directional).
 //!
 //! The frozen Stand phase is t=0; the reference's sampling clock is untraced.
 //!
@@ -40,8 +43,8 @@ use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
 pub(crate) use framing::{
-    attachment_point, glue_box_aspect, glue_canvas_bars, head_anchor, pane_projection,
-    PortraitAnchors, WowPortraitProjection,
+    attachment_point, head_anchor, pane_projection, PaneUnits, PortraitAnchors,
+    WowPortraitProjection,
 };
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
@@ -51,19 +54,28 @@ use booth::{
     clear_booth_rig, spawn_booth_effects, spawn_booth_model, spawn_booth_own_emitters,
     BoothBillboardSpec, BoothEffects, BoothInstance, BoothMotion, BoothPart, BoothRider,
 };
+mod drain;
+pub(crate) use drain::PortraitMarks;
 mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 /// A model file's own authored lights, folded as the reference's gather does (`0x718960`).
 pub(crate) use glue_booth::{scene_rig, SceneRig};
 pub(crate) use glue_booth::{
-    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SelectLook, GLUE_SLOT,
+    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueSceneFile,
+    PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SceneRoot,
+    SelectLook, GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
-use light::{model_pane_light, studio_light, BoothLight};
+use light::{studio_light, BoothLight};
+mod panes;
+pub(crate) use panes::{PaneDisplays, PaneRequest, PaneRequests};
+#[cfg(test)]
+mod loading_tests;
 pub(crate) mod test_bake;
+#[cfg(test)]
+mod unheld_tests;
 
 /// The round portrait slots, each with its own layer and camera. `"npc"` is an interaction
 /// window's NPC ([`crate::ui_session::InteractNpc`]); `"targettarget"` resolves only while drawn,
@@ -85,64 +97,30 @@ const SLOTS: [&str; 14] = [
     "partypet4",
     benilla_ui::script::LOOT_PORTRAIT_UNIT,
 ];
-/// The character window's full-body pane: the dressed player, sampled square.
-const PAPERDOLL_SLOT: &str = "paperdoll";
-/// The inspect window's full-body pane: the paper doll's bake pointed at another player.
-const INSPECT_SLOT: &str = "inspect";
-/// The pet paper doll's full-body pane, a booth of its own because the `"pet"` slot is a 256²
-/// bust with no yaw.
-const PETDOLL_SLOT: &str = "petdoll";
-/// The stable window's pane (`0x4cb870`), whose subject may be a stabled pet with no world object
-/// ([`StableBooth`]).
-const STABLE_SLOT: &str = "stable";
+/// The character panes' booth pass ([`panes::sync_panes`]), for the systems that share its
+/// booths and light pool.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PaneSync;
 
-/// Which booth a `<Model>`/`<PlayerModel>` pane samples, keyed by the pane's global name from the
-/// stock file (`PaperDollFrame.xml`, `TabardFrame.xml`, `PetPaperDollFrame.xml`,
-/// `InspectPaperDollFrame.xml`, `PetStable.xml`, `DressUpFrame.xml`,
-/// `Blizzard_AuctionDressUp.xml`). A pane not in this table draws nothing.
-const MODEL_PANE_BOOTHS: [(&str, &str); 7] = [
-    ("CharacterModelFrame", PAPERDOLL_SLOT),
-    // The tabard designer's pane: the paper doll's bake, wearing the design under preview.
-    ("TabardModel", PAPERDOLL_SLOT),
-    ("PetModelFrame", PETDOLL_SLOT),
-    ("InspectModelFrame", INSPECT_SLOT),
-    ("PetStableModel", STABLE_SLOT),
-    ("DressUpModel", dressup::DRESSUP_SLOT),
-    // Deviation: the auction house's dressing room shares the one dressing-room booth, because the
-    // app's `TryOn`/`Dress` intents are not per-widget; the reference's two widgets each clone
-    // their own model.
-    ("AuctionDressUpModel", dressup::DRESSUP_SLOT),
-];
+/// The character panes' composite into the UI append lane; the lane's other writers order
+/// against it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PaneComposite;
 
-/// The booth a named model pane samples, or `None` for a pane no window has claimed.
-pub(crate) fn model_pane_booth(name: &str) -> Option<&'static str> {
-    MODEL_PANE_BOOTHS
-        .iter()
-        .find(|(pane, _)| *pane == name)
-        .map(|(_, slot)| *slot)
-}
-
-/// The systems that write [`GluePreview`], one per glue screen set (the native screens', the
-/// stock glue VM's); the glue booth reads it after them, the same frame.
+/// The system that writes [`GluePreview`] off the glue VM; the glue booth reads it after it, the
+/// same frame.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GluePreviewFeed;
 
 /// World is layer 0, the UI pass layer 1; each portrait slot gets its own layer from here up.
 const PORTRAIT_LAYER_BASE: usize = 2;
-/// The paper-doll booth's layer, the first past the portrait slots.
-const PAPERDOLL_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
-const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
-const PETDOLL_LAYER: usize = INSPECT_LAYER + 1;
-const STABLE_LAYER: usize = PETDOLL_LAYER + 1;
-/// The glue booth's layer. Every booth layer is computed in this one ladder: two cameras on one
-/// layer collide silently, in rendering and in the emitter-to-camera match (`particles::sim` takes
-/// the first camera whose layers intersect).
-pub(super) const GLUE_LAYER: usize = STABLE_LAYER + 1;
-/// The dressing room's layer.
-pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
+/// The glue booth's layer, the first past the portrait slots. Every booth layer is computed in
+/// this one ladder: two cameras on one layer collide silently, in rendering and in the
+/// emitter-to-camera match (`particles::sim` takes the first camera whose layers intersect).
+pub(super) const GLUE_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
 /// The warm pass's twin booth layer; only the warm menagerie rides it, only while the pass runs
 /// ([`spawn_warm_booth`]).
-pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
+pub(crate) const WARM_BOOTH_LAYER: usize = GLUE_LAYER + 1;
 /// The warm pass's orthographic twin camera layer: bevy_pbr keys pipelines on the projection
 /// class, and the tile atlas camera is a third class.
 pub(crate) const WARM_ORTHO_LAYER: usize = WARM_BOOTH_LAYER + 1;
@@ -154,38 +132,27 @@ pub(crate) const UI_MODELS_LAYER: usize = MINIMAP_COMPOSITE_LAYER + 1;
 /// The first perspective model pane layer: a `<Model>` framed by its own camera needs a camera,
 /// and so a layer, of its own. The block tops the ladder so it can widen.
 pub(crate) const UI_MODEL_CAM_LAYER_BASE: usize = UI_MODELS_LAYER + 1;
-/// How many perspective model panes draw at once; a ninth draws nothing.
+/// How many perspective model panes draw at once; a ninth draws nothing. The character panes'
+/// layers follow ([`panes`]).
 pub(crate) const UI_MODEL_CAM_LAYERS: usize = 8;
 
 // A booth camera's layer is its identity, for rendering and for the emitter-to-camera match.
 const _: () = assert!(
-    PAPERDOLL_LAYER != INSPECT_LAYER
-        && INSPECT_LAYER != PETDOLL_LAYER
-        && PETDOLL_LAYER != STABLE_LAYER
-        && STABLE_LAYER != GLUE_LAYER
-        && PAPERDOLL_LAYER != STABLE_LAYER
-        && INSPECT_LAYER != STABLE_LAYER
-        && PETDOLL_LAYER != GLUE_LAYER
-        && PAPERDOLL_LAYER != PETDOLL_LAYER
-        && PAPERDOLL_LAYER != GLUE_LAYER
-        && INSPECT_LAYER != GLUE_LAYER
-        && DRESSUP_LAYER > GLUE_LAYER
-        && WARM_BOOTH_LAYER > DRESSUP_LAYER
+    WARM_BOOTH_LAYER > GLUE_LAYER
         && WARM_ORTHO_LAYER > WARM_BOOTH_LAYER
         && MINIMAP_COMPOSITE_LAYER > WARM_ORTHO_LAYER
         && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER
-        && UI_MODEL_CAM_LAYER_BASE > UI_MODELS_LAYER,
+        && UI_MODEL_CAM_LAYER_BASE > UI_MODELS_LAYER
+        && panes::PANE_LAYER_BASE >= UI_MODEL_CAM_LAYER_BASE + UI_MODEL_CAM_LAYERS,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(
-    PAPERDOLL_LAYER > PORTRAIT_LAYER_BASE + SLOTS.len() - 1,
+    GLUE_LAYER > PORTRAIT_LAYER_BASE + SLOTS.len() - 1,
     "booth layers must not overlap the per-slot portrait layers"
 );
 /// The round portraits' bake size, square (the reference bakes 64²); `ui_quad.wgsl`'s `circular`
 /// cuts the circle at draw time.
 const PORTRAIT_SIZE: u32 = 256;
-/// The body panes' bake size: covers the ~233×224-point pane at 2× hidpi.
-const PAPERDOLL_SIZE: u32 = 512;
 /// Stamped by the attach path on every unit-model part child: the part's skinned and static
 /// bind-pose mesh twins and its steady exterior material, which a booth mirrors.
 #[derive(Component)]
@@ -250,7 +217,7 @@ impl PortraitSeat {
 }
 
 /// Stamped on an effect-bearing model riding a unit (an item's emitters, a weapon's `ItemVisuals`
-/// glow), carrying the emitter records for a body booth to spawn its own copies.
+/// glow), carrying the emitter records for a character pane's booth to spawn its own copies.
 #[derive(Component)]
 pub(crate) struct PortraitEffects {
     /// The body bone whose booth joint the effect model's host seats on.
@@ -260,28 +227,40 @@ pub(crate) struct PortraitEffects {
     /// The host's offset in the bone's joint frame: the attach point, plus the glow slot's offset.
     pub(crate) offset: Vec3,
     pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
+    pub(crate) rig: Option<EffectRig>,
 }
 
-/// A bodiless subject built from the display cache only to be mirrored: how a body booth draws a
-/// stabled pet, which has no world object. Carries the display id a unit reads off its wire record.
+/// An effect model's skeleton and idle, for a booth to pose the bones its emitters ride.
+#[derive(Clone)]
+pub(crate) struct EffectRig {
+    pub(crate) skeleton: benilla_assets::ModelSkeleton,
+    pub(crate) animations: benilla_assets::ModelAnimations,
+}
+
+/// A bodiless subject built from the display cache only to be mirrored: how a character pane draws
+/// a creature display, a stabled pet with no world object (`0x505a70`). Carries the display id a unit reads off its wire record.
 #[derive(Component)]
 pub(crate) struct PortraitStandIn(pub(crate) u32);
 
-/// What a portrait slot shows: the booth's bake, or a 2D stand-in file, for a unit with no object
-/// (`0x525ba0`) and while a unit's model streams in (the reference shows blank then, `0x519fcc`).
-#[derive(Clone, PartialEq)]
+/// What a portrait slot shows: the booth's bake or a cached face, a 2D stand-in file for a unit
+/// with no object (`0x525ba0`, `0x525cb0`), or no image while a held unit's model loads
+/// (`0x525874`) and for a unit with no object and no art (`0x51a095`, `0x51a0ce`).
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum PortraitSource {
     /// The slot's off-screen render target (the model bake).
     Live(Handle<Image>),
     /// A flat portrait BLP (`Interface\CharacterFrame\TemporaryPortrait-…`), resolved by the UI
     /// extract through the standard sprite path.
     File(String),
+    /// No image: the texture `SetPortraitTexture` emptied (`0x519fcc`), which stores a null image
+    /// (`0x770218`-`0x7702cb`) and so draws nothing (`0x7706e3`).
+    Empty,
 }
 
 /// The GUID-keyed bake cache (`0xc0ce7c`): `SetPortraitTexture` on a player the client does not
 /// hold binds the cached bake on a hit (`0x525c36` → `0x770300`) and loads the stand-in only on a
 /// miss, so a party member who walks out of range keeps their face. A booth losing its member
-/// hands its target in here ([`sync_portraits`]).
+/// hands its target in here ([`sync_portraits`]). Leaving the world empties it (`0x524b70`).
 ///
 /// Deviation: only the four party slots hand over, capped at [`Self::CAP`], instead of every
 /// portrait until `ClientDestroyGame` (`0x401ee0`), because a general cache would pay a texture
@@ -312,80 +291,108 @@ impl PortraitBakes {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.faces.clear();
+        self.order.clear();
+    }
+}
+
+/// The display-id bake cache (`0xc0cea4`): the bake of a held unit that is no player files its face
+/// under its `UNIT_FIELD_DISPLAYID` when the display has no entry yet (`0x525719` → `0x526d70`),
+/// and `SetPortraitTexture` on a pet the client does not hold binds the entry of its group record's
+/// display id before it falls back to the stand-in (`0x525cb0`). An entry is never redrawn or
+/// removed until leaving the world empties the cache (`0x524b70`, from `0x491187`).
+#[derive(Resource, Default)]
+pub(crate) struct DisplayBakes {
+    faces: HashMap<u32, Handle<Image>>,
+}
+
+impl DisplayBakes {
+    /// The face filed under `display`: the probe `0x525ce9`.
+    fn get(&self, display: u32) -> Option<Handle<Image>> {
+        self.faces.get(&display).cloned()
+    }
+
+    /// Whether `display` has an entry: a bake files its face only on a miss.
+    fn has(&self, display: u32) -> bool {
+        self.faces.contains_key(&display)
+    }
+
+    /// File `face` under `display`; a display with an entry keeps it.
+    fn fill(&mut self, display: u32, face: Handle<Image>) {
+        self.faces.entry(display).or_insert(face);
+    }
+
+    fn clear(&mut self) {
+        self.faces.clear();
+    }
+}
+
+/// Leaving the world, by logout or a lost link, empties both bake caches and the pending list:
+/// `CGGameUI::ShutdownGame` calls `ClearPortraitCaches` (`0x491187` → `0x524b70`).
+fn clear_portrait_caches(
+    mut logged_out: MessageReader<crate::net::LoggedOutMessage>,
+    mut disconnected: MessageReader<crate::net::DisconnectedMessage>,
+    mut bakes: ResMut<PortraitBakes>,
+    mut displays: ResMut<DisplayBakes>,
+    mut marks: ResMut<PortraitMarks>,
+) {
+    let left = logged_out.read().count() + disconnected.read().count();
+    if left > 0 {
+        bakes.clear();
+        displays.clear();
+        marks.clear();
+    }
+}
+
+/// What a unit the object manager does not hold draws (`0x519fe6`): the stand-in file, and for a
+/// pet the display id of its group record (the word at `+0x5a`, `0x51a0d0`), whose cached bake
+/// shows first. A player's cached bake is found by its guid instead.
+#[derive(Debug, Clone, PartialEq)]
+struct Unseen {
+    file: String,
+    display: Option<u32>,
+}
+
+impl Unseen {
+    fn player(file: String) -> Self {
+        Unseen {
+            file,
+            display: None,
+        }
+    }
+
+    /// `0x525cb0(display)`: a roster pet's.
+    fn pet(display: u32) -> Self {
+        Unseen {
+            file: pet_temporary_portrait(),
+            display: Some(display),
+        }
+    }
+}
+
+/// What the slot of a unit the object manager does not hold shows: a pet's bake filed under its
+/// display id, or one a booth holds right now (the reference files it as it draws), and a
+/// player's under the guid it bakes as (`0x525ba0`); the stand-in on a miss.
+fn unseen_source(
+    unseen: Unseen,
+    occupant: Option<u64>,
+    bakes: &PortraitBakes,
+    displays: &DisplayBakes,
+    baking: impl Fn(u32) -> Option<Handle<Image>>,
+) -> PortraitSource {
+    let hit = match unseen.display {
+        Some(d) => displays.get(d).or_else(|| baking(d)),
+        None => occupant.and_then(|g| bakes.get(g)),
+    };
+    hit.map_or(PortraitSource::File(unseen.file), PortraitSource::Live)
 }
 
 /// Unit token to what its portrait region shows: the booth writes it, and the UI extract
 /// ([`crate::ui_script`]) reads it for a `SetPortraitTexture`-bound region.
 #[derive(Resource, Default)]
 pub(crate) struct PortraitImages(pub(crate) HashMap<String, PortraitSource>);
-
-/// The paper-doll pane's yaw in radians, `Model:SetRotation`'s convention (rotate-left decrements;
-/// `0.61` is `Model_OnLoad`'s default, `UIParent.lua:1422`). The booth re-poses only on a change.
-#[derive(Resource)]
-pub(crate) struct PaperDollBooth {
-    pub(crate) yaw: f32,
-}
-
-impl Default for PaperDollBooth {
-    fn default() -> Self {
-        Self { yaw: 0.61 }
-    }
-}
-
-/// The inspect pane's yaw and unit ([`crate::ui_inspect`]'s resolve); `None` empties the booth.
-#[derive(Resource)]
-pub(crate) struct InspectBooth {
-    pub(crate) yaw: f32,
-    pub(crate) unit: Option<Entity>,
-}
-
-impl Default for InspectBooth {
-    fn default() -> Self {
-        Self {
-            yaw: 0.61,
-            unit: None,
-        }
-    }
-}
-
-/// The pet paper doll's yaw and unit ([`crate::ui_pet_doll`]'s resolve); `None` empties the booth.
-#[derive(Resource)]
-pub(crate) struct PetDollBooth {
-    pub(crate) yaw: f32,
-    pub(crate) unit: Option<Entity>,
-}
-
-impl Default for PetDollBooth {
-    fn default() -> Self {
-        Self {
-            yaw: 0.61,
-            unit: None,
-        }
-    }
-}
-
-/// The stable pane's input. `SetPetStablePaperdoll` resolves the summoned pet by GUID (`unit`,
-/// when out and streamed) and any other through the creature cache (`display_id`; a dismissed pet
-/// falls to `0xb72060`, the summoned record's entry). Both `None` empties the booth. No size ramp:
-/// `0x4cb870` and `0x505cb0` write no scale, and `0x505a70` applies only the texture variation
-/// (`0x4797b0`).
-#[derive(Resource)]
-pub(crate) struct StableBooth {
-    pub(crate) yaw: f32,
-    pub(crate) unit: Option<Entity>,
-    pub(crate) display_id: Option<u32>,
-}
-
-impl Default for StableBooth {
-    fn default() -> Self {
-        Self {
-            // `Model_OnLoad`'s default facing (`UIParent.lua:1422`).
-            yaw: 0.61,
-            unit: None,
-            display_id: None,
-        }
-    }
-}
 
 /// What a booth has baked; any change to the unit's dressed look re-bakes.
 #[derive(PartialEq)]
@@ -432,15 +439,15 @@ struct Booth {
     baked: Option<LookKey>,
     /// Whose face the bake is, for the handover into [`PortraitBakes`] (party slots only).
     baked_guid: Option<u64>,
-    /// Body panes only: the last snapshot, in place of `baked` ([`SnapKey`]).
-    snap: Option<SnapKey>,
-    /// The pane was drawn last frame: the edge detector for the show override (`0x505d00`).
-    shown: bool,
-    show_rev: u32,
+    /// The display id a bake of a unit that is no player files its face under in [`DisplayBakes`].
+    baked_display: Option<u32>,
+    /// The unit the bake is of, which keeps it while its own body rebuilds.
+    baked_unit: Option<Entity>,
     /// Frames the camera stays active after a content edge; at 0 with nothing pending it sleeps
     /// and the target keeps the last render.
     wake: u32,
-    /// A live widget (a body pane): it renders every frame its pane is drawn ([`BoothPanes`]).
+    /// A live widget (a character pane): it renders every frame its pane is drawn
+    /// ([`BoothPanes`]).
     live: bool,
     /// Textures the bake referenced that were not yet resident; the camera waits for each.
     pending: Vec<Handle<Image>>,
@@ -451,54 +458,39 @@ struct Booth {
     pipes_settling: bool,
     /// When the `pipes_settling` hold began (wall secs), bounded at [`PIPELINE_SETTLING_SECS`].
     pipes_since: Option<f64>,
-    /// The pane aspect the camera is framed for: 1.0 until first drawn, then sticky.
-    aspect: f32,
     /// A rig stands in this booth, for the park gate.
     rigged: bool,
-    turn: Turn,
     /// The scene is parked: its camera sleeps and [`benilla_world::rig_anim::AnimParked`] holds
     /// the pose; its emitters freeze, as the reference ticks only an emitter its frame draws.
     parked: bool,
 }
 
-/// A body pane's turn animation. `PlayerModel:SetRotation` (`0x505bb0`) picks a turn-in-place
-/// shuffle by direction, queues it with a 100 ms expiry, then writes the facing.
-#[derive(Default)]
-struct Turn {
-    /// The facing the root is posed at (`[+0x39c]`); `None` until the first pose, so a fresh bake
-    /// does not step.
-    faced: Option<f32>,
-    /// This frame's rotation: the id [`booth::turn_shuffle`] picked, taken by the driver.
-    spun: Option<u16>,
-    /// The shuffle stepping and the wall-clock second it expires; `None` on Stand.
-    shuffle: Option<(u16, f64)>,
-    /// The node the primary runs: every arm rolls a weighted variation (`0x7121a0`'s `-1`).
-    playing: Option<bevy::animation::graph::AnimationNodeIndex>,
-    fade: Option<Fade>,
-}
-
-impl Turn {
-    /// The bake replaced the `AnimationPlayer`: drop its node references. [`Self::faced`]
-    /// survives, since a re-bake is `RefreshUnit`, which never calls `SetRotation`.
-    fn rebaked(&mut self) {
-        *self = Turn {
-            faced: self.faced,
-            ..Default::default()
-        };
+impl Booth {
+    /// An empty booth on `layer`, its model root and target given.
+    fn new(layer: RenderLayers, root: Entity, target: Handle<Image>) -> Self {
+        Booth {
+            layer,
+            root,
+            target,
+            baked: None,
+            baked_guid: None,
+            baked_display: None,
+            baked_unit: None,
+            wake: 0,
+            live: false,
+            pending: Vec::new(),
+            pending_since: None,
+            pipes_settling: false,
+            pipes_since: None,
+            rigged: false,
+            parked: false,
+        }
     }
-}
 
-/// The cross-fade out of the pose an arm replaced, the reference's secondary blend slot. Both
-/// turn call sites (`0x505c23`, `0x505c98`) arm it through `0x7121a0`, and `0x7125d6` copies the
-/// live primary track, still on its own clock, into `[blk+0xc4]`; `0x714880` blends by a
-/// smoothstep λ. One slot: a new arm overwrites it.
-#[derive(Clone, Copy)]
-struct Fade {
-    node: bevy::animation::graph::AnimationNodeIndex,
-    /// The wall-clock second λ reaches 0 (`[blk+0x100]`).
-    until: f64,
-    /// The window width: the incoming clip's `M2Sequence.blendTime` (`0x7125f2`).
-    span: f32,
+    /// The bake is drawn and held: a half-drawn one handed over would freeze.
+    fn settled(&self) -> bool {
+        self.baked.is_some() && self.wake == 0 && self.pending.is_empty() && !self.pipes_settling
+    }
 }
 
 /// Frames a content edge keeps a booth camera rendering (spawn, re-face lag, upload).
@@ -561,7 +553,7 @@ fn booth_anchors(
     let Some(display_id) = display_id else {
         return Some(PortraitAnchors {
             camera: None,
-            pane_camera: None,
+            cameras: std::sync::Arc::new([]),
             bbox_center: Vec3::ZERO,
             head: None,
             pivot_height: 0.0,
@@ -647,9 +639,9 @@ fn wake_booth<'a>(
 #[derive(Resource, Default)]
 struct Booths(HashMap<String, Booth>);
 
-/// Where each booth is sampled on screen this frame: slot token to the region's aspect, from the
-/// UI extract. A body pane frames at that aspect and renders only while drawn; one frame stale,
-/// so the aspect latches into [`Booth::aspect`].
+/// Where each booth is sampled on screen this frame: slot token to the region's aspect. The UI
+/// extract publishes the round portraits; [`panes::sync_panes`] marks each character pane it
+/// draws, which renders only while marked.
 #[derive(Resource, Default)]
 pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
 
@@ -659,6 +651,8 @@ pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
 pub(crate) struct BoothBridge<'w> {
     pub(crate) images: Res<'w, PortraitImages>,
     pub(crate) panes: ResMut<'w, BoothPanes>,
+    /// The character panes' half: each pane's composite, drawn from its own booth.
+    pub(crate) character: ResMut<'w, PaneRequests>,
     /// The file panes' half: a tile request per pane, sampled back from the atlas.
     pub(crate) tiles: ResMut<'w, crate::ui_models::UiModelTiles>,
 }
@@ -670,7 +664,6 @@ pub(crate) struct PartyBooths<'w, 's> {
     roster: Res<'w, crate::ui_party::GroupState>,
     index: Res<'w, crate::net::GuidIndex>,
     palettes: ResMut<'w, benilla_world::rig_palette::RigPalettes>,
-    pet_bar: Res<'w, crate::ui_pet::PetBar>,
     names: Res<'w, crate::names::NameCache>,
     /// What the UI drew last frame, read by `"targettarget"` and the loot source.
     panes: Res<'w, BoothPanes>,
@@ -679,20 +672,29 @@ pub(crate) struct PartyBooths<'w, 's> {
     /// The guid-keyed bake cache, and a fresh target plus the camera's [`RenderTarget`] for the
     /// handover.
     bakes: ResMut<'w, PortraitBakes>,
+    /// The display-id bake cache, which a bake of a unit that is no player fills.
+    displays: ResMut<'w, DisplayBakes>,
     images: ResMut<'w, Assets<Image>>,
     targets: Query<'w, 's, (&'static BoothCam, &'static mut RenderTarget)>,
+    /// The portrait list, which a pending unit's bake returns on (`0x524f96`), and the name
+    /// cache's callbacks a portrait registers (`0x51a100`).
+    marks: ResMut<'w, PortraitMarks>,
+    /// A held player's GUID, the key of its cached face (`0x524fe2`).
+    guids: Query<'w, 's, &'static crate::net::Guid>,
 }
 
 /// Tags a booth camera with its slot token (not the M2 rig, `benilla_assets::PortraitCamera`).
 #[derive(Component)]
 pub(crate) struct BoothCam(pub(crate) String);
 
-/// The display aspect the client's `screencoord` scale uses: `gxResolution`'s width/height with
-/// `widescreen` on (its default), `4/3` off. Read by [`framing::pane_model_scale`].
+/// The display aspect the client's `screencoord` scale uses (`0x4901e0`): `gxResolution`'s
+/// width/height with `widescreen` on (its default), `4/3` off. Read by
+/// [`framing::pane_model_scale`]. Defaults to `4/3`, where the factor is 1.0.
 ///
-/// Deviation: this reads the window's aspect, not `gxResolution` (here only the windowed size)
-/// under `widescreen` (not registered), because fullscreen is the monitor's own size with no mode
-/// list, where the two agree. Defaults to `4/3`, where the factor is 1.0.
+/// Deviation: this reads the window's aspect, not `gxResolution`'s, because the window here takes
+/// any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). In
+/// fullscreen the window is the screen in logical pixels and `gxResolution` the screen in device
+/// pixels, so their aspects agree and their sizes need not.
 #[derive(Resource)]
 pub(crate) struct GxAspect(pub(crate) f32);
 
@@ -702,24 +704,29 @@ impl Default for GxAspect {
     }
 }
 
-/// Track the primary window's aspect into [`GxAspect`].
+/// Track the primary window's aspect into [`GxAspect`], or 4/3 with `widescreen` off.
 fn feed_gx_aspect(
     mut gx: ResMut<GxAspect>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    widescreen: Option<Res<crate::video::Widescreen>>,
 ) {
     let Ok(w) = window.single() else {
         return;
     };
     let (px_w, px_h) = (w.resolution.width(), w.resolution.height());
-    if px_h > 0.0 {
-        let a = px_w / px_h;
-        if (a - gx.0).abs() > 1e-4 {
-            gx.0 = a;
-        }
+    let a = if widescreen.is_some_and(|w| !w.0) {
+        4.0 / 3.0
+    } else if px_h > 0.0 {
+        px_w / px_h
+    } else {
+        return;
+    };
+    if (a - gx.0).abs() > 1e-4 {
+        gx.0 = a;
     }
 }
 
-/// The body panes' render rate: with `boothHalfRate` on (the default), a pane's camera renders
+/// The character panes' render rate: with `boothHalfRate` on (the default), a pane's camera renders
 /// every other frame while nothing else keeps it awake; the pose and item effects run at full
 /// rate ([`benilla_world::particles::ViewThrottled`]). The glue screens are exempt.
 ///
@@ -738,18 +745,11 @@ impl Default for PaneRate {
     }
 }
 
-/// A body booth's framing inputs: the pane geometry and the display aspect.
-#[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct BoothFraming<'w> {
-    pub(crate) panes: Res<'w, BoothPanes>,
-    pub(crate) gx: Res<'w, GxAspect>,
-}
-
 /// Owns the portrait bake pipeline: the [`PortraitImages`] bridge and the per-slot booths.
 pub(crate) struct PortraitPlugin;
 
 /// `boothHalfRate`'s change callback.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRate>) {
+pub(crate) fn on_cvar(ev: &crate::cvars::CvarChanged, mut rate: bevy::prelude::Mut<'_, PaneRate>) {
     if ev.is("boothHalfRate") {
         rate.half = ev.flag();
     }
@@ -757,15 +757,18 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRa
 
 impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
+        glue_booth::trace::plugin(app);
         app.init_resource::<PortraitImages>()
+            .init_resource::<PortraitMarks>()
+            .init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<PortraitBakes>()
+            .init_resource::<DisplayBakes>()
             .init_resource::<PaneRate>()
-            .add_observer(on_cvar)
-            .init_resource::<PaperDollBooth>()
-            .init_resource::<InspectBooth>()
-            .init_resource::<PetDollBooth>()
-            .init_resource::<StableBooth>()
-            .init_resource::<StableStandIn>()
+            .init_resource::<PaneRequests>()
+            .init_resource::<PaneDisplays>()
+            .init_resource::<panes::PaneBooths>()
+            .init_resource::<crate::ui_panes::CharacterPanes>()
+            .init_resource::<crate::ui_panes::PaneAnswers>()
             .init_resource::<glue_booth::GluePreview>()
             .init_resource::<glue_booth::GluePreviewBake>()
             .init_resource::<glue_booth::GluePetBake>()
@@ -777,7 +780,14 @@ impl Plugin for PortraitPlugin {
             .init_resource::<BoothLight>()
             .add_systems(Startup, setup_booths)
             // The variant-cache reaper: booth twins die with their world source material.
-            .add_systems(Update, (light::reap_dead_variants, feed_gx_aspect))
+            // The aspect after the calls, whose `widescreen` callback writes the knob it reads.
+            .add_systems(
+                Update,
+                (
+                    light::reap_dead_variants,
+                    feed_gx_aspect.after(crate::vm_pass::VmPass::End),
+                ),
+            )
             // The test bake owns the booths when its env is set; the chain orders the shared
             // camera, booth and image access.
             .add_systems(
@@ -787,13 +797,12 @@ impl Plugin for PortraitPlugin {
                     // reference's own latency (an event queued into `0x524cd0`'s per-frame drain).
                     bump_model_revision,
                     test_bake::sync_test_portraits,
+                    // Before the bakes: a frame that leaves the world files nothing it then keeps.
+                    clear_portrait_caches,
+                    // The portrait list's marks and its drain (`0x524cd0`), the world render's:
+                    drain::mark_portraits,
+                    drain::drain_portraits,
                     sync_portraits,
-                    sync_paperdoll,
-                    sync_inspect_booth,
-                    sync_petdoll_booth,
-                    // The stand-in must exist before the booth mirrors it.
-                    sync_stable_standin,
-                    sync_stable_booth,
                     // The scene before the character standing in it: they commit as one pair
                     // (`glue_booth::PendingSwap`), and the booth reads the stage off the scene.
                     glue_booth::sync_glue_scene,
@@ -810,17 +819,59 @@ impl Plugin for PortraitPlugin {
                         .after(test_bake::dump_booth_target)
                         .before(benilla_world::doodad_anim::MatAnimTick)
                         .before(benilla_world::doodad_anim::sample_mat_anim),
-                    dressup::sync_dressup_booth,
-                    // After the syncs, the only writers of the yaw it spends.
-                    booth::drive_booth_turn,
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
                 )
                     .chain()
-                    .after(GluePreviewFeed),
+                    .after(GluePreviewFeed)
+                    // After the VM pass, whose script calls may change the unit a portrait shows;
+                    // the booths' transforms and cameras are none a call reads.
+                    .after(crate::vm_pass::VmPass::End),
+            )
+            // The seats ride this frame's scene pose, as the reference animates the scene before
+            // the children on it (`0x714000`); the seats' builds above wrote the bind pose.
+            .add_systems(
+                PostUpdate,
+                glue_booth::seat_on_stage_bones
+                    .after(benilla_world::rig_anim::RigModelPass)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            )
+            // The character panes: the VM's paint list, after its paint pass armed the turns and
+            // the extract published the panes' geometry; before the camera gate reads the marks.
+            .add_systems(
+                Update,
+                (
+                    // After the paint pass armed this frame's turns.
+                    crate::ui_panes::feed_character_panes
+                        .after(crate::ui_script::UiPaint)
+                        .before(panes::sync_panes)
+                        // Before the quads' appends, which read CVar knobs its calls write.
+                        .before(crate::ui_pass::UiQuadAppend),
+                    // After the world's visuals (the display cache, the dressing room's
+                    // assembly, the animation driver it shares the variation roll with), the
+                    // window aspect and the portrait chain's booths.
+                    panes::sync_panes
+                        .after(crate::ui_script::UiPaint)
+                        .after(crate::entities::EntityVisualsSet)
+                        .after(feed_gx_aspect)
+                        .after(glue_booth::pace_glue_clock)
+                        .after(crate::aura_visual::apply_aura_anim_rate)
+                        .in_set(PaneSync)
+                        .after(test_bake::sync_test_portraits)
+                        .before(gate_booth_cameras),
+                    // After the camera gate, the chain's last writer of the booths it samples.
+                    panes::compose_panes
+                        .after(panes::sync_panes)
+                        .after(gate_booth_cameras)
+                        // The append lane's other writers, in a fixed order.
+                        .after(crate::ui_models::compose_tiles)
+                        .after(crate::combat_text::float_combat_text)
+                        .in_set(PaneComposite)
+                        .in_set(crate::ui_pass::UiQuadAppend),
+                ),
             )
             // Re-face each booth's eye-glow cards to its own camera.
-            .add_systems(Update, booth::face_booth_billboards)
+            .add_systems(Update, booth::face_booth_billboards.after(PaneSync))
             // Push each booth part's sampled `MatAnim` alpha, after the sampler.
             .add_systems(
                 Update,
@@ -831,7 +882,7 @@ impl Plugin for PortraitPlugin {
             // `WOW_BOOTH_DUMP=<token>:<path>:<secs>`: write a booth's target to disk.
             .add_systems(Update, test_bake::dump_booth_target)
             // `WOW_BOOTH_LOG=1`: the model half of the framing instrument.
-            .add_systems(Update, log_booth_pose);
+            .add_systems(Update, log_booth_pose.after(PaneSync));
     }
 }
 
@@ -924,17 +975,11 @@ fn setup_booths(
         buffer
     };
     booth_light.studio.buffer = Some(light_buffer("wow_portrait_light", studio_light()));
-    // The body panes' own light, the reference `<PlayerModel>` widget's.
-    booth_light.pane.buffer = Some(light_buffer("wow_model_pane_light", model_pane_light()));
-    // Booth rigs skin from the palette regions of these buffers: register both
-    // as mirrors so the palette upload keeps their regions live.
-    for (key, buf) in [
-        ("portrait", &booth_light.studio.buffer),
-        ("pane", &booth_light.pane.buffer),
-    ] {
-        if let Some(b) = buf {
-            mirrors.0.insert(key, b.clone());
-        }
+    // Booth rigs skin from the palette regions of this buffer: register it as a mirror so the
+    // palette upload keeps its regions live. The character panes light through the UI model
+    // tiles' pool, whose buffers are mirrors of their own (`crate::ui_models`).
+    if let Some(b) = &booth_light.studio.buffer {
+        mirrors.0.insert("portrait", b.clone());
     }
 
     for (i, token) in SLOTS.iter().enumerate() {
@@ -968,100 +1013,13 @@ fn setup_booths(
             layer.clone(),
             BoothCam((*token).to_string()),
         ));
-        booths.0.insert(
-            (*token).to_string(),
-            Booth {
-                layer,
-                root,
-                target: image,
-                baked: None,
-                baked_guid: None,
-                snap: None,
-                shown: false,
-                show_rev: 0,
-                wake: 0,
-                live: false,
-                pending: Vec::new(),
-                pending_since: None,
-                pipes_settling: false,
-                pipes_since: None,
-                aspect: 1.0,
-                rigged: false,
-                parked: false,
-                turn: Turn::default(),
-            },
-        );
-    }
-
-    // The four body booths: the paper doll, inspect, the pet paper doll and the stable
-    // (`0x4cb870`), at 512², aimed per bake by `sync_body_booth`.
-    for (i, (slot, layer_index)) in [
-        (PAPERDOLL_SLOT, PAPERDOLL_LAYER),
-        (INSPECT_SLOT, INSPECT_LAYER),
-        (PETDOLL_SLOT, PETDOLL_LAYER),
-        (STABLE_SLOT, STABLE_LAYER),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let image = images.add(new_target_image(PAPERDOLL_SIZE));
-        portraits
+        booths
             .0
-            .insert(slot.to_string(), PortraitSource::Live(image.clone()));
-        let layer = RenderLayers::layer(layer_index);
-        let root = commands
-            .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
-            .id();
-        commands.spawn((
-            booth_view_shape(),
-            Camera {
-                order: -100 + (SLOTS.len() + i) as isize,
-                // Transparent: a `<PlayerModel>` has no backdrop; the page's art shows behind.
-                clear_color: ClearColorConfig::Custom(Color::NONE),
-                ..default()
-            },
-            RenderTarget::Image(image.clone().into()),
-            // No glow: the reference paints `<PlayerModel>` widgets after the WorldFrame's FFX.
-            benilla_world::ffx_glow::FfxGlow::UI_PANE,
-            // A placeholder until the first bake.
-            Projection::from(PerspectiveProjection {
-                fov: PORTRAIT_FOV,
-                near: 0.02,
-                far: 100.0,
-                ..default()
-            }),
-            layer.clone(),
-            BoothCam(slot.to_string()),
-        ));
-        booths.0.insert(
-            slot.to_string(),
-            Booth {
-                layer,
-                root,
-                target: image,
-                baked: None,
-                baked_guid: None,
-                snap: None,
-                shown: false,
-                show_rev: 0,
-                wake: 0,
-                live: false,
-                pending: Vec::new(),
-                pending_since: None,
-                pipes_settling: false,
-                pipes_since: None,
-                aspect: 1.0,
-                rigged: false,
-                parked: false,
-                turn: Turn::default(),
-            },
-        );
+            .insert((*token).to_string(), Booth::new(layer, root, image));
     }
 
     // The glue booth: its own slot/layer/target, framed per-bake.
     glue_booth::spawn_glue_booth(&mut commands, &mut images, &mut portraits, &mut booths);
-    // The dressing room: tuple-driven like the glue booth, lit like the paper doll.
-    dressup::spawn_dressup_booth(&mut commands, &mut images, &mut portraits, &mut booths);
 }
 
 /// `true` while the `WOW_PORTRAIT_TEST` debug bake owns the booths (read once).
@@ -1069,8 +1027,8 @@ fn test_mode(cached: &mut Option<bool>) -> bool {
     *cached.get_or_insert_with(|| std::env::var("WOW_PORTRAIT_TEST").is_ok_and(|s| !s.is_empty()))
 }
 
-/// benilla's `UNIT_MODEL_CHANGED` for the producers that are not a change of dress; a body pane
-/// re-takes its snapshot when it moves ([`SnapKey`]).
+/// A model event that is not a change of dress, for a character pane to re-take its copy on
+/// ([`SnapKey`]).
 ///
 /// - The manual sheath ceremony: `ToggleSheath` passes `bInstant = 0`, and the clip's
 ///   `$SHL`/`$SHR` event marks the unit (`0x611b60` → `0x5ffb10`, mark at `0x5ffbbe`). A snap
@@ -1079,17 +1037,25 @@ fn test_mode(cached: &mut Option<bool>) -> bool {
 #[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ModelRevision(pub(crate) u32);
 
-/// Bump [`ModelRevision`] for every unit one of its producers fired on this frame.
+/// Bump [`ModelRevision`] for every unit one of its producers fired on this frame, and mark the
+/// portrait of each the sheath clip's key moved (`0x5ffbbe`, [`drain`]).
 fn bump_model_revision(
     mut commands: Commands,
     mut swaps: MessageReader<crate::creature_anim::SheathSwapMessage>,
     glows: Query<&benilla_world::model_fade::ParentModel, Added<crate::entities::ItemGlowAttached>>,
     revs: Query<&ModelRevision>,
+    guids: Query<&crate::net::Guid>,
+    mut marks: ResMut<PortraitMarks>,
 ) {
     let mut bumped = <bevy::platform::collections::HashSet<Entity>>::default();
     let units = swaps
         .read()
         .map(|m| m.entity)
+        .inspect(|unit| {
+            if let Ok(guid) = guids.get(*unit) {
+                marks.mark(guid.0);
+            }
+        })
         // A glow's root is chained to its wearer, the unit that gained geometry.
         .chain(glows.iter().map(|p| p.0));
     for unit in units {
@@ -1108,16 +1074,16 @@ fn sheath_lane(attach: Option<u16>) -> bool {
     matches!(attach, Some(0..=2 | 26..=28 | 30..=33))
 }
 
-/// What a body pane re-takes its snapshot on. A `<PlayerModel>` duplicates the unit's `CM2Model`
-/// once (`0x5059a0` → `0x707400`, which releases the source) and re-takes it on four things:
+/// What a character pane re-takes its copy on beyond the engine's own build requests. A
+/// `<PlayerModel>` duplicates the unit's `CM2Model` once (`0x5059a0` → `0x707400`, which releases
+/// the source); the engine asks again on `SetUnit`, `RefreshUnit` and each show (`0x505d00`). The
+/// stock windows also `SetUnit` again on `UNIT_MODEL_CHANGED` (`drain`), which reaches a script a
+/// frame after the mark, so the booth re-takes on the same marks itself:
 ///
-/// 1. The pane becoming visible ([`Self::show`]): the show override `0x505d00` re-duplicates on
-///    every hidden-to-visible edge; `0x505ce0` destroys on hide.
-/// 2. A change of dress ([`Self::dress`], [`Self::stable`]): `UNIT_MODEL_CHANGED`, fired only at
+/// 1. A change of dress ([`Self::dress`], [`Self::stable`]): `UNIT_MODEL_CHANGED`, fired only at
 ///    `0x524df1`, marked by equipping (`0x5e2810` → `0x5dee30`), a displayId change, a helm or
 ///    cloak toggle and an enchant; not by nocked ammo (`0x60ba30`) or combat.
-/// 3. A model event ([`Self::rev`], [`ModelRevision`]).
-/// 4. A resize ([`Self::aspect_bits`]): `DISPLAY_SIZE_CHANGED` → `RefreshUnit()`.
+/// 2. A model event ([`Self::rev`], [`ModelRevision`]).
 #[derive(PartialEq, Eq)]
 struct SnapKey {
     /// A different body is a different `SetUnit`.
@@ -1130,8 +1096,6 @@ struct SnapKey {
     /// item exists at all.
     dress: Option<crate::entities::DressKey>,
     rev: u32,
-    show: u32,
-    aspect_bits: u32,
 }
 
 impl SnapKey {
@@ -1144,8 +1108,6 @@ impl SnapKey {
         effects: &[&PortraitEffects],
         dress: Option<crate::entities::DressKey>,
         rev: u32,
-        show: u32,
-        aspect: f32,
     ) -> Self {
         // Sorted, so sibling order cannot move the key.
         let mut stable: Vec<(AssetId<Mesh>, AssetId<WowModelMaterial>)> = parts
@@ -1183,8 +1145,6 @@ impl SnapKey {
             stable_fx,
             dress,
             rev,
-            show,
-            aspect_bits: aspect.to_bits(),
         }
     }
 }
@@ -1292,7 +1252,7 @@ impl DressedLook<'_, '_> {
 }
 
 /// Each frame, mirror each slot's unit's dressed look into its booth whenever it changes; a unit
-/// whose model has not attached shows a 2D stand-in, where the reference shows blank (`0x519fcc`).
+/// whose model has not attached shows the empty booth (`0x519fcc`, `0x525874`).
 fn sync_portraits(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -1315,13 +1275,18 @@ fn sync_portraits(
         return; // the test bake owns the booths
     }
     for token in SLOTS {
-        // A unit the object manager does not hold draws the 2D stand-in (`0x525ba0`), not the
-        // blank, which is for a model not ready (`0x519fcc`); `unseen` carries that art.
-        let mut unseen: Option<String> = None;
+        // A unit the object manager does not hold draws what `0x519fe6` gives its guid: a
+        // player's stand-in by race and sex (`0x525ba0`), a group pet record's (`0x525cb0`), or
+        // nothing; `unseen` carries that art.
+        let mut unseen: Option<Unseen> = None;
         let mut occupant: Option<u64> = None;
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
-            "target" => selection.target,
+            "target" => {
+                let subject = target_subject(&selection, &party.roster, &party.names);
+                (occupant, unseen) = (subject.occupant, subject.unseen);
+                subject.entity
+            }
             // Gated on the UI drawing the slot: its frame ships hidden (`SHOW_TARGET_OF_TARGET`
             // defaults to `"0"`), and ungated it would re-bake on every target switch.
             "targettarget" => party
@@ -1338,15 +1303,15 @@ fn sync_portraits(
                 })
                 .flatten(),
             "pet" => {
-                let guid = party.pet_bar.spells.pet_guid;
-                let entity = (guid != 0)
-                    .then(|| party.index.0.get(&guid))
-                    .flatten()
-                    .copied();
-                if entity.is_none() && guid != 0 {
-                    unseen = Some(creature_temporary_portrait());
-                }
-                entity
+                let me = self_q.single().ok().and_then(|e| stores_q.get(e).ok());
+                let subject = pet_subject(
+                    pet_guid(me),
+                    |g| party.index.0.get(&g).copied(),
+                    &party.roster,
+                    &party.names,
+                );
+                unseen = subject.unseen;
+                subject.entity
             }
             "npc" => interact_npc.0,
             // Gated on the UI drawing it, as `"targettarget"`: no stock file binds it.
@@ -1385,13 +1350,8 @@ fn sync_portraits(
                 occupant = member.map(|m| m.guid);
                 let entity = member.and_then(|m| party.index.0.get(&m.guid)).copied();
                 if entity.is_none() {
-                    unseen = member.map(|m| {
-                        let traits = party.names.player_traits(m.guid);
-                        player_temporary_portrait(
-                            traits.map(|(race, _, _)| race),
-                            traits.map(|(_, _, sex)| sex),
-                        )
-                    });
+                    unseen =
+                        member.and_then(|m| unseen_portrait(&party.roster, &party.names, m.guid));
                 }
                 entity
             }
@@ -1404,41 +1364,38 @@ fn sync_portraits(
             // cache and the booth gets a fresh one; the UI keeps the same handle, the reference's
             // "bind the cached bake" (`0x525c36`). Only a settled bake: a half-drawn one would
             // freeze.
-            if let Some(guid) = booth.baked_guid.filter(|_| {
-                booth.baked.is_some()
-                    && booth.wake == 0
-                    && booth.pending.is_empty()
-                    && !booth.pipes_settling
+            if let Some(guid) = booth.baked_guid.filter(|_| booth.settled()) {
+                let face = take_target(booth, token, &mut party.images, &mut party.targets);
+                party.bakes.store(guid, face);
+            }
+            file_display_bake(
+                booth,
+                token,
+                &mut party.displays,
+                &mut party.images,
+                &mut party.targets,
+            );
+            empty_booth(&mut commands, booth);
+            // A player with no name record asks the cache, whose callback marks the portrait
+            // when the record lands (`0x51a08e` → `0x55f080`, `0x51a100`).
+            if let Some(guid) = occupant.filter(|g| {
+                benilla_protocol::guid::is_player(*g) && party.names.player_traits(*g).is_none()
             }) {
-                let fresh = party.images.add(new_target_image(PORTRAIT_SIZE));
-                for (cam, mut target) in &mut party.targets {
-                    if cam.0 == *token {
-                        *target = RenderTarget::Image(fresh.clone().into());
-                    }
-                }
-                party
-                    .bakes
-                    .store(guid, std::mem::replace(&mut booth.target, fresh));
+                party.marks.ask(guid);
             }
-            booth.baked_guid = None;
-            // No unit: empty the booth.
-            if booth.baked.is_some() {
-                commands.entity(booth.root).despawn_related::<Children>();
-                booth.baked = None;
-                // Render the emptied stage, so the target holds the backdrop.
-                booth.wake = BOOTH_SETTLE_FRAMES;
-                booth.pending.clear();
-                // The root's rig state needs its own strip.
-                clear_booth_rig(&mut commands, booth.root);
-                booth.rigged = false;
-                booth.parked = false;
-            }
-            // No object: the cached bake on a hit, the 2D stand-in on a miss (`0x525ba0`).
+            // No object: the cached bake on a hit, the 2D stand-in on a miss (`0x525ba0`,
+            // `0x525cb0`), and with neither, no image (`0x51a095`, `0x51a0ce`).
             let src = match unseen {
-                Some(file) => occupant
-                    .and_then(|g| party.bakes.get(g))
-                    .map_or(PortraitSource::File(file), PortraitSource::Live),
-                None => PortraitSource::Live(booth.target.clone()),
+                Some(unseen) => {
+                    let booths = &booths.0;
+                    unseen_source(unseen, occupant, &party.bakes, &party.displays, |d| {
+                        booths
+                            .values()
+                            .find(|b| b.baked_display == Some(d) && b.settled())
+                            .map(|b| b.target.clone())
+                    })
+                }
+                None => PortraitSource::Empty,
             };
             if portraits.0.get(token) != Some(&src) {
                 portraits.0.insert(token.to_string(), src);
@@ -1447,10 +1404,38 @@ fn sync_portraits(
         };
         let (parts, riders, billboards, effects) = look.collect(unit);
         if parts.is_empty() {
-            // Not attached yet: a 2D stand-in. The reference blanks the widget (`0x519fcc`) and
-            // re-bakes once the model is ready.
-            let file = temporary_portrait(ent_q.get(unit).ok(), stores_q.get(unit).ok());
-            let src = PortraitSource::File(file);
+            // Not attached yet. The same unit rebuilding its body keeps its last bake: the widget
+            // keeps its texture until the drain's `UNIT_PORTRAIT_UPDATE` binds again, which waits
+            // on the body.
+            let src = if booth.baked_unit == Some(unit) {
+                PortraitSource::Live(booth.target.clone())
+            } else {
+                file_display_bake(
+                    booth,
+                    token,
+                    &mut party.displays,
+                    &mut party.images,
+                    &mut party.targets,
+                );
+                empty_booth(&mut commands, booth);
+                let net = ent_q.get(unit).ok();
+                let guid = party.guids.get(unit).ok().map(|g| g.0);
+                let booths = &booths.0;
+                loading_source(
+                    net.is_some_and(|n| n.kind == benilla_protocol::EntityKind::Player),
+                    guid,
+                    display_key(net, stores_q.get(unit).ok()),
+                    &party.marks,
+                    &party.bakes,
+                    &party.displays,
+                    |d| {
+                        booths
+                            .values()
+                            .find(|b| b.baked_display == Some(d) && b.settled())
+                            .map(|b| b.target.clone())
+                    },
+                )
+            };
             if portraits.0.get(token) != Some(&src) {
                 portraits.0.insert(token.to_string(), src);
             }
@@ -1518,6 +1503,14 @@ fn sync_portraits(
                 booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
                 continue;
             }
+            // The bake leaves its last unit's face: the display-id cache keeps it on a miss.
+            file_display_bake(
+                booth,
+                token,
+                &mut party.displays,
+                &mut party.images,
+                &mut party.targets,
+            );
             commands.entity(booth.root).despawn_related::<Children>();
             let booth_rig = spawn_booth_model(
                 &mut commands,
@@ -1559,6 +1552,8 @@ fn sync_portraits(
             );
             booth.baked = Some(key);
             booth.baked_guid = occupant;
+            booth.baked_unit = Some(unit);
+            booth.baked_display = display_key(ent_q.get(unit).ok(), stores_q.get(unit).ok());
         }
         let live = PortraitSource::Live(booth.target.clone());
         if portraits.0.get(token) != Some(&live) {
@@ -1567,449 +1562,86 @@ fn sync_portraits(
     }
 }
 
-/// Each frame, bake the self player's dressed look into the paper-doll booth, full-body and spun
-/// to [`PaperDollBooth::yaw`]. A [`SnapKey`] change re-bakes; a yaw change only re-rotates.
-fn sync_paperdoll(
-    mut commands: Commands,
-    mut booths: ResMut<Booths>,
-    mut portraits: ResMut<PortraitImages>,
-    mut booth_light: ResMut<BoothLight>,
-    creatures: Option<Res<Creatures>>,
-    self_q: Query<Entity, With<SelfPlayer>>,
-    ent_q: Query<&NetEntity>,
-    look: DressedLook,
-    paperdoll: Res<PaperDollBooth>,
-    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
-    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
-    mut env_cache: Local<Option<bool>>,
-    mut last_pose: Local<Option<(f32, f32)>>,
-    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    framing_in: BoothFraming,
-    anim_data: Option<Res<crate::creature_anim::AnimData>>,
-) {
-    if test_mode(&mut env_cache) {
-        return; // the test bake owns the booths
-    }
-    sync_body_booth(
-        &mut palettes,
-        PAPERDOLL_SLOT,
-        self_q.single().ok(),
-        paperdoll.yaw,
-        &mut last_pose,
-        framing_in.gx.0,
-        &mut commands,
-        &mut booths,
-        &mut portraits,
-        &mut booth_light,
-        creatures.as_deref(),
-        &ent_q,
-        &look,
-        &mut wow_mats,
-        &mut cams,
-        anim_data.as_deref(),
-        &framing_in.panes,
-    );
-}
-
-/// The inspect window's pane, pointed at [`crate::ui_inspect`]'s unit.
-fn sync_inspect_booth(
-    mut commands: Commands,
-    mut booths: ResMut<Booths>,
-    mut portraits: ResMut<PortraitImages>,
-    mut booth_light: ResMut<BoothLight>,
-    creatures: Option<Res<Creatures>>,
-    ent_q: Query<&NetEntity>,
-    look: DressedLook,
-    inspect: Res<InspectBooth>,
-    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
-    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
-    mut env_cache: Local<Option<bool>>,
-    mut last_pose: Local<Option<(f32, f32)>>,
-    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    framing_in: BoothFraming,
-    anim_data: Option<Res<crate::creature_anim::AnimData>>,
-) {
-    if test_mode(&mut env_cache) {
-        return;
-    }
-    sync_body_booth(
-        &mut palettes,
-        INSPECT_SLOT,
-        inspect.unit,
-        inspect.yaw,
-        &mut last_pose,
-        framing_in.gx.0,
-        &mut commands,
-        &mut booths,
-        &mut portraits,
-        &mut booth_light,
-        creatures.as_deref(),
-        &ent_q,
-        &look,
-        &mut wow_mats,
-        &mut cams,
-        anim_data.as_deref(),
-        &framing_in.panes,
-    );
-}
-
-/// The pet paper doll's pane, pointed at [`crate::ui_pet_doll`]'s pet.
-fn sync_petdoll_booth(
-    mut commands: Commands,
-    mut booths: ResMut<Booths>,
-    mut portraits: ResMut<PortraitImages>,
-    mut booth_light: ResMut<BoothLight>,
-    creatures: Option<Res<Creatures>>,
-    ent_q: Query<&NetEntity>,
-    look: DressedLook,
-    petdoll: Res<PetDollBooth>,
-    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
-    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
-    mut env_cache: Local<Option<bool>>,
-    mut last_pose: Local<Option<(f32, f32)>>,
-    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    framing_in: BoothFraming,
-    anim_data: Option<Res<crate::creature_anim::AnimData>>,
-) {
-    if test_mode(&mut env_cache) {
-        return;
-    }
-    sync_body_booth(
-        &mut palettes,
-        PETDOLL_SLOT,
-        petdoll.unit,
-        petdoll.yaw,
-        &mut last_pose,
-        framing_in.gx.0,
-        &mut commands,
-        &mut booths,
-        &mut portraits,
-        &mut booth_light,
-        creatures.as_deref(),
-        &ent_q,
-        &look,
-        &mut wow_mats,
-        &mut cams,
-        anim_data.as_deref(),
-        &framing_in.panes,
-    );
-}
-
-/// The stable pane's stand-in subject ([`PortraitStandIn`]), keyed on the display: two pets that
-/// share one are the same model, as in the reference's cached branch.
-#[derive(Resource, Default)]
-struct StableStandIn {
-    /// The stand-in, while one exists.
-    entity: Option<Entity>,
-    /// The display it was spawned for.
+/// What `SetPortraitTexture` binds for a held unit whose model is not ready, in the bake's order
+/// (`0x524f60`): nothing for a unit on the portrait list (`0x524f96`); a clean cached face, a
+/// player's by its GUID (`0x524fe2`-`0x525069`) and any other unit's by its display id
+/// (`0x525077`-`0x5250e4`, or one a booth holds now, as the reference files it as it draws); else
+/// nothing, as the readiness gate binds nothing (`0x5250f5`-`0x52515d` → `0x525874`).
+fn loading_source(
+    player: bool,
+    guid: Option<u64>,
     display: Option<u32>,
-    /// Its mirror children are up.
-    built: bool,
+    marks: &PortraitMarks,
+    bakes: &PortraitBakes,
+    displays: &DisplayBakes,
+    baking: impl Fn(u32) -> Option<Handle<Image>>,
+) -> PortraitSource {
+    if guid.is_some_and(|g| marks.holds(g)) {
+        return PortraitSource::Empty;
+    }
+    let face = if player {
+        guid.and_then(|g| bakes.get(g))
+    } else {
+        display.and_then(|d| displays.get(d).or_else(|| baking(d)))
+    };
+    face.map_or(PortraitSource::Empty, PortraitSource::Live)
 }
 
-/// Keep [`StableStandIn`] on the selected stabled pet, rebuilding it when the want changes.
-fn sync_stable_standin(
-    mut commands: Commands,
-    stable: Res<StableBooth>,
-    creatures: Option<Res<Creatures>>,
-    mut state: ResMut<StableStandIn>,
-) {
-    // The live pet wins: the reference reaches the creature cache only after the GUID
-    // resolve fails (`0x4cb9bc`).
-    let want = stable.unit.is_none().then_some(stable.display_id).flatten();
-    if state.display != want {
-        if let Some(old) = state.entity.take() {
-            commands.entity(old).despawn();
-        }
-        state.display = want;
-        state.built = false;
-        state.entity = want.map(|display| {
-            commands
-                .spawn((
-                    PortraitStandIn(display),
-                    // Hidden: the booth draws its own copies.
-                    Transform::default(),
-                    Visibility::Hidden,
-                ))
-                .id()
-        });
-    }
-    if state.built {
-        return;
-    }
-    let (Some(root), Some(disp), Some(creatures)) = (state.entity, want, creatures.as_deref())
-    else {
-        return;
-    };
-    // `None` while the display's model loads.
-    let Some((parts, cards)) = creatures.display_mirror(disp) else {
-        return;
-    };
-    let (n_parts, n_cards) = (parts.len(), cards.len());
-    commands.entity(root).with_children(|kids| {
-        for part in parts {
-            kids.spawn((Transform::default(), Visibility::Inherited, part));
-        }
-        for card in cards {
-            kids.spawn((Transform::default(), Visibility::Inherited, card));
-        }
-    });
-    state.built = true;
-    debug!(
-        "stable booth: stand-in for display {disp} — {n_parts} part(s), {n_cards} camera-facing"
-    );
-}
-
-/// The stable window's pane, with the stand-in as the fallback subject.
-fn sync_stable_booth(
-    mut commands: Commands,
-    mut booths: ResMut<Booths>,
-    mut portraits: ResMut<PortraitImages>,
-    mut booth_light: ResMut<BoothLight>,
-    creatures: Option<Res<Creatures>>,
-    ent_q: Query<&NetEntity>,
-    look: DressedLook,
-    stable: Res<StableBooth>,
-    stand_in: Res<StableStandIn>,
-    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
-    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
-    mut env_cache: Local<Option<bool>>,
-    mut last_pose: Local<Option<(f32, f32)>>,
-    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    framing_in: BoothFraming,
-    anim_data: Option<Res<crate::creature_anim::AnimData>>,
-) {
-    if test_mode(&mut env_cache) {
-        return;
-    }
-    sync_body_booth(
-        &mut palettes,
-        STABLE_SLOT,
-        stable.unit.or(stand_in.entity),
-        stable.yaw,
-        &mut last_pose,
-        framing_in.gx.0,
-        &mut commands,
-        &mut booths,
-        &mut portraits,
-        &mut booth_light,
-        creatures.as_deref(),
-        &ent_q,
-        &look,
-        &mut wow_mats,
-        &mut cams,
-        anim_data.as_deref(),
-        &framing_in.panes,
-    );
-}
-
-/// Bake `unit`'s full-body dressed look into the `slot` booth at `yaw`, for all four body panes;
-/// `None` empties it. `unit` may be a [`PortraitStandIn`].
-fn sync_body_booth(
-    palettes: &mut benilla_world::rig_palette::RigPalettes,
-    slot: &str,
-    unit: Option<Entity>,
-    yaw: f32,
-    last_pose: &mut Option<(f32, f32)>,
-    display_aspect: f32,
-    commands: &mut Commands,
-    booths: &mut Booths,
-    portraits: &mut PortraitImages,
-    booth_light: &mut BoothLight,
-    creatures: Option<&Creatures>,
-    ent_q: &Query<&NetEntity>,
-    look: &DressedLook,
-    wow_mats: &mut Assets<WowModelMaterial>,
-    cams: &mut Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    anim_data: Option<&crate::creature_anim::AnimData>,
-    panes: &BoothPanes,
-) {
-    let Some(booth) = booths.0.get_mut(slot) else {
-        return;
-    };
-    // Latch the pane's aspect while it is drawn.
-    let aspect = panes.0.get(slot).copied().unwrap_or(booth.aspect);
-    // The show edge (`0x505d00`): `BoothPanes` publishes a slot exactly while its pane is drawn.
-    let on_screen = panes.0.contains_key(slot);
-    if on_screen && !booth.shown {
-        booth.show_rev = booth.show_rev.wrapping_add(1);
-    }
-    booth.shown = on_screen;
-    let live = PortraitSource::Live(booth.target.clone());
-    if portraits.0.get(slot) != Some(&live) {
-        portraits.0.insert(slot.to_string(), live);
-    }
-    let (parts, riders, billboards, effects) = match unit {
-        Some(unit) => look.collect(unit),
-        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-    };
-    if parts.is_empty() {
-        // Empty the booth and forget the applied yaw.
-        if booth.snap.is_some() {
-            commands.entity(booth.root).despawn_related::<Children>();
-            booth.snap = None;
-            *last_pose = None;
-            // Render the emptied stage; with no emitters left it is not live.
-            booth.wake = BOOTH_SETTLE_FRAMES;
-            booth.live = false;
-            booth.pending.clear();
-            clear_booth_rig(commands, booth.root);
-            booth.rigged = false;
-            booth.parked = false;
-        }
-        return;
-    }
-    let unit = unit.expect("unit present — parts came from its descendants");
-    let (dress, rev) = look.snapshot_inputs(unit);
-    let key = SnapKey::build(
-        unit,
-        &parts,
-        &riders,
-        &billboards,
-        &effects,
-        dress,
-        rev,
-        booth.show_rev,
-        aspect,
-    );
-    // A stand-in carries its display on itself.
-    let display_id = ent_q
-        .get(unit)
-        .ok()
-        .and_then(|n| n.display_id)
-        .or_else(|| look.stand_in_display(unit));
-    // Anchors before any teardown; the root scale needs them on idle frames too.
-    let anchors_now = booth_anchors(creatures, display_id);
-    let model_scale = anchors_now
-        .as_ref()
-        .map_or(1.0, |a| framing::pane_root_scale(a, display_aspect));
-    // The reference's re-`SetUnit` set (`SnapKey`), which a weapon draw is not in.
-    let parts_changed = booth.snap.as_ref() != Some(&key);
-    if parts_changed {
-        booth.aspect = aspect;
-        let Some(anchors) = anchors_now else {
-            booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
-            log_bake(slot, "wait-anchors", &parts, &riders, &billboards, &effects);
-            return;
-        };
-        let rig = creatures
-            .zip(display_id)
-            .and_then(|(c, d)| c.display_rig(d));
-        let booth_parts: Vec<BoothPart> = parts
-            .iter()
-            .map(|p| BoothPart {
-                skinned: p.skinned_mesh.clone(),
-                static_mesh: p.static_mesh.clone(),
-                material: booth_light.pane.variant(&p.material, wow_mats),
-                alpha_anim: None,
-                twins: BoothTwins::default(),
-                mat_anim: false,
-            })
-            .collect();
-        let booth_riders: Vec<BoothRider> = riders
-            .iter()
-            .map(|r| BoothRider {
-                mesh: r.static_mesh.clone(),
-                material: booth_light.pane.variant(&r.material, wow_mats),
-                bone: r.bone,
-                offset: r.offset,
-                twins: BoothTwins::default(),
-                mat_anim: false,
-            })
-            .collect();
-        let booth_billboards: Vec<BoothBillboardSpec> = billboards
-            .iter()
-            .map(|b| BoothBillboardSpec {
-                mesh: b.mesh.clone(),
-                material: booth_light.pane.variant(&b.material, wow_mats),
-                bone: b.bone,
-                offset: b.seat.offset(),
-                kind: b.kind,
-                twins: BoothTwins::default(),
-                mat_anim: false,
-            })
-            .collect();
-        // The worn items' effects, spawned after the model hands over the joints.
-        let booth_effects: Vec<BoothEffects> = effects
-            .iter()
-            .map(|fx| BoothEffects {
-                bone: fx.bone,
-                offset: fx.offset,
-                emitters: fx.emitters.clone(),
-            })
-            .collect();
-        // Never latch a world-lane material into the pane.
-        if booth_light.pane.take_unready() {
-            booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
-            return;
-        }
+/// Empty `booth`'s stage and render it once, so its target holds the backdrop.
+fn empty_booth(commands: &mut Commands, booth: &mut Booth) {
+    booth.baked_guid = None;
+    booth.baked_unit = None;
+    if booth.baked.is_some() {
         commands.entity(booth.root).despawn_related::<Children>();
-        let mut booth_rig = spawn_booth_model(
-            commands,
-            palettes,
-            booth.root,
-            booth.layer.clone(),
-            &booth_parts,
-            &booth_riders,
-            rig.as_ref().and_then(|r| {
-                r.inverse_bindposes
-                    .as_ref()
-                    .map(|ibp| (r.skeleton, ibp, r.animations))
-            }),
-            anim_data.map(|a| &a.0),
-            // The pane animates, as the reference's `<PlayerModel>` renders live.
-            BoothMotion::Loop,
-            hand_grip(&riders, &billboards, &effects),
-            &booth_billboards,
-            BoothInstance::default(),
-        );
-        // Item effects: only the body panes, live widgets in the reference, carry them.
-        spawn_booth_effects(
-            commands,
-            &mut booth_rig,
-            &booth.layer,
-            booth_light.pane.buffer.as_ref(),
-            &booth_effects,
-            BoothInstance::default(),
-        );
-        booth.turn.rebaked();
-        // Live, emitters or not: rendered every frame its pane is drawn.
-        booth.live = true;
-        booth.rigged = booth_rig.rigged();
-        booth_rig.finish(commands);
+        booth.baked = None;
+        booth.wake = BOOTH_SETTLE_FRAMES;
+        booth.pending.clear();
+        // The root's rig state needs its own strip.
+        clear_booth_rig(commands, booth.root);
+        booth.rigged = false;
         booth.parked = false;
-        log_frame(slot, &anchors, &body_frame(&anchors, aspect).0);
-        aim(cams, slot, &body_frame(&anchors, aspect));
-        log_bake(slot, "bake", &parts, &riders, &billboards, &effects);
-        wake_booth(
-            booth,
-            wow_mats,
-            booth_parts
-                .iter()
-                .map(|p| &p.material)
-                .chain(booth_riders.iter().map(|r| &r.material))
-                .chain(booth_billboards.iter().map(|b| &b.material)),
-        );
-        booth.snap = Some(key);
     }
-    // The model root: the widget's `T(pos)·R(facing)·S(s)` with `pos` at the origin. `s`
-    // (`framing::pane_root_scale`) is latched with the yaw: both move on a resize.
-    //
-    // The turn keys on the yaw alone, as `0x505bb0` picks the shuffle before storing the angle,
-    // and compares the Lua-facing scalar the reference passes to `SetRotation`.
-    if booth.turn.faced != Some(yaw) {
-        if let Some(prev) = booth.turn.faced {
-            booth.turn.spun = Some(booth::turn_shuffle(prev, yaw));
+}
+
+/// Give `token`'s booth a fresh target, its camera repointed, and return the old one, which keeps
+/// the face it holds while the UI holds the same handle: the reference's "bind the cached bake"
+/// (`0x525c36`).
+fn take_target(
+    booth: &mut Booth,
+    token: &str,
+    images: &mut Assets<Image>,
+    targets: &mut Query<(&BoothCam, &mut RenderTarget)>,
+) -> Handle<Image> {
+    let fresh = images.add(new_target_image(PORTRAIT_SIZE));
+    for (cam, mut target) in targets.iter_mut() {
+        if cam.0 == token {
+            *target = RenderTarget::Image(fresh.clone().into());
         }
-        booth.turn.faced = Some(yaw);
     }
-    if parts_changed || *last_pose != Some((yaw, model_scale)) {
-        commands.entity(booth.root).insert(
-            Transform::from_rotation(Quat::from_rotation_y(yaw))
-                .with_scale(Vec3::splat(model_scale)),
-        );
-        *last_pose = Some((yaw, model_scale));
-        booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
+    std::mem::replace(&mut booth.target, fresh)
+}
+
+/// The key a bake files its face under in [`DisplayBakes`]: a unit without the player bit
+/// (`0x525663`) by the `UNIT_FIELD_DISPLAYID` it holds at the insert (`0x525719`).
+fn display_key(net: Option<&NetEntity>, store: Option<&crate::net::ObjectStore>) -> Option<u32> {
+    net.filter(|n| n.kind != benilla_protocol::EntityKind::Player)?;
+    store?.0.unit_displayid().map(|d| d as u32)
+}
+
+/// A booth leaving a settled bake of a unit that is no player files the face under its display
+/// id, unless the display has an entry (`0x525719` → `0x526d70`).
+fn file_display_bake(
+    booth: &mut Booth,
+    token: &str,
+    displays: &mut DisplayBakes,
+    images: &mut Assets<Image>,
+    targets: &mut Query<(&BoothCam, &mut RenderTarget)>,
+) {
+    if let Some(display) = booth.baked_display.take() {
+        if booth.settled() && !displays.has(display) {
+            let face = take_target(booth, token, images, targets);
+            displays.fill(display, face);
+        }
     }
 }
 
@@ -2042,7 +1674,7 @@ fn pipe_settle(compiling: bool, wake_drained: bool, held_for: f64) -> PipeSettle
 
 /// The demand-render gate: a booth camera renders only for [`Booth::wake`] frames after a content
 /// edge, while a texture or pipeline is pending, or while its content is live (the glue scene, a
-/// drawn body pane), and throughout the warm pass, which compiles the booths' pipelines.
+/// drawn character pane), and throughout the warm pass, which compiles the booths' pipelines.
 fn gate_booth_cameras(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2197,18 +1829,6 @@ fn gate_booth_cameras(
 
 const TEMPORARY_PORTRAIT: &str = "Interface\\CharacterFrame\\TemporaryPortrait";
 
-/// The 2D stand-in for a unit that is not yet renderable: the player file is `0x525ba0`'s.
-fn temporary_portrait(net: Option<&NetEntity>, store: Option<&crate::net::ObjectStore>) -> String {
-    use benilla_protocol::EntityKind;
-    if net.map(|n| n.kind) == Some(EntityKind::Player) {
-        return match store {
-            Some(s) => player_temporary_portrait(s.0.unit_race(), s.0.unit_gender()),
-            None => format!("{TEMPORARY_PORTRAIT}.blp"),
-        };
-    }
-    creature_temporary_portrait()
-}
-
 /// The player stand-in from race and sex bytes, which an out-of-area party member gets from the
 /// name cache. An unknown race gives the plain file, as the reference's `%s-%s` format does.
 fn player_temporary_portrait(race: Option<u8>, sex: Option<u8>) -> String {
@@ -2230,21 +1850,17 @@ fn player_temporary_portrait(race: Option<u8>, sex: Option<u8>) -> String {
     format!("{TEMPORARY_PORTRAIT}-{sex}-{race}.blp")
 }
 
-/// What `"partypetN"`'s portrait shows, as the entity to bake and the stand-in file: the pet the
+/// What `"partypetN"`'s portrait shows, as the entity to bake and what it draws unheld: the pet the
 /// roster names for that party slot (`0x4e81d0`) while the UI draws the slot. A pet the client does
-/// not hold takes the roster pet's stand-in (`0x525cb0`), and one with no pet record, blank
-/// (`0x51a0ce`), so neither.
-///
-/// Deviation: the reference probes a bake cache keyed by the record's display id (`0x525cb0`,
-/// `0xc0cea4`) before the stand-in, so a pet out of view keeps its face. benilla holds no such
-/// cache, and [`PortraitBakes`] is keyed by guid for the party slots alone: the stand-in shows.
+/// not hold draws the bake filed under its record's display id, else the roster pet's stand-in
+/// (`0x525cb0`), and one with no pet record, blank (`0x51a0ce`), so neither.
 fn party_pet_subject<'a>(
     roster: &crate::ui_party::GroupState,
     token: &str,
     drawn: bool,
     entity_of: impl Fn(u64) -> Option<Entity>,
     store_of: impl Fn(u64) -> Option<&'a crate::net::ObjectStore>,
-) -> (Option<Entity>, Option<String>) {
+) -> (Option<Entity>, Option<Unseen>) {
     if !drawn {
         return (None, None);
     }
@@ -2261,17 +1877,88 @@ fn party_pet_subject<'a>(
     };
     match entity_of(pet) {
         Some(entity) => (Some(entity), None),
-        None => (
-            None,
-            roster.pet_record(pet).map(|_| pet_temporary_portrait()),
-        ),
+        None => (None, pet_unseen(roster, pet)),
     }
 }
 
-/// The creature stand-in, benilla's own file: the reference's only creature stand-in is `-Pet`,
-/// for a roster pet with no object (`0x525cb0`), and a live creature not yet loaded shows blank.
-fn creature_temporary_portrait() -> String {
-    format!("{TEMPORARY_PORTRAIT}-Monster.blp")
+/// What a portrait slot shows: the object to bake, the guid the bake cache files it under, and the
+/// stand-in for a unit the object manager does not hold.
+#[derive(Debug, Default, PartialEq)]
+struct Subject {
+    entity: Option<Entity>,
+    occupant: Option<u64>,
+    unseen: Option<Unseen>,
+}
+
+/// The guid `"pet"`'s portrait draws, off our descriptor `me`: the unit the token names
+/// ([`crate::ui_unit::pet_token_guid`]).
+fn pet_guid(me: Option<&crate::net::ObjectStore>) -> u64 {
+    crate::ui_unit::pet_token_guid(me)
+}
+
+/// `"pet"`'s subject: the object of the pet's guid, or for a pet the object manager does not
+/// hold, what any such guid draws (`0x519fe6`, [`unseen_portrait`]): our own pet is in no group
+/// pet record (`0x496420`), so its portrait stays empty (`0x51a0ce`).
+fn pet_subject(
+    pet_guid: u64,
+    entity_of: impl Fn(u64) -> Option<Entity>,
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+) -> Subject {
+    let entity = (pet_guid != 0).then(|| entity_of(pet_guid)).flatten();
+    Subject {
+        entity,
+        occupant: None,
+        unseen: (entity.is_none() && pet_guid != 0)
+            .then(|| unseen_portrait(roster, names, pet_guid))
+            .flatten(),
+    }
+}
+
+/// `"target"`'s subject: the selection's object, or, for a selection with no object, a party
+/// member out of range, the guid's cached bake or stand-in, as any unit the object manager does not
+/// hold (`0x519fe6`).
+fn target_subject(
+    selection: &Selection,
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+) -> Subject {
+    match (selection.target, selection.guid) {
+        (None, Some(guid)) => Subject {
+            entity: None,
+            occupant: Some(guid),
+            unseen: unseen_portrait(roster, names, guid),
+        },
+        (entity, _) => Subject {
+            entity,
+            ..Subject::default()
+        },
+    }
+}
+
+/// What a guid the object manager does not hold draws (`0x519fe6`): a player's stand-in by the
+/// race and sex of its name record (`0x51a08e` → `0x51a0b4`, `0x525ba0`), none with no record
+/// (`0x51a095`); any other guid's from the group's pet record ([`pet_unseen`]).
+fn unseen_portrait(
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+    guid: u64,
+) -> Option<Unseen> {
+    if benilla_protocol::guid::is_player(guid) {
+        names
+            .player_traits(guid)
+            .map(|(race, _, sex)| Unseen::player(player_temporary_portrait(Some(race), Some(sex))))
+    } else {
+        pet_unseen(roster, guid)
+    }
+}
+
+/// A pet guid's draw off the group's pet record (`0x51a0c7` → `0x496420`): the record's display
+/// id, the word at `+0x5a` (`0x51a0d0`), for `0x525cb0`; none with no pet record (`0x51a0ce`).
+fn pet_unseen(roster: &crate::ui_party::GroupState, guid: u64) -> Option<Unseen> {
+    roster
+        .pet_record(guid)
+        .map(|r| Unseen::pet(r.pet_model_id.map_or(0, u32::from)))
 }
 
 /// A roster pet with no object and no bake under its display id (`0x525cb0`): the reference's
@@ -2299,17 +1986,35 @@ mod tests {
     use super::*;
     use crate::entities::ItemModelKind;
 
+    /// The screen basis's aspect is `0x4901e0`'s: the display's width over height while
+    /// `widescreen` is on, 4/3 when it is 0.
+    #[test]
+    fn the_gx_aspect_is_four_thirds_with_widescreen_off() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<GxAspect>();
+        world.init_resource::<crate::video::Widescreen>();
+        let mut window = Window::default();
+        window.resolution.set(1920.0, 1080.0);
+        world.spawn((window, bevy::window::PrimaryWindow));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert!((world.resource::<GxAspect>().0 - 16.0 / 9.0).abs() < 1e-6);
+        world.insert_resource(crate::video::Widescreen(false));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert_eq!(world.resource::<GxAspect>().0, 4.0 / 3.0);
+    }
+
     /// The stock pet frame binds `"partypetN"` (`PartyFrameTemplates.xml`, `UnitFrame_Initialize`),
     /// and `SetPortraitTexture` draws only a token a slot bakes.
     #[test]
     fn every_party_pet_token_has_a_portrait_slot() {
-        for token in crate::ui_party::PARTY_PET_TOKENS {
+        for token in ["partypet1", "partypet2", "partypet3", "partypet4"] {
             assert!(SLOTS.contains(&token), "{token} has no slot");
         }
     }
 
     /// The party pet's portrait, by what the client holds: the pet's own model while it is held,
-    /// the roster pet's stand-in (`0x525cb0`) while only its owner's record names it, blank with no
+    /// its record's display id for `0x525cb0` while only its owner's record names it, blank with no
     /// record (`0x51a0ce`), and nothing while the UI is not drawing the slot.
     #[test]
     fn a_party_pets_portrait_is_its_bake_else_the_roster_pets_stand_in() {
@@ -2346,6 +2051,7 @@ mod tests {
                 PartyMemberStatsInfo {
                     status: Some(status),
                     pet_guid: Some(PET),
+                    pet_model_id: Some(903),
                     ..Default::default()
                 },
             );
@@ -2364,10 +2070,8 @@ mod tests {
             )
         };
         let online = group(member_status::ONLINE);
-        let stand_in = Some(pet_temporary_portrait());
-        assert!(stand_in
-            .as_deref()
-            .is_some_and(|f| f.ends_with("TemporaryPortrait-Pet.blp")));
+        let stand_in = Some(Unseen::pet(903));
+        assert!(pet_temporary_portrait().ends_with("TemporaryPortrait-Pet.blp"));
 
         assert_eq!(
             subject(&online, false, true, None),
@@ -2408,6 +2112,201 @@ mod tests {
             (None, None),
             "a slot with no member"
         );
+    }
+
+    /// The display-id cache keeps the first face filed under a display (`0x525719`, a bake files
+    /// only on a miss) and empties on leaving the world, the pending list with it (`0x524b70`).
+    #[test]
+    fn the_display_cache_keeps_its_first_face_until_the_world_is_left() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut images = Assets::<Image>::default();
+        let first = images.add(new_target_image(1));
+        let second = images.add(new_target_image(1));
+        let mut world = World::new();
+        world.init_resource::<PortraitBakes>();
+        world.init_resource::<DisplayBakes>();
+        world.init_resource::<PortraitMarks>();
+        world.resource_mut::<PortraitMarks>().mark(0x51);
+        world.init_resource::<Messages<crate::net::LoggedOutMessage>>();
+        world.init_resource::<Messages<crate::net::DisconnectedMessage>>();
+        {
+            let mut displays = world.resource_mut::<DisplayBakes>();
+            displays.fill(903, first.clone());
+            displays.fill(903, second);
+            assert_eq!(displays.get(903), Some(first.clone()), "never redrawn");
+        }
+        world
+            .resource_mut::<PortraitBakes>()
+            .store(0x51, first.clone());
+        world.run_system_once(clear_portrait_caches).unwrap();
+        assert!(
+            world.resource::<DisplayBakes>().has(903),
+            "still in the world"
+        );
+        world.write_message(crate::net::LoggedOutMessage);
+        world.run_system_once(clear_portrait_caches).unwrap();
+        assert!(
+            !world.resource::<DisplayBakes>().has(903),
+            "a logout clears"
+        );
+        assert_eq!(world.resource::<PortraitBakes>().get(0x51), None);
+        assert!(
+            world.resource::<PortraitMarks>().pending().is_empty(),
+            "and the pending list"
+        );
+        world.resource_mut::<DisplayBakes>().fill(903, first);
+        world.write_message(crate::net::DisconnectedMessage::new(
+            String::new(),
+            benilla_protocol::SessionEnd::Lost,
+        ));
+        world.run_system_once(clear_portrait_caches).unwrap();
+        assert!(
+            !world.resource::<DisplayBakes>().has(903),
+            "so does a lost link"
+        );
+    }
+
+    /// An unheld pet draws the face filed under its record's display id, or one a booth holds for
+    /// that display now, before the stand-in (`0x525cb0`); a player draws the face filed under its
+    /// guid (`0x525ba0`), which a pet's guid never reaches.
+    #[test]
+    fn an_unseen_pet_keeps_the_face_of_its_display_id() {
+        let mut images = Assets::<Image>::default();
+        let filed = images.add(new_target_image(1));
+        let booth = images.add(new_target_image(1));
+        let mut bakes = PortraitBakes::default();
+        let mut displays = DisplayBakes::default();
+        const PET: u64 = 0xF140_0000_0000_0001;
+        let none = |_: u32| None;
+        let pet = Unseen::pet(903);
+        let stand_in = PortraitSource::File(pet_temporary_portrait());
+        assert_eq!(
+            unseen_source(pet.clone(), Some(PET), &bakes, &displays, none),
+            stand_in,
+            "a miss"
+        );
+        bakes.store(PET, filed.clone());
+        assert_eq!(
+            unseen_source(pet.clone(), Some(PET), &bakes, &displays, none),
+            stand_in,
+            "a pet probes no guid"
+        );
+        let baking = |d: u32| (d == 903).then(|| booth.clone());
+        assert_eq!(
+            unseen_source(pet.clone(), None, &bakes, &displays, baking),
+            PortraitSource::Live(booth.clone()),
+            "a booth drawing the display"
+        );
+        displays.fill(903, filed.clone());
+        assert_eq!(
+            unseen_source(pet.clone(), None, &bakes, &displays, baking),
+            PortraitSource::Live(filed.clone()),
+            "the filed face first"
+        );
+        assert_eq!(
+            unseen_source(Unseen::pet(904), None, &bakes, &displays, none),
+            stand_in,
+            "another display"
+        );
+        let player = Unseen::player(player_temporary_portrait(Some(4), Some(1)));
+        assert_eq!(
+            unseen_source(player.clone(), Some(PET), &bakes, &displays, none),
+            PortraitSource::Live(filed)
+        );
+        assert_eq!(
+            unseen_source(player.clone(), Some(0x99), &bakes, &displays, none),
+            PortraitSource::File(player.file)
+        );
+    }
+
+    /// A bake of a unit that is no player files under the display id its fields hold
+    /// (`0x525663`, `0x525719`); a player's files under its guid instead.
+    #[test]
+    fn a_bake_files_a_non_players_face_under_its_display_id() {
+        use benilla_protocol::{messages::ObjectFields, EntityKind};
+        let store = crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+            benilla_protocol::field::FIELD_UNIT_DISPLAYID,
+            903,
+        )]));
+        let net = |kind| NetEntity {
+            kind,
+            display_id: Some(903),
+            scale: 1.0,
+        };
+        assert_eq!(
+            display_key(Some(&net(EntityKind::Unit)), Some(&store)),
+            Some(903)
+        );
+        assert_eq!(
+            display_key(Some(&net(EntityKind::Player)), Some(&store)),
+            None
+        );
+        let empty = crate::net::ObjectStore(ObjectFields::default());
+        assert_eq!(
+            display_key(Some(&net(EntityKind::Unit)), Some(&empty)),
+            None
+        );
+    }
+
+    /// A booth leaving a settled bake hands its target to the display-id cache on a miss and draws
+    /// on in a fresh one; a display with an entry keeps it, and a half-drawn bake files nothing.
+    #[test]
+    fn a_booth_leaving_its_bake_files_the_face_once() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<DisplayBakes>();
+        let old = world
+            .resource_mut::<Assets<Image>>()
+            .add(new_target_image(1));
+        let cam = world
+            .spawn((
+                BoothCam("partypet1".into()),
+                RenderTarget::Image(old.clone().into()),
+            ))
+            .id();
+        let root = world.spawn_empty().id();
+        let booth = |target: Handle<Image>, wake: u32| {
+            let mut b = Booth::new(RenderLayers::layer(1), root, target);
+            b.baked = Some(LookKey::build(&[], &[], &[], &[]));
+            b.baked_display = Some(903);
+            b.wake = wake;
+            b
+        };
+        let file = |world: &mut World, mut b: Booth| {
+            world
+                .run_system_once(
+                    move |mut displays: ResMut<DisplayBakes>,
+                          mut images: ResMut<Assets<Image>>,
+                          mut targets: Query<(&BoothCam, &mut RenderTarget)>| {
+                        file_display_bake(
+                            &mut b,
+                            "partypet1",
+                            &mut displays,
+                            &mut images,
+                            &mut targets,
+                        );
+                        (b.target.clone(), b.baked_display)
+                    },
+                )
+                .unwrap()
+        };
+        let (half_drawn, _) = file(&mut world, booth(old.clone(), 1));
+        assert_eq!(half_drawn, old);
+        assert!(!world.resource::<DisplayBakes>().has(903), "half drawn");
+
+        let (fresh, display) = file(&mut world, booth(old.clone(), 0));
+        assert_ne!(fresh, old, "a fresh target");
+        assert_eq!(display, None);
+        assert_eq!(world.resource::<DisplayBakes>().get(903), Some(old.clone()));
+        let RenderTarget::Image(aim) = world.get::<RenderTarget>(cam).unwrap() else {
+            panic!("an image target");
+        };
+        assert_eq!(aim.handle, fresh, "the camera draws into the fresh one");
+
+        let (kept, _) = file(&mut world, booth(fresh.clone(), 0));
+        assert_eq!(kept, fresh, "a display with an entry");
+        assert_eq!(world.resource::<DisplayBakes>().get(903), Some(old));
     }
 
     #[test]
@@ -2501,6 +2400,7 @@ mod tests {
                     idle_seq: 0,
                 })
                 .collect(),
+            rig: None,
         }
     }
 
@@ -2625,12 +2525,7 @@ mod tests {
         dress_of([None, None, Some((3026, ItemModelKind::Weapon, 0))])
     }
 
-    fn key(
-        riders: &[PortraitRider],
-        dress: crate::entities::DressKey,
-        rev: u32,
-        show: u32,
-    ) -> SnapKey {
+    fn key(riders: &[PortraitRider], dress: crate::entities::DressKey, rev: u32) -> SnapKey {
         let body = [body_part()];
         let body: Vec<&PortraitPart> = body.iter().collect();
         let riders: Vec<&PortraitRider> = riders.iter().collect();
@@ -2642,8 +2537,6 @@ mod tests {
             &[],
             Some(dress),
             rev,
-            show,
-            1.0,
         )
     }
 
@@ -2653,8 +2546,8 @@ mod tests {
     fn drawing_a_bow_in_combat_does_not_re_snapshot_the_pane() {
         use crate::entities::attach_id::HAND_LEFT;
         let bow = [geom_rider(HAND_LEFT, 1)];
-        let stowed = key(&[], hunter(), 0, 1);
-        let drawn = key(&bow, hunter(), 0, 1);
+        let stowed = key(&[], hunter(), 0);
+        let drawn = key(&bow, hunter(), 0);
         assert!(
             stowed == drawn,
             "the world drew the bow; the widget's duplicate must not notice"
@@ -2674,8 +2567,8 @@ mod tests {
     fn stowing_a_sword_does_not_re_snapshot_the_pane() {
         use crate::entities::attach_id::{HAND_RIGHT, HIP_MAIN};
         let sword = dress_of([Some((1234, ItemModelKind::Weapon, 0)), None, None]);
-        let drawn = key(&[geom_rider(HAND_RIGHT, 7)], sword, 0, 1);
-        let hipped = key(&[geom_rider(HIP_MAIN, 7)], sword, 0, 1);
+        let drawn = key(&[geom_rider(HAND_RIGHT, 7)], sword, 0);
+        let hipped = key(&[geom_rider(HIP_MAIN, 7)], sword, 0);
         assert!(drawn == hipped);
     }
 
@@ -2684,28 +2577,19 @@ mod tests {
     #[test]
     fn the_manual_sheath_ceremony_re_snapshots_the_pane() {
         use crate::entities::attach_id::HAND_LEFT;
-        let before = key(&[], hunter(), 0, 1);
-        let after = key(&[geom_rider(HAND_LEFT, 1)], hunter(), 1, 1);
+        let before = key(&[], hunter(), 0);
+        let after = key(&[geom_rider(HAND_LEFT, 1)], hunter(), 1);
         assert!(
             before != after,
             "the ceremony's own keyframe is a model event"
         );
     }
 
-    /// The show override `0x505d00`, not a Lua event.
-    #[test]
-    fn showing_the_pane_re_snapshots_it() {
-        use crate::entities::attach_id::HAND_LEFT;
-        let open_stowed = key(&[], hunter(), 0, 1);
-        let reopened_drawn = key(&[geom_rider(HAND_LEFT, 1)], hunter(), 0, 2);
-        assert!(open_stowed != reopened_drawn);
-    }
-
     /// Equipping marks the unit (`0x5e2810` → `0x5dee30` → `0x5df119`).
     #[test]
     fn equipping_a_stowed_weapon_still_re_snapshots_the_pane() {
-        let empty = key(&[], dress_of([None, None, None]), 0, 1);
-        let armed = key(&[], hunter(), 0, 1);
+        let empty = key(&[], dress_of([None, None, None]), 0);
+        let armed = key(&[], hunter(), 0);
         assert!(
             empty != armed,
             "the dress moved even though nothing is drawn"
@@ -2715,8 +2599,8 @@ mod tests {
     #[test]
     fn a_helm_arriving_re_snapshots_the_pane() {
         use crate::entities::attach_id::HELM;
-        let bare = key(&[], hunter(), 0, 1);
-        let helmed = key(&[geom_rider(HELM, 9)], hunter(), 0, 1);
+        let bare = key(&[], hunter(), 0);
+        let helmed = key(&[geom_rider(HELM, 9)], hunter(), 0);
         assert!(bare != helmed);
     }
 

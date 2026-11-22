@@ -10,7 +10,11 @@
 //! - `knb`: a knockback ([`knockback`]), flown or refused.
 //! - `snd`: an outbound `MSG_MOVE_*` ([`sent`]), diffable against a 1.12.1 capture's client
 //!   stream; `net::motion`'s `rly` is the receive side.
-//! - `sett`: how the settle hold ended ([`settle`]) and the time it skipped ([`skipped_time`]).
+//! - `prs`: a command press or release that ran the tick ahead of the frame's packets ([`press`]);
+//!   its `snd` lines follow it, and the net drain's `drn` line marks where the packets land.
+//! - `sett`: how the settle hold ended ([`settle`]) and the time skipped ([`skipped_time`]).
+//! - `gate`: the world query gate starting or ending a hold ([`gate`]): the world's edge, or a
+//!   tile not yet resident.
 //! - `rid`: a frame of a self-spline ride ([`ride`]).
 //!
 //! The anim driver writes `anim` lines into the same file on the same clock, and
@@ -54,6 +58,18 @@ pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f3
             "{kind:?} flags={flags:#x} o={facing:.4} pos=[{:.2},{:.2},{:.2}]",
             pos[0], pos[1], pos[2]
         ),
+    );
+}
+
+/// One `prs` line per command press or release that ran the tick in the input records: the held
+/// command word, and the move word before and after.
+pub(super) fn press(word: u32, before: u32, after: u32) {
+    if !trace::enabled() {
+        return;
+    }
+    trace::line(
+        "prs",
+        &format!("commands={word:#x} flags={before:#x}->{after:#x}"),
     );
 }
 
@@ -153,7 +169,7 @@ pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
     );
 }
 
-/// One `sett` line per `CMSG_MOVE_TIME_SKIPPED` we send: the ms the settle hold skipped, and whose.
+/// One `sett` line per `CMSG_MOVE_TIME_SKIPPED` we send: the ms skipped, and whose.
 pub(super) fn skipped_time(guid: u64, lag_ms: u32) {
     if !trace::enabled() {
         return;
@@ -161,6 +177,25 @@ pub(super) fn skipped_time(guid: u64, lag_ms: u32) {
     trace::line(
         "sett",
         &format!("skipped {lag_ms:5} ms for mover {guid:#x}"),
+    );
+}
+
+/// One `gate` line when the world query gate starts holding the body ([`super::edge`]) and one
+/// when it lets go, with the feet where it happened.
+pub(super) fn gate(held: bool, pos: bevy::prelude::Vec3) {
+    if !trace::enabled() {
+        return;
+    }
+    let wow = benilla_assets::coords::bevy_to_wow(pos);
+    trace::line(
+        "gate",
+        &format!(
+            "{} at wow [{:.2},{:.2},{:.2}]",
+            if held { "HOLD   " } else { "release" },
+            wow[0],
+            wow[1],
+            wow[2]
+        ),
     );
 }
 

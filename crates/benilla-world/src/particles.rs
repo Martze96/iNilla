@@ -234,6 +234,11 @@ impl ParticleEmitter {
         self.size_scale = size_scale;
     }
 
+    /// The half-extent unit as last set.
+    pub fn size_scale(&self) -> f32 {
+        self.size_scale
+    }
+
     /// Confine this cloud's quads to a UI tile's cell of the shared atlas, in pixels
     /// ([`crate::particles::buffer::EffectDrawSpec::clip`]), as the reference draws each `<Model>`
     /// with the widget's rect as its viewport; `None` draws over the whole target.
@@ -301,6 +306,17 @@ impl ParticleEmitter {
     /// attached instance spawns `Free`, since a model dtor frees its emitters at once.
     pub fn drain_on_owner_loss(&mut self) {
         self.on_owner_loss = OwnerLoss::Drain;
+    }
+
+    /// Switch to [`OwnerLoss::Free`]: the effect is released with its model, whose destructor
+    /// frees its emitters at once (`0x6210e0` → `0x61f520`), its live particles with them.
+    pub fn free_on_owner_loss(&mut self) {
+        self.on_owner_loss = OwnerLoss::Free;
+    }
+
+    /// What losing the owner does to this pool ([`Self::drain_on_owner_loss`]).
+    pub fn on_owner_loss(&self) -> OwnerLoss {
+        self.on_owner_loss
     }
 
     /// The cloud's live world anchor, the census probe's distance subject.
@@ -902,7 +918,6 @@ pub(crate) mod tests {
             handle: Handle::default(),
             world_from_local: bevy::math::Affine3A::IDENTITY,
             name_set: 0,
-            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
             visible: vec![true, false, false],
             interior_fog: vec![false; 3],

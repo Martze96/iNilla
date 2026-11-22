@@ -8,8 +8,9 @@ use crate::widget::FrameHandle;
 const DRAG_START_DISTANCE_SQ: f32 = 0.01 * 0.01;
 
 /// Whether `pos` is far enough from the press point `start` to start the drag (`0x76b34c`–`0x76b372`).
-/// The reference measures in layout units, where the screen diagonal is 1 (`0x41ad80`, from the
-/// press and move converters `0x425666`/`0x425766`), so the pointer, in root units, is divided by
+/// The reference measures in layout units, where the screen diagonal is 1 (`0x41ad80`, called at
+/// `0x766fb1` in the interface's mouse converter `0x766f70`, which the press and move handlers
+/// `0x7662c0` and `0x7660d0` run), so the pointer, in root units, is divided by
 /// [`Model::layout_unit`]: 1% of the diagonal at every screen size and UI scale. The squared
 /// distance is taken in `f64` against the f32 threshold (x87 at 53 bits: `WinMain`'s
 /// `_controlfp(0x9001f)`, `D3DCREATE_FPU_PRESERVE`), and only a smaller one skips (`0x76b372`
@@ -154,7 +155,28 @@ pub(crate) fn take_drag(model: &mut Model, button: &str) -> Option<DragRelease> 
 #[cfg(test)]
 mod tests {
     use crate::script::cursor::{CursorItem, CursorPayload};
-    use crate::script::UiScript;
+    use crate::script::{PointerTarget, UiScript};
+
+    /// Seat the backpack's slot 1 with the Tough Jerky of `guid` and its record, so a held copy
+    /// resolves and its popup reads a cached record, as the world drop needs (`0x495337`,
+    /// `0x4953ac`).
+    fn seat_jerky(s: &mut UiScript, guid: u64) {
+        s.set_item_template(117, Default::default());
+        let slot = crate::script::ContainerSlot {
+            guid,
+            item_id: 117,
+            count: 1,
+            ..Default::default()
+        };
+        s.set_container(
+            0,
+            Some(crate::script::ContainerState {
+                name: None,
+                num_slots: 16,
+                slots: [(1, slot)].into(),
+            }),
+        );
+    }
 
     fn drag_script() -> UiScript {
         let mut s = UiScript::new().unwrap();
@@ -170,13 +192,13 @@ mod tests {
             drag_starts, drag_stops, receives = 0, 0, 0
             click_a, click_b = 0, 0
             drag_button = nil
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnDragStart", function() local self, button = this, arg1 drag_starts = drag_starts + 1; drag_button = button end)
             a:SetScript("OnDragStop", function() local self = this drag_stops = drag_stops + 1 end)
             a:SetScript("OnClick", function() local self = this click_a = click_a + 1 end)
-            local b = CreateFrame("Frame", "B")
+            local b = CreateFrame("Button", "B")
             b:SetPoint("BOTTOMLEFT", 400, 0); b:SetWidth(400); b:SetHeight(600); b:EnableMouse(true)
             b:SetScript("OnReceiveDrag", function() local self = this receives = receives + 1 end)
             b:SetScript("OnClick", function() local self = this click_b = click_b + 1 end)
@@ -227,12 +249,12 @@ mod tests {
 
     #[test]
     fn drag_release_on_the_source_still_suppresses_onclick() {
-        // A plain Frame fires OnClick on a same-frame release; a started drag suppresses it.
+        // A Button fires OnClick on a same-frame release; a started drag suppresses it.
         let mut s = drag_script();
         s.run(
             r#"
             clicks = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnClick", function() local self = this clicks = clicks + 1 end)
@@ -255,7 +277,7 @@ mod tests {
             r#"
             log = {}
             local function note(name) return function() table.insert(log, name) end end
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnMouseDown", note("down"))
@@ -349,7 +371,7 @@ mod tests {
         s.run(
             r#"
             clicks = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnClick", function() local self = this clicks = clicks + 1 end)
@@ -376,7 +398,7 @@ mod tests {
         s.run(
             r#"
             heard = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             local f = CreateFrame("Frame", "Listener")
@@ -386,6 +408,7 @@ mod tests {
         )
         .unwrap();
         s.resolve();
+        seat_jerky(&mut s, 0x118);
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
             item_class: None,
             guid: 0x118,
@@ -416,7 +439,7 @@ mod tests {
             "the press alone is not the trigger"
         );
         let consumed = s.mouse_button(-50.0, -50.0, "LeftButton", false);
-        assert!(consumed, "a world-drop click consumes the event");
+        assert!(!consumed, "a world drop leaves the release the world's");
         s.tick(0.01);
         assert_eq!(s.eval::<i64>("return heard").unwrap(), 1);
         assert!(
@@ -439,6 +462,7 @@ mod tests {
         )
         .unwrap();
         s.resolve();
+        seat_jerky(&mut s, 0x119);
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
             item_class: None,
             guid: 0x119,
@@ -456,7 +480,7 @@ mod tests {
 
         s.mouse_button(-50.0, -50.0, "LeftButton", true);
         let consumed = s.mouse_button(-50.0, -50.0, "LeftButton", false); // the completed click
-        assert!(consumed, "a world drop consumes the event");
+        assert!(!consumed, "a world drop leaves the release the world's");
         s.tick(0.01);
         assert_eq!(s.eval::<i64>("return heard").unwrap(), 1);
         assert_eq!(s.eval::<String>("return name").unwrap(), "");
@@ -480,6 +504,7 @@ mod tests {
         )
         .unwrap();
         s.resolve();
+        seat_jerky(&mut s, 0x11a);
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
             item_class: None,
             guid: 0x11a,
@@ -502,8 +527,13 @@ mod tests {
         assert!(s.is_world_frame(hit));
 
         s.mouse_button(400.0, 300.0, "LeftButton", true);
-        let consumed = s.mouse_button(400.0, 300.0, "LeftButton", false);
-        assert!(consumed, "a world drop consumes the completed click");
+        // The release is the world frame's, so its binding's up-half ends the camera's session.
+        let target = s.mouse_button_to(400.0, 300.0, "LeftButton", false);
+        assert_eq!(
+            target,
+            PointerTarget::World,
+            "the drop leaves the release the world's"
+        );
         s.tick(0.01);
         assert_eq!(s.eval::<i64>("return heard").unwrap(), 1, "the popup fires");
         assert!(s.cursor_item().is_some(), "the payload stays held");
@@ -516,7 +546,7 @@ mod tests {
             r#"
             WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()
             heard = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
@@ -620,7 +650,7 @@ mod tests {
         s.run(
             r#"
             heard = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
@@ -652,8 +682,8 @@ mod tests {
     }
 
     /// A press whose frame hid (the removal cleared the capture, `0x764cad`) reaches no one on the
-    /// release: `0x766420` dispatches to the capture alone, and the world hook `0x492b50` runs
-    /// only in freelook, so the world click `0x495300` never runs.
+    /// release: `0x766420` dispatches to the capture alone, and the world hook `0x492b50` sends
+    /// a release to the world frame only in freelook, so the world click `0x495300` never runs.
     #[test]
     fn a_press_whose_frame_hid_is_not_a_world_drop() {
         let mut s = drag_script();
@@ -661,7 +691,7 @@ mod tests {
             r#"
             WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()
             heard = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:SetScript("OnMouseDown", function() A:Hide() end)
             local f = CreateFrame("Frame", "Listener")
@@ -700,7 +730,7 @@ mod tests {
         s.run(
             r#"
             heard = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             local f = CreateFrame("Frame", "Listener")
@@ -738,7 +768,7 @@ mod tests {
         s.run(
             r#"
             stops = 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 100, 100); a:SetWidth(200); a:SetHeight(100)
             a:EnableMouse(true); a:SetMovable(true)
             a:RegisterForDrag("LeftButton")
@@ -786,7 +816,7 @@ mod tests {
         s.run(
             r#"
             stops, starts, ups = 0, 0, 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 100, 100); a:SetWidth(200); a:SetHeight(100)
             a:EnableMouse(true); a:SetMovable(true)
             a:RegisterForDrag("LeftButton")
@@ -843,7 +873,7 @@ mod tests {
             r#"
             log = {}
             local function note(name) return function() table.insert(log, name) end end
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton", "RightButton")
             a:SetScript("OnMouseDown", note("down"))
@@ -917,7 +947,7 @@ mod tests {
         s.run(
             r#"
             names = {}
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton", "RightButton")
             a:SetScript("OnDragStart", function() table.insert(names, arg1) end)
@@ -948,11 +978,11 @@ mod tests {
         s.run(
             r#"
             stops, receives = 0, 0
-            local a = CreateFrame("Frame", "A")
+            local a = CreateFrame("Button", "A")
             a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnDragStop", function() stops = stops + 1 end)
-            local b = CreateFrame("Frame", "B")
+            local b = CreateFrame("Button", "B")
             b:SetPoint("BOTTOMLEFT", 400, 0); b:SetWidth(400); b:SetHeight(600); b:EnableMouse(true)
             b:SetScript("OnReceiveDrag", function() receives = receives + 1 end)
             "#,

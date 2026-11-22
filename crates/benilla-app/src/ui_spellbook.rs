@@ -1,5 +1,7 @@
-//! The spellbook feed: builds the book from the known spells and the `SpellCatalog` ×
-//! `SkillLineCatalog` join, behind the stock `SpellBookFrame.xml`. A known spell is booked when
+//! The spellbook behind the stock `SpellBookFrame.xml`: the book's order from the known spells and
+//! the `SpellCatalog` × `SkillLineCatalog` join ([`book_order`]), which the getters read through
+//! the call host as it stands ([`live`]), and the signals of the handlers that change it
+//! ([`BookSignals`]). A known spell is booked when
 //! [`SpellDisplay::in_spellbook`](benilla_formats::SpellDisplay::in_spellbook) passes (`0x4b25b0`).
 //!
 //! A spell's tab (`0x4b24f0`) is its skill line, or General (key 0) when the
@@ -16,15 +18,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::prelude::*;
 
 use benilla_formats::{SkillLineCatalog, SpellCatalog};
-use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabView, UiScript};
+use benilla_ui::script::{SpellSlotView, SpellTabName, SpellTabView};
 
-use crate::entities::ItemDisplays;
-use crate::items::Items;
-use crate::net::NetCommands;
-use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
-use crate::ui_script::gate;
-use crate::ui_unit::UnitFeed;
+use crate::field_watch::{FieldNotice, NoticeLane};
+use crate::ui_action::Spells;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+
+mod live;
+pub(crate) use live::BookLive;
 
 /// `SkillLine.dbc` × `SkillLineAbility.dbc`; absent when the data failed to load.
 #[derive(Resource)]
@@ -39,27 +40,11 @@ const NO_LINE: u32 = 0;
 /// Hardcoded in the reference (`0x8468f0`), extensionless for the loader; key 0 has no DBC row.
 const GENERAL_TAB_ICON: &str = "Interface\\Icons\\Ability_Kick";
 
-/// Spells learned mid-session, queued for `LEARNED_SPELL_IN_TAB` (event 510). Filled by the learn
-/// and rank-up arms (`crate::spell::net`), never the `SMSG_INITIAL_SPELLS` load, which the
-/// reference passes with `0x4b25b0`'s live-mutation flag clear. A queue because the event follows
-/// the tab re-sort and `SPELLS_CHANGED` (`0x4b2b5a` before `0x4b2b92`).
-#[derive(Resource, Default)]
-pub(crate) struct LearnedInTab(pub(crate) Vec<u32>);
-
 pub(crate) struct UiSpellbookPlugin;
 
 impl Plugin for UiSpellbookPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LearnedInTab>()
-            .add_systems(Startup, load_skill_lines.after(AssetSet::Open))
-            .add_systems(
-                Update,
-                // The feed precedes `CooldownEvents`, whose `SPELL_UPDATE_COOLDOWN` makes the book
-                // re-read its cooldowns. A click's cast is a script call (`cast_spell`).
-                feed_spellbook
-                    .in_set(UnitFeed)
-                    .before(crate::ui_action::CooldownEvents),
-            );
+        app.add_systems(Startup, load_skill_lines.after(AssetSet::Open));
     }
 }
 
@@ -84,228 +69,160 @@ fn load_skill_lines(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     }
 }
 
-/// The feed's memory of what it last pushed, for the `SPELLS_CHANGED` diff.
-#[derive(Default)]
-struct FeedMemory {
-    pushed: SpellBookState,
-    /// Counter watches for stores whose lazy resolves defeat `is_changed` (template asks, the
-    /// cooldown prune), and for the self store's presence: a despawn flips the weapon icons unseen.
-    items_templates: gate::Watch,
-    cooldown_epoch: gate::Watch,
-    self_present: gate::Watch,
+/// The signals of the handlers that change the book, at the handler, on the notice lane: the
+/// reference's add and removal signal inside the handler that learns or unlearns (`0x4b2b5a`,
+/// `0x4b2f3f`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BookSignals<'w, 's> {
+    lane: ResMut<'w, NoticeLane>,
+    // The learn's line, shown between the form list's edge and the book's signals.
+    errors: Res<'w, crate::ui_action::UiErrorKeys>,
+    skill_lines: Option<Res<'w, SkillLines>>,
+    me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 }
 
-fn feed_spellbook(
-    script: Option<NonSendMut<UiScript>>,
-    actions: Res<PlayerActions>,
-    spells: Option<Res<Spells>>,
-    skill_lines: Option<Res<SkillLines>>,
-    mut inv: crate::items::Inventory,
-    items: Res<Items>,
-    icons: Option<Res<ItemDisplays>>,
-    commands: Res<NetCommands>,
-    cooldowns: Res<crate::spell::Cooldowns>,
-    clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
-    mut learned: ResMut<LearnedInTab>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let (memory, vm_reset) = memory.get_reset(&script);
-    // The book depends on these inputs alone. `UiClock` is not one: `ui_triple` is frame-stable
-    // per arm, and expiry moves the store's `feed_epoch`.
-    let objects_moved = inv.changes.moved();
-    let templates_moved = memory.items_templates.moved(items.template_epoch());
-    let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
-    let presence_moved = memory
-        .self_present
-        .moved(u64::from(!inv.self_store.is_empty()));
-    // The frame a timer crosses zero, before the prune moves the epoch.
-    let sweep = cooldowns.sweep_pending(clock.anchor);
-    let self_changed = !inv.self_changed.is_empty();
-    let actions_changed = actions.is_changed();
-    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
-    let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
-    // `is_added`: only the load-once icon column is read; the model cache churns every frame.
-    let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
-    gate::trace(
-        "feed_spellbook",
-        &[
-            ("vm_reset", vm_reset),
-            ("objects", objects_moved),
-            ("templates", templates_moved),
-            ("cooldowns", cooldowns_moved),
-            ("sweep", sweep),
-            ("presence", presence_moved),
-            ("self", self_changed),
-            ("actions", actions_changed),
-            ("spells", spells_changed),
-            ("skill_lines", lines_changed),
-            ("icons", icons_added),
-            // A queued learn never waits behind a skipped frame.
-            ("learned", !learned.0.is_empty()),
-        ],
-    );
-    let gate = gate::Gate::new(
-        vm_reset
-            || objects_moved
-            || templates_moved
-            || cooldowns_moved
-            || sweep
-            || presence_moved
-            || self_changed
-            || actions_changed
-            || spells_changed
-            || lines_changed
-            || icons_added
-            || !learned.0.is_empty(),
-    );
-    if gate.skip() {
-        return;
+/// What a learn's spell replaces, for the registrar's form-list leg (`0x4b2849`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Learned {
+    /// `SMSG_LEARNED_SPELL`.
+    Fresh,
+    /// `SMSG_SUPERCEDED_SPELL`'s new rank, over `old`.
+    Rank { old: u32 },
+}
+
+impl BookSignals<'_, '_> {
+    /// The lane the book's signals go on, which the bar's legs of the same packet share
+    /// ([`crate::ui_action::SpellSlots`]), so the two keep the handler's order.
+    pub(crate) fn lane(&mut self) -> &mut NoticeLane {
+        &mut self.lane
     }
-    // Drained before a later return can strand it; an unresolved id fires nothing, as in 1.12.
-    let learned = std::mem::take(&mut learned.0);
-    let Some(spells) = spells.as_deref() else {
-        return;
-    };
-    // Race and class drive the General collapse; 0/0 before the descriptor skips it.
-    let store = inv.self_store.single().ok();
-    let (race, class) = store
-        .map(|s| (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0)))
-        .unwrap_or((0, 0));
-    // The melee auto-attack shows the main-hand weapon, or Spell-Reset unarmed, not its `Temp`.
-    let attack_icon = store.map(|s| {
-        melee_auto_attack_icon(
-            s,
-            &spells.forms,
-            &inv.objects,
-            &items,
-            icons.as_deref(),
-            &commands,
-        )
-    });
-    // Auto Shot and wand Shoot show the ranged weapon; without one, their own icon.
-    let ranged_icon = store
-        .and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref(), &commands));
-    let (mut fresh, tab_lines) = build_book(
-        &actions.spells,
-        &spells.catalog,
-        skill_lines.as_deref().map(|s| &s.catalog),
-        race,
-        class,
-        attack_icon,
-        ranged_icon,
-    );
-    // The face the action bar paints for a weapon-face or `ActiveIconID` spell, where it is not
-    // the book's: a drop writes it, so the slot's in-place event reads what the bar feed would.
-    for slot in &mut fresh.slots {
-        let Some(d) = spells
-            .catalog
-            .get(slot.spell_id)
-            .filter(|d| crate::ui_action::substitutes_weapon_icon(d) || d.active_icon_id != 0)
-        else {
-            continue;
+
+    /// `0x4b25b0`'s tail for `spell_id`, now among `actions`' known spells. First its language
+    /// leg's `LANGUAGE_LIST_CHANGED` for a spell whose first effect is `SPELL_EFFECT_LANGUAGE`
+    /// (`0x4b2641`-`0x4b2659`, live or not), then the form list's leg on the stored list
+    /// ([`crate::ui_shapeshift::form_learned`]) and its edge, `UPDATE_SHAPESHIFT_FORMS`
+    /// (`0x4b2904`), when it moved. Then the book's: the sort's `SPELLS_CHANGED` (`0x4b2b5a`),
+    /// `LEARNED_SPELL_IN_TAB` with its tab's 1-based place in the order it left (`0x4b2b92`), then
+    /// The Spellbook's tutorial (`0x4b2ba1`), none of them for a spell the gates keep out of the
+    /// book (`0x4b2911`, `0x4b2944`, `0x4b29c4`). The learn's `line` shows between the form edge
+    /// and the book's (`0x4b2936`, `0x4b29b7`). With no player held a fresh learn joins the
+    /// initial list, which the arrival learns (`0x5e61fb` → `0x5e621e`), and signals nothing; a
+    /// rank-up still shows its line.
+    pub(crate) fn entered(
+        &mut self,
+        spell_id: u32,
+        how: Learned,
+        actions: &mut crate::ui_action::PlayerActions,
+        spells: Option<&Spells>,
+        line: Option<crate::ui_action::UiError>,
+    ) {
+        let Ok(store) = self.me.single() else {
+            match how {
+                Learned::Fresh => actions.initial.push(spell_id),
+                // A rank-up reaches the registrar ahead of its player test (`0x5e6363` →
+                // `0x4b2f68`, then `0x5e6385`), whose line reads no player (`0x4b29b7`).
+                Learned::Rank { .. } => {
+                    if let Some(line) = line {
+                        self.errors.push(line);
+                    }
+                }
+            }
+            return;
         };
-        let face = crate::ui_action::spell_action_icon(
-            slot.spell_id,
-            d,
-            spells,
-            store,
-            &inv.objects,
-            &items,
-            icons.as_deref(),
-            &commands,
-        );
-        if face != slot.texture {
-            slot.bar_texture = Some(face);
-        }
-    }
-    // The book's `IsCurrentCast` is `0x4b3600`, not the action bar's `0x4e53a0`, with two arms: a
-    // form spell is current while the form byte is its form, and the open trade-skill window, not
-    // built. It has no casting-now arm, so a book slot never lights during a cast.
-    let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
-    if form_byte != 0 {
-        for slot in &mut fresh.slots {
-            slot.current = spells
-                .catalog
-                .get(slot.spell_id)
-                .is_some_and(|d| d.shapeshift_form == Some(u32::from(form_byte)));
-        }
-    }
-    // Each slot's cooldown (`GetCooldownInfo` `0x6e13e0`: id, category and GCD alike) on the
-    // `GetTime` clock, frame-stable per arm, so a running cooldown never churns the diff.
-    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
-    for slot in &mut fresh.slots {
-        slot.cooldown = cooldowns
-            .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), anchor)
-            .ui_triple(anchor, ui_now);
-    }
-    if fresh != memory.pushed {
-        gate.audit("feed_spellbook", "the spellbook snapshot");
-        // A checked-ring move fires `CURRENT_SPELL_CAST_CHANGED`, a book change `SPELLS_CHANGED`.
-        let ring_moved = fresh.slots.len() != memory.pushed.slots.len()
-            || fresh
-                .slots
-                .iter()
-                .zip(&memory.pushed.slots)
-                .any(|(a, b)| a.current != b.current);
-        let book_changed = fresh.tabs != memory.pushed.tabs
-            || fresh.slots.len() != memory.pushed.slots.len()
-            || fresh.slots.iter().zip(&memory.pushed.slots).any(|(a, b)| {
-                (a.spell_id, &a.name, &a.rank, &a.texture, a.passive)
-                    != (b.spell_id, &b.name, &b.rank, &b.texture, b.passive)
+        let Some(spells) = spells else {
+            return;
+        };
+        if spells.catalog.get(spell_id).is_some_and(teaches_language) {
+            self.lane.write(FieldNotice::Global {
+                id: crate::field_watch::id::LANGUAGE_LIST_CHANGED,
             });
-        debug!(
-            "ui_spellbook: fed {} tab(s), {} spell(s) (book {book_changed}, ring {ring_moved})",
-            fresh.tabs.len(),
-            fresh.slots.len()
-        );
-        script.set_spellbook(fresh.clone());
-        memory.pushed = fresh;
-        if book_changed {
-            script.fire_event("SPELLS_CHANGED", vec![]);
         }
-        if ring_moved {
-            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
-        }
-    }
-    // The tab flash after `SPELLS_CHANGED` (`0x4b2b5a` before `0x4b2b92`), outside the diff: the
-    // reference fires on the packet, so a re-learn that changes nothing still flashes.
-    fire_tab_flashes(
-        &mut script,
-        &learned,
-        &tab_lines,
-        spells,
-        skill_lines.as_deref().map(|s| &s.catalog),
-        race,
-        class,
-    );
-}
-
-/// Fire `LEARNED_SPELL_IN_TAB` with the 1-based index of each learned spell's tab in the strip
-/// `build_book` just published (`0x4b2b86 inc edi`), which `SpellBookFrame.lua:81` flashes. The
-/// reference's three early returns (`0x4b2911`, `0x4b2944`, `0x4b29c4`) are `in_spellbook`.
-fn fire_tab_flashes(
-    script: &mut UiScript,
-    learned: &[u32],
-    tab_lines: &[u32],
-    spells: &Spells,
-    skill_lines: Option<&SkillLineCatalog>,
-    race: u8,
-    class: u8,
-) {
-    for &spell_id in learned {
-        let Some(index) = tab_flash_index(spell_id, tab_lines, spells, skill_lines, race, class)
-        else {
-            continue;
+        let replaces = match how {
+            Learned::Fresh => None,
+            Learned::Rank { old } => Some(old),
         };
-        debug!("ui_spellbook: spell {spell_id} landed in tab {index} — flash");
-        script.fire_event("LEARNED_SPELL_IN_TAB", vec![ScriptValue::Int(index)]);
+        if let Some(edits) = actions.form_edits.as_mut() {
+            edits.push(crate::ui_shapeshift::FormEdit::Learned { spell_id, replaces });
+        }
+        if crate::ui_shapeshift::form_learned(
+            &mut actions.forms,
+            spell_id,
+            replaces,
+            &spells.catalog,
+        ) {
+            self.lane.write(FieldNotice::Global {
+                id: crate::field_watch::id::UPDATE_SHAPESHIFT_FORMS,
+            });
+        }
+        if let Some(line) = line {
+            self.errors.push(line);
+        }
+        let (race, class) = (
+            store.0.unit_race().unwrap_or(0),
+            store.0.unit_class().unwrap_or(0),
+        );
+        let lines = self.skill_lines.as_deref().map(|l| &l.catalog);
+        let order = book_order(&actions.spells, &spells.catalog, lines, race, class);
+        let Some(tab) = tab_flash_index(spell_id, &order.tab_lines, spells, lines, race, class)
+        else {
+            return;
+        };
+        debug!("ui_spellbook: spell {spell_id} landed in tab {tab} — flash");
+        self.lane.write_batch([
+            FieldNotice::Global {
+                id: crate::field_watch::id::SPELLS_CHANGED,
+            },
+            FieldNotice::LearnedInTab { tab },
+            FieldNotice::Tutorial {
+                id: crate::tutorial::id::SPELLBOOK,
+            },
+        ]);
+    }
+
+    /// `0x4b2c50`'s tail for `spell_id`, which `was_known` says the known spells held, with a
+    /// player held. An unlearn (`unlists` true; a rank-up's removal passes 1, `0x4b2db7`) first
+    /// takes the spell off the stored form list where it holds it and signals
+    /// `UPDATE_SHAPESHIFT_FORMS` ([`crate::ui_shapeshift::form_unlearned`]); then the sort's
+    /// `SPELLS_CHANGED` (`0x4b2f3f`) when it was in the book (`0x4b2f2f`).
+    pub(crate) fn left(
+        &mut self,
+        spell_id: u32,
+        was_known: bool,
+        unlists: bool,
+        actions: &mut crate::ui_action::PlayerActions,
+        spells: Option<&Spells>,
+    ) {
+        let d = spells.and_then(|s| s.catalog.get(spell_id));
+        if !was_known || self.me.is_empty() {
+            return;
+        }
+        if unlists {
+            if let Some(edits) = actions.form_edits.as_mut() {
+                edits.push(crate::ui_shapeshift::FormEdit::Unlearned { spell_id });
+            }
+        }
+        if unlists && crate::ui_shapeshift::form_unlearned(&mut actions.forms, spell_id) {
+            self.lane.write(FieldNotice::Global {
+                id: crate::field_watch::id::UPDATE_SHAPESHIFT_FORMS,
+            });
+        }
+        if d.is_some_and(|d| d.in_spellbook()) {
+            self.lane.write(FieldNotice::Global {
+                id: crate::field_watch::id::SPELLS_CHANGED,
+            });
+        }
     }
 }
 
-/// The 1-based index of `spell_id`'s tab in `tab_lines`; `None` for an unbooked spell.
+/// Whether a spell's first effect is `SPELL_EFFECT_LANGUAGE`, the registrar's test for its
+/// language leg (`0x4b2641`, `[rec+0xf4]`).
+pub(crate) fn teaches_language(d: &benilla_formats::SpellDisplay) -> bool {
+    d.effects[0] == benilla_formats::SPELL_EFFECT_LANGUAGE
+}
+
+/// The 1-based index of `spell_id`'s tab in `tab_lines` (`0x4b2b86 inc edi`), which
+/// `SpellBookFrame.lua:81` flashes; `None` for an unbooked spell, the reference's three early
+/// returns (`0x4b2911`, `0x4b2944`, `0x4b29c4`).
 fn tab_flash_index(
     spell_id: u32,
     tab_lines: &[u32],
@@ -326,17 +243,24 @@ fn tab_flash_index(
     Some(index as i64 + 1)
 }
 
-/// Build the book, and the skill-line id behind each published tab in order, for
-/// [`LearnedInTab`]'s index: one tab ordering, never recomputed.
-fn build_book(
+/// The book's order: the tabs in `0x4b3040`'s order with the skill line behind each, and the
+/// booked spells by slot in `0x4b30c0`'s.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct BookOrder {
+    pub(crate) tabs: Vec<SpellTabView>,
+    pub(crate) tab_lines: Vec<u32>,
+    pub(crate) slots: Vec<u32>,
+}
+
+/// The book `known` makes for `race` and `class`: one tab ordering, which the slots' offsets and
+/// a learn's tab index both read.
+pub(crate) fn book_order(
     known: &BTreeSet<u32>,
     catalog: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
     race: u8,
     class: u8,
-    attack_icon: Option<String>,
-    ranged_icon: Option<String>,
-) -> (SpellBookState, Vec<u32>) {
+) -> BookOrder {
     let mut by_line: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for &spell_id in known {
         // The add-gate (module doc); a spell missing from `Spell.dbc` is dropped too.
@@ -350,100 +274,180 @@ fn build_book(
         by_line.entry(tab).or_default().push(spell_id);
     }
 
-    // General first with its fixed name and icon, then by `SkillLine.dbc` name; an unresolved
-    // line reads "General" with no icon.
-    let mut lines: Vec<(u32, String, Option<String>, Vec<u32>)> = by_line
+    // General first with its fixed icon, named by `GENERAL` when `GetSpellTabInfo` asks, then by
+    // `SkillLine.dbc` name; an unresolved line answers no name and no icon (`0x4b3dbd`) and sorts
+    // where a line named "General" would.
+    let mut lines: Vec<(u32, SpellTabName, Option<String>, Vec<u32>)> = by_line
         .into_iter()
         .map(|(line_id, spell_ids)| {
             let (name, texture) = if line_id == NO_LINE {
-                ("General".to_string(), Some(GENERAL_TAB_ICON.to_string()))
+                (SpellTabName::General, Some(GENERAL_TAB_ICON.to_string()))
             } else {
                 match skill_lines.and_then(|c| c.line(line_id)) {
-                    Some(info) => (info.name.clone(), info.icon.clone()),
-                    None => ("General".to_string(), None),
+                    Some(info) => (SpellTabName::Line(info.name.clone()), info.icon.clone()),
+                    None => (SpellTabName::Missing, None),
                 }
             };
             (line_id, name, texture, spell_ids)
         })
         .collect();
-    lines.sort_by(|a, b| (a.0 != NO_LINE).cmp(&(b.0 != NO_LINE)).then(a.1.cmp(&b.1)));
+    let sort_name = |n: &SpellTabName| match n {
+        SpellTabName::Line(name) => name.clone(),
+        SpellTabName::General | SpellTabName::Missing => "General".to_string(),
+    };
+    lines.sort_by(|a, b| {
+        (a.0 != NO_LINE)
+            .cmp(&(b.0 != NO_LINE))
+            .then(sort_name(&a.1).cmp(&sort_name(&b.1)))
+    });
 
-    let mut tabs = Vec::with_capacity(lines.len());
-    let mut tab_lines = Vec::with_capacity(lines.len());
-    let mut slots = Vec::new();
+    let mut order = BookOrder::default();
     for (line_id, name, texture, mut spell_ids) in lines {
-        tab_lines.push(line_id);
-        spell_ids.sort_by_key(|&a| spell_sort_key(catalog, a));
-        let offset = slots.len() as u32;
-        let num_spells = spell_ids.len() as u32;
-        for spell_id in spell_ids {
-            let d = catalog.get(spell_id);
-            // Keyed on the effect type, as the action bar's substitution is.
-            let texture = if d.is_some_and(|d| d.is_melee_auto_attack()) {
-                attack_icon
-                    .clone()
-                    .or_else(|| d.and_then(|d| d.icon.clone()))
-            } else if d.is_some_and(|d| d.ranged_icon_substitution()) {
-                // Without a ranged weapon, or with a thrown one, the spell's own (`0x4e6990`).
-                ranged_icon
-                    .clone()
-                    .or_else(|| d.and_then(|d| d.icon.clone()))
-            } else {
-                d.and_then(|d| d.icon.clone())
-            };
-            slots.push(SpellSlotView {
-                spell_id,
-                name: d.map(|d| d.name.clone()).unwrap_or_default(),
-                rank: d.and_then(|d| d.rank.clone()),
-                texture,
-                passive: d.is_some_and(|d| d.passive),
-                // Stamped by the feed after the build, from live state.
-                current: false,
-                cooldown: None,
-                // `GetSpellAutocast` answers (nil, nil) for the player book, and a known spell has
-                // no packed word.
-                autocast: None,
-                packed: 0,
-                // Stamped by the feed after the build, from live state.
-                bar_texture: None,
-            });
-        }
-        tabs.push(SpellTabView {
+        order.tab_lines.push(line_id);
+        sort_book(&mut spell_ids, |&a| spell_sort_key(catalog, a));
+        order.tabs.push(SpellTabView {
             name,
             texture,
-            offset,
-            num_spells,
+            offset: order.slots.len() as u32,
+            num_spells: spell_ids.len() as u32,
         });
+        order.slots.extend(spell_ids);
     }
-    (SpellBookState { tabs, slots }, tab_lines)
+    order
 }
 
-/// `0x4b30c0`'s tail: name, then the parsed rank number, then the rank string. The rank is the
-/// first digit run of `NameSubtext` (`0x4b3c30`), so any localized prefix parses.
-fn spell_sort_key(catalog: &SpellCatalog, spell_id: u32) -> (String, u32, String) {
+/// One booked spell's slot off its record: its name, rank and passivity, and its icon, which
+/// the melee auto-attack takes from `attack_icon` and a ranged shot from `ranged_icon` where
+/// they give one (`0x4b3f8a`, `0x4b3f99`), else the spell's own (`0x4b3fae`). The checked ring,
+/// the bar's face and the cooldown are the caller's.
+fn slot_view(
+    spell_id: u32,
+    catalog: &SpellCatalog,
+    attack_icon: impl FnOnce() -> Option<String>,
+    ranged_icon: impl FnOnce() -> Option<String>,
+) -> SpellSlotView {
+    let d = catalog.get(spell_id);
+    // Keyed on the effect type, as the action bar's substitution is.
+    let texture = if d.is_some_and(|d| d.is_melee_auto_attack()) {
+        attack_icon().or_else(|| d.and_then(|d| d.icon.clone()))
+    } else if d.is_some_and(|d| d.ranged_icon_substitution()) {
+        // Without a ranged weapon, or with a thrown one, the spell's own (`0x4e6990`).
+        ranged_icon().or_else(|| d.and_then(|d| d.icon.clone()))
+    } else {
+        d.and_then(|d| d.icon.clone())
+    };
+    SpellSlotView {
+        spell_id,
+        name: d.map(|d| d.name.clone()).unwrap_or_default(),
+        rank: d.and_then(|d| d.rank.clone()),
+        texture,
+        passive: d.is_some_and(|d| d.passive),
+        current: false,
+        cooldown: None,
+        // `GetSpellAutocast` answers (nil, nil) for the player book, and a known spell has no
+        // packed word.
+        autocast: None,
+        packed: 0,
+        bar_texture: None,
+    }
+}
+
+/// The book with fixed weapon icons, for the tests of the order and the icons.
+#[cfg(test)]
+fn build_book(
+    known: &BTreeSet<u32>,
+    catalog: &SpellCatalog,
+    skill_lines: Option<&SkillLineCatalog>,
+    race: u8,
+    class: u8,
+    attack_icon: Option<String>,
+    ranged_icon: Option<String>,
+) -> (benilla_ui::script::SpellBookState, Vec<u32>) {
+    let order = book_order(known, catalog, skill_lines, race, class);
+    let slots = order
+        .slots
+        .iter()
+        .map(|&id| slot_view(id, catalog, || attack_icon.clone(), || ranged_icon.clone()))
+        .collect();
+    (
+        benilla_ui::script::SpellBookState {
+            tabs: order.tabs,
+            slots,
+        },
+        order.tab_lines,
+    )
+}
+
+/// One booked spell's place in the comparator `0x4b30c0` sorts a book with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BookKey {
+    name: String,
+    /// `ParseSpellRank`'s answer ([`parse_spell_rank`]).
+    number: u32,
+    rank: String,
+}
+
+/// The key of the spell `spell_id`: [`spell_sort_key_of`] over its record.
+fn spell_sort_key(catalog: &SpellCatalog, spell_id: u32) -> BookKey {
     let d = catalog.get(spell_id);
     spell_sort_key_of(
         d.map(|d| d.name.as_str()).unwrap_or_default(),
         d.and_then(|d| d.rank.as_deref()),
+        d.map_or(0, |d| d.spell_level),
     )
 }
 
-/// [`spell_sort_key`] over a resolved `(name, rank)`, shared with the pet book: `0x4b2fd0` sorts
-/// both books with `0x4b30c0`.
-pub(crate) fn spell_sort_key_of(name: &str, rank: Option<&str>) -> (String, u32, String) {
-    let rank_str = rank.unwrap_or_default().to_string();
-    (name.to_string(), leading_number(&rank_str), rank_str)
+/// [`spell_sort_key`] over a resolved `(name, rank, spell level)`, shared with the pet book:
+/// `0x4b2fd0` sorts both books with `0x4b30c0`.
+pub(crate) fn spell_sort_key_of(name: &str, rank: Option<&str>, spell_level: u32) -> BookKey {
+    let rank = rank.unwrap_or_default();
+    BookKey {
+        name: name.to_string(),
+        number: parse_spell_rank(rank, spell_level),
+        rank: rank.to_string(),
+    }
 }
 
-/// The first ASCII digit run as a number, else 0: the reference's rank parse (`0x4b3c30`).
-fn leading_number(s: &str) -> u32 {
-    s.chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .fold(None::<u32>, |acc, c| {
-            Some(acc.unwrap_or(0) * 10 + c.to_digit(10).unwrap())
-        })
-        .unwrap_or(0)
+/// `ParseSpellRank` (`0x4b3c30`): the rank string's digits accumulate (`0x4b3c60`-`0x4b3c78`),
+/// zeros and non-digits before the first nonzero one are skipped, and the number is returned at the
+/// first non-digit after it (`0x4b3c7e`-`0x4b3c80`) or the string's end; 0 returns the spell's
+/// level (`record+0x74`, `0x4b3c94`).
+fn parse_spell_rank(rank: &str, spell_level: u32) -> u32 {
+    let mut number = 0u32;
+    for byte in rank.bytes() {
+        if byte.is_ascii_digit() {
+            number = number.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+        } else if number != 0 {
+            return number;
+        }
+    }
+    if number != 0 {
+        number
+    } else {
+        spell_level
+    }
+}
+
+/// `0x4b30c0` past its skill-line test: the names (`0x4b3143`), then the two parsed numbers where
+/// both are nonzero (`0x4b315c`-`0x4b3164`), which equal compare equal, else the rank strings
+/// (`0x4b3193`).
+pub(crate) fn book_cmp(a: &BookKey, b: &BookKey) -> std::cmp::Ordering {
+    a.name.cmp(&b.name).then_with(|| {
+        if a.number != 0 && b.number != 0 {
+            a.number.cmp(&b.number)
+        } else {
+            a.rank.cmp(&b.rank)
+        }
+    })
+}
+
+/// `items` in [`book_cmp`] order, by the CRT `qsort` the book sort runs (`0x4b2fd0` →
+/// `0x73f727`): the comparator is no total order where one spell parses to 0 (a rank and a level
+/// both 0), so where such spells land is the quicksort's.
+pub(crate) fn sort_book<T>(items: &mut Vec<T>, key: impl Fn(&T) -> BookKey) {
+    let mut keyed: Vec<(BookKey, T)> = items.drain(..).map(|t| (key(&t), t)).collect();
+    benilla_ui::crt::qsort(&mut keyed, |a, b| book_cmp(&a.0, &b.0) as i32);
+    items.extend(keyed.into_iter().map(|(_, t)| t));
 }
 
 /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)` (`0x4b3300`'s player leg),
@@ -451,36 +455,49 @@ fn leading_number(s: &str) -> u32 {
 /// with `onSelf` at the caster.
 pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_self: bool) {
     let crate::spell::ScriptCast { targeting, ladder } = cast;
-    // `CastSpell`'s two cancel forks (`0x4b3300`), in order: the active-action toggle
-    // (`0x4b36f0`), then the form match (`0x4b348b`), which `UseAction` lacks, with its silent
-    // no-op (`0x4b35cf`).
-    if let (Some(sp), Some(store)) = (ladder.spells.as_ref(), targeting.self_store.iter().next()) {
-        if let Some(d) = sp.catalog.get(spell_id) {
-            if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
-                debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
+    // `CastSpell`'s three forks ahead of the cast (`0x4b3300`), in order, all ahead of the gate:
+    // the active-action toggle (`0x4b36f0`), the stop of the targeting cursor this spell armed
+    // (`0x4b3474`-`0x4b347d`), then the form match (`0x4b348b`), which `UseAction` lacks, with its
+    // silent no-op (`0x4b35cf`).
+    let catalog_row = ladder
+        .spells
+        .as_ref()
+        .and_then(|sp| Some((sp, targeting.self_store.iter().next()?)))
+        .and_then(|(sp, store)| Some((sp, store, sp.catalog.get(spell_id)?)));
+    if let Some((_, store, d)) = catalog_row {
+        if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
+            debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
+            let _ = ladder
+                .commands
+                .0
+                .send(crate::net::ClientCommand::CancelAura { spell_id });
+            return;
+        }
+    }
+    // `GetTargetingSpellId 0x6e48e0` is this spell: the press toggles the cursor off and casts
+    // nothing. Any other spell's cursor is aborted by the cast itself (`TryCast`, `0x6e4d62`).
+    if ladder.ground.spell() == Some(spell_id) {
+        debug!("ui_spellbook: cast {spell_id} re-pressed — targeting toggles off");
+        ladder.stop_targeting();
+        return;
+    }
+    if let Some((sp, store, d)) = catalog_row {
+        let form = store.0.unit_shapeshift_form();
+        let row = sp.forms.get(&u32::from(form));
+        match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
+            Some(true) => {
+                debug!("ui_spellbook: cast {spell_id} — the active form cancels");
                 let _ = ladder
                     .commands
                     .0
                     .send(crate::net::ClientCommand::CancelAura { spell_id });
                 return;
             }
-            let form = store.0.unit_shapeshift_form();
-            let row = sp.forms.get(&u32::from(form));
-            match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
-                Some(true) => {
-                    debug!("ui_spellbook: cast {spell_id} — the active form cancels");
-                    let _ = ladder
-                        .commands
-                        .0
-                        .send(crate::net::ClientCommand::CancelAura { spell_id });
-                    return;
-                }
-                Some(false) => {
-                    debug!("ui_spellbook: cast {spell_id} — non-cancelable form, silent no-op");
-                    return;
-                }
-                None => {}
+            Some(false) => {
+                debug!("ui_spellbook: cast {spell_id} — non-cancelable form, silent no-op");
+                return;
             }
+            None => {}
         }
     }
     debug!(
@@ -495,16 +512,55 @@ pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_
 mod tests {
     use super::*;
     use benilla_formats::SpellDisplay;
+    use benilla_ui::script::SpellBookState;
     use std::collections::HashMap;
 
+    /// `ParseSpellRank` (`0x4b3c30`): zeros are digits that add nothing and a non-digit ends the
+    /// number only once it is nonzero; a rank that parses to 0 takes the spell's level.
     #[test]
-    fn leading_number_scans_the_first_digit_run() {
-        assert_eq!(leading_number("Rank 1"), 1);
-        assert_eq!(leading_number("Rank 10"), 10);
-        assert_eq!(leading_number("Rank 2"), 2);
-        assert_eq!(leading_number(""), 0);
-        assert_eq!(leading_number("Racial"), 0); // digit-less: the reference uses SpellLevel
-        assert_eq!(leading_number("Apprentice"), 0);
+    fn parse_spell_rank_skips_zeros_and_falls_back_to_the_level() {
+        assert_eq!(parse_spell_rank("Rank 1", 9), 1);
+        assert_eq!(parse_spell_rank("Rank 10", 9), 10);
+        assert_eq!(parse_spell_rank("Rank 05", 9), 5);
+        assert_eq!(parse_spell_rank("Rank 0, 3", 9), 3, "past a zero run");
+        assert_eq!(
+            parse_spell_rank("1a2", 9),
+            1,
+            "the first nonzero run ends at a non-digit"
+        );
+        assert_eq!(parse_spell_rank("", 9), 9);
+        assert_eq!(parse_spell_rank("Apprentice", 9), 9);
+        assert_eq!(parse_spell_rank("Rank 0", 9), 9);
+    }
+
+    /// `0x4b30c0` compares the numbers only where both are nonzero, else the rank strings.
+    #[test]
+    fn same_name_spells_sort_by_level_where_the_rank_has_no_number() {
+        let key = |rank: &str, level| spell_sort_key_of("Summon", Some(rank), level);
+        let (apprentice, journeyman) = (key("Apprentice", 5), key("Journeyman", 3));
+        assert!(
+            book_cmp(&journeyman, &apprentice).is_lt(),
+            "by level, not by string"
+        );
+        // Equal numbers are equal, whatever the strings.
+        assert!(book_cmp(&key("Rank 2", 0), &key("Rang 2", 0)).is_eq());
+        // A zero on either side compares the strings.
+        assert!(book_cmp(&key("Apprentice", 0), &key("Journeyman", 9)).is_lt());
+        assert!(book_cmp(&key("Rank 2", 0), &key("Rank 10", 0)).is_lt());
+
+        let mut map = HashMap::new();
+        for (id, rank, level) in [(1, "Apprentice", 5), (2, "Journeyman", 3), (3, "Expert", 8)] {
+            let mut d = spell("Summon", Some(rank), 0);
+            d.spell_level = level;
+            map.insert(id, d);
+        }
+        let catalog = SpellCatalog::from_displays(map);
+        let known: BTreeSet<u32> = [1, 2, 3].into_iter().collect();
+        let book = build_book(&known, &catalog, None, 1, 1, None, None).0;
+        assert_eq!(
+            book.slots.iter().map(|s| s.spell_id).collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
     }
 
     /// A minimal `SpellDisplay`: `attributes` drives the gate, `rank` the sort.
@@ -531,7 +587,6 @@ mod tests {
         let catalog = SpellCatalog::from_displays(map);
         let known: BTreeSet<u32> = [133, 668, 818, 1234].into_iter().collect();
         let (book, tab_lines) = build_book(&known, &catalog, None, 1, 1, None, None);
-
         assert_eq!(
             tab_lines.len(),
             book.tabs.len(),
@@ -585,7 +640,7 @@ mod tests {
         let book = build_book(&known, &catalog, None, 1, 1, None, None).0;
 
         assert_eq!(book.tabs.len(), 1);
-        assert_eq!(book.tabs[0].name, "General");
+        assert_eq!(book.tabs[0].name, SpellTabName::General);
         assert_eq!(book.tabs[0].texture.as_deref(), Some(GENERAL_TAB_ICON));
         assert_eq!(book.tabs[0].num_spells, 3);
         let order: Vec<(&str, Option<&str>)> = book

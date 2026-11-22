@@ -17,14 +17,14 @@ const BOB: u64 = 0x12;
 
 /// A world holding everything [`super::feed::feed_chat`] reads, the stock chat stack in its VM,
 /// `ChatFrame1` carrying `Mychan`, and our slots `World`, `Trade - City` and `Mychan` (3).
-struct Feed {
-    world: World,
+pub(super) struct Feed {
+    pub(super) world: World,
     /// The outbound side of `NetCommands`, where the name queries land.
     sent: crossbeam_channel::Receiver<crate::net::ClientCommand>,
 }
 
 impl Feed {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let s = chat_vm();
         s.run(SPY).unwrap();
         s.run(
@@ -47,7 +47,7 @@ impl Feed {
 
         let mut channels = super::edit::ChannelState::default();
         for name in ["World", "Trade - City", "Mychan"] {
-            channels.claim_slot(name);
+            channels.claim_slot(name, channels.channels.zone_channel_id(name));
         }
         let (tx, sent) = crossbeam_channel::unbounded();
 
@@ -66,6 +66,7 @@ impl Feed {
         world.insert_resource(crate::world_state::WorldStates::default());
         world.insert_resource(super::language::ChatLanguages::default());
         world.insert_resource(crate::items::Items::default());
+        world.insert_resource(crate::go_templates::GameObjectTemplates::default());
         world.insert_resource(crate::text_filter::TextFilter::default());
         world.insert_resource(crate::text_filter::TextFilterSwitches::default());
         Feed { world, sent }
@@ -84,11 +85,11 @@ impl Feed {
     }
 
     /// One frame of the drain.
-    fn drain(&mut self) {
+    pub(super) fn drain(&mut self) {
         self.world.run_system_once(super::feed::feed_chat).unwrap();
     }
 
-    fn script(&self) -> &UiScript {
+    pub(super) fn script(&self) -> &UiScript {
         self.world.non_send_resource::<UiScript>()
     }
 
@@ -136,6 +137,45 @@ fn a_members_join_reaches_the_stock_frame_numbered() {
         )
     );
     assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
+}
+
+/// The join notice's second word is the slot's instance (`0x49bb20`, `+0x98`), which every event
+/// the channel's record stamps reads as arg10 (`0x49b115`): our own join, another member's, and
+/// a reused slot's, since no allocator writes it (`0x49ba01`).
+#[test]
+fn a_joins_instance_number_is_arg10_of_the_slots_events() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    f.name(ANN, "Ann");
+    f.push(
+        n::YOU_JOINED,
+        "Mychan",
+        ChannelNoticeTail::YouJoined {
+            flags: 0,
+            instance: 7,
+        },
+    );
+    f.drain();
+    assert_eq!(f.spy().1, "YOU_JOINED|||3. Mychan|||0|3|Mychan|7");
+    f.push(n::JOINED, "Mychan", ChannelNoticeTail::Guid(ANN));
+    f.drain();
+    assert_eq!(f.spy().1, "|Ann||3. Mychan|||0|3|Mychan|7");
+
+    // Freed and claimed again by another name, the slot keeps its instance until a join stores one.
+    let mut channels = f.world.resource_mut::<super::edit::ChannelState>();
+    channels.free_slot("Mychan");
+    channels.claim_slot("Otherchan", 0);
+    assert_eq!(channels.instances[2], 7);
+    let mut line =
+        super::event::ChatEvent::text_only(super::event::ChatEventKind::Channel, "".into());
+    line.channel = "Otherchan".into();
+    channels.stamp_channel(&mut line);
+    assert_eq!((line.channel_number, line.instance), (3, 7));
+    let mut missing =
+        super::event::ChatEvent::text_only(super::event::ChatEventKind::Channel, "".into());
+    missing.channel = "Nowhere".into();
+    channels.stamp_channel(&mut missing);
+    assert_eq!(missing.instance, 0, "no record, no instance");
 }
 
 /// A join whose name is not cached waits on the name query, then prints stamped, as the
@@ -207,6 +247,98 @@ fn owner_change_and_kick_notices_print() {
     assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
 }
 
+/// A member's flags changing, name cached (`0x49e934`): bit 2 gained is `SET_MODERATOR`, lost
+/// `UNSET_MODERATOR`, then bit 4 `SET_VOICE` / `UNSET_VOICE`, each a `CHANNEL_NOTICE_USER`
+/// (`0x49e8a0`) naming the member; a bit that did not change prints nothing.
+#[test]
+fn a_mode_change_prints_its_moderator_and_voice_lines() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    f.name(ANN, "Ann");
+    let mode = |old_flags, new_flags| ChannelNoticeTail::ModeChange {
+        guid: ANN,
+        old_flags,
+        new_flags,
+    };
+    let before = f.lines();
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x00, 0x02));
+    f.drain();
+    assert_eq!(
+        f.spy(),
+        (
+            "CHAT_MSG_CHANNEL_NOTICE_USER".to_string(),
+            "SET_MODERATOR|Ann||3. Mychan|||0|3|Mychan|0".to_string()
+        )
+    );
+    assert_eq!(
+        f.last_added(),
+        "[3. Mychan] Moderation privileges given to Ann."
+    );
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x02, 0x00));
+    f.drain();
+    assert_eq!(f.spy().1, "UNSET_MODERATOR|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(
+        f.last_added(),
+        "[3. Mychan] Moderation privileges removed from Ann."
+    );
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x00, 0x04));
+    f.drain();
+    assert_eq!(f.spy().1, "SET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(f.last_added(), "[3. Mychan] Voice given to Ann.");
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x04, 0x00));
+    f.drain();
+    assert_eq!(f.spy().1, "UNSET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(f.last_added(), "[3. Mychan] Ann muted.");
+    assert_eq!(f.lines(), before + 4);
+
+    // Both bits at once print the moderator line, then the voice line; the owner bit (1) and a
+    // bit that stays set print nothing.
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x01, 0x06));
+    f.drain();
+    assert_eq!(f.lines(), before + 6);
+    assert_eq!(f.spy().1, "SET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x03, 0x01));
+    f.drain();
+    assert_eq!(f.lines(), before + 7, "only the moderator bit was lost");
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x06, 0x07));
+    f.drain();
+    assert_eq!(f.lines(), before + 7, "the owner bit alone prints nothing");
+    assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
+}
+
+/// A name the cache lacks shows nothing: `0x49e93d` returns on the miss and the callback `0x49e934`
+/// registers holds no line. The miss still asks for the name.
+#[test]
+fn a_mode_change_for_an_unknown_name_prints_nothing_and_asks() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    let before = f.lines();
+    f.push(
+        n::MODE_CHANGE,
+        "Mychan",
+        ChannelNoticeTail::ModeChange {
+            guid: ANN,
+            old_flags: 0,
+            new_flags: 2,
+        },
+    );
+    f.drain();
+    assert!(
+        matches!(
+            f.sent.try_recv(),
+            Ok(crate::net::ClientCommand::NameQuery { guid: ANN })
+        ),
+        "the name was asked for"
+    );
+    f.name(ANN, "Ann");
+    f.drain();
+    assert_eq!(f.lines(), before, "and the answer shows no line");
+}
+
 /// An invite names a channel we are not in, so it stays unstamped (the miss leg `0x49aa86`,
 /// `0x49b12f`) and prints only through the stock filter's `INVITE` exemption (`ChatFrame.lua:1374`).
 #[test]
@@ -238,7 +370,10 @@ fn our_own_join_notice_is_unchanged() {
     f.push(
         n::YOU_JOINED,
         "Mychan",
-        ChannelNoticeTail::YouJoined { flags: 0 },
+        ChannelNoticeTail::YouJoined {
+            flags: 0,
+            instance: 0,
+        },
     );
     f.drain();
     assert_eq!(
@@ -250,4 +385,40 @@ fn our_own_join_notice_is_unchanged() {
     );
     assert_eq!(f.lines(), before + 1);
     assert_eq!(f.last_added(), "Joined Channel: [3. Mychan]");
+}
+
+/// A chat line and a channel notice look their names up with the callback `0x49ccc0` at their
+/// packet (`0x49d77f`, `0x49c50d`); the drains they wait through read. A refused name is asked
+/// by no drain after it, only by the next packet that names its player.
+#[test]
+fn a_refused_chat_name_is_asked_by_the_next_packet_never_by_a_drain() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    let packets = |f: &mut Feed| {
+        f.world.resource_mut::<super::ChatLog>().push_wire(
+            benilla_protocol::messages::ChatMessage {
+                chat_type: 0x00,
+                language: 0,
+                sender_guid: ANN,
+                target_guid: 0,
+                sender_name: None,
+                channel: None,
+                text: "hello".into(),
+                chat_tag: 0,
+            },
+        );
+        f.push(n::JOINED, "Mychan", ChannelNoticeTail::Guid(BOB));
+        f.drain();
+    };
+    let asked = |f: &Feed| crate::query_cache::queries(&f.sent).len();
+    packets(&mut f);
+    assert_eq!(asked(&f), 2, "the speaker and the joiner");
+    f.name(ANN, "");
+    f.name(BOB, "");
+    for _ in 0..600 {
+        f.drain();
+    }
+    assert_eq!(asked(&f), 0, "no drain asks a refusal");
+    packets(&mut f);
+    assert_eq!(asked(&f), 2, "the next packets ask again");
 }

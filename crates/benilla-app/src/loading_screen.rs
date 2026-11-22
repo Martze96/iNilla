@@ -3,15 +3,17 @@
 //! is two layers, `Loading-BarBorder` and `Loading-BarFill` (Background, Glow and Glass are never
 //! drawn in 1.12).
 //!
-//! Event-raised and readiness-cleared, as in the reference: it rises at the character pick's
-//! `Connected` edge and at `SMSG_TRANSFER_PENDING` (the reference's two entries into `0x406640`'s
-//! tail) and clears on a per-frame readiness poll. The reference's one blocking stretch
+//! Event-raised, as in the reference: it rises at the character pick's `Connected` edge and at
+//! `SMSG_TRANSFER_PENDING` (`0x406640`, and `0x4072c0` for a transport, whose screen is the leg's
+//! route over the world map, [`route`]). It clears on a per-frame readiness poll that also waits
+//! for our arrival. The reference's one blocking stretch
 //! (`SMSG_NEW_WORLD`'s `0x401b00` defers `0x401bc0` onto the deadline heap, drained at `0x420d0c`)
 //! also suppresses input, which this client builds explicitly ([`input`]).
 //!
 //! A destination snap only ends a raise's wait ([`LoadingScreen::snap_landed`]). The screen clears
-//! when the destination is scene-presentable ([`WorldLoadProgress`]), never on the body reaching
-//! the ground.
+//! when the destination is scene-presentable ([`WorldLoadProgress`]) and, for a load that brings
+//! one, our own player's create has arrived, where the reference ends it (`0x5debbd`); never on the
+//! body reaching the ground.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -20,14 +22,17 @@ use benilla_formats::{load_loading_screens, LoadingScreenCatalog};
 
 use benilla_assets::LockRecover;
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::{AssetSet, LooseOpen, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::terrain_stream::WorldLoadProgress;
-use benilla_world::world_map::CurrentMap;
 
 /// The cover's input half: while it is up the client takes no input (a source cut in `PreUpdate`).
 mod input;
 pub(crate) use input::CoverInput;
+/// A same-map teleport's frozen frame, and the frames the window presents.
+pub(crate) mod hold;
+/// A transport transfer's route screen.
+mod route;
 
 // The bar, from the `LoadingScreen.cpp` descriptor table at `0x7ffd34` (read by `0x407150`):
 // entry {cx, cy, halfW, halfH}, rect [cx ± halfW·0.5] × [cy ± halfH·0.5], fill right edge
@@ -42,9 +47,68 @@ const FILL_BOTTOM: f32 = 0.0625; // 0.075 − 0.025·0.5
 const FILL_HEIGHT: f32 = 0.025;
 const FILL_MAX_WIDTH: f32 = 0.525; // halfW; fill width = progress · FILL_MAX_WIDTH
 
-/// The glue and loading screens are authored 4:3; on a wider window the reference fits them to
-/// height and pillarboxes. The square BLP is stretched to this aspect.
-const BACKDROP_ASPECT: f32 = 4.0 / 3.0;
+/// The factor `0x41ad10` applies to the display aspect (`0x8012cc`): the picture is authored 4:3, so
+/// `a = 0.75 · width/height` is 1.0 at 4:3 and the fit below turns on it.
+const ASPECT_TO_FIT: f32 = 0.75;
+
+/// Whether the `widescreen` CVar is on: its default, and anything but an applied 0.
+pub(crate) fn widescreen(cvars: Option<&crate::cvars::Cvars>) -> bool {
+    cvars.and_then(|c| c.flag("widescreen")) != Some(false)
+}
+
+/// `a = [0x832a4c]`, the display aspect relative to 4:3 (`0x41ad10`, read by `0x406a60` at
+/// `0x406ac4` and by the tip at `0x40668c` and `0x4066b9`). A window with no size reads as 4:3.
+///
+/// Both setters (the glue's `0x46ab40` through `0x46a828`, the interface's `0x4901e0` through
+/// `0x48fe2b`) pass `gxResolution`'s width over height only while `widescreen` is on, else 4/3,
+/// and `RN24(0.75 · f32(4/3))` is exactly 1.0: with it off the picture fills the window (the
+/// `0x406b02` path) and the tip's wrap is `515·W/1024`.
+///
+/// Deviation: the live window's aspect stands in for `gxResolution`'s, as in `portrait`'s
+/// `GxAspect`, because the window here takes any shape a drag gives it, where the reference's
+/// keeps `gxResolution`'s (`0x5989d7`). In fullscreen the window is the screen in logical pixels
+/// and `gxResolution` the screen in device pixels, so their aspects agree and their sizes need not.
+pub(crate) fn scaled_aspect(window: Vec2, widescreen: bool) -> f32 {
+    if widescreen && window.x > 0.0 && window.y > 0.0 {
+        window.x / window.y * ASPECT_TO_FIT
+    } else {
+        1.0
+    }
+}
+
+/// A rectangle in the window's logical pixels, from its top left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FitRect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+/// The viewport the paint callback `0x406a60` installs (`0x58af60` at `0x406b3d`) for a window of
+/// this size, which the art, the bar and the tip are drawn in. Wider than 4:3 (`a > 1`,
+/// `0x406ac9`-`0x406ad4`) it is `1/a` of the width, centred; narrower (`a < 1`, `0x406af7`-
+/// `0x406b02`) it is `a` of the height, centred; at exactly 4:3, or with no usable aspect, the
+/// whole window (`0x406b02` keeps the defaults for `a == 1` and a NaN). The edges are fractions of
+/// the window, `(1 − extent) · 0.5` from the near side.
+pub(crate) fn fit_rect(window: Vec2, widescreen: bool) -> FitRect {
+    let a = scaled_aspect(window, widescreen);
+    let (mut left, mut bottom, mut across, mut up) = (0.0, 0.0, 1.0, 1.0);
+    if a > 1.0 {
+        across = 1.0 / a;
+        left = (1.0 - across) * 0.5;
+    } else if a < 1.0 {
+        up = a;
+        bottom = (1.0 - up) * 0.5;
+    }
+    // The bands above and below are equal, so the bottom edge is also the top edge's distance.
+    FitRect {
+        x: left * window.x,
+        y: bottom * window.y,
+        width: across * window.x,
+        height: up * window.y,
+    }
+}
 /// Consecutive fully resident frames before the clear: debounces the post-teleport frame where
 /// `ready` reads 0 against a nonzero `total`.
 const CLEAR_AFTER_READY_FRAMES: u32 = 3;
@@ -104,10 +168,10 @@ impl EntryCover {
 /// `First`: advance or reset the covered-frame count.
 fn count_entry_cover(
     screen: Res<LoadingScreen>,
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     mut cover: ResMut<EntryCover>,
 ) {
-    let in_world = *state.get() == crate::char_select::ClientState::InWorld;
+    let in_world = *state.get() == crate::client_state::ClientState::InWorld;
     cover.tick(screen.covering() && in_world);
 }
 
@@ -132,6 +196,17 @@ pub(crate) struct LoadingScreen {
     /// residency cannot clear a screen raised for the new one (at world entry the login vista is
     /// resident well before `SMSG_LOGIN_VERIFY_WORLD`).
     awaiting_snap: bool,
+    /// A raise whose load brings our own player's create holds until that create: the reference
+    /// ends the screen at our arrival (`0x5debbd` → `0x407e80`), never before it, so the world
+    /// never shows without our body. A ship's leg change brings none, and an abort or a logout
+    /// drops the wait.
+    awaiting_arrival: bool,
+    /// The wait is a world entry's, which our own player's arrival also ends
+    /// ([`release_interface_on_arrival`]): the reference loads the world at the roster's map and
+    /// position before the login (`0x46c236` → `0x401570`) and its `SMSG_LOGIN_VERIFY_WORLD`
+    /// handler does nothing for that map (`0x401de0`, `0x468580`), so a server may leave the packet
+    /// out (MaNGOS Zero does, when the map is the character list's).
+    entry_snap: bool,
     /// The map this screen's art resolves from, the reference's `[0x82f00c]`, set by every raise;
     /// `None` is its `-1`, no backdrop. Not `CurrentMap`: vmangos can relocate a character inside
     /// `Player::LoadFromDB` (`Player.cpp:15020`), under a live screen. Its writers: `0x4067e6` and
@@ -154,6 +229,14 @@ pub(crate) struct LoadingScreen {
     pub(crate) tip_edge: Option<TipEdge>,
     /// Capture only: the clear is skipped while set ([`Self::hold_for_capture`]).
     held: bool,
+    /// The transfer's route (`0x8828e0`), which draws in place of the art, the bar and the tip.
+    route: Option<route::ActiveRoute>,
+    /// Whether the layers below run under the screen (`core/framepass`): its flag bit 0, cleared by
+    /// every raise (`0x406808`) and set by an arrival aboard a transport (`0x5debb6`), or the
+    /// screen the reference ends at any other arrival (`0x5debbd`) while the cover here waits.
+    see_through: bool,
+    /// Bumped whenever [`Self::route`] changes, for [`route::draw_route`].
+    route_built: u32,
 
     /// `Time::elapsed_secs` at the last raise and at the last wait log line.
     active_since: f32,
@@ -164,6 +247,14 @@ impl LoadingScreen {
     /// Whether the opaque cover is up; the world camera renders under it, never behind the glue.
     pub(crate) fn covering(&self) -> bool {
         self.active
+    }
+
+    /// Whether the screen's layer hides the interface's beneath it, so the frame pass calls no
+    /// `OnUpdate` (`0x442431`-`0x442437`, `0x4424b9`): up, and not yet let through by our arrival
+    /// ([`release_interface_on_arrival`]). The world→glue blackout is no raise of the screen and
+    /// hides nothing.
+    pub(crate) fn hides_interface(&self) -> bool {
+        self.active && !self.blackout && !self.see_through
     }
 
     /// An active cover, for tests.
@@ -195,14 +286,30 @@ impl LoadingScreen {
     /// announced destination passes the current map). Only an edge that reaches the reference's
     /// transition entries calls this, never a snap ([`Self::snap_landed`]).
     fn raise(&mut self, reason: &str, awaiting_snap: bool, map: Option<u32>, now: f32) {
+        self.raise_for(reason, awaiting_snap, true, map, now);
+    }
+
+    /// [`Self::raise`] for a load that does or does not bring our create (`awaiting_arrival`).
+    fn raise_for(
+        &mut self,
+        reason: &str,
+        awaiting_snap: bool,
+        awaiting_arrival: bool,
+        map: Option<u32>,
+        now: f32,
+    ) {
         self.active = true;
         self.blackout = false;
         self.awaiting_snap = awaiting_snap;
+        self.awaiting_arrival = awaiting_arrival;
+        self.entry_snap = false;
         self.map = map;
         self.ready_frames = 0;
         self.displayed = 0.0; // restart the fill for the new load
         self.active_since = now;
         self.last_wait_log = now;
+        // `0x406808`: every raise hides the layers below again.
+        self.see_through = false;
         info!("loading screen: up ({reason}, map {map:?})");
     }
 
@@ -239,6 +346,18 @@ impl LoadingScreen {
         self.tip_edge = Some(TipEdge::Clear);
         // `0x407ed7` clears `[0x882e04]`: the next screen resolves its own art.
         self.art_resolved = false;
+        // `0x407f1e`: the route goes with the screen.
+        self.set_route(None);
+        // `0x407e8d` closes the layer whose flags these are.
+        self.see_through = false;
+    }
+
+    /// Take a route, or drop the one held: a build that fails clears it (`0x407405`).
+    fn set_route(&mut self, route: Option<route::ActiveRoute>) {
+        if self.route.is_some() || route.is_some() {
+            self.route = route;
+            self.route_built = self.route_built.wrapping_add(1);
+        }
     }
 }
 
@@ -247,6 +366,10 @@ impl LoadingScreen {
 struct LoadingRoot;
 #[derive(Component)]
 struct LoadingBackdrop;
+/// The content area: the viewport `0x406a60` fits to the window ([`fit_rect`]). The bar's
+/// fractions are relative to it.
+#[derive(Component)]
+pub(crate) struct LoadingArea;
 #[derive(Component)]
 struct LoadingBarFill;
 #[derive(Component)]
@@ -263,13 +386,79 @@ impl Plugin for LoadingScreenPlugin {
             .init_resource::<EntryCover>()
             // In `First`, ahead of every consumer in `PreUpdate` and `Update`.
             .add_systems(First, count_entry_cover)
-            .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
+            .add_systems(
+                Startup,
+                (setup_loading_screen, route::setup_transfer_routes).after(AssetSet::Open),
+            )
             // In `WorldStage::Present`, after Input and Stream: a worldport snaps in Input and the
             // streamer refocuses in Stream, so the cover lands on the same frame, never a flash.
-            .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present));
+            .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present))
+            .add_systems(
+                Update,
+                release_interface_on_arrival
+                    .in_set(WorldStage::Present)
+                    .before(drive_loading_screen),
+            )
+            .add_systems(
+                Update,
+                route::draw_route
+                    .in_set(WorldStage::Present)
+                    .after(drive_loading_screen),
+            )
+            // After the drive, which sets the visibility the same nodes carry, and after the
+            // window's mode is applied, so the size it reads is this frame's.
+            .add_systems(
+                Update,
+                fit_loading_area
+                    .in_set(WorldStage::Present)
+                    .after(drive_loading_screen)
+                    .after(crate::video::apply_window_mode)
+                    .after(crate::video::apply_present_mode),
+            );
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
+        hold::build(app);
     }
+}
+
+/// Our own player's arrival (`0x5dea50`) lets the interface run: aboard a transport (slot 9's
+/// GUID a game object, `0x5deb93`-`0x5debb2`) it sets the screen's bit 0 (`0x5debb6`), else it
+/// ends the screen (`0x5debbd` → `0x407e80`). Either way the layers below are drawn from then on,
+/// though here the cover stays up for the readiness poll. A pending cinematic (`0xc4d75c`,
+/// `0x5deb80`) takes the arrival instead and does neither, leaving the screen to the
+/// cinematic's black frame (`0x48edd0`).
+///
+/// The same arrival ends a world entry's wait for its snap ([`LoadingScreen::entry_snap`]), with a
+/// cinematic pending too: the snap says only that the world around us is the destination's. Ours
+/// may exist before the raise reads its edge, so this asks whether it is there, not whether it came.
+fn release_interface_on_arrival(
+    arrived: Query<(), Added<crate::net::SelfPlayer>>,
+    present: Query<(), With<crate::net::SelfPlayer>>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
+    mut screen: ResMut<LoadingScreen>,
+) {
+    if screen.active && screen.awaiting_snap && screen.entry_snap && !present.is_empty() {
+        info!("loading screen: our player arrived - the world entry's snap");
+        screen.snap_landed(None);
+        // and its arrival, which may have come before the raise read its edge
+        screen.awaiting_arrival = false;
+    }
+    if arrived.is_empty() {
+        return;
+    }
+    // The arrival is what the screen waited for, a pending cinematic's included.
+    screen.awaiting_arrival = false;
+    let pending = cinematic.is_some_and(|c| c.is_pending());
+    if !pending && screen.active {
+        screen.see_through = true;
+    }
+}
+
+/// The cover's per-frame drive alone, in `Update` after `after`, for the tests of the paths that
+/// feed it.
+#[cfg(test)]
+pub(crate) fn add_drive<M>(app: &mut App, after: impl bevy::ecs::schedule::IntoSystemSet<M>) {
+    app.add_systems(Update, drive_loading_screen.after(after));
 }
 
 /// Startup: load the LoadingScreens catalog and the bar textures, and spawn the hidden UI tree.
@@ -278,7 +467,7 @@ fn setup_loading_screen(
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // The black pillarbox root spawns unconditionally: `covering()` consumers act as covered while
+    // The black root, the bands of a pillarbox or letterbox, spawns unconditionally: `covering()` consumers act as covered while
     // the screen is active, so missing art must still leave a black cover.
     let root = commands
         .spawn((
@@ -314,8 +503,9 @@ fn setup_loading_screen(
         }
     }
 
-    // The two layers 1.12 draws, as sRGB clamp sprites.
-    let mut tex = |path: &str| assets.sprite_texture(path, &mut images);
+    // The two layers 1.12 draws, as sRGB clamp sprites, from the archives alone: the loading
+    // screen's `TextureCreate` calls (`0x406891`) pass file flag 0.
+    let mut tex = |path: &str| assets.sprite_texture_opened(path, LooseOpen::Archives, &mut images);
     let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
         error!("loading bar textures missing — plain black cover, no art");
         return;
@@ -323,14 +513,17 @@ fn setup_loading_screen(
     let fill = tex("Interface\\Glues\\LoadingBar\\Loading-BarFill.blp").unwrap_or_default();
 
     commands.entity(root).with_children(|root| {
-        // One 4:3 area fit to the viewport height and centred; the bar's fractions are relative
-        // to it. Paint order is spawn order: backdrop, tip, fill, border.
-        root.spawn(Node {
-            width: Val::Vh(100.0 * BACKDROP_ASPECT),
-            height: Val::Vh(100.0),
-            position_type: PositionType::Relative,
-            ..default()
-        })
+        // The fitted rect, centred by the root; [`fit_loading_area`] sizes it each frame. The bar's
+        // fractions are relative to it. Paint order is spawn order: backdrop, tip, fill, border.
+        root.spawn((
+            LoadingArea,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Relative,
+                ..default()
+            },
+        ))
         .with_children(|area| {
             // Tinted black until the art resolves.
             area.spawn((
@@ -348,7 +541,7 @@ fn setup_loading_screen(
                 },
             ));
             // The tip, between the backdrop and the bar as in the reference (`0x406e12`,
-            // `0x406e18`), placed in percent of this area, the space of `crate::game_tip`.
+            // `0x406e18`), placed by `crate::game_tip` in window terms, as the reference does.
             area.spawn((LoadingTip, crate::game_tip::tip_bundle()));
             // The fill art is a horizontally uniform gradient, so scaling its width is a reveal.
             area.spawn((
@@ -388,17 +581,33 @@ fn setup_loading_screen(
     });
 }
 
+/// Per frame: the content area is the window's [`fit_rect`], so a resize during a load refits the
+/// art, the bar and the tip, as the reference's per-frame paint does (`0x406a60`).
+pub(crate) fn fit_loading_area(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut area: Query<&mut Node, With<LoadingArea>>,
+    cvars: Option<Res<crate::cvars::Cvars>>,
+) {
+    let (Some(window), Ok(mut node)) = (windows.iter().next(), area.single_mut()) else {
+        return;
+    };
+    let fit = fit_rect(
+        Vec2::new(window.width(), window.height()),
+        widescreen(cvars.as_deref()),
+    );
+    let (width, height) = (Val::Px(fit.width), Val::Px(fit.height));
+    if node.width != width || node.height != height {
+        node.width = width;
+        node.height = height;
+    }
+}
+
 /// Per frame: observe the lifecycle edges, run the raise and clear rules, resolve the backdrop and
 /// set the bar.
 #[allow(clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
-    // Bundled to stay under Bevy's 16-parameter ceiling.
-    stream: (
-        Res<WorldLoadProgress>,
-        Res<benilla_world::terrain_stream::ViewFocus>,
-    ),
-    current_map: Option<Res<CurrentMap>>,
+    progress: Res<WorldLoadProgress>,
     maps: Option<Res<MapCatalogRes>>,
     screens: Option<Res<LoadingScreenCatalogRes>>,
     mut assets: Option<ResMut<WorldAssets>>,
@@ -421,8 +630,9 @@ fn drive_loading_screen(
     warm: Res<crate::pipe_warm::WarmPass>,
     // The world-entry UI load runs behind this cover; the reference's reveal always has the UI up.
     entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+    route_source: route::RouteSource,
     edges: (
-        Res<State<crate::char_select::ClientState>>,
+        Res<State<crate::client_state::ClientState>>,
         MessageReader<crate::net::EnteredWorldMessage>,
         MessageReader<crate::net::WorldportMessage>,
         MessageReader<crate::net::TeleportMessage>,
@@ -430,7 +640,8 @@ fn drive_loading_screen(
         MessageReader<crate::net::DisconnectedMessage>,
         MessageReader<crate::net::CharacterLoginFailedMessage>,
         Option<Res<crate::net::PendingTransfer>>,
-        Option<Res<crate::char_select::Roster>>,
+        Option<Res<crate::glue_session::roster::Roster>>,
+        MessageReader<crate::transport::TransportLegLeft>,
     ),
 ) {
     let (
@@ -443,35 +654,71 @@ fn drive_loading_screen(
         mut refusals,
         transfer,
         roster,
+        mut legs_left,
     ) = edges;
-    let (progress, focus) = (&stream.0, &stream.1);
     let now = time.elapsed_secs();
-    let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal, so the body's world is live first.
     let player_settling = player.as_ref().is_some_and(|p| p.settling);
 
     // --- The edges. ---
     // A glue entry (not the seamless in-world reconnect), raised on the frame the glue tears down
     // and held across the server's character load; the art comes from the roster's map.
-    if entered.read().next().is_some() && *state.get() != crate::char_select::ClientState::InWorld {
+    if entered.read().next().is_some() && *state.get() != crate::client_state::ClientState::InWorld
+    {
         let map = roster.as_ref().and_then(|r| r.pending_map());
         screen.raise("world entry", true, map, now);
+        screen.entry_snap = true;
         // The tip rides this edge alone: the reference's setter `0x406630` has one caller, in
         // `CGlueMgr::EnterWorld`, which neither `SMSG_TRANSFER_PENDING` arm reaches.
         screen.tip_edge = Some(TipEdge::Pick);
     }
-    // A portal (`SMSG_TRANSFER_PENDING`, no transport): cover now, before the server unloads us, as
-    // the reference does. A transport crossing rides visibly until its worldport lands.
+    // `SMSG_TRANSFER_PENDING` covers now, before the server unloads us, on both arms of
+    // `0x401900`: with a transport entry and a map left other than −1, `0x4072c0` draws that leg's
+    // route over the world map, which sets the map id to −1 (`0x4073d4`), so no art; else
+    // `0x406640`, the destination's art.
     if let Some(t) = transfer.as_ref().filter(|t| t.is_changed()) {
         match &t.0 {
-            Some(info) if info.transport_entry.is_none() => {
-                screen.raise("transfer pending", true, Some(info.map_id), now);
+            Some(info) => {
+                let route_arm = info
+                    .transport_entry
+                    .zip(info.from_map)
+                    .filter(|&(entry, from)| entry != 0 && from != u32::MAX);
+                let route = route_arm.and_then(|(entry, from)| {
+                    route_source.build(
+                        entry,
+                        route::RouteLeg::Leaving(from),
+                        assets.as_deref_mut(),
+                        &mut images,
+                    )
+                });
+                let map = route.is_none().then_some(info.map_id);
+                screen.raise("transfer pending", true, map, now);
+                if route_arm.is_some() {
+                    screen.set_route(route);
+                }
             }
             // Cleared with no snap in flight is `SMSG_TRANSFER_ABORTED` (a worldport lands below
             // this frame): stop waiting, and the resident old world clears the screen.
-            None => screen.awaiting_snap = false,
-            Some(_) => {}
+            None => {
+                screen.awaiting_snap = false;
+                screen.awaiting_arrival = false;
+            }
         }
+    }
+    // `0x407de0`, from the ship tick: the route of the leg we left, which stores −1 for the map on
+    // success (`0x407e59`) and leaves the last raise's map otherwise. The reference loads around
+    // the camera and dismisses inside that tick (`0x615020`, `0x407e80`); here the readiness poll
+    // below dismisses it.
+    for left in legs_left.read() {
+        let route = route_source.build(
+            left.entry,
+            route::RouteLeg::Index(left.leg),
+            assets.as_deref_mut(),
+            &mut images,
+        );
+        let map = if route.is_some() { None } else { screen.map };
+        screen.raise_for("transport leg", false, false, map, now);
+        screen.set_route(route);
     }
     // A snap never re-raises a live screen ([`LoadingScreen::far_snap`]).
     for w in worldports.read() {
@@ -492,6 +739,7 @@ fn drive_loading_screen(
         screen.active = true;
         screen.blackout = true;
         screen.awaiting_snap = false;
+        screen.awaiting_arrival = false;
         screen.ready_frames = 0;
         info!(
             "loading screen: blackout ({})",
@@ -504,23 +752,9 @@ fn drive_loading_screen(
             }
         );
     }
-    if screen.blackout && *state.get() != crate::char_select::ClientState::InWorld {
+    if screen.blackout && *state.get() != crate::client_state::ClientState::InWorld {
         // The glue is up (it renders above this root); the cover's job is done.
         screen.dismiss();
-    }
-
-    // --- Backstop: the ground under the focus is not resident and nothing raised us. In world
-    // only, since behind the glue nothing loads; only while the focus is the body, since in a
-    // cinematic or free-fly residency describes the camera's tile; and never while a same-map
-    // teleport's settle hold is up. ---
-    if !screen.active
-        && !progress.focus_resident
-        && focus.follows_body()
-        && !player_settling
-        && *state.get() == crate::char_select::ClientState::InWorld
-    {
-        // Same map by construction: the ground under the body.
-        screen.raise("focus not resident", false, map_id, now);
     }
 
     // --- Clear, sustained a few frames. ---
@@ -528,6 +762,7 @@ fn drive_loading_screen(
         if progress.is_ready()
             && progress.presentable()
             && !screen.awaiting_snap
+            && !screen.awaiting_arrival
             && !player_settling
             && warm.satisfied()
             && entry_ui_pending.is_none()
@@ -550,8 +785,8 @@ fn drive_loading_screen(
                 screen.last_wait_log = now;
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
-                     {} colliders pending, {} merges pending, awaiting_snap={}, settling={}, \
-                     warm={}, ui_pending={}",
+                     {} colliders pending, {} merges pending, awaiting_snap={}, \
+                     awaiting_arrival={}, settling={}, warm={}, ui_pending={}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
@@ -559,6 +794,7 @@ fn drive_loading_screen(
                     progress.colliders_pending,
                     progress.merge_pending,
                     screen.awaiting_snap,
+                    screen.awaiting_arrival,
                     player_settling,
                     warm.satisfied(),
                     entry_ui_pending.is_some(),
@@ -580,14 +816,20 @@ fn drive_loading_screen(
     } else {
         Visibility::Inherited
     };
+    // `0x406cd0`: the route screen draws instead of the art and the bar.
+    let plain_vis = if screen.route.is_some() {
+        Visibility::Hidden
+    } else {
+        content_vis
+    };
     if let Ok((_, mut vis)) = backdrop.single_mut() {
-        if *vis != content_vis {
-            *vis = content_vis;
+        if *vis != plain_vis {
+            *vis = plain_vis;
         }
     }
     for mut vis in &mut bar_vis {
-        if *vis != content_vis {
-            *vis = content_vis;
+        if *vis != plain_vis {
+            *vis = plain_vis;
         }
     }
     if !screen.active || screen.blackout {
@@ -613,9 +855,12 @@ fn drive_loading_screen(
                 .map(str::to_string);
             let handle = path.and_then(|path| match screen.art_cache.get(&path) {
                 Some(h) => Some(h.clone()),
-                None => assets.sprite_texture(&path, &mut images).inspect(|h| {
-                    screen.art_cache.insert(path.clone(), h.clone());
-                }),
+                // `ResolveLoadingArt` opens the art with file flag 0 (`0x406eba`, `0x406ef1`).
+                None => assets
+                    .sprite_texture_opened(&path, LooseOpen::Archives, &mut images)
+                    .inspect(|h| {
+                        screen.art_cache.insert(path.clone(), h.clone());
+                    }),
             });
             match (handle, backdrop.single_mut()) {
                 (Some(handle), Ok((mut img, _))) => {
@@ -646,6 +891,110 @@ fn drive_loading_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_world::world_map::CurrentMap;
+
+    fn fit(w: f32, h: f32) -> [f32; 4] {
+        let r = fit_rect(Vec2::new(w, h), true);
+        [r.x, r.y, r.width, r.height]
+    }
+
+    fn close(got: [f32; 4], want: [f32; 4]) {
+        assert!(
+            got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01),
+            "{got:?} != {want:?}"
+        );
+    }
+
+    /// `0x406a60`: `a > 1` is `1/a` of the width, `a < 1` is `a` of the height, each centred, and
+    /// exactly 4:3 is the whole window.
+    #[test]
+    fn the_picture_is_fit_inside_the_window_in_both_directions() {
+        // Wider than 4:3: pillarboxed, full height.
+        close(fit(1920.0, 1080.0), [240.0, 0.0, 1440.0, 1080.0]);
+        // Narrower: letterboxed, full width, 3/4 of it tall.
+        close(fit(1280.0, 1024.0), [0.0, 32.0, 1280.0, 960.0]);
+        close(fit(600.0, 1000.0), [0.0, 275.0, 600.0, 450.0]);
+        // 4:3: the window.
+        close(fit(1024.0, 768.0), [0.0, 0.0, 1024.0, 768.0]);
+        close(fit(800.0, 600.0), [0.0, 0.0, 800.0, 600.0]);
+    }
+
+    /// `widescreen` off is a 4/3 aspect (`0x46ab40`, `0x4901e0`): `a` is exactly 1.0 and the picture
+    /// fills the window, at any window shape.
+    #[test]
+    fn widescreen_off_fills_the_window() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 1024.0), (600.0, 1000.0)] {
+            let r = fit_rect(Vec2::new(w, h), false);
+            assert_eq!(scaled_aspect(Vec2::new(w, h), false), 1.0);
+            close([r.x, r.y, r.width, r.height], [0.0, 0.0, w, h]);
+        }
+        assert!(
+            widescreen(Some(&crate::cvars::Cvars::default())),
+            "the default is on"
+        );
+        assert!(widescreen(None));
+        assert!(!widescreen(Some(&crate::cvars::Cvars::with_value(
+            "widescreen",
+            "0"
+        ))));
+    }
+
+    /// The system reads the CVar: a tall window, `widescreen` off, is not letterboxed.
+    #[test]
+    fn the_content_area_honours_widescreen_off() {
+        let mut app = App::new();
+        app.insert_resource(crate::cvars::Cvars::with_value("widescreen", "0"));
+        app.world_mut().spawn((
+            Window {
+                resolution: (1280_u32, 1024_u32).into(),
+                ..default()
+            },
+            bevy::window::PrimaryWindow,
+        ));
+        let area = app.world_mut().spawn((LoadingArea, Node::default())).id();
+        app.add_systems(Update, fit_loading_area);
+        app.update();
+        let n = app.world().get::<Node>(area).unwrap();
+        assert_eq!((n.width, n.height), (Val::Px(1280.0), Val::Px(1024.0)));
+    }
+
+    /// A window with no size has no aspect; it reads as 4:3 and fits to nothing, never a NaN.
+    #[test]
+    fn a_window_without_a_size_fits_to_nothing() {
+        close(fit(0.0, 0.0), [0.0; 4]);
+    }
+
+    /// The system sizes the node the loading screen spawns from the primary window each frame, so
+    /// a window resized tall during a load letterboxes it.
+    #[test]
+    fn the_content_area_follows_the_window() {
+        let mut app = App::new();
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: (1280_u32, 1024_u32).into(),
+                    ..default()
+                },
+                bevy::window::PrimaryWindow,
+            ))
+            .id();
+        let area = app.world_mut().spawn((LoadingArea, Node::default())).id();
+        app.add_systems(Update, fit_loading_area);
+        let size = |app: &App| {
+            let n = app.world().get::<Node>(area).unwrap();
+            (n.width, n.height)
+        };
+        app.update();
+        assert_eq!(size(&app), (Val::Px(1280.0), Val::Px(960.0)));
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set(1920.0, 1080.0);
+        app.update();
+        assert_eq!(size(&app), (Val::Px(1440.0), Val::Px(1080.0)));
+    }
 
     #[test]
     fn the_cover_counts_frames_to_the_glass_and_resets_the_moment_it_drops() {
@@ -774,13 +1123,14 @@ mod tests {
         player.pos = benilla_assets::coords::wow_to_bevy(at);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(crate::char_select::ClientState::InWorld)
+            .insert_state(crate::client_state::ClientState::InWorld)
             .add_message::<crate::net::EnteredWorldMessage>()
             .add_message::<crate::net::WorldportMessage>()
             .add_message::<crate::net::TeleportMessage>()
             .add_message::<crate::net::LoggedOutMessage>()
             .add_message::<crate::net::DisconnectedMessage>()
             .add_message::<crate::net::CharacterLoginFailedMessage>()
+            .add_message::<crate::transport::TransportLegLeft>()
             .init_resource::<LoadingScreen>()
             .init_resource::<crate::pipe_warm::WarmPass>()
             .init_resource::<Assets<Image>>()
@@ -846,15 +1196,26 @@ mod tests {
         }
     }
 
+    /// A live body outrunning the stream (GM speed ×100) stands on unloaded ground with no hold:
+    /// the reference's tile pass waits for the read in the frame and calls no raise (`0x6985d0`),
+    /// so the frame hitches and no screen comes up.
     #[test]
-    fn unloaded_ground_under_a_body_no_snap_holds_is_covered() {
+    fn outrunning_the_stream_raises_no_screen() {
         let mut app = in_world(GM_ISLAND);
         land_unloaded(&mut app, SOUTH_SEAS);
         app.world_mut()
             .resource_mut::<crate::player::Player>()
             .settling = false;
-        app.update();
-        assert!(covering(&app));
+        app.insert_resource(benilla_world::terrain_stream::ViewFocus::body(
+            SOUTH_SEAS, true,
+        ));
+        for _ in 0..30 {
+            app.update();
+            assert!(
+                !covering(&app),
+                "the ground under a live body is not a load"
+            );
+        }
     }
 
     #[test]
@@ -870,5 +1231,249 @@ mod tests {
         });
         app.update();
         assert!(covering(&app));
+    }
+
+    /// The reference ends a cross-map screen at our create (`0x5debbd`): a destination already
+    /// resident under the screen waits for it, and the create clears it.
+    #[test]
+    fn a_cross_map_screen_waits_for_our_create() {
+        let mut app = in_world(GM_ISLAND);
+        app.insert_resource(crate::pipe_warm::WarmPass::done_for_test());
+        app.add_systems(
+            Update,
+            release_interface_on_arrival.before(drive_loading_screen),
+        );
+        app.world_mut().write_message(crate::net::WorldportMessage {
+            map_id: 0,
+            position: NORTHSHIRE,
+            orientation: 0.0,
+            needs_ack: true,
+            transport_entry: None,
+        });
+        app.update();
+        assert!(covering(&app));
+        app.world_mut().resource_mut::<crate::player::Player>().pos =
+            benilla_assets::coords::wow_to_bevy(NORTHSHIRE);
+        app.insert_resource(benilla_world::terrain_stream::ViewFocus::body(
+            NORTHSHIRE, true,
+        ));
+        for _ in 0..30 {
+            app.update();
+            assert!(covering(&app), "the destination is in, our create is not");
+        }
+        app.world_mut().spawn(crate::net::SelfPlayer);
+        for _ in 0..=CLEAR_AFTER_READY_FRAMES {
+            app.update();
+        }
+        assert!(!covering(&app), "our create ends the screen");
+    }
+
+    /// `0x407de0`, from the ship tick's leg change: it raises the screen, and with no route to
+    /// draw it keeps the map the last raise stored, as it stores none but −1 (`0x407e59`).
+    #[test]
+    fn a_ridden_ships_leg_change_raises_the_screen() {
+        let mut app = in_world(GM_ISLAND);
+        {
+            let mut screen = app.world_mut().resource_mut::<LoadingScreen>();
+            screen.raise("earlier", false, Some(0), 0.0);
+            screen.dismiss();
+        }
+        app.world_mut()
+            .write_message(crate::transport::TransportLegLeft {
+                entry: 176495,
+                leg: 0,
+            });
+        app.update();
+        assert!(covering(&app));
+        let screen = app.world().resource::<LoadingScreen>();
+        assert!(screen.route.is_none(), "no route tables here");
+        assert_eq!(screen.map, Some(0));
+    }
+
+    /// `0x401900` raises on both arms: a transport crossing covers at `SMSG_TRANSFER_PENDING`,
+    /// and with no route to draw it shows the destination's art (`0x4072d3`).
+    #[test]
+    fn a_transport_crossing_covers_at_transfer_pending() {
+        let mut app = in_world(GM_ISLAND);
+        app.insert_resource(crate::net::PendingTransfer(Some(
+            crate::net::PendingTransferInfo {
+                map_id: 0,
+                transport_entry: Some(20808),
+                from_map: Some(1),
+            },
+        )));
+        app.update();
+        assert!(covering(&app), "the screen is up before the worldport");
+        let screen = app.world().resource::<LoadingScreen>();
+        assert!(screen.route.is_none(), "no transport is ridden here");
+        assert_eq!(screen.map, Some(0));
+    }
+
+    /// `0x406cd0`: with a route the taxi screen draws and the plain art and its bar do not; the
+    /// dismiss takes the route with it (`0x407f1e`).
+    #[test]
+    fn a_route_screen_draws_no_art_and_no_bar() {
+        let mut app = in_world(GM_ISLAND);
+        let backdrop = app
+            .world_mut()
+            .spawn((LoadingBackdrop, ImageNode::default(), Visibility::Inherited))
+            .id();
+        let bar = app
+            .world_mut()
+            .spawn((LoadingBarBorder, Visibility::Inherited))
+            .id();
+        let quad = [benilla_formats::RouteVertex {
+            pos: [0.5; 2],
+            uv: [0.0; 2],
+        }; 4];
+        {
+            let mut screen = app.world_mut().resource_mut::<LoadingScreen>();
+            screen.raise("transfer pending", true, None, 0.0);
+            screen.set_route(Some(route::ActiveRoute::test(benilla_formats::Route {
+                markers: [quad; 2],
+                ribbon: vec![quad; 3],
+            })));
+        }
+        app.update();
+        for e in [backdrop, bar] {
+            assert_eq!(
+                app.world().get::<Visibility>(e),
+                Some(&Visibility::Hidden),
+                "the route screen hides the plain screen's parts"
+            );
+        }
+        app.world_mut().resource_mut::<LoadingScreen>().dismiss();
+        assert!(app.world().resource::<LoadingScreen>().route.is_none());
+    }
+
+    /// Our arrival under a raised screen, aboard a transport or not and with a cinematic latched
+    /// or not: whether the screen still hides the UI.
+    fn arrive(aboard: bool, cinematic: bool) -> bool {
+        use bevy::ecs::system::RunSystemOnce;
+        const DECK: u64 = 0xF120_0000_0000_0042;
+        let mut world = World::new();
+        let mut screen = LoadingScreen::default();
+        screen.raise("transfer pending", true, Some(1), 0.0);
+        assert!(screen.hides_interface(), "a raise hides the layers below");
+        world.insert_resource(screen);
+        world.insert_resource(if cinematic {
+            crate::cinematic::Cinematic::pending_for_test(81)
+        } else {
+            crate::cinematic::Cinematic::default()
+        });
+        let me = world.spawn(crate::net::SelfPlayer).id();
+        if aboard {
+            world
+                .entity_mut(me)
+                .insert(crate::transport::TransportRider {
+                    transport_guid: DECK,
+                    local_pos: [0.0; 3],
+                    local_orientation: 0.0,
+                });
+        }
+        world.run_system_once(release_interface_on_arrival).unwrap();
+        world.resource::<LoadingScreen>().hides_interface()
+    }
+
+    /// `0x5deb78`-`0x5debbd`: an arrival aboard a transport sets the layer's bit 0 and any other
+    /// ends the screen, so either way the interface runs; a latched cinematic takes the arrival
+    /// and leaves the layers below hidden. The next raise hides them again (`0x406808`).
+    #[test]
+    fn an_arrival_lets_the_interface_run_unless_a_cinematic_is_latched() {
+        assert!(!arrive(true, false), "aboard a transport: let through");
+        assert!(!arrive(false, false), "on foot: the screen ends");
+        assert!(arrive(false, true), "a latched cinematic takes the arrival");
+        assert!(arrive(true, true), "aboard, too");
+
+        let mut screen = LoadingScreen::default();
+        screen.raise("world entry", true, Some(0), 0.0);
+        screen.see_through = true;
+        screen.raise("worldport", false, Some(1), 0.0);
+        assert!(
+            screen.hides_interface(),
+            "a raise hides the layers below again"
+        );
+    }
+
+    /// A world entry's wait for its snap ends with our own player's arrival, cinematic or not, for
+    /// a server that sends no `SMSG_LOGIN_VERIFY_WORLD` for the character list's map (`0x401de0`
+    /// ignores that map); a transfer's wait does not, `SMSG_NEW_WORLD` ends that one.
+    #[test]
+    fn an_arrival_ends_a_world_entrys_wait_for_its_snap() {
+        use bevy::ecs::system::RunSystemOnce;
+        for cinematic in [false, true] {
+            let mut world = World::new();
+            let mut screen = LoadingScreen::default();
+            screen.raise("world entry", true, Some(0), 0.0);
+            screen.entry_snap = true;
+            world.insert_resource(screen);
+            world.insert_resource(if cinematic {
+                crate::cinematic::Cinematic::pending_for_test(81)
+            } else {
+                crate::cinematic::Cinematic::default()
+            });
+            world.run_system_once(release_interface_on_arrival).unwrap();
+            assert!(
+                world.resource::<LoadingScreen>().awaiting_snap,
+                "no player yet: the wait holds"
+            );
+            world.spawn(crate::net::SelfPlayer);
+            world.run_system_once(release_interface_on_arrival).unwrap();
+            assert!(
+                !world.resource::<LoadingScreen>().awaiting_snap,
+                "our player is there: the snap landed (cinematic {cinematic})"
+            );
+            assert!(
+                !world.resource::<LoadingScreen>().awaiting_arrival,
+                "and arrived (cinematic {cinematic})"
+            );
+        }
+
+        // Our create came before the raise read its edge: its `Added` is spent, and its presence
+        // ends both waits.
+        let mut app = App::new();
+        app.init_resource::<LoadingScreen>()
+            .init_resource::<crate::cinematic::Cinematic>()
+            .add_systems(Update, release_interface_on_arrival);
+        app.world_mut().spawn(crate::net::SelfPlayer);
+        app.update();
+        {
+            let mut screen = app.world_mut().resource_mut::<LoadingScreen>();
+            screen.raise("world entry", true, Some(0), 0.0);
+            screen.entry_snap = true;
+        }
+        app.update();
+        let screen = app.world().resource::<LoadingScreen>();
+        assert!(
+            !screen.awaiting_snap && !screen.awaiting_arrival,
+            "an earlier create ends a world entry's waits"
+        );
+
+        let mut world = World::new();
+        let mut screen = LoadingScreen::default();
+        screen.raise("transfer pending", true, Some(1), 0.0);
+        world.insert_resource(screen);
+        world.init_resource::<crate::cinematic::Cinematic>();
+        world.spawn(crate::net::SelfPlayer);
+        world.run_system_once(release_interface_on_arrival).unwrap();
+        assert!(
+            world.resource::<LoadingScreen>().awaiting_snap,
+            "a transfer waits for SMSG_NEW_WORLD"
+        );
+    }
+
+    /// `0x5deb93`-`0x5debbd`: an arrival on foot ends the screen at once (`0x407e80`), so the
+    /// interface runs from that frame on, while here the cover waits for the world to be ready.
+    #[test]
+    fn an_arrival_on_foot_lets_the_interface_run() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let mut screen = LoadingScreen::default();
+        screen.raise("world entry", true, Some(0), 0.0);
+        world.insert_resource(screen);
+        world.init_resource::<crate::cinematic::Cinematic>();
+        world.spawn(crate::net::SelfPlayer);
+        world.run_system_once(release_interface_on_arrival).unwrap();
+        assert!(!world.resource::<LoadingScreen>().hides_interface());
     }
 }

@@ -275,8 +275,14 @@ fn the_loader_still_fills_and_creates_what_the_setters_no_longer_take() {
             _ => None,
         })
         .collect();
-    assert!(fills.contains(&[0.25, 0.5, 0.75, 1.0]), "{fills:?}");
-    assert!(fills.contains(&[0.75, 0.5, 0.25, 1.0]), "{fills:?}");
+    assert!(
+        fills.contains(&crate::color::quant::drawn([0.25, 0.5, 0.75, 1.0])),
+        "{fills:?}"
+    );
+    assert!(
+        fills.contains(&crate::color::quant::drawn([0.75, 0.5, 0.25, 1.0])),
+        "{fills:?}"
+    );
 }
 
 /// The bar's path leg gives a new bar texture all points on its bar (`0x7831bf`), as the XML leg's
@@ -356,6 +362,14 @@ fn an_empty_bar_or_thumb_element_installs_a_texture() {
 #[test]
 fn set_status_bar_color_with_no_bar_does_nothing() {
     let s = script();
+    // 255 read back times the float at `0x81c6b4`: red the double, green, blue and alpha through
+    // `f32` (`0x78fab0`).
+    let one = crate::color::channel(255);
+    s.lua().globals().set("ONE", one).unwrap();
+    s.lua()
+        .globals()
+        .set("ONE32", f64::from(one as f32))
+        .unwrap();
     s.run(
         r#"
         local sb = CreateFrame("StatusBar", "TintBar")
@@ -363,10 +377,10 @@ fn set_status_bar_color_with_no_bar_does_nothing() {
         assert(sb:GetStatusBarTexture() == nil, "no bar made")
         sb:SetStatusBarTexture("p")
         local r, g, b, a = sb:GetStatusBarColor()
-        assert(r == 1 and g == 1 and b == 1 and a == 1, "untinted: " .. r .. g .. b)
+        assert(r == ONE and g == ONE32 and b == ONE32 and a == ONE32, "untinted: " .. r .. g .. b)
         sb:SetStatusBarColor(0, 1, 0)
         r, g, b = sb:GetStatusBarColor()
-        assert(r == 0 and g == 1 and b == 0, "tinted once there is a bar")
+        assert(r == 0 and g == ONE32 and b == 0, "tinted once there is a bar")
     "#,
     )
     .unwrap();

@@ -14,7 +14,8 @@ use benilla_assets::coords::wow_to_bevy;
 
 use super::PetBar;
 use crate::net::{GuidIndex, NetHandlerApp, PetDismissSoundMessage, PetTalkMessage};
-use crate::ui_action::{CastErrors, PetTameFailures, Spells, UiError, UiErrorKeys};
+use crate::ui_action::{FillArg, Spells, UiError, UiErrorKeys};
+use crate::ui_cast::CastReports;
 
 pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
@@ -31,44 +32,85 @@ pub(super) fn register(app: &mut App) {
 }
 
 /// A lost socket sends no zero-guid `SMSG_PET_SPELLS`, so the session end resets the bar itself.
-fn on_session_end(In(_): In<SessionEvent>, mut bar: ResMut<PetBar>) {
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut bar: ResMut<PetBar>,
+    mut latch: ResMut<super::PetAttackLatch>,
+) {
     bar.clear();
+    latch.0 = None;
 }
 
-fn on_spells(In(ev): In<SessionEvent>, catalog: Option<Res<Spells>>, mut bar: ResMut<PetBar>) {
+fn on_spells(
+    In(ev): In<SessionEvent>,
+    catalog: Option<Res<Spells>>,
+    mods: Option<Res<crate::spell::SpellModifiers>>,
+    player: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    mut bar: ResMut<PetBar>,
+    mut latch: ResMut<super::PetAttackLatch>,
+    mut lane: ResMut<crate::field_watch::NoticeLane>,
+) {
     if let SessionEvent::PetSpells(spells) = ev {
-        pet_spells(*spells, catalog.as_deref(), &mut bar);
+        // The pet list's category pad (`0x6e2b60` with the pet flag): op 11 alone.
+        let pad = crate::spell::CategoryPad::for_list(true, player.iter().next());
+        let changed = pet_spells(*spells, catalog.as_deref(), mods.as_deref(), pad, &mut bar);
+        if changed {
+            latch.0 = None;
+        }
+        // The pet book's sort on every packet, an empty list included (`0x4bdadb` →
+        // `0x4b2fd0(0, 1)`), which signals `SPELLS_CHANGED` (`0x4b302a`) ahead of the macro
+        // derivation (`0x4bdae0`) and the guid's store.
+        lane.write(crate::field_watch::FieldNotice::Global {
+            id: crate::field_watch::id::SPELLS_CHANGED,
+        });
+        // Then the macros that follow the pet's book derived again (`0x4bdae0` → `0x4f0ce0`).
+        lane.write(crate::field_watch::FieldNotice::PetMacros);
+        // `SetPetGuid`'s signals at the packet's place (`0x4bdaf0` → `0x4bc7e0`): the pet frame's
+        // `UnitExists("pet")` reads our summon field as this packet left it.
+        lane.write(crate::field_watch::FieldNotice::PetGuidSet {
+            changed,
+            guid: bar.spells.pet_guid,
+        });
     }
 }
 
-fn on_mode(In(ev): In<SessionEvent>, mut bar: ResMut<PetBar>) {
+fn on_mode(
+    In(ev): In<SessionEvent>,
+    mut bar: ResMut<PetBar>,
+    mut lane: ResMut<crate::field_watch::NoticeLane>,
+) {
     if let SessionEvent::PetMode(mode) = ev {
-        pet_mode(mode, &mut bar);
+        if pet_mode(mode, &mut bar) {
+            // `0x4bdb4f`: `PET_BAR_UPDATE` inside the handler, at the packet's place.
+            lane.write(crate::field_watch::FieldNotice::Global {
+                id: crate::field_watch::id::PET_BAR_UPDATE,
+            });
+        }
     }
 }
 
-fn on_action_feedback(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+fn on_action_feedback(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
     if let SessionEvent::PetActionFeedback { reason } = ev {
-        pet_action_feedback(reason, &mut errors);
+        pet_action_feedback(reason, &errors);
     }
 }
 
-fn on_cast_failed(In(ev): In<SessionEvent>, mut errors: ResMut<CastErrors>) {
+fn on_cast_failed(In(ev): In<SessionEvent>, mut reports: ResMut<CastReports>) {
     if let SessionEvent::PetCastFailed { spell_id, reason } = ev {
-        pet_cast_failed(spell_id, reason, &mut errors);
+        pet_cast_failed(spell_id, reason, &mut reports);
     }
 }
 
-fn on_tame_failure(In(ev): In<SessionEvent>, mut failures: ResMut<PetTameFailures>) {
+fn on_tame_failure(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
     if let SessionEvent::PetTameFailure { reason } = ev {
-        pet_tame_failure(reason, &mut failures);
+        pet_tame_failure(reason, &errors);
     }
 }
 
-fn on_refusal_line(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+fn on_refusal_line(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
     match ev {
-        SessionEvent::PetNameInvalid => pet_name_invalid(&mut errors),
-        SessionEvent::PetBroken => pet_broken(&mut errors),
+        SessionEvent::PetNameInvalid => pet_name_invalid(&errors),
+        SessionEvent::PetBroken => pet_broken(&errors),
         _ => {}
     }
 }
@@ -90,18 +132,22 @@ fn on_dismiss_sound(In(ev): In<SessionEvent>, mut sounds: MessageWriter<PetDismi
 }
 
 /// `SMSG_PET_SPELLS`: replace the whole bar and reseed the pet's cooldowns from its tail. A zero
-/// guid is the teardown (`Player::RemovePetActionBar`), cooldowns included.
-fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
+/// guid is the teardown (`Player::RemovePetActionBar`), cooldowns included. Whether the pet guid
+/// changed, which lowers the attack latch (`0x4bc8ce`); a re-send from the same pet keeps it.
+fn pet_spells(
+    spells: PetSpells,
+    catalog: Option<&Spells>,
+    mods: Option<&crate::spell::SpellModifiers>,
+    pad: crate::spell::CategoryPad,
+    bar: &mut PetBar,
+) -> bool {
+    let new_pet = bar.spells.pet_guid != spells.pet_guid;
     if spells.pet_guid == 0 {
         if bar.spells.pet_guid != 0 {
             debug!("net: pet bar torn down");
         }
         bar.clear();
-        return;
-    }
-    // A new pet guid clears the attack latch (`0x4bc8ce`); a re-send from the same pet keeps it.
-    if bar.spells.pet_guid != spells.pet_guid {
-        bar.attacking = false;
+        return new_pet;
     }
     debug!(
         "net: pet bar for {:#x} — react {} command {} {}, {} known spell(s), {} cooldown(s)",
@@ -158,31 +204,34 @@ fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
     bar.expires = (spells.duration_ms != 0)
         .then(|| now + std::time::Duration::from_millis(u64::from(spells.duration_ms)));
     bar.cooldowns.clear_silent();
+    let no_mods = crate::spell::SpellModifiers::default();
     for cd in &spells.cooldowns {
         let display = catalog.and_then(|c| c.catalog.get(cd.spell_id));
-        bar.cooldowns.seed_pet(cd, display, now);
+        bar.cooldowns
+            .seed_pet(cd, display, mods.unwrap_or(&no_mods), pad, now);
     }
     bar.spells = spells;
-    // `SetPet` (`0x4bc7e0`) ends in `SignalEvent(0x161)` on every packet (`0x4bc90c`), whatever
-    // changed: the one repaint a packet that moves only the pet's cooldowns gets.
-    bar.bar_signals = bar.bar_signals.wrapping_add(1);
+    new_pet
 }
 
-/// `SMSG_PET_MODE`: the state word alone, applied only to the bar of the pet it names.
-fn pet_mode(mode: PetMode, bar: &mut PetBar) {
-    if bar.spells.pet_guid == 0 || bar.spells.pet_guid != mode.pet_guid {
-        return;
+/// `SMSG_PET_MODE` (`0x4bdb10`): the state word alone, applied only when the packet's guid is the
+/// bar's cached one (`0x4bdb33`, `0x4bdb3f`), a zero guid against no bar included; whether it was,
+/// for the signal that follows the store (`0x4bdb4f`).
+fn pet_mode(mode: PetMode, bar: &mut PetBar) -> bool {
+    if bar.spells.pet_guid != mode.pet_guid {
+        return false;
     }
     debug!("net: pet mode — state {:#010x}", mode.state);
     // The whole dword, as the client stores both packets' state (`0x4bc930`).
     bar.spells.state = mode.state;
+    true
 }
 
 /// `SMSG_PET_ACTION_FEEDBACK`: a refused order's reason byte, onto the red line.
-fn pet_action_feedback(reason: u8, errors: &mut UiErrorKeys) {
+fn pet_action_feedback(reason: u8, errors: &UiErrorKeys) {
     debug!("net: pet action feedback {reason}");
     if let Some(key) = pet_feedback_key(reason) {
-        errors.0.push(UiError::key(key));
+        errors.push(UiError::key(key));
     }
 }
 
@@ -200,28 +249,32 @@ fn pet_feedback_key(reason: u8) -> Option<&'static str> {
     })
 }
 
-/// `SMSG_PET_TAME_FAILURE`: the reason byte, queued. vmangos also sends it for a summon while a
-/// pet or a charmed unit is out (`Spell.cpp:5467`).
-fn pet_tame_failure(reason: u8, failures: &mut PetTameFailures) {
-    debug!(
-        "net: pet tame failure {reason} ({})",
-        benilla_protocol::messages::pet_tame_failure_key(reason)
-    );
-    failures.0.push(reason);
+/// `SMSG_PET_TAME_FAILURE` (`0x6e97e0` → `0x6e6a20`), the handler's one signal: the reason's
+/// `PETTAME_*` string (the jump table `0x6e6ac0`, `PETTAME_UNKNOWNERROR` outside 1 to 11), read
+/// through `FrameScript_GetText` (`0x6e6a91`, `""` when missing) as `ERR_TAME_FAILED`'s `%s`
+/// (`DisplayError(0xee)`, `0x6e6ab4`). vmangos also sends it for a summon while a pet or a charmed
+/// unit is out (`Spell.cpp:5467`).
+fn pet_tame_failure(reason: u8, errors: &UiErrorKeys) {
+    let key = benilla_protocol::messages::pet_tame_failure_key(reason);
+    debug!("net: pet tame failure {reason} ({key})");
+    errors.push(UiError::args(
+        "ERR_TAME_FAILED",
+        vec![FillArg::Global(key.to_string())],
+    ));
 }
 
 /// `SMSG_PET_NAME_INVALID`, an empty body: the reference raises `ERR_INVALID_PETNAME` and reads
 /// nothing (`0x5e3e33`). No local name was applied, so nothing rolls back.
-fn pet_name_invalid(errors: &mut UiErrorKeys) {
+fn pet_name_invalid(errors: &UiErrorKeys) {
     debug!("net: pet name refused");
-    errors.0.push(UiError::key("ERR_INVALID_PETNAME"));
+    errors.push(UiError::key("ERR_INVALID_PETNAME"));
 }
 
 /// `SMSG_PET_BROKEN`, an empty body: loyalty hit zero; raise `ERR_PET_BROKEN` (`0x4bdc00`). The
 /// zero-guid `SMSG_PET_SPELLS` of the unsummon right after it clears the bar (`Pet.cpp:822`).
-fn pet_broken(errors: &mut UiErrorKeys) {
+fn pet_broken(errors: &UiErrorKeys) {
     debug!("net: pet ran away");
-    errors.0.push(UiError::key("ERR_PET_BROKEN"));
+    errors.push(UiError::key("ERR_PET_BROKEN"));
 }
 
 /// `SMSG_PET_ACTION_SOUND`: dropped when the pet is not streamed (`0x604101`); the sound layer
@@ -255,10 +308,10 @@ fn pet_dismiss_sound(
 /// `SMSG_PET_CAST_FAILED`: queued as the pet's, so the display uses the reference's pet table
 /// (`0x6e8eb0`, not the player's `0x6e1a00`). Our cast state is untouched, and unlike the
 /// player's it writes no combat-log line and plays no error sound (`0x62c360`, `0x458a50`).
-fn pet_cast_failed(spell_id: u32, reason: Option<u8>, errors: &mut CastErrors) {
+fn pet_cast_failed(spell_id: u32, reason: Option<u8>, reports: &mut CastReports) {
     debug!("net: pet cast failed — spell {spell_id} reason {reason:?}");
     if let Some(reason) = reason {
-        errors.push_pet(spell_id, reason);
+        reports.pet_refused(spell_id, reason);
     }
 }
 
@@ -280,10 +333,22 @@ mod tests {
     #[test]
     fn a_zero_guid_tears_the_whole_bar_down() {
         let mut bar = PetBar::default();
-        pet_spells(a_bar(0x2A), None, &mut bar);
+        pet_spells(
+            a_bar(0x2A),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         assert_eq!(bar.spells.pet_guid, 0x2A);
 
-        pet_spells(PetSpells::default(), None, &mut bar);
+        pet_spells(
+            PetSpells::default(),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         assert_eq!(bar.spells, PetSpells::default());
         assert!(!bar.has_bar());
     }
@@ -296,24 +361,54 @@ mod tests {
         let mut charm = a_bar(0x2A);
         charm.duration_ms = 60_000;
         let before = Instant::now();
-        pet_spells(charm.clone(), None, &mut bar);
+        pet_spells(
+            charm.clone(),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         let left = bar.expires.expect("armed").duration_since(before);
         assert!(
             left >= std::time::Duration::from_secs(60) && left < std::time::Duration::from_secs(61)
         );
 
-        pet_spells(a_bar(0x2A), None, &mut bar);
+        pet_spells(
+            a_bar(0x2A),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         assert_eq!(bar.expires, None, "a 0 duration clears it");
-        pet_spells(charm, None, &mut bar);
+        pet_spells(
+            charm,
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         assert!(bar.expires.is_some());
-        pet_spells(PetSpells::default(), None, &mut bar);
+        pet_spells(
+            PetSpells::default(),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
         assert_eq!(bar.expires, None, "the teardown clears it");
     }
 
     #[test]
     fn pet_mode_only_writes_its_own_bar() {
         let mut bar = PetBar::default();
-        pet_spells(a_bar(0x2A), None, &mut bar);
+        pet_spells(
+            a_bar(0x2A),
+            None,
+            None,
+            crate::spell::CategoryPad::NoPlayer,
+            &mut bar,
+        );
 
         pet_mode(
             PetMode {
@@ -340,24 +435,28 @@ mod tests {
     #[test]
     fn the_attack_latch_survives_a_resend_and_dies_on_a_new_pet() {
         let mut bar = PetBar::default();
-        pet_spells(a_bar(0x2A), None, &mut bar);
-        bar.attacking = true;
-
-        pet_spells(a_bar(0x2A), None, &mut bar);
-        assert!(bar.attacking, "the same pet re-sending keeps its attack");
-
-        pet_spells(a_bar(0x99), None, &mut bar);
-        assert!(!bar.attacking, "a different pet is not attacking");
+        let mut spells = |guid| {
+            pet_spells(
+                a_bar(guid),
+                None,
+                None,
+                crate::spell::CategoryPad::NoPlayer,
+                &mut bar,
+            )
+        };
+        assert!(spells(0x2A), "the first pet");
+        assert!(!spells(0x2A), "the same pet re-sending keeps its attack");
+        assert!(spells(0x99), "a different pet is not attacking");
     }
 
     #[test]
     fn the_feedback_map_is_the_jump_table_at_0x4bdbe8() {
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         for reason in [0u8, 1, 2, 3, 4, 5, 200] {
-            pet_action_feedback(reason, &mut errors);
+            pet_action_feedback(reason, &errors);
         }
         assert_eq!(
-            errors.0.iter().map(|e| e.key).collect::<Vec<_>>(),
+            errors.snapshot().iter().map(|e| e.key).collect::<Vec<_>>(),
             [
                 "ERR_PET_SPELL_DEAD",
                 "ERR_NO_ATTACK_TARGET",

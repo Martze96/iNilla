@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::chain::Chain;
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{loc_str, parse, u32_at};
 
 const AREA_TABLE: &str = "DBFilesClient\\AreaTable.dbc";
 
@@ -32,16 +32,21 @@ pub struct AreaTableRow {
     pub name: String,
 }
 
-/// `AreaTable.dbc` rows keyed by id.
+/// `AreaTable.dbc` rows keyed by id, with the file's record order, which the reference's record
+/// array (`0xc0e040`) keeps.
 pub struct AreaTableCatalog {
     by_id: HashMap<u32, AreaTableRow>,
+    order: Vec<u32>,
 }
 
 impl AreaTableCatalog {
-    /// A catalog over rows given directly, for tests that need a table of known shape.
+    /// A catalog over rows given directly, in record order, for tests that need a table of known
+    /// shape.
     pub fn from_rows(rows: Vec<(u32, AreaTableRow)>) -> Self {
+        let order = rows.iter().map(|(id, _)| *id).collect();
         Self {
             by_id: rows.into_iter().collect(),
+            order,
         }
     }
 
@@ -82,19 +87,12 @@ impl AreaTableCatalog {
         row.flags & 0x1 != 0
     }
 
-    /// The id of the area named `name` (any case) for `/who`'s `z-` term; a top-level row wins.
-    pub fn id_for_name(&self, name: &str) -> Option<u32> {
-        let mut fallback = None;
-        for (id, row) in &self.by_id {
-            if !row.name.eq_ignore_ascii_case(name) {
-                continue;
-            }
-            if row.zone_id == 0 {
-                return Some(*id);
-            }
-            fallback = Some(*id);
-        }
-        fallback
+    /// Every row with its id, in record order, as the `/who` zone walk reads the record array
+    /// (`0x5aed95`-`0x5aedff`).
+    pub fn rows_in_order(&self) -> impl Iterator<Item = (u32, &AreaTableRow)> {
+        self.order
+            .iter()
+            .filter_map(|id| self.by_id.get(id).map(|row| (*id, row)))
     }
 
     /// Every row, unordered, for a scan by flag (the chat auto-join's `Flags & 0x200` city row).
@@ -128,7 +126,9 @@ pub fn load_area_table_catalog(chain: &mut Chain) -> Result<AreaTableCatalog> {
         .read_file(AREA_TABLE)
         .context("reading AreaTable.dbc")?;
     let rs = parse(&bytes, schema(), "AreaTable")?;
+    let locale = chain.locale();
     let mut by_id = HashMap::with_capacity(rs.records().len());
+    let mut order = Vec::with_capacity(rs.records().len());
     for r in rs.records() {
         let (Some(id), Some(map_id), Some(zone_id), Some(explore_flag), Some(flags), Some(name)) = (
             u32_at(r, 0),
@@ -136,13 +136,14 @@ pub fn load_area_table_catalog(chain: &mut Chain) -> Result<AreaTableCatalog> {
             u32_at(r, 2),
             u32_at(r, 3),
             u32_at(r, 4),
-            str_at(&rs, r, 11),
+            loc_str(&rs, r, 11, locale),
         ) else {
             continue;
         };
         let faction_group_mask = u32_at(r, 20).unwrap_or(0);
         // Signed; an absent column reads as `-1`, no exploration gate.
         let exploration_level = u32_at(r, 10).map_or(-1, |v| v as i32);
+        order.push(id);
         by_id.insert(
             id,
             AreaTableRow {
@@ -156,7 +157,7 @@ pub fn load_area_table_catalog(chain: &mut Chain) -> Result<AreaTableCatalog> {
             },
         );
     }
-    Ok(AreaTableCatalog { by_id })
+    Ok(AreaTableCatalog { by_id, order })
 }
 
 #[cfg(test)]

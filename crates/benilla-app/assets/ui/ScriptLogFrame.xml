@@ -318,7 +318,6 @@
                             <Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor>
                             <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="16"/></Offset></Anchor>
                         </Anchors>
-                        <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(this, arg1)</OnValueChanged></Scripts>
                     </Slider>
                     <!-- Mouse-enabled and the pane's full height, as SendMailScrollChildFrame is
                          (MailFrame.xml:604-659): a click below the text focuses the box. -->
@@ -380,7 +379,8 @@
          declares SlashCmdList. -->
     <Script><![CDATA[
         -- Deviation: 1.12 has no `/reload` (later clients added it; 1.12 reloads through
-        -- `/console reloadui`); kept so a player can reload the interface after toggling addons.
+        -- `/console reloadui`); kept because it lets a player reload the interface after toggling
+        -- addons.
         SLASH_BENILLA_RELOAD1 = "/reload"
         SlashCmdList["BENILLA_RELOAD"] = function()
             ReloadUI()

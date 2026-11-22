@@ -55,7 +55,7 @@ pub struct Diagnostic {
 }
 
 /// The log, held on the model.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DiagnosticLog {
     rows: VecDeque<Diagnostic>,
     /// The last `seq` handed out; kept apart from `rows.len()` so eviction never renumbers.
@@ -104,15 +104,48 @@ impl DiagnosticLog {
 }
 
 impl super::UiScript {
+    /// The last row number handed out, 0 for an empty log.
+    pub fn diagnostics_seq(&self) -> u64 {
+        self.model_ref().diagnostics.seq
+    }
+
+    /// Call the global function `record` with the message of each retained `Error` and `Load` row
+    /// numbered up to `upto`, once per occurrence, oldest first, protected and under no error
+    /// function: a host's hand-off of what was logged before `record` existed. Nothing when the
+    /// global is not a function.
+    pub fn replay_diagnostics(&self, upto: u64, record: &str) {
+        let Ok(mlua::Value::Function(f)) = self.lua.globals().get::<mlua::Value>(record) else {
+            return;
+        };
+        let rows: Vec<Diagnostic> = self
+            .model_ref()
+            .diagnostics
+            .rows()
+            .filter(|r| r.seq <= upto && r.kind != DiagnosticKind::Warning)
+            .cloned()
+            .collect();
+        super::host::unheld(&self.lua, || {
+            for row in rows {
+                for _ in 0..row.count {
+                    if let Err(e) = f.call::<()>(row.message.as_str()) {
+                        self.model_mut().record_lua_error(&e);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     /// Every retained row, oldest first, cloned out of the model.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.model_ref().diagnostics.rows().cloned().collect()
     }
 
-    /// Retain an addon load failure that never raised (a missing file, an unparseable document, a
-    /// missing or failed dependency, a broken `Bindings.xml`). It is not dispatched to
-    /// `geterrorhandler()`: the reference logs such a failure and shows nothing. The caller still
-    /// writes its own log line.
+    /// Retain an addon load failure: a file that raised or failed to compile, whose error the Lua
+    /// error handler heard as it ran ([`super::execute_buffer`]), or one that never raised (a
+    /// missing file, an unparseable document, a missing or failed dependency, a broken
+    /// `Bindings.xml`), which the reference logs and shows nothing for. The caller still writes
+    /// its own log line.
     pub fn report_load_failure(&self, msg: &str) {
         record_load_failure(&self.lua, msg);
     }
@@ -191,7 +224,7 @@ mod tests {
     #[test]
     fn a_warning_reaches_the_retained_log_and_the_host_drain() {
         let mut s = crate::script::UiScript::new().expect("vm");
-        s.run(r#"SetCVar("thisCVarDoesNotExist", "1")"#).unwrap();
+        s.set_cvar_host("thisCVarDoesNotExist", "1");
 
         let host = s.take_warnings();
         assert!(
@@ -220,7 +253,7 @@ mod tests {
         s.run(
             r#"
             f = CreateFrame("Frame", "BytesFrame")
-            t = f:CreateFontString("BytesText")
+            t = f:CreateFontString("BytesText"); t:SetFont("Fonts\\FRIZQT__.TTF", 12)
             -- "a—b" is 5 bytes; cutting at 2 leaves the em dash's lead byte alone.
             local sliced = strsub("a\226\128\148b", 1, 2)
             t:SetText(sliced)

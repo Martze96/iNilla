@@ -1,5 +1,5 @@
-//! The `SetCVar` (`0x488c10`) and `RegisterCVar` (`0x488b00`) bindings: how each reads its
-//! arguments, the read-only flag, and when `CVAR_UPDATE` fires.
+//! The `GetCVar` (`0x488ba0`), `SetCVar` (`0x488c10`) and `RegisterCVar` (`0x488b00`) bindings:
+//! how each reads its arguments, the read-only flag, and when `CVAR_UPDATE` fires.
 
 use crate::script::UiScript;
 
@@ -80,8 +80,44 @@ fn set_cvar_raises_the_reference_usage_without_a_name() {
     assert_eq!(get(&s, "5"), "b");
 }
 
-/// Flag bit2 (`0x488c67`-`0x488c78`): the in-game session flags three rows (`0x48f566`), and
-/// only the Lua binding tests it; before the flag the same write lands.
+/// `lua_isstring(1)` fails (`0x488ba8`) and `GetCVar` raises the reference's own usage text
+/// (`0x842330`); a number passes and names the CVar by its text.
+#[test]
+fn get_cvar_raises_the_reference_usage_without_a_name() {
+    let s = script_with(&[("5", "a")]);
+    for chunk in ["GetCVar()", "GetCVar(nil)", "GetCVar({})", "GetCVar(true)"] {
+        // Through `luaL_error` (`0x488bb7`), at the caller's line.
+        assert_eq!(
+            crate::script::lua_message(&s.run(chunk).expect_err(chunk)),
+            "[string \"(chunk)\"]:1: Usage: GetCVar(\"cvar\")",
+            "{chunk}"
+        );
+    }
+    assert_eq!(s.eval::<String>("return GetCVar(5)").unwrap(), "a");
+}
+
+/// `GetCVarDefault` (`0x488cf0`) tests `lua_isstring(1)` too, and raises its own usage text,
+/// which names `SetCVarDefault` (`0x84238c`).
+#[test]
+fn get_cvar_default_raises_the_reference_usage_without_a_name() {
+    let s = script_with(&[("5", "a")]);
+    for chunk in [
+        "GetCVarDefault()",
+        "GetCVarDefault(nil)",
+        "GetCVarDefault({})",
+    ] {
+        // Through `luaL_error` (`0x488d07`), at the caller's line.
+        assert_eq!(
+            crate::script::lua_message(&s.run(chunk).expect_err(chunk)),
+            "[string \"(chunk)\"]:1: Usage: SetCVarDefault(\"cvar\")",
+            "{chunk}"
+        );
+    }
+    assert_eq!(s.eval::<String>("return GetCVarDefault(5)").unwrap(), "a");
+}
+
+/// Flag bit2 (`0x488c67`-`0x488c78`): the in-game session flags three rows (`0x48f566`); `SetCVar`
+/// raises on one and every other write stores nothing; before the flag the same write lands.
 #[test]
 fn set_cvar_refuses_a_read_only_row_only_once_flagged() {
     let mut s = script_with(&[
@@ -116,7 +152,10 @@ fn set_cvar_refuses_a_read_only_row_only_once_flagged() {
             raised(&s, &format!("SetCVar({upper:?}, \"after\", \"TOKEN\")"))
                 .lines()
                 .next(),
-            Some(format!("runtime error: \"{upper}\" is read-only").as_str()),
+            // Through `luaL_error` (`0x488c78`), at the caller's line.
+            Some(
+                format!("runtime error: [string \"(chunk)\"]:1: \"{upper}\" is read-only").as_str()
+            ),
             "the name as passed, any case"
         );
         assert_eq!(get(&s, name), "before", "{name} kept its value");
@@ -130,17 +169,45 @@ fn set_cvar_refuses_a_read_only_row_only_once_flagged() {
     s.run("SetCVar(\"MusicVolume\", 0.5)").unwrap();
     assert_eq!(get(&s, "MusicVolume"), "0.5", "other rows stay writable");
 
-    // The host's and the console's writes go through `CVar::Set` (`0x63df50`), which never
-    // tests the flag.
+    s.take_cvar_changes();
+    // Every other write goes through `CVar::Set` (`0x63df50`) into `InternalSet`, which returns at
+    // the flag (`0x63e0ba`): an engine write and every console form store nothing, and raise
+    // nothing.
     s.set_cvar_engine("realmList", "logon.example.org");
-    assert_eq!(get(&s, "realmList"), "logon.example.org");
-    s.run("ConsoleExec(\"realmName Elsewhere\")").unwrap();
-    assert_eq!(get(&s, "realmName"), "Elsewhere");
+    s.run(
+        "ConsoleExec(\"realmName Elsewhere\") ConsoleExec(\"set realmName Elsewhere\") \
+         ConsoleExec(\"cvar_default scriptMemory\")",
+    )
+    .unwrap();
+    for name in crate::script::IN_WORLD_READ_ONLY_CVARS {
+        assert_eq!(get(&s, name), "before", "{name} kept its value");
+    }
+    assert!(s.take_cvar_changes().is_empty(), "nothing was written");
+    // The host's mirror sync is not a write.
+    s.set_cvar_host("realmName", "Synced");
+    assert_eq!(get(&s, "realmName"), "Synced");
 
     // `ShutdownGame`'s clear (`0x491252`).
     s.set_cvar_read_only("realmList", false);
     s.run("SetCVar(\"realmList\", \"again\")").unwrap();
     assert_eq!(get(&s, "realmList"), "again");
+}
+
+/// `InternalSet` (`0x63e0b0`) compares with `SStrCmpI` (`0x63e0ec`), so a change of case only
+/// stores and queues nothing; and it never parse-checks, so text on a numeric row is kept.
+#[test]
+fn set_cvar_compares_case_blind_and_keeps_any_text() {
+    let mut s = script_with(&[("myKnob", "foo"), ("MasterVolume", "1.0")]);
+    s.run("SetCVar('myKnob', 'Foo') ConsoleExec('myKnob FOO') ConsoleExec('set myknob fOO')")
+        .unwrap();
+    assert_eq!(get(&s, "myKnob"), "foo");
+    assert!(s.take_cvar_changes().is_empty(), "nothing moved");
+    s.run("SetCVar('MasterVolume', 'wat')").unwrap();
+    assert_eq!(get(&s, "MasterVolume"), "wat");
+    assert_eq!(
+        s.take_cvar_changes(),
+        [("MasterVolume".to_string(), "wat".to_string())]
+    );
 }
 
 /// A re-seed from the host replaces every row, and the flag outlives it, as the reference's
@@ -154,6 +221,9 @@ fn the_read_only_flag_survives_a_host_reseed() {
         value: "Here".into(),
         default: String::new(),
         latched: false,
+        check: None,
+        reset: None,
+        session: false,
     }]);
     assert!(raised(&s, "SetCVar(\"realmName\", \"x\")").contains("is read-only"));
 }
@@ -246,4 +316,70 @@ fn register_cvar_defaults_to_zero_and_reads_numbers_as_lua_text() {
             "{chunk}"
         );
     }
+}
+
+/// `RegisterCVar` creates at most 30 CVars per process (`0x488b25`: `cmp [0xb4e3c8], 0x1e`), and
+/// raises `0x8422c0` once there, before the name is even looked up. Only a creation counts
+/// (`0x488b8f`): a live name and a name the config file already holds do not.
+#[test]
+fn register_cvar_creates_thirty_cvars_per_process() {
+    let mut s = script_with(&[("farclip", "350")]);
+    s.set_cvar_saved_base([("savedknob".to_string(), "4".to_string())]);
+    s.run("RegisterCVar('farclip', '1') RegisterCVar('SavedKnob', '1')")
+        .unwrap();
+    assert_eq!(s.cvar_lua_created(), 0, "neither call created a record");
+    for i in 0..29 {
+        s.run(&format!("RegisterCVar('knob{i}', '1')")).unwrap();
+    }
+    s.run("RegisterCVar('knob0', '2')").unwrap();
+    assert_eq!(s.cvar_lua_created(), 29, "a re-declaration is no creation");
+    s.run("RegisterCVar('knob29', '1')").unwrap();
+    assert_eq!(s.cvar_lua_created(), 30);
+    for chunk in ["RegisterCVar('knob30', '1')", "RegisterCVar('knob0', '1')"] {
+        // Through `luaL_error` (`0x488b34`), at the caller's line.
+        assert_eq!(
+            crate::script::lua_message(&s.run(chunk).expect_err(chunk)),
+            "[string \"(chunk)\"]:1: Attempted to register too many CVars",
+            "{chunk}"
+        );
+    }
+    assert!(s.cvar("knob30").is_none());
+    assert_eq!(
+        s.take_cvar_registrations().len(),
+        31,
+        "30 counted, one saved"
+    );
+
+    // The count is the process's: a new VM seeded with it is already at the limit.
+    let mut next = UiScript::new().unwrap();
+    next.set_cvar_lua_created(s.cvar_lua_created());
+    assert!(next.run("RegisterCVar('fresh', '1')").is_err());
+}
+
+/// A seeded row's change callback runs before the store (`CVar::Set` `0x63df7d`): a refusal keeps
+/// the applied value and queues nothing for the host but the callback's console line.
+#[test]
+fn a_seeded_check_refuses_before_the_store() {
+    let mut s = UiScript::new().unwrap();
+    s.seed_cvars([crate::script::SeededCvar {
+        name: "shadowLevel".into(),
+        value: "1".into(),
+        default: "1".into(),
+        latched: false,
+        check: Some(crate::script::check_shadow_level),
+        reset: None,
+        session: false,
+    }]);
+    s.run("SetCVar('shadowLevel', 2)").unwrap();
+    assert_eq!(get(&s, "shadowLevel"), "1");
+    assert!(s.take_cvar_changes().is_empty());
+    s.run("SetCVar('shadowLevel', 0)").unwrap();
+    assert_eq!(get(&s, "shadowLevel"), "0");
+    assert_eq!(
+        s.take_cvar_console_lines(),
+        [
+            "Shadow mip level must be in range 0 - 1.",
+            "Shadow mip level changed upon restart.",
+        ]
+    );
 }

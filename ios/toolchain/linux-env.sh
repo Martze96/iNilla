@@ -7,7 +7,7 @@
 #
 # Rust itself needs nothing from the SDK until the final link: `rustup target add
 # aarch64-apple-ios` brings a prebuilt std, and a `staticlib` is an archive, not a link. The only
-# thing that does need Darwin headers is the handful of C files in the graph (Lua, blake3's NEON
+# thing that does need Darwin headers is the handful of C files in the graph (ring, blake3's NEON
 # path, tracing-oslog's wrapper). Those compile with the host clang against the open-source Darwin
 # libc headers that Zig distributes (APSL/BSD, from Apple's open-source Libc/xnu drops), plus two
 # small shims in `shims/` for <os/log.h>, which only the SDK carries.

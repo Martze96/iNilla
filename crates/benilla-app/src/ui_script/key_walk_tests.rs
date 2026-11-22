@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use benilla_ui::script::UiScript;
 
 use super::bag_tests::open_backpack_with_a_five_stack;
-use super::input::feed_keys;
+use super::input::{feed_keys, past_egui};
 use super::UiKeyboardCapture;
 use crate::bindings::{KeyDownList, LayoutNames};
 use crate::textinput::{keymap::Mods, HostClipboard};
@@ -285,4 +285,35 @@ fn a_dropped_key_walks_nowhere_and_grants_no_focus() {
     );
     feed.send(&mut s, &[down(KeyCode::KeyA, Some("a"))]);
     assert_eq!(s.focused_editbox_name().as_deref(), Some("DropBox"));
+}
+
+/// While a dev overlay's text field holds the keyboard, the UI gets no presses but every release:
+/// a key held into that focus still sends its key-up to the frame that took it.
+#[test]
+fn a_key_held_into_an_egui_field_still_comes_up() {
+    let mut s = UiScript::new().unwrap();
+    s.run(
+        r#"
+        log = {}
+        f = CreateFrame("Frame", "EguiWatch")
+        f:EnableKeyboard(true)
+        f:SetScript("OnKeyDown", function() table.insert(log, "v" .. arg1) end)
+        f:SetScript("OnKeyUp", function() table.insert(log, "^" .. arg1) end)
+    "#,
+    )
+    .unwrap();
+    let mut feed = Feed::new("");
+    feed.send(&mut s, &[down(KeyCode::KeyA, Some("a"))]);
+    let typed = [
+        down(KeyCode::KeyB, Some("b")),
+        up(KeyCode::KeyB),
+        up(KeyCode::KeyA),
+    ];
+    let passed: Vec<KeyboardInput> = past_egui(typed.iter(), true).cloned().collect();
+    feed.send(&mut s, &passed);
+    let log = s.eval::<String>("return table.concat(log, ',')").unwrap();
+    assert!(log.starts_with("vA,") && log.contains("^A"), "{log}");
+    assert!(!log.contains("vB"), "B's press is egui's: {log}");
+    let all: Vec<KeyboardInput> = past_egui(typed.iter(), false).cloned().collect();
+    assert_eq!(all.len(), 3, "without egui's focus every event passes");
 }

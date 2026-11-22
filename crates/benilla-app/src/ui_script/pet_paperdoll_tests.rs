@@ -3,7 +3,7 @@
 //! with the pet.
 
 use benilla_ui::script::{
-    PetStats, QuadContent, ScriptValue, UiScript, UnitCombatStats, UnitState,
+    PetStats, QuadContent, ScriptValue, UiScript, UnitCombatStats, UnitGuids, UnitState,
 };
 
 /// The whole character block: the page calls seven `PaperDollFrame_Set*` setters
@@ -37,13 +37,17 @@ fn player_unit() -> UnitState {
     }
 }
 
+/// The pet in view, its descriptor's numbers the stat rows read.
 fn pet_unit() -> UnitState {
     UnitState {
         exists: true,
+        has_object: true,
         name: Some("Snarl".into()),
         health: 900,
         max_health: 1000,
         level: 58,
+        combat: pet_combat_stats(),
+        family: Some("Boar".into()),
         ..UnitState::default()
     }
 }
@@ -60,7 +64,6 @@ fn hunter_pet_stats() -> PetStats {
         loyalty: Some("(Loyalty Level 6) Best Friend".into()),
         training_points: (170, 130),
         experience: (4200, 8000),
-        family: Some("Boar".into()),
         food_types: ["Meat", "Fish", "Cheese", "Bread", "Fungus", "Fruit"]
             .map(String::from)
             .to_vec(),
@@ -103,7 +106,6 @@ fn tab_left(s: &mut UiScript, tab: u32) -> f64 {
 fn give_pet(s: &mut UiScript) {
     s.set_unit("pet", Some(pet_unit()));
     s.set_pet_stats(true, hunter_pet_stats());
-    s.set_pet_combat_stats(Some(pet_combat_stats()));
     s.fire_event("PET_BAR_UPDATE", vec![]);
 }
 
@@ -111,7 +113,6 @@ fn give_pet(s: &mut UiScript) {
 fn take_pet(s: &mut UiScript) {
     s.set_unit("pet", None);
     s.set_pet_stats(false, PetStats::default());
-    s.set_pet_combat_stats(None);
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 }
 
@@ -273,7 +274,6 @@ fn a_minion_gets_the_page_without_the_hunter_furniture() {
     let mut s = load_pet_page();
     s.set_unit("pet", Some(pet_unit()));
     s.set_pet_stats(true, PetStats::default()); // has_ui, but hunter_pet == false
-    s.set_pet_combat_stats(Some(pet_combat_stats()));
     s.fire_event("PET_BAR_UPDATE", vec![]);
 
     s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
@@ -306,14 +306,16 @@ fn the_level_line_names_the_family_and_is_untouched_without_one() {
     let _data = benilla_formats::wow_data_or_skip!();
     let with_family = |family: Option<String>| {
         let mut s = load_pet_page();
-        s.set_unit("pet", Some(pet_unit()));
-        s.set_pet_combat_stats(Some(pet_combat_stats()));
+        s.set_unit(
+            "pet",
+            Some(UnitState {
+                family,
+                ..pet_unit()
+            }),
+        );
         s.set_pet_stats(
             true,
-            PetStats {
-                family,
-                ..PetStats::default() // hunter_pet false: a warlock's minion
-            },
+            PetStats::default(), // hunter_pet false: a warlock's minion
         );
         s.fire_event("PET_BAR_UPDATE", vec![]);
         s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
@@ -438,4 +440,47 @@ fn build_list_string_is_a_plain_comma_join_that_nils_on_nothing() {
         s.eval::<bool>("return BuildListString() == nil").unwrap(),
         "zero arguments is nil, not an empty string"
     );
+}
+
+/// The stock pages bind their own panes: the paper doll to the player at world entry
+/// (`PaperDollFrame.lua:39`), the pet page to the pet as it paints (`PetPaperDollFrame.lua:67`).
+/// A hidden pane stores its unit and asks for nothing until shown (`0x505b50`, `0x505d00`).
+#[test]
+fn the_paper_doll_and_the_pet_page_bind_their_own_units() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    const ME: u64 = 0x42;
+    const PET: u64 = 0xF140_0000_0000_0077;
+    let mut s = load_pet_page();
+    s.set_unit_guids(&UnitGuids {
+        player: ME,
+        pet: PET,
+        ..Default::default()
+    });
+    let pane = |s: &UiScript, name: &str| {
+        s.character_pane(s.frame_handle(name).expect(name))
+            .expect("a character pane")
+    };
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(pane(&s, "CharacterModelFrame").guid, ME);
+    assert_eq!(
+        pane(&s, "CharacterModelFrame").builds,
+        0,
+        "hidden, it asks for no copy"
+    );
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    assert!(
+        pane(&s, "CharacterModelFrame").pending(),
+        "shown, it asks for its copy"
+    );
+
+    give_pet(&mut s);
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
+    assert_eq!(pane(&s, "PetModelFrame").guid, PET);
+    assert!(pane(&s, "PetModelFrame").pending());
+    assert_eq!(
+        pane(&s, "CharacterModelFrame").guid,
+        ME,
+        "each pane keeps its own subject"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }

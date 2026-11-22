@@ -10,6 +10,7 @@ use benilla_ui::script::{
 /// The map plus everything its OnLoad touches, in the shipped list's own order.
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -36,8 +37,13 @@ fn harness() -> UiScript {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // A world position here is already map UV, so a landmark source sits where it says.
     s.set_world_loc_projector(Box::new(|_, _, x, y| Some((x, y))));
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s
 }
+
+/// The active player's guid, which the position verb resolves `"player"` to.
+const PLAYER: u64 = 0x5E1F;
 
 /// The map arrow's file facts, as the app hands them over: `MinimapArrow.m2`, one looping 3.333 s
 /// Stand keying no bone, header box x in [-0.0127, 0.0135], y in [-0.0118, 0.0145].
@@ -62,6 +68,30 @@ fn update(s: &mut UiScript) {
         .unwrap();
 }
 
+/// A host answering `GetPlayerMapPosition`'s read of a unit (`0x4a7870`): each guid's position,
+/// already map UV under [`harness`]'s identity projection, on our map.
+pub(super) struct MapPositions(pub(super) std::collections::HashMap<u64, (f32, f32)>);
+
+impl benilla_ui::script::CallHost for MapPositions {
+    fn apply(
+        &mut self,
+        _: &mut UiScript,
+        _: benilla_ui::script::ScriptCall,
+    ) -> Option<benilla_ui::script::CallTail> {
+        None
+    }
+
+    fn read_live(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        ask.answer(|q: &benilla_ui::script::UnitMapPositionQuery| {
+            Some(
+                self.0
+                    .get(&q.0)
+                    .map(|&(x, y)| benilla_ui::script::UnitMapPosition { map: 0, x, y }),
+            )
+        })
+    }
+}
+
 /// A landmark at map UV `uv` on every level, through [`harness`]'s identity projection.
 fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkSource {
     WorldMapLandmarkSource {
@@ -82,7 +112,7 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
     s.set_world_map_landmark_sources(vec![landmark("Stormwind Warrior Trainer", 6, (0.25, 0.5))]);
     s.run("WorldMapFrame_Update()").unwrap();
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<i64>("return GetNumMapLandmarks()").unwrap(),
         1,
         "the host reports the one landmark"
@@ -98,7 +128,7 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
     let (l, t, _, b, r, ..): (f32, f32, f32, f32, f32, f32, f32, f32) = s
         .eval("return WorldMapFramePOI1Texture:GetTexCoord()")
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (l, r, t, b),
         (0.75, 0.875, 0.0, 0.125),
         "POIIcons cell 6 — the red flag"
@@ -111,7 +141,7 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
              return ox, oy",
         )
         .unwrap();
-    assert_eq!((x, y), (0.25 * 1002.0, -0.5 * 668.0));
+    benilla_ui::assert_near!((x, y), (0.25 * 1002.0, -0.5 * 668.0));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -253,16 +283,22 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
         assert!(!shown(&s, i), "slot {i} hides while the party is empty");
     }
 
-    // Two members on the map and one between them off it: the app pushes None for no position.
-    s.set_world_map_feed(
-        None,
-        Some((0.5, 0.5)),
-        0.0,
-        None,
-        vec![Some((0.25, 0.75)), None, Some((0.5, 0.125))],
-        Vec::new(),
+    // Two members on the map and one between them off it, which the host reads no position for.
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: PLAYER,
+        party: [0x11, 0x12, 0x13, 0],
+        ..Default::default()
+    });
+    s.set_world_map_feed(None, Some((0.5, 0.5)), Some(0.0));
+    let mut host = MapPositions(
+        [
+            (PLAYER, (0.5, 0.5)),
+            (0x11, (0.25, 0.75)),
+            (0x13, (0.5, 0.125)),
+        ]
+        .into(),
     );
-    update(&mut s);
+    s.hosted(&mut host, update);
     let diag = s
         .eval::<String>(
             r#"return "p1="..tostring(GetPlayerMapPosition("party1")).." p3="..tostring(GetPlayerMapPosition("party3"))"#,
@@ -295,8 +331,11 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
         "v runs DOWN from the sheet's top"
     );
 
-    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
-    update(&mut s);
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: PLAYER,
+        ..Default::default()
+    });
+    s.hosted(&mut host, update);
     for i in 1..=4 {
         assert!(!shown(&s, i), "slot {i} hides when the party is gone");
     }
@@ -310,7 +349,10 @@ fn the_player_arrow_is_the_stock_model_pane_seated_and_turned_by_the_update() {
     let _data = benilla_formats::wow_data_or_skip!();
     // The whole manifest: the arrow's quad needs the map visible, through `ShowUIPanel`.
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -326,7 +368,7 @@ fn the_player_arrow_is_the_stock_model_pane_seated_and_turned_by_the_update() {
     s.resolve();
     s.run("ShowUIPanel(WorldMapFrame)").unwrap();
     s.resolve();
-    s.set_world_map_feed(None, Some((0.25, 0.75)), 1.25, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, Some((0.25, 0.75)), Some(1.25));
     update(&mut s);
     s.resolve();
     let arrow = |s: &mut UiScript| {
@@ -374,7 +416,7 @@ fn the_player_arrow_is_the_stock_model_pane_seated_and_turned_by_the_update() {
     );
 
     // Off the displayed map: the (0, 0) sentinel hides it.
-    s.set_world_map_feed(None, None, 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, None, None);
     update(&mut s);
     s.resolve();
     assert!(arrow(&mut s).is_none(), "off-map hides the arrow");
@@ -387,16 +429,18 @@ fn the_player_arrow_is_the_stock_model_pane_seated_and_turned_by_the_update() {
 fn battleground_teammates_and_the_flag_draw_from_the_position_family() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, Some((0.5, 0.5)), Some(0.0));
     s.set_battlefield_positions(
         vec![
             BattlefieldPositionView {
                 uv: (0.25, 0.75),
                 name: Some("Probe".into()),
+                ..Default::default()
             },
             BattlefieldPositionView {
                 uv: (0.0, 0.0),
                 name: None,
+                ..Default::default()
             },
         ],
         Some(BattlefieldFlagView {
@@ -459,7 +503,10 @@ fn battleground_teammates_and_the_flag_draw_from_the_position_family() {
 fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     // A player exists before the manifest loads: the UI loads on world entry, and the macro
     // window's OnLoad formats `UnitName("player")`.
     s.set_unit(
@@ -524,6 +571,7 @@ fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
 fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(821.0, 768.0);
     s.set_unit(
         "player",
@@ -543,7 +591,7 @@ fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
         s.eval::<f64>("return WorldMapFrame:GetScale()").unwrap() < 0.99,
         "the narrow window scales the map under 1"
     );
-    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, Some((0.5, 0.5)), Some(0.0));
     update(&mut s);
     s.resolve();
     let (px, py, eff) = s
@@ -573,7 +621,10 @@ fn hovering_the_player_blip_on_a_scaled_map_names_the_player() {
 fn the_player_arrow_draws_over_the_zones_explored_overlays() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -588,7 +639,7 @@ fn the_player_arrow_draws_over_the_zones_explored_overlays() {
     arrow_facts(&mut s);
     s.run("ShowUIPanel(WorldMapFrame)").unwrap();
     s.resolve();
-    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, Some((0.5, 0.5)), Some(0.0));
     update(&mut s);
     // An overlay made the stock file's way, covering the whole detail frame.
     s.run(
@@ -630,7 +681,10 @@ fn the_player_arrow_draws_over_the_zones_explored_overlays() {
 fn a_click_over_a_blip_still_answers_the_maps_uv() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -644,7 +698,7 @@ fn a_click_over_a_blip_still_answers_the_maps_uv() {
     s.resolve();
     s.run("ShowUIPanel(WorldMapFrame)").unwrap();
     s.resolve();
-    s.set_world_map_feed(None, Some((0.4, 0.6)), 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(None, Some((0.4, 0.6)), Some(0.0));
     update(&mut s);
     s.resolve();
 
@@ -730,6 +784,80 @@ fn the_real_feralas_catalog_names_dire_maul_under_the_cursor() {
     );
 }
 
+/// The real catalog at the world level: the cursor over Kalimdor puts its `Map.dbc` name in the
+/// label and shows `Interface\WorldMap\Kalimdor\KalimdorHighlight` over its sheet rect, from its
+/// `WorldMapContinent` row (`0x4a83b9`): tiles 23..=48 by 9..=52 at scale 0.75, so 26 by 44 tiles
+/// of the 62.625 by 41.75 sheet, the texture's left 26/44 drawn.
+#[test]
+fn hovering_a_continent_on_the_world_map_lights_it() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+
+    let mut chain = benilla_formats::open_chain(&data).expect("chain");
+    for file in ["Kalimdor", "Azeroth"] {
+        let path = format!("Interface\\WorldMap\\{file}\\{file}Highlight.blp");
+        assert!(chain.contains(&path), "{path} ships");
+    }
+    let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+    let maps =
+        benilla_assets::MapCatalogRes(benilla_formats::load_map_catalog(&mut chain).expect("Map"));
+    let (views, _) =
+        crate::ui_world_map::build_catalog(&mut chain, &areas, &maps).expect("the real catalog");
+    // Every continent has its row, so no stock data reaches the rowless branch.
+    assert!(views.iter().all(|c| c.sheet.is_some()));
+    let kalimdor = views
+        .iter()
+        .find(|c| c.map_file == "Kalimdor")
+        .expect("Kalimdor is in the catalog");
+    let row = kalimdor
+        .sheet
+        .expect("Kalimdor has its WorldMapContinent row");
+    assert_eq!((row.tiles, row.scale), ((23, 48, 9, 52), 0.75));
+    s.set_world_map_catalog(views);
+    s.run("ToggleWorldMap()").unwrap();
+    s.run("SetMapZoom(0)").unwrap();
+    s.resolve();
+
+    let (l, r, t, b, eff) = s
+        .eval::<(f32, f32, f32, f32, f32)>(
+            "return WorldMapButton:GetLeft(), WorldMapButton:GetRight(), WorldMapButton:GetTop(), \
+             WorldMapButton:GetBottom(), WorldMapButton:GetEffectiveScale()",
+        )
+        .unwrap();
+    let (x, y) = ((l + (r - l) * 0.25) * eff, (t - (t - b) * 0.45) * eff);
+    s.mouse_move(x, y);
+    update(&mut s);
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<String>("return WorldMapFrameAreaLabel:GetText()")
+            .unwrap(),
+        "Kalimdor"
+    );
+    let (shown, texture, w, h, dx, dy) = s
+        .eval::<(bool, String, f32, f32, f32, f32)>(
+            "return WorldMapHighlight:IsShown() == 1, WorldMapHighlight:GetTexture(), \
+             WorldMapHighlight:GetWidth(), WorldMapHighlight:GetHeight(), \
+             WorldMapHighlight:GetLeft() - WorldMapDetailFrame:GetLeft(), \
+             WorldMapDetailFrame:GetTop() - WorldMapHighlight:GetTop()",
+        )
+        .unwrap();
+    assert!(shown, "the stock OnUpdate shows the quad for a fileName");
+    assert!(
+        texture
+            .to_ascii_lowercase()
+            .ends_with("worldmap\\kalimdor\\kalimdorhighlight"),
+        "{texture}"
+    );
+    let (bw, bh) = (r - l, t - b);
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(near(w, 19.5 / 62.625 * bw), "width {w}");
+    assert!(near(h, 33.0 / 41.75 * bh), "height {h}");
+    // Seated on `WorldMapDetailFrame`'s top-left, in the button's own units.
+    assert!(near(dx, 5.5625 / 62.625 * bw), "left {dx}");
+    assert!(near(dy, 3.302_502 / 41.75 * bh), "top {dy}");
+}
+
 /// An addon that windows the map (Cartographer's `LookNFeel`) stamps userPlaced through a drag
 /// (`0x7652b0`, at `0x7652e5`). The layout cache gates both ends on `movable|resizable` too, as the
 /// reference does (writer `0x490e97`; apply `0x490600`, `0x490689`), and stock `WorldMapFrame` has
@@ -738,7 +866,10 @@ fn the_real_feralas_catalog_names_dire_maul_under_the_cursor() {
 fn a_stale_layout_row_cannot_seat_a_stock_frame() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -774,7 +905,7 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
              GetScreenWidth(), GetScreenHeight()",
         )
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (w, h),
         (sw, sh),
         "the stale row seated nothing — the map is still the screen, as its setAllPoints authored it"
@@ -797,7 +928,7 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
     let (w, h) = s
         .eval::<(f64, f64)>("return WorldMapFrame:GetWidth(), WorldMapFrame:GetHeight()")
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (w, h),
         (1024.0, 768.0),
         "a movable+resizable frame takes it"
@@ -808,7 +939,7 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
         "and the position arm stamps the bit it was written under"
     );
     let saved = s.user_placed_layouts();
-    assert_eq!(saved.len(), 1, "which is what puts the row back: {saved:?}");
+    benilla_ui::assert_near!(saved.len(), 1, "which is what puts the row back: {saved:?}");
     assert_eq!(
         benilla_ui::script::FrameLayout {
             level: None,
@@ -827,7 +958,10 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
 fn the_fullscreen_quads_follow_a_resize() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     // A player exists by the time the manifest loads.
     s.set_unit(
         "player",
@@ -843,7 +977,7 @@ fn the_fullscreen_quads_follow_a_resize() {
     s.resolve();
 
     let width = |s: &UiScript, f: &str| s.eval::<f64>(&format!("return {f}:GetWidth()")).unwrap();
-    assert_eq!(width(&s, "BlackoutWorld"), 1600.0, "the load edge sized it");
+    benilla_ui::assert_near!(width(&s, "BlackoutWorld"), 1600.0, "the load edge sized it");
 
     // Grown, still wider than 4:3, so all three take their recompute branch.
     assert!(s.set_screen_size(1920.0, 1080.0), "the size changed");
@@ -851,15 +985,15 @@ fn the_fullscreen_quads_follow_a_resize() {
     s.resolve();
 
     let screen = s.eval::<f64>("return GetScreenWidth()").unwrap();
-    assert_eq!(screen, 1920.0);
+    benilla_ui::assert_near!(screen, 1920.0);
     for quad in ["BlackoutWorld", "UpperBlackBar", "LowerBlackBar"] {
-        assert_eq!(
+        benilla_ui::assert_near!(
             width(&s, quad),
             screen,
             "{quad} still spans the OLD screen after a resize — the world shows through beside it"
         );
     }
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return BlackoutWorld:GetHeight()").unwrap(),
         1080.0,
         "…and the blackout is the new height too"
@@ -877,7 +1011,10 @@ fn a_reopened_map_shows_the_players_zone_before_its_first_paint() {
     let _data = benilla_formats::wow_data_or_skip!();
     // The whole stock UI: the OnShow's `UpdateMicroButtons` and the full-screen panel slot.
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
+    // `GetPlayerMapPosition("player")` answers only for the player's own guid (`0x4a8668`).
+    s.seat_player_guid(PLAYER);
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -901,7 +1038,7 @@ fn a_reopened_map_shows_the_players_zone_before_its_first_paint() {
         ..Default::default()
     }]);
     // The player stands in Elwynn Forest.
-    s.set_world_map_feed(Some((1, 1)), None, 0.0, None, Vec::new(), Vec::new());
+    s.set_world_map_feed(Some((1, 1)), None, None);
     s.tick(0.01);
     let tile = |s: &UiScript| {
         s.eval::<String>("return WorldMapDetailTile1:GetTexture()")

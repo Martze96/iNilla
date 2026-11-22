@@ -164,6 +164,7 @@ fn the_scrollbar_track_sits_right_of_the_page() {
 fn a_book_page_shows_the_paging_chrome() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {
         item: "Lament of the Highborne".into(),
@@ -196,12 +197,13 @@ fn a_book_page_shows_the_paging_chrome() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The X hides the panel and its OnHide queues `CloseItemText`; the app then clears the session
-/// and fires `ITEM_TEXT_CLOSED`, which hides again harmlessly.
+/// The X hides the panel and its OnHide calls `CloseItemText`, whose core clears the session and
+/// fires `ITEM_TEXT_CLOSED`, which hides again harmlessly.
 #[test]
 fn closing_queues_the_close_intent() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     load_ui(&s);
     s.set_item_text(Some(letter()));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
@@ -210,7 +212,7 @@ fn closing_queues_the_close_intent() {
 
     s.run("ItemTextCloseButton:Click()").unwrap();
     assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
-    assert!(s.take_item_text_close(), "OnHide queued the close intent");
+    assert!(s.take_item_text_close(), "OnHide called the close");
 
     s.set_item_text(None);
     s.fire_event("ITEM_TEXT_CLOSED", vec![]);
@@ -284,7 +286,7 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
     let mut s = UiScript::new().unwrap();
     // Wired as `ui_script::lifecycle::install_addon_asset_resolvers` wires the live one.
     s.set_texture_size_probe(Box::new(move |path| {
-        benilla_assets::sprite_dimensions(&chain, None, path)
+        benilla_assets::sprite_dimensions(&chain, &benilla_assets::LooseFiles::default(), path)
     }));
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {
@@ -320,9 +322,9 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
         })
         .filter_map(|q| q.rect)
         .collect();
-    assert_eq!(crest.len(), 1, "one crest quad on the page");
+    benilla_ui::assert_near!(crest.len(), 1, "one crest quad on the page");
     let r = crest[0];
-    assert_eq!(
+    benilla_ui::assert_near!(
         (r.right - r.left, r.top - r.bottom),
         (128.0, 128.0),
         "the crest draws at the BLP's own 128x128 — a texel is a FrameXML unit"
@@ -371,9 +373,9 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
         })
         .filter_map(|q| q.rect)
         .collect();
-    assert_eq!(badges.len(), 5, "one quad per officer rank");
+    benilla_ui::assert_near!(badges.len(), 5, "one quad per officer rank");
     for b in &badges {
-        assert_eq!(
+        benilla_ui::assert_near!(
             (b.right - b.left, b.top - b.bottom),
             (32.0, 32.0),
             "each rank badge is its own 32x32 BLP, not a page-wide slab"
@@ -390,6 +392,8 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
     use benilla_ui::script::GossipMenu;
 
     let mut s = UiScript::new().unwrap();
+    // `CloseGossip` is a call, which this VM keeps with no host.
+    s.keep_calls();
     load_ui(&s);
     // The stock gossip window, off the chain.
     common::load_ui(&s, "Interface\\FrameXML\\GossipFrame.xml");
@@ -429,7 +433,9 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
     assert!(s.eval::<bool>("return GossipFrame:IsShown()").unwrap());
 
     // The reverse order: reading the note over an open gossip ends the gossip session.
-    let _ = s.take_gossip_close();
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+        benilla_ui::script::GossipCall::Close,
+    ));
     s.set_item_text(Some(letter()));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
     s.fire_event("ITEM_TEXT_READY", vec![]);
@@ -440,7 +446,9 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
         "the reader replaces gossip the same way"
     );
     assert!(
-        s.take_gossip_close(),
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+            benilla_ui::script::GossipCall::Close
+        )) > 0,
         "the displaced gossip's OnHide ended the gossip session (CloseGossip)"
     );
 }

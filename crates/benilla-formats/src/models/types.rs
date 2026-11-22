@@ -1,5 +1,7 @@
 //! The render types every model source (M2 batches, WMO groups) produces, one per render batch.
 
+use std::sync::Arc;
+
 use super::key_anim::SeqLoops;
 use super::mat_anim::{AlphaAnim, RgbAnim};
 use super::tex_anim::UvAnim;
@@ -270,6 +272,9 @@ pub struct RenderSubmesh {
     /// canopies harshly. Empty if the source has none, and the renderer computes them.
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// The vertices' UV set 1, parallel to [`Self::positions`], carried only for a batch whose
+    /// stage 1 reads it ([`TextureStage::env_map`] clear); empty otherwise.
+    pub uvs2: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// `None` for an unfilled creature skin slot ([`Self::skin_slot`]).
     pub texture: Option<String>,
@@ -318,6 +323,11 @@ pub struct RenderSubmesh {
     pub no_depth_write: bool,
     /// M2 render flag `0x08`: drawn over everything.
     pub no_depth_test: bool,
+    /// M2 texture unit flag `0x08` (texUnit `+0x00`): drawn, but out of the scene ray's hit test,
+    /// which skips such a unit in modes 1 and 2 (`test cl,0x8` at `0x70902f` in `0x7089c0`). The
+    /// battleground banners' aura glows (`ParticleEmitters\Aura*.m2`, units `0x18`) carry it, so
+    /// the pick reaches the banner inside them.
+    pub no_hit_test: bool,
     pub fog_policy: FogPolicy,
     pub billboard: Option<Billboard>,
     /// Geometry on a billboard bone the card split refused: the reference blends it per vertex, so
@@ -350,12 +360,48 @@ pub struct RenderSubmesh {
     /// (`texture_unit_lookup[texCoordSet] > 2`): `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5`.
     /// Such a mesh parks its UVs at one point (`GnomeSubwayGlass.m2`).
     pub env_map: bool,
+    /// The batch's second texture stage, for a unit of two or more textures; `None` for one.
+    pub stage1: Option<TextureStage>,
+    /// Stage 0's combine preset, 0 to 5 (`benilla_m2::M2Model::stage_combine`): preset 0, the
+    /// stock opaque batch's, takes its alpha from the diffuse alone, 1 modulates it by the texel.
+    pub combine: u8,
+    /// An M2 batch's keys in the scene's transparent order (`0x70ae10`); `None` for WMO.
+    pub order: Option<super::BatchOrder>,
+}
+
+/// A texture stage after the first: the reference binds one per texture of the unit
+/// (`0x70b740`-`0x70b823`), each with its own texture, coordinates and combine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextureStage {
+    /// The texture through the batch's lookup at `texture_combo_index + k` (`0x70b768`); `None`
+    /// for a slot the spawn site fills (skin, character, icon) or no record.
+    pub texture: Option<String>,
+    /// The texture record's address mode (`flags & 0x1/0x2`), as stage 0's.
+    pub wrap_x: bool,
+    pub wrap_y: bool,
+    /// Generated coordinates: the coordinate entry (`benilla_m2::M2Model::stage_coord`) is above 2
+    /// (`0x70b8bd`), the same view-space sphere map as [`RenderSubmesh::env_map`]. Otherwise the
+    /// stage reads the vertex's UV set `k`, whatever the entry holds (`Model2.bls` passes
+    /// `texcoord[k]`), carried as [`RenderSubmesh::uvs2`]; no stock two-texture batch does.
+    pub env_map: bool,
+    /// The combine preset (`benilla_m2::M2Model::stage_combine`): 0 and 1 modulate the colour
+    /// with alpha passed or modulated, 3 adds, 4 modulates ×2, 2 and 5 interpolate.
+    pub combine: u8,
+    /// The stage's own texture transform, the lookup at `texture_transform_combo_index + k`
+    /// (`0x70b897`), whose matrix moves, turns and scales this stage alone (`0x70b91f`), baked as
+    /// stage 0's [`RenderSubmesh::uv_anim`] and the three after it. None on a generated stage,
+    /// which no transform drives. Shared, so every lane keys one identity.
+    pub uv_anim: Option<Arc<UvAnim>>,
+    pub uv_seq: Option<Arc<SeqLoops<[f32; 2]>>>,
+    pub uv_rot_seq: Option<Arc<SeqLoops<[f32; 4]>>>,
+    pub uv_scale_seq: Option<Arc<SeqLoops<[f32; 2]>>>,
 }
 
 /// A flat ground-plane quad: four vertices on one horizontal plane at or just above z = 0 (hover
 /// ≤ [`GROUND_HOVER_MAX`]), an axis-aligned XY rectangle wholly on one bone, as ground-ring spells
 /// author them (Battle Shout's crescents). The reference draws them as geometry slopes bury.
-/// Deviation: the fx lane redraws them as projected decals (`ground_fx`) so they drape the terrain.
+/// Deviation: the fx lane redraws them as projected decals (`ground_fx`) because that way they
+/// drape the terrain.
 #[derive(Debug, Clone, Copy)]
 pub struct GroundQuad {
     /// Posed through the joint's matrix × the bone's inverse bind pose, as a skinned vertex.
@@ -383,6 +429,7 @@ impl Default for RenderSubmesh {
             positions: Vec::new(),
             normals: Vec::new(),
             uvs: Vec::new(),
+            uvs2: Vec::new(),
             indices: Vec::new(),
             texture: None,
             skin_slot: None,
@@ -403,6 +450,7 @@ impl Default for RenderSubmesh {
             additive: false,
             no_depth_write: false,
             no_depth_test: false,
+            no_hit_test: false,
             fog_policy: FogPolicy::Scene,
             billboard: None,
             welded_billboard: false,
@@ -415,7 +463,10 @@ impl Default for RenderSubmesh {
             rgb_seq: None,
             wmo_batch: None,
             env_map: false,
+            stage1: None,
+            combine: 1,
             section: None,
+            order: None,
         }
     }
 }

@@ -1,4 +1,4 @@
-//! The stock buff bar (`BuffFrame.xml`) under a stubbed aura feed. A button's `id` is an ordinal
+//! The stock buff bar (`BuffFrame.xml`) under a stubbed buff cache. A button's `id` is an ordinal
 //! within its filter; `GetPlayerBuff` maps it to the cache position every other buff verb takes.
 
 use benilla_ui::script::{AuraState, ExtractedQuad, QuadContent, UiScript};
@@ -7,6 +7,7 @@ use super::test_ui::load_ui as load_xml;
 
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The one-letter duration strings, which `SecondsToTimeAbbrev` formats unguarded.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -19,8 +20,13 @@ fn harness() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     // `BuffButton_Update` asks `GameTooltip:IsOwned(this)` unguarded (`BuffFrame.lua:104`).
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The stock arm that pitches the rows, `UIOptionsFrame.lua:193-206`, on the stock options kit.
+    load_xml(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\OptionsFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\UIOptionsFrame.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -34,7 +40,7 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     // As the app does: `BuffFrame_OnLoad` never calls `BuffButtons_UpdatePositions`, which 1.12
     // runs on `VARIABLES_LOADED` (`UIOptionsFrame.lua:206`).
-    super::manifest::apply_buff_durations(&s).unwrap();
+    s.fire_event("VARIABLES_LOADED", vec![]);
     s
 }
 
@@ -54,6 +60,7 @@ fn aura(
         name: Some(name.into()),
         icon: Some(icon.into()),
         count,
+        level: 0,
         debuff_type: debuff_type.map(Into::into),
         duration: expiration_time,
         expiration_time,
@@ -62,6 +69,10 @@ fn aura(
         // The feed takes this from the spell (`ui_aura::until_cancelled`); here, from the expiry.
         until_cancelled: expiration_time == 0.0,
         channeled: false,
+        raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
+        vision_hidden: false,
     }
 }
 
@@ -861,13 +872,19 @@ fn the_duration_line_reads_the_real_global_strings() {
         .expect("GlobalStrings.lua in the chain");
 
     let mut s = UiScript::new().unwrap();
+
+    s.keep_calls();
+    crate::ui_script::test_ui::load_tooltip_template(&s);
     s.set_screen_size(1024.0, 768.0);
     s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
-    s.set_spell_tooltip(
-        1459,
-        benilla_ui::script::SpellTooltipView {
+    s.set_aura_tooltip(
+        benilla_ui::script::AuraKey {
+            spell_id: 1459,
+            ..Default::default()
+        },
+        benilla_ui::script::AuraTooltipView {
             name: "Arcane Intellect".into(),
-            aura_description: "Intellect increased by 2.".into(),
+            description: "Intellect increased by 2.".into(),
             ..Default::default()
         },
     );
@@ -876,7 +893,7 @@ fn the_duration_line_reads_the_real_global_strings() {
         r#"
         BENILLA_ANCHOR = CreateFrame("Button", "BF9")
         BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetWidth(10); BENILLA_ANCHOR:SetHeight(10)
-        BENILLA_TIP = CreateFrame("GameTooltip", "TT9")
+        BENILLA_TIP = CreateFrame("GameTooltip", "TT9", nil, "TestTooltipTemplate")
     "#,
     )
     .unwrap();
